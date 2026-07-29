@@ -659,6 +659,24 @@ fn tool_specs() -> Vec<Value> {
         json!({ "name": "browser_close",
             "description": "Close the agent browser window.",
             "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "mcp_search_capabilities",
+            "description": "Search OWLLM's reviewed MCP catalog when a needed capability is missing. If no reviewed match exists, research the official MCP Registry/vendor source and ask the user before any arbitrary package install.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "Capability needed, e.g. GitHub issues, Slack search, or web research." }
+            }, "required": ["query"] } }),
+        json!({ "name": "mcp_install_curated",
+            "description": "Install, start and verify one exact reviewed MCP returned by mcp_search_capabilities. Credentialed entries fail closed until configured in Settings > MCP; secrets are never accepted in chat.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "Exact reviewed MCP name." },
+                "workspace": { "type": "string", "description": "Current project path for workspace-scoped MCPs." }
+            }, "required": ["name"] } }),
+        json!({ "name": "mcp_call_connected",
+            "description": "Call a tool exposed by a connected MCP immediately after installation. Use the exact server/tool and input schema returned by mcp_install_curated.",
+            "inputSchema": { "type": "object", "properties": {
+                "server": { "type": "string" },
+                "tool": { "type": "string" },
+                "arguments": { "type": "object", "description": "Arguments matching the connected tool's input schema." }
+            }, "required": ["server", "tool"] } }),
         // KVM node control — mirrors the kvm_node local tool so CLI agents get
         // the same capability. The backend feature flag + per-host consent
         // (kvm.rs, fail-closed) gate execution, so exposure here is safe.
@@ -775,6 +793,30 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             json!({ "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_close" => crate::browser::browser_stop(app.clone()),
+        "mcp_search_capabilities" => tauri::async_runtime::block_on(
+            crate::mcp::mcp_search_capabilities(as_str(args, "query")),
+        )
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(|e| e.to_string())),
+        "mcp_install_curated" => tauri::async_runtime::block_on(
+            crate::mcp::mcp_install_curated(
+                as_str(args, "name"),
+                args.get("workspace").and_then(Value::as_str).map(str::to_string),
+            ),
+        )
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(|e| e.to_string())),
+        "mcp_call_connected" => {
+            let arguments = match args.get("arguments") {
+                Some(Value::String(raw)) => serde_json::from_str(raw)
+                    .map_err(|e| format!("arguments must be valid JSON: {e}"))?,
+                Some(value) => value.clone(),
+                None => json!({}),
+            };
+            tauri::async_runtime::block_on(crate::mcp::mcp_call_tool(
+                as_str(args, "server"),
+                as_str(args, "tool"),
+                arguments,
+            ))
+        }
         "kvm_node" => {
             // `target`/`params` may arrive as objects (per schema) or as JSON
             // strings (models and the local-tool path both do this) — accept both.

@@ -763,6 +763,8 @@ pub fn run() {
             mcp::mcp_stop_server,
             mcp::mcp_list_servers,
             mcp::mcp_list_all_tools,
+            mcp::mcp_search_capabilities,
+            mcp::mcp_install_curated,
             mcp::mcp_call_tool,
             mcp::mcp_autostart_all,
             mcp::mcp_install_pack,

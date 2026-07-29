@@ -41,6 +41,14 @@ import { parseProjectCard, lintProjectCard, type CardFinding, type CardFacts } f
 /// installed. Kept in LOCAL_TOOL_SPECS so the name normalizer + validator know
 /// them; force-added in formatToolsForOpenAI so an allowlist can't hide them.
 export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
+/// Agent-facing capability control plane. Kept universal like skill discovery:
+/// role prompts may specialize an agent, but they must not hide the path that
+/// connects a genuinely missing reviewed tool.
+export const CAPABILITY_TOOL_NAMES = new Set([
+  "mcp_search_capabilities",
+  "mcp_install_curated",
+  "mcp_call_connected",
+]);
 
 /// Shared team-memory tools — a RAG-like store every agent can read/write so the
 /// team builds a common, durable knowledge base (decisions, build commands,
@@ -807,6 +815,7 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
     : LOCAL_TOOL_SPECS
   ).filter((t) =>
     !SKILL_TOOL_NAMES.has(t.name) &&
+    !CAPABILITY_TOOL_NAMES.has(t.name) &&
     !MEMORY_TOOL_NAMES.has(t.name) &&
     !BROWSER_TOOL_NAMES.has(t.name) &&
     !KVM_TOOL_NAMES.has(t.name) &&
@@ -819,6 +828,10 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
       SKILL_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
       localTools.push(t);
     }
+  }
+  for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+    CAPABILITY_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
+    localTools.push(t);
   }
   // Shared team-memory tools — always advertised (cross-cutting, never
   // allowlist-gated) so any agent can consult / contribute to the team's
@@ -1385,6 +1398,44 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [
       { name: "url", required: true, description: "Absolute URL to screenshot.", aliases: ["link", "address", "uri", "u"] },
       { name: "out_png", required: true, description: "Absolute filesystem path for the output PNG.", aliases: ["out", "output", "output_path", "out_path", "png", "path"] },
+    ],
+  },
+  {
+    name: "mcp_search_capabilities",
+    aliases: ["find_tool", "find_capability", "search_mcp", "discover_mcp", "missing_tool"],
+    description:
+      "Search OWLLM's reviewed MCP catalog and show matching installed/connected tools. " +
+      "Use when the task needs a capability you do not currently have. If no reviewed " +
+      "entry matches, deeply research the official MCP Registry and vendor sources with " +
+      "web_search/web_fetch, explain provenance and requested permissions, and ask the " +
+      "user before any arbitrary third-party install.",
+    args: [
+      { name: "query", required: true, description: "Capability needed, e.g. 'search Slack', 'GitHub issues', or 'web research'.", aliases: ["q", "capability", "tool", "need"] },
+    ],
+  },
+  {
+    name: "mcp_install_curated",
+    aliases: ["install_mcp", "connect_mcp", "add_mcp"],
+    description:
+      "Install, start, and VERIFY one exact OWLLM-reviewed MCP returned by " +
+      "mcp_search_capabilities. Keyless reviewed entries install automatically. " +
+      "Credentialed entries return the missing per-user configuration and never " +
+      "accept secrets in chat. Arbitrary internet packages are rejected.",
+    args: [
+      { name: "name", required: true, description: "Exact reviewed MCP name returned by mcp_search_capabilities.", aliases: ["server", "mcp", "id"] },
+    ],
+  },
+  {
+    name: "mcp_call_connected",
+    aliases: ["call_mcp", "use_mcp", "run_mcp_tool"],
+    description:
+      "Call a tool exposed by a connected MCP immediately after installation, without " +
+      "waiting for another user turn. Use the exact server/tool names and input schema " +
+      "returned by mcp_install_curated or mcp_search_capabilities.",
+    args: [
+      { name: "server", required: true, description: "Connected MCP server name.", aliases: ["mcp"] },
+      { name: "tool", required: true, description: "Exact tool name exposed by that server.", aliases: ["name"] },
+      { name: "arguments", required: false, description: "JSON object containing the MCP tool arguments.", aliases: ["args", "input", "parameters"] },
     ],
   },
   {
@@ -2079,6 +2130,40 @@ async function executeToolCallInner(
           outPng: call.args.out_png ?? "",
         });
         return { ok: true, output: `screenshot saved: ${saved}` };
+      }
+      case "mcp_search_capabilities": {
+        const result = await invoke<unknown>("mcp_search_capabilities", {
+          query: call.args.query ?? "",
+        });
+        return { ok: true, output: JSON.stringify(result, null, 2) };
+      }
+      case "mcp_install_curated": {
+        const result = await invoke<unknown>("mcp_install_curated", {
+          name: call.args.name ?? "",
+          workspace: cwd ?? null,
+        });
+        const rendered = JSON.stringify(result, null, 2);
+        return {
+          ok: !rendered.includes('"status": "needs_configuration"'),
+          output: rendered,
+        };
+      }
+      case "mcp_call_connected": {
+        let args: unknown = {};
+        const raw = call.args.arguments ?? "";
+        if (raw.trim()) {
+          try { args = JSON.parse(raw); }
+          catch (e) { return { ok: false, output: `mcp_call_connected arguments must be a JSON object: ${String(e)}` }; }
+        }
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+          return { ok: false, output: "mcp_call_connected arguments must be a JSON object." };
+        }
+        const text = await invoke<string>("mcp_call_tool", {
+          server: call.args.server ?? "",
+          tool: call.args.tool ?? "",
+          arguments: args,
+        });
+        return { ok: true, output: truncate(text, 8000) };
       }
       case "list_skills": {
         const ids = policySkillIds(allowedTools);

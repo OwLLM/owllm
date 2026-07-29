@@ -178,7 +178,7 @@ fn touch_directives(conn: &rusqlite::Connection, project_id: &str) {
 /// new native set. `directives_seeded` doubles as the seed VERSION (0 = never).
 /// On upgrade we replace only untouched builtins — a rule the user edited is
 /// promoted to source='user_typed' (see directives_update) and is kept.
-pub(crate) const CURRENT_SEED_VERSION: i64 = 4;
+pub(crate) const CURRENT_SEED_VERSION: i64 = 5;
 
 /// Native best-practice rules every project starts with, so nobody writes a rule
 /// list from zero. They are NORMAL directives (the user can edit or delete any of
@@ -199,6 +199,7 @@ pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
     ("must", "Prove the mechanism of a bug with a controlled experiment before fixing it. Name the cause, then show the measurement or test that confirms it. A fix built on an unverified hypothesis is a guess, and it will be mistaken for a solved problem."),
     ("must", "Ship every bug fix with a regression check that fails on the old code and passes on the new, and wire that check into the automated gate that actually runs before release. An unguarded fix will be undone by a later change."),
     ("must", "Confirm that a check you rely on really executes. A test, guard, or verifier that is never discovered or never run is not protection, and it makes the system look safer than it is."),
+    ("must", "Before replacing or substantially rewriting an existing subsystem, inspect its history and regression checks for previously fixed failures. Preserve every established behavioral invariant, and replace any obsolete check with equivalent coverage before removing the old implementation."),
     ("must", "Verify that the artifact you are observing is the one you changed — check version, build identifier, and that the modified code is present in what is actually running — before concluding a fix worked or failed."),
     ("prefer", "Validate the instrument before trusting a negative result. If a test cannot distinguish the competing explanations, or cannot detect the effect it is meant to measure, it is not evidence of absence."),
     ("prefer", "Re-examine the assumption behind a fix when it does not work, instead of adding another layer on top. An unexplained failure usually means the mechanism was misidentified, not that the fix was too small."),

@@ -4443,6 +4443,22 @@ fn kimi_is_new_flavor() -> bool {
         .unwrap_or(true)
 }
 
+const KIMI_ARGV_BUDGET: usize = 28_000;
+
+/// Decide whether a Kimi prompt may travel on argv. Legacy/current Python Kimi
+/// supports stdin and must always use it: the WSL wrapper base64-expands argv,
+/// so even a prompt below Windows' nominal limit can exceed CreateProcessW's
+/// real limit. Modern kimi-code currently requires `--prompt`; reject an
+/// oversized prompt before spawn instead of launching a command known to fail.
+fn kimi_prompt_uses_argv(new_flavor: bool, prompt_len: usize) -> Result<bool, String> {
+    if new_flavor && prompt_len > KIMI_ARGV_BUDGET {
+        return Err(
+            "kimi prompt exceeds the safe Windows argv budget; shorten the request".to_string(),
+        );
+    }
+    Ok(new_flavor)
+}
+
 /// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
 /// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
@@ -5715,12 +5731,7 @@ async fn kimi_cli_run(
             // 28 KB folded team prompt expands to ~37 KB and CreateProcessW
             // fails with os error 206 before Kimi starts. Modern kimi-code has
             // no stdin prompt path, so retain its bounded --prompt transport.
-            const ARGV_BUDGET: usize = 28_000;
-            let prompt_fits = prompt_value.len() <= ARGV_BUDGET;
-            if new_flavor && !prompt_fits {
-                return Err("kimi prompt exceeds the safe Windows argv budget; shorten the request".to_string());
-            }
-            let use_prompt_flag = new_flavor;
+            let use_prompt_flag = kimi_prompt_uses_argv(new_flavor, prompt_value.len())?;
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
@@ -6211,6 +6222,16 @@ mod tests {
         assert!(decide(None, Some(KIMI_CFG), false).is_empty());
         // No config at all (ancient CLI) and no request → keep the always-valid alias.
         assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
+    }
+
+    #[test]
+    fn kimi_prompt_transport_never_puts_legacy_team_prompts_on_argv() {
+        use super::{kimi_prompt_uses_argv, KIMI_ARGV_BUDGET};
+
+        assert!(!kimi_prompt_uses_argv(false, 2).unwrap());
+        assert!(!kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4).unwrap());
+        assert!(kimi_prompt_uses_argv(true, KIMI_ARGV_BUDGET).unwrap());
+        assert!(kimi_prompt_uses_argv(true, KIMI_ARGV_BUDGET + 1).is_err());
     }
 
     #[test]

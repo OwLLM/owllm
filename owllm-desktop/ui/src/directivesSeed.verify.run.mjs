@@ -21,8 +21,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIRECTIVES = path.resolve(HERE, "../../src-tauri/src/directives.rs");
 
 // Bump BOTH of these together with CURRENT_SEED_VERSION whenever the rules change.
-const EXPECTED_SEED_VERSION = 4;
-const EXPECTED_FINGERPRINT = "31c0005bae154172";
+const EXPECTED_SEED_VERSION = 5;
+const EXPECTED_FINGERPRINT = "830291a2de61b872";
 
 let passed = 0;
 function check(condition, message) {

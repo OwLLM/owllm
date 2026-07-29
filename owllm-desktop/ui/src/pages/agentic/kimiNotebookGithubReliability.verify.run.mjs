@@ -32,6 +32,18 @@ function check(name, ok) {
   }
 }
 
+function legacyPromptTransportSafe(source) {
+  return source.includes("fn kimi_prompt_uses_argv(new_flavor: bool, prompt_len: usize)")
+    && source.includes("Ok(new_flavor)")
+    && source.includes("kimi_prompt_uses_argv(new_flavor, prompt_value.len())?")
+    && source.includes("fn kimi_prompt_transport_never_puts_legacy_team_prompts_on_argv()")
+    && source.includes("kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4)")
+    && source.includes('"--input-format".into()')
+    && source.includes('"text".into()')
+    && source.includes("cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() })")
+    && source.includes("stdin.write_all(prompt_value.as_bytes())");
+}
+
 check(
   "Kimi uses line-streamed JSON rather than final-message-only text",
   accounts.includes("wait_cli_child_lines")
@@ -42,11 +54,21 @@ check(
 );
 check(
   "legacy Kimi streams prompts over stdin so WSL base64 cannot overflow CreateProcessW",
-  accounts.includes("let use_prompt_flag = new_flavor;")
-    && accounts.includes('"--input-format".into()')
-    && accounts.includes('"text".into()')
-    && accounts.includes("cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() })")
-    && accounts.includes("stdin.write_all(prompt_value.as_bytes())"),
+  legacyPromptTransportSafe(accounts),
+);
+check(
+  "Kimi argv guard detects the July 27 regression shape",
+  !legacyPromptTransportSafe(
+    accounts
+      .replace(
+        "let use_prompt_flag = kimi_prompt_uses_argv(new_flavor, prompt_value.len())?;",
+        "let use_prompt_flag = prompt_value.len() <= KIMI_ARGV_BUDGET;",
+      )
+      .replace(
+        "assert!(!kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4).unwrap());",
+        "assert!(kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4).unwrap());",
+      ),
+  ),
 );
 check(
   "Kimi stream command is registered and consumed by both agent routes",

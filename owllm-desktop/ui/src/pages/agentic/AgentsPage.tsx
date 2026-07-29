@@ -10099,13 +10099,12 @@ export function AgentsPage({
     return { ...renderTeam, agents: soloAgents, edges };
   }, [renderTeam, roleByName]);
 
-  // Solo card labels: the picked writer keeps its dispatch identity (name is
-  // used for @routing + log keys) but READS as "Coder" on the canvases —
-  // showing its team lane name ("Frontend") in solo mode was misleading
-  // (user bug 2026-07-04). agents[0] is the coder by construction above.
+  // Solo card label reflects the actual runtime role. It is deliberately not a
+  // team lane ("Frontend") or the old generic "Coder": this agent owns every
+  // domain and receives every connected tool in Solo mode.
   const soloLabels = useMemo<Record<string, string>>(() => {
     const coder = soloRenderTeam?.agents[0];
-    return coder ? { [coder.name]: "Coder" } : {};
+    return coder ? { [coder.name]: "Solo Generalist" } : {};
   }, [soloRenderTeam]);
 
   // ----- Per-agent log mutation helpers -----

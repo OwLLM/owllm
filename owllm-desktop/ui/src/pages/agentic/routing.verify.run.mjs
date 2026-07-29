@@ -130,6 +130,8 @@ check(
   "synthetic solo name avoids a custom-team collision",
   soloGeneralistForTeam({ agents: [{ name: "solo_generalist", base: "documentation" }] }).name === "solo_generalist_2",
 );
+const agentsPageSource = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+check("Solo canvas identifies the selected agent as Solo Generalist", /coder\s*\?\s*\{\s*\[coder\.name\]:\s*"Solo Generalist"\s*\}/.test(agentsPageSource));
 
 // 2b) lane-aware coder routing — a code goal must reach the coder whose lane
 //     (frontend/backend) matches the goal, not always the first coder in roster

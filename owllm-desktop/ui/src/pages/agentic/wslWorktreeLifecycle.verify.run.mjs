@@ -17,6 +17,11 @@ if (process.platform !== "win32") {
   process.exit(0);
 }
 
+if (process.env.OWLLM_SMOKE_STATIC_ONLY === "1") {
+  console.log("SKIP WSL worktree lifecycle: static-only release smoke excludes live WSL gates.");
+  process.exit(0);
+}
+
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, {
     encoding: "utf8",

@@ -137,7 +137,14 @@ function runHarnesses() {
   })(root);
   for (const p of found.sort()) {
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, [p], { encoding: "utf8", timeout: 120_000 });
+    const r = spawnSync(process.execPath, [p], {
+      encoding: "utf8",
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        OWLLM_SMOKE_STATIC_ONLY: STATIC_ONLY ? "1" : process.env.OWLLM_SMOKE_STATIC_ONLY || "",
+      },
+    });
     const ok = r.status === 0;
     const tail = ((r.stdout || "") + (r.stderr || "")).trim().split(/\r?\n/).slice(-1)[0] || "";
     record("H", path.relative(root, p).replace(/\\/g, "/"), ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);

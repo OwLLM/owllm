@@ -227,9 +227,8 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   Card controls fire host-side (the window + gateway are host objects), so they
   work even when the rest of the team is sandboxed.
 - **Reachable by ALL agent kinds**: local + API agents call `browser_*` through
-  `executeToolCall`; subscription-CLI agents (Claude Code) reach the SAME
-  browser natively via the MCP gateway below (host runs). No per-tool harvest
-  hack.
+  `executeToolCall`; subscription-CLI agents (Claude, Codex and Kimi) reach the
+  SAME browser natively via the MCP gateway below. No per-tool harvest hack.
 
 ## MCP gateway — OWLLM tools for subscription-CLI agents (`mcp_gateway.rs`)
 
@@ -252,17 +251,16 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
     shells each call through Windows `curl.exe` interop to the host loopback —
     no firewall rule needed.
   * bwrap-JAILED WSL run → excluded (interop is dead inside the jail), with
-    ONE exception: the **Browser role**. Detected Rust-side from its
-    `tool_allowlist` naming `browser_*` (Publisher pattern —
-    `is_browser_role_allowlist`, accounts.rs), that single agent is spawned via
+    two explicit exceptions: the **Browser role** and the deliberately
+    unrestricted **Solo Generalist**. Detected Rust-side from `browser_*` or
+    the explicit `all` tool sentinel, those agents are spawned via
     `sandbox::program_argv_unjailed` (plain WSL, interop alive) and wired to
     the relay, while every other agent in the team stays jailed. Deliberate,
-    disclosed tradeoff: the Browser agent's run gains /mnt + interop access
-    like a full-access run.
-  Adding memory_*/kvm_node to the catalogue is a follow-up. The CLI↔gateway
-  handshake + tool loading were verified against the real installed CLI
-  (2026-07-05); the jail-exception spawn path is code-verified but needs one
-  live isolated-team run to confirm end-to-end.
+    disclosed tradeoff: these runs gain /mnt + interop access like a
+    full-access run.
+  Adding memory_*/kvm_node to the catalogue is a follow-up. The Kimi WSL relay
+  was verified end-to-end against the real shared WhatsApp browser on
+  2026-07-30 (`browser_tabs` → tab select → `browser_snapshot`).
 - **OpenAI / Codex parity** (`codex_cli_stream`): the same gateway now reaches
   Codex-CLI agents too — Codex has no `--mcp-config` flag, so it's wired via
   `-c mcp_servers.owllm.*` overrides (HOST → HTTP `url` + `bearer_token_env_var`
@@ -274,8 +272,13 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   capable by design) or a **full-access** project — a normal sandboxed Codex
   coder is untouched (no browser, no escalation). This role/full-access scoping
   is the deliberate difference from the Claude path (which needs no escalation);
-  it exists because codex couples MCP-call approval to the sandbox mode. Kimi/
-  Gemini CLIs remain one-shot (no streaming tool path) — a later follow-up.
+  it exists because codex couples MCP-call approval to the sandbox mode.
+- **Kimi parity** (`kimi_cli_stream`): Python Kimi receives a per-run
+  `--mcp-config-file`; host `kimi-code` receives an isolated temporary home
+  with `mcp.json`. WSL uses the same stdio relay described above. Kimi exposes
+  gateway tools under bare names (`browser_tabs`, `browser_snapshot`), and its
+  stream events surface tool calls/results in the UI. Gemini remains one-shot
+  and is configured project-locally.
 
 ## OWLLM Node — KVM remote control (`kvm.rs`)
 

@@ -76,6 +76,9 @@ export type ProjectSettingsDialogProps = {
   onToggleFullAccess: () => void;
   bridgeOn: boolean;
   isolationRequested: boolean;
+  /// Reopen the project's last saved browser tab set (not merely its original
+  /// environment recipe), preserving the stable device-local login profile.
+  onReopenBrowser?: () => Promise<{ restoredTabs: number; message: string }>;
   onAfterRename: () => void;
   onAfterDelete: () => void;
   /// Re-derive this project's roster + wiring from its built-in team template
@@ -161,7 +164,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     resolvedTeamLabel, defaultTeamName, existingNames = NO_EXISTING_NAMES, onCreated,
     project, location, effectiveCwd, onChangeLocation,
     trustWrites, onToggleTrustWrites, fullAccess, onToggleFullAccess,
-    bridgeOn, isolationRequested, onAfterRename, onAfterDelete,
+    bridgeOn, isolationRequested, onReopenBrowser, onAfterRename, onAfterDelete,
   } = props;
 
   // --- new-project form state ---
@@ -1095,7 +1098,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                         onClick={async () => {
                           setActBusy("environment"); setActMsg(null);
                           try {
-                            const result = await launchProjectEnvironment(environment, (command, args) => invoke(command, args));
+                            const result = onReopenBrowser
+                              ? await onReopenBrowser()
+                              : await launchProjectEnvironment(environment, (command, args) => invoke(command, args));
                             setActMsg(`✓ ${result.message}`);
                           } catch (e: any) {
                             setActMsg(`Environment failed to open: ${e?.message ?? e}`);
@@ -1104,7 +1109,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                           }
                         }}
                         style={{ height: 32, padding: "0 12px", fontWeight: 750 }}>
-                        {actBusy === "environment" ? "Opening…" : "Open environment"}
+                        {actBusy === "environment" ? "Reopening…" : "Reopen browser"}
                       </button>
                     )}
                   </div>

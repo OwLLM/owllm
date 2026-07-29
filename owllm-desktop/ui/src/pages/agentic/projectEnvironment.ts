@@ -444,3 +444,25 @@ export async function restoreProjectBrowser(
     message: `Reopened ${bind.session.tabs.length} browser tab${bind.session.tabs.length === 1 ? "" : "s"} for this project.`,
   };
 }
+
+/// Reopen the browser pages that belong to no project — the personal agent's
+/// desk of logged-in apps. Those never had a project screen to restore them
+/// from, so this is their way back after the window was closed.
+export async function reopenPersonalBrowserSession(
+  invokeCommand: ProjectEnvironmentInvoker,
+): Promise<{ restoredTabs: number; message: string }> {
+  let parsed: any = await invokeCommand("browser_session_reopen", {});
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  const reopened = Number.isInteger(parsed?.reopened) ? parsed.reopened : 0;
+  // A page that will not load must say so rather than be quietly skipped.
+  const failed: string[] = Array.isArray(parsed?.failed) ? parsed.failed : [];
+  const message = reopened
+    ? `Reopened ${reopened} browser tab${reopened === 1 ? "" : "s"}.`
+    : "Those browser pages are already open.";
+  return {
+    restoredTabs: reopened,
+    message: failed.length ? `${message} ${failed.length} could not be reopened: ${failed.join("; ")}` : message,
+  };
+}

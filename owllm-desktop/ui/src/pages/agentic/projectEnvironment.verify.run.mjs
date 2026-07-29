@@ -89,7 +89,8 @@ try {
     "personal assistants include a routed Browser specialist that can operate selected sites");
   check(dialog.includes("The project stores only the site names and URLs")
       && dialog.includes('data-ui="SavedProjectEnvironment"')
-      && dialog.includes("Open environment"),
+      && dialog.includes("Reopen browser")
+      && dialog.includes("onReopenBrowser"),
     "the UI explains local credentials and can reopen a saved environment");
   check(agents.includes("previousGraphJson: selectedProject.graph_json")
       && agents.includes("...previous")

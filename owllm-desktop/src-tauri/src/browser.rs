@@ -1040,8 +1040,18 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
 // ---------------------------------------------------------------------------
 
 /// Project whose session the live tab set belongs to. `None` = tabs opened
-/// outside any project (agent one-offs), which are deliberately not persisted.
+/// outside any project — the personal agent's desk, an agent one-off, the
+/// browser tools. Those are the user's logged-in pages too, so they persist to
+/// the reserved file below instead of being thrown away.
 static SESSION_OWNER: Mutex<Option<String>> = Mutex::new(None);
+
+/// Session file for tabs that belong to no project. The leading `_` cannot
+/// collide with a project's file: `session_file_stem` trims those off.
+const PERSONAL_SESSION_STEM: &str = "_personal";
+
+/// How many closed pages stay reopenable. Deep enough to undo a wrong ✕ or a
+/// whole row of them, short enough that the file stays a few KB.
+const CLOSED_HISTORY_MAX: usize = 25;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BrowserSession {
@@ -1055,6 +1065,10 @@ pub struct BrowserSession {
     /// does not resurrect a window they had put away on purpose.
     #[serde(default)]
     pub open: bool,
+    /// Recently closed pages, oldest first. Closing a tab rewrites `tabs`
+    /// without it, so without this the page is gone the instant it is closed.
+    #[serde(default)]
+    pub closed: Vec<String>,
 }
 
 /// Project ids come from our own database, but the session file name is still
@@ -1073,8 +1087,7 @@ fn session_file_stem(project_id: &str) -> String {
     stem.trim_matches('_').chars().take(120).collect()
 }
 
-fn session_path(project_id: &str) -> Option<std::path::PathBuf> {
-    let stem = session_file_stem(project_id);
+fn session_path(stem: &str) -> Option<std::path::PathBuf> {
     if stem.is_empty() {
         return None;
     }
@@ -1083,15 +1096,27 @@ fn session_path(project_id: &str) -> Option<std::path::PathBuf> {
     Some(dir.join(format!("{stem}.json")))
 }
 
-fn read_session(project_id: &str) -> BrowserSession {
-    session_path(project_id)
+/// File the tabs on screen belong to. Falls back to the personal desk, so
+/// there is no state in which the browser forgets what was open.
+fn live_session_stem() -> String {
+    SESSION_OWNER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_deref()
+        .map(session_file_stem)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| PERSONAL_SESSION_STEM.to_string())
+}
+
+fn read_session(stem: &str) -> BrowserSession {
+    session_path(stem)
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<BrowserSession>(&raw).ok())
         .unwrap_or_default()
 }
 
-fn write_session(project_id: &str, session: &BrowserSession) {
-    if let (Some(path), Ok(raw)) = (session_path(project_id), serde_json::to_string(session)) {
+fn write_session(stem: &str, session: &BrowserSession) {
+    if let (Some(path), Ok(raw)) = (session_path(stem), serde_json::to_string(session)) {
         let _ = std::fs::write(path, raw);
     }
 }
@@ -1099,13 +1124,7 @@ fn write_session(project_id: &str, session: &BrowserSession) {
 /// Mirror the live tab set into the owning project's session file. Called
 /// wherever the strip changes (open/close/activate/title, i.e. navigation).
 fn persist_session(app: &tauri::AppHandle) {
-    let Some(owner) = SESSION_OWNER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    else {
-        return;
-    };
+    let stem = live_session_stem();
     let live = list_tabs(app);
     // Blank/loading tabs are dropped, so the remembered index MUST be counted
     // over the kept tabs. Taking it from the unfiltered list shifted it by one
@@ -1122,32 +1141,48 @@ fn persist_session(app: &tauri::AppHandle) {
     }
     let tabs: Vec<String> = kept.iter().map(|tab| tab.url.clone()).collect();
     let active = kept.iter().position(|tab| tab.active).unwrap_or(0);
+    // The reopen history outlives the strip: this runs on every tab mutation,
+    // so rebuilding the record from scratch would erase it on the very next
+    // navigation after a close.
+    let closed = read_session(&stem).closed;
     write_session(
-        &owner,
+        &stem,
         &BrowserSession {
             tabs,
             active,
             open: true,
+            closed,
         },
     );
+}
+
+/// Remember a page the user just closed so it can be reopened. Called before
+/// the strip is rewritten without it.
+fn remember_closed_tab(url: &str) {
+    if url.is_empty() || url == "about:blank" {
+        return;
+    }
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
+    session.closed.retain(|seen| seen != url);
+    session.closed.push(url.to_string());
+    let overflow = session.closed.len().saturating_sub(CLOSED_HISTORY_MAX);
+    if overflow > 0 {
+        session.closed.drain(..overflow);
+    }
+    write_session(&stem, &session);
 }
 
 /// The user put the browser away on purpose (✕ / browser_stop / last tab
 /// closed). Keep the pages, but do not reopen the window by itself next boot.
 fn mark_session_closed() {
-    let Some(owner) = SESSION_OWNER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    else {
-        return;
-    };
-    let mut session = read_session(&owner);
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
     if session.tabs.is_empty() {
         return;
     }
     session.open = false;
-    write_session(&owner, &session);
+    write_session(&stem, &session);
 }
 
 /// Push the strip to the chrome bar and mirror it to disk. Every tab mutation
@@ -1179,7 +1214,7 @@ pub fn browser_session_bind(app: tauri::AppHandle, project_id: String) -> Result
     Ok(json!({
         "busy": owned_by_other,
         "live": has_tabs && !owned_by_other,
-        "session": read_session(&id),
+        "session": read_session(&session_file_stem(&id)),
     })
     .to_string())
 }
@@ -1444,6 +1479,14 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
                 let app = app.clone();
                 std::thread::spawn(move || close_tab(&app, id));
             }
+        }
+        "tabreopen" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = browser_reopen_closed(app) {
+                    eprintln!("[browser] reopen closed tab: {e}");
+                }
+            });
         }
         _ => {}
     }
@@ -1755,6 +1798,13 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
     let target_window = app
         .get_window(BROWSER_LABEL)
         .or_else(|| app.get_window(&tab_label(id)));
+    // Read the page BEFORE the strip loses it, and outside the TABS lock —
+    // list_tabs takes that same lock.
+    let closing_url = list_tabs(app)
+        .into_iter()
+        .find(|tab| tab.id == id)
+        .map(|tab| tab.url)
+        .unwrap_or_default();
     let next = {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         let Some(tabs) = guard.as_mut() else { return };
@@ -1785,6 +1835,9 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         tabs.active = next;
         next
     };
+    // Closing the last tab keeps the whole set in `tabs` (it is persisted
+    // above, before teardown), so only a mid-strip ✕ needs the undo record.
+    remember_closed_tab(&closing_url);
     if app.get_webview(CHROME_LABEL).is_some() {
         if let Some(wv) = app.get_webview(&tab_label(id)) {
             let _ = wv.close();
@@ -2356,6 +2409,52 @@ pub fn browser_open_tab(
         json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
             .to_string(),
     )
+}
+
+/// Reopen the page that was closed last — the ↺ button and Ctrl+Shift+T.
+#[tauri::command(async)]
+pub fn browser_reopen_closed(app: tauri::AppHandle) -> Result<String, String> {
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
+    let Some(url) = session.closed.pop() else {
+        return Err("no recently closed page to reopen".to_string());
+    };
+    // Take it off the record first: a page that fails to reopen must not sit at
+    // the head of the history and swallow every later press.
+    write_session(&stem, &session);
+    browser_open_tab(app, url, Some(true))
+}
+
+/// Reopen every page this browser had open. Tabs that belong to no project
+/// have no project screen to restore them from, so this is the only way back
+/// to a desk of logged-in apps after the window was closed.
+#[tauri::command(async)]
+pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
+    let stem = live_session_stem();
+    let session = read_session(&stem);
+    if session.tabs.is_empty() {
+        return Err("no saved browser pages to reopen".to_string());
+    }
+    let already: std::collections::HashSet<String> =
+        list_tabs(&app).into_iter().map(|tab| tab.url).collect();
+    let mut reopened = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (index, url) in session.tabs.iter().enumerate() {
+        if already.contains(url) {
+            continue;
+        }
+        // One dead page must not cost the user the rest of the desk.
+        match browser_open_tab(app.clone(), url.clone(), Some(index == session.active)) {
+            Ok(_) => reopened += 1,
+            Err(e) => failed.push(format!("{url}: {e}")),
+        }
+    }
+    Ok(json!({
+        "reopened": reopened,
+        "tabs": session.tabs.len(),
+        "failed": failed,
+    })
+    .to_string())
 }
 
 #[tauri::command(async)]

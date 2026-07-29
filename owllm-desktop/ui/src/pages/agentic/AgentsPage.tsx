@@ -26,6 +26,7 @@ import {
   environmentPromptBlock,
   parseProjectEnvironment,
   restoreProjectBrowser,
+  reopenPersonalBrowserSession,
   type ProjectEnvironment,
 } from "./projectEnvironment";
 import RulesEditor from "./RulesEditor";
@@ -9147,6 +9148,7 @@ export function AgentsPage({
   const [projectHubOpen, setProjectHubOpen] = useState(false);
   const [projectMaterializing, setProjectMaterializing] = useState(false);
   const [projectMaterializeError, setProjectMaterializeError] = useState("");
+  const [browserReopenBusy, setBrowserReopenBusy] = useState(false);
   // Browser-session restore bookkeeping: which projects this page has already
   // tried to reopen, whether we are still on the app-start pass, and the
   // project whose environment onProjectCreated is launching right now.
@@ -9515,6 +9517,26 @@ export function AgentsPage({
     selectedProject && locationOverrideProjectId === selectedProject.id
       ? locationOverride
       : (selectedProject?.location || "");
+
+  const reopenSelectedProjectBrowser = async () => {
+    setBrowserReopenBusy(true);
+    try {
+      // No project selected still means a desk worth restoring: the personal
+      // agent's logged-in pages belong to no project, so they are reopened
+      // from the browser's own saved session instead.
+      if (!selectedProject) {
+        return await reopenPersonalBrowserSession((command, args) => invoke(command, args));
+      }
+      return await restoreProjectBrowser(
+        selectedProject.id,
+        parseProjectEnvironment(selectedProject.graph_json),
+        (command, args) => invoke(command, args),
+        { boot: false },
+      );
+    } finally {
+      setBrowserReopenBusy(false);
+    }
+  };
 
   // Multi-tab bookkeeping: remember this tab's project + surface the tab
   // title (project name) and busy dot up to the AgentsPages shell.
@@ -13609,6 +13631,7 @@ export function AgentsPage({
           onToggleFullAccess={onToggleFullAccess}
           bridgeOn={bridgeOn}
           isolationRequested={isolationRequested}
+          onReopenBrowser={reopenSelectedProjectBrowser}
           onAfterRename={() => { void reloadProjects(); }}
           onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
         />
@@ -13739,6 +13762,7 @@ export function AgentsPage({
         onToggleFullAccess={onToggleFullAccess}
         bridgeOn={bridgeOn}
         isolationRequested={isolationRequested}
+        onReopenBrowser={reopenSelectedProjectBrowser}
         onAfterRename={() => { reloadProjects(); }}
         onAfterDelete={() => { reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
       />
@@ -13788,6 +13812,17 @@ export function AgentsPage({
               title="Project settings — folder, security, team, bridge, rename, delete"
               style={{ height:38, minWidth:40, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16, cursor: selectedProjectId ? "pointer":"not-allowed", opacity: selectedProjectId?1:0.5 }}
             >⚙</button>
+            <button
+              data-ui="ReopenProjectBrowserBtn"
+              onClick={() => {
+                void reopenSelectedProjectBrowser().catch((e: any) => {
+                  window.alert(`Couldn't reopen the browser:\n\n${e?.message ?? e}`);
+                });
+              }}
+              disabled={browserReopenBusy}
+              title="Reopen the saved browser tabs and logged-in website sessions — this project's, or the personal ones when no project is selected"
+              style={{ height:38, padding:"0 11px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:13, fontWeight:700, cursor: browserReopenBusy ? "not-allowed":"pointer", opacity: browserReopenBusy ? 0.5:1 }}
+            >{browserReopenBusy ? "Opening…" : "🌐 Browser"}</button>
             <button
               data-ui="NewProjectBtn"
               onClick={onNewProject}

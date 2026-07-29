@@ -160,9 +160,14 @@ check(/#site\s*\{[^}]*width:\s*\d+px/.test(chromeHtml),
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");
+check(chromeHtml.includes('id="reopen"') && chromeHtml.includes('evt("tabreopen")')
+      && /ctrlKey \|\| e\.metaKey[\s\S]*?shiftKey[\s\S]*?tabreopen/.test(chromeHtml),
+  "the chrome exposes Reopen closed tab by button and Ctrl/Cmd+Shift+T");
+check(/"tabreopen"\s*=>[\s\S]*?browser_reopen_closed/.test(browserRs),
+  "the chrome reopen action reaches the native closed-tab history");
 const copyRows = chromeHtml.match(/"(en|zh-CN|ko|ja|ar|it|hi|pt)":\s*\[[^\]]+\]/g) || [];
-check(copyRows.length === 8 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 9 + 2),
-  "all eight languages localize the chrome incl. New tab / Close tab");
+check(copyRows.length === 8 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 10 + 2),
+  "all eight languages localize the chrome incl. New / Close / Reopen tab");
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

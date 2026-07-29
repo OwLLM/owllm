@@ -125,11 +125,11 @@
         cursor: pointer; padding: 0; box-shadow: 0 0 0 1px var(--border);
       }
       .tab .tx:hover { background: #e81123; color: #fff; }
-      #newtab {
+      #newtab, #reopen {
         flex: none; width: 28px; height: 28px; border: none; border-radius: 8px;
         background: transparent; color: var(--fg-muted); font-size: 16px; cursor: pointer; padding: 0;
       }
-      #newtab:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
+      #newtab:hover, #reopen:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
       #url {
         flex: 1; min-width: 60px; height: 24px; border-radius: 999px;
         border: 1px solid var(--border); background: var(--bg-input);
@@ -149,6 +149,7 @@
         <div id="site"><span id="sitemark" class="mark"></span><span id="sitename"></span></div>
         <div id="tabs"></div>
         <button id="newtab" title="New tab">+</button>
+        <button id="reopen" title="Reopen closed tab">↺</button>
         <div id="drag"></div>
         <div class="winbtns">
           <button class="btn" id="min" title="Minimize">─</button>
@@ -182,8 +183,18 @@
       $("back").addEventListener("click", function () { evt("back"); });
       $("reload").addEventListener("click", function () { evt("reload"); });
       $("newtab").addEventListener("click", function () { evt("tabnew"); });
+      $("reopen").addEventListener("click", function () { evt("tabreopen"); });
       $("url").addEventListener("keydown", function (e) {
         if (e.key === "Enter" && this.value.trim()) { evt("nav", this.value.trim()); this.blur(); }
+      });
+      // Ctrl/Cmd+Shift+T is the undo every browser has trained the user to
+      // reach for. Only the chrome has focus-independent key handling here;
+      // the ↺ button is the same action for anyone who never learned it.
+      document.addEventListener("keydown", function (e) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "T" || e.key === "t")) {
+          e.preventDefault();
+          evt("tabreopen");
+        }
       });
       // Anywhere that isn't a control starts a window drag; double-click
       // toggles maximize (Rust decides which, we just report).
@@ -365,14 +376,14 @@
       // This chrome is a separate webview, so it cannot consume React context.
       // Keep its small static surface in sync through the same persisted locale.
       var CHROME_COPY = {
-        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close", "New tab", "Close tab"],
-        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭", "新标签页", "关闭标签页"],
-        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기", "새 탭", "탭 닫기"],
-        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる", "新しいタブ", "タブを閉じる"],
-        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق", "علامة تبويب جديدة", "إغلاق علامة التبويب"],
-        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi", "Nuova scheda", "Chiudi scheda"],
-        "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें"],
-        "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba"]
+        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close", "New tab", "Close tab", "Reopen closed tab"],
+        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭", "新标签页", "关闭标签页", "重新打开已关闭的标签页"],
+        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기", "새 탭", "탭 닫기", "닫은 탭 다시 열기"],
+        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる", "新しいタブ", "タブを閉じる", "閉じたタブを再度開く"],
+        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق", "علامة تبويب جديدة", "إغلاق علامة التبويب", "إعادة فتح علامة التبويب المغلقة"],
+        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi", "Nuova scheda", "Chiudi scheda", "Riapri scheda chiusa"],
+        "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें", "बंद टैब फिर से खोलें"],
+        "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba", "Reabrir aba fechada"]
       };
       function applyLanguage(language) {
         var copy = CHROME_COPY[language] || CHROME_COPY.en;
@@ -381,7 +392,7 @@
         if ($("ttl").textContent === "OwLLM Browser" || Object.keys(CHROME_COPY).some(function (key) { return $("ttl").textContent === CHROME_COPY[key][0]; })) $("ttl").textContent = copy[0];
         $("back").title = copy[1]; $("reload").title = copy[2]; $("url").placeholder = copy[3];
         $("min").title = copy[4]; $("max").title = copy[5]; $("close").title = copy[6];
-        $("newtab").title = copy[7]; closeTabTitle = copy[8];
+        $("newtab").title = copy[7]; closeTabTitle = copy[8]; $("reopen").title = copy[9];
       }
       try { applyLanguage(localStorage.getItem("owllm:language") || "en"); } catch (e) { applyLanguage("en"); }
       window.addEventListener("storage", function (e) {

@@ -123,7 +123,8 @@ import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
-  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish } from "./teamConfig";
+  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish,
+  soloGeneralistForTeam } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -10084,11 +10085,7 @@ export function AgentsPage({
   const soloRenderTeam: Team | null = useMemo(() => {
     if (!renderTeam) return null;
     const agents = renderTeam.agents;
-    const orch = findOrchestratorSpec(renderTeam);
-    const coder = agents.find(a => a.name !== orch?.name && agentDomain(a) === "coder")
-      ?? agents.find(a => a.name !== orch?.name && roleCanWrite(roleByName.get(a.base)))
-      ?? agents.find(a => a.name !== orch?.name)
-      ?? agents[0];
+    const coder = soloGeneralistForTeam(renderTeam);
     const critic = agents.find(a => a.name === CRITIC_AGENT_NAME)
       ?? ({ name: CRITIC_AGENT_NAME, base: "critic", icon: null } as AgentSpec);
     const publisher = agents.find(a => a.base === "publisher" || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release"))
@@ -11552,15 +11549,11 @@ export function AgentsPage({
       // and — RULE-BASED, host-side — publishes deterministically if the goal asks.
       // Isolated early-return so the team path below is byte-for-byte untouched.
       if (soloMode) {
-        // Pick a coder that can ACTUALLY WRITE — never the orchestrator (read-only:
-        // it would just emit a @dispatch the solo path doesn't execute) or the
-        // read-only critic. bestAgentForGoal over the writers only.
-        const writers = runTeam.agents.filter(a => a.name !== orch.name && roleCanWrite(roleByName.get(a.base)));
-        const coder = bestAgentForGoal(writers, text, roleByName)
-          ?? writers.find(a => agentDomain(a) === "coder")
-          ?? writers[0]
-          ?? runTeam.agents.find(a => a.name !== orch.name)
-          ?? orch;
+        // Solo is a deterministic, unrestricted generalist on EVERY team. Do
+        // not reuse a lane specialist here: changing its prompt did not change
+        // its runtime tool allowlist, so browser/ops tasks could be routed to a
+        // "do everything" frontend agent that was still denied the needed tool.
+        const coder = soloGeneralistForTeam(runTeam);
         if (!requiresAgentWorktree(projectCwd)) {
           throw new Error(
             "Solo mode needs a Git project directory so OWLLM can isolate its filesystem access. Select or initialize a Git project, then retry.",

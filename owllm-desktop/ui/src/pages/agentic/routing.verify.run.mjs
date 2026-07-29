@@ -34,6 +34,7 @@ const {
   classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite, coderLane, goalLane,
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
   toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
+  soloGeneralistForTeam, SOLO_GENERALIST_BASE,
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
@@ -111,6 +112,24 @@ for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   check(`[${data.name}] code→writable-non-design`, codeOk);
   console.log(`  ${codeOk ? "✓" : "✗"} ${(data.name || tf).padEnd(16)} code→@${codePick?.name ?? "(none)"} (${codePick ? agentDomain(codePick) : "-"})   design→@${designPick?.name ?? "(none)"}`);
 }
+
+// Solo must never inherit whichever narrow specialist happened to score first.
+// Every bundled/custom team gets the same unrestricted runtime generalist,
+// while an explicitly authored solo_generalist remains selectable as-is.
+section("2a) Solo generalist (all tools, every team)");
+check("solo_generalist role is installed", roleByBase.has(SOLO_GENERALIST_BASE));
+check("solo_generalist role is unrestricted", roleByBase.get(SOLO_GENERALIST_BASE)?.toolAllowlist?.includes("all") === true);
+for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
+  const data = JSON.parse(fs.readFileSync(path.join(teamsDir, tf), "utf8"));
+  const solo = soloGeneralistForTeam({ agents: data.agents || [] });
+  check(`[${data.name}] solo→generalist`, solo.base === SOLO_GENERALIST_BASE);
+}
+const explicitSolo = { name: "my_solo", base: SOLO_GENERALIST_BASE };
+check("explicit team solo generalist is preserved", soloGeneralistForTeam({ agents: [explicitSolo] }) === explicitSolo);
+check(
+  "synthetic solo name avoids a custom-team collision",
+  soloGeneralistForTeam({ agents: [{ name: "solo_generalist", base: "documentation" }] }).name === "solo_generalist_2",
+);
 
 // 2b) lane-aware coder routing — a code goal must reach the coder whose lane
 //     (frontend/backend) matches the goal, not always the first coder in roster

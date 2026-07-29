@@ -82,17 +82,82 @@ globalThis.__invokeStub = async (cmd) => {
 };
 localStorage.setItem("owllm:code:pages", "[live]");
 const restored = await mirror.restoreStateMirror();
-check(restored === 4, "restore fills exactly the missing durable keys");
+// 3, not 4: owllm:code:page:p1 is a HOT BLOB, hydrated into the synchronous
+// cache instead of localStorage (see HOT_BLOB_PREFIXES in stateMirror.ts).
+check(restored === 3, "restore fills exactly the missing durable keys");
 check(localStorage.getItem("owllm:code:pages") === "[live]",
   "restore NEVER overwrites a key the live profile already has");
-check(localStorage.getItem("owllm:code:page:p1") === "{restored}",
+check(mirror.readHotBlob("owllm:code:page:p1") === "{restored}",
   "a missing Coding session comes back from the DB");
+check(localStorage.getItem("owllm:code:page:p1") === null,
+  "a Coding session is never put BACK into localStorage (every write there is replicated into every same-origin renderer)");
 check(localStorage.getItem("owllm:agents:notebook:proj1") === "{nb}",
   "a missing notebook blob comes back from the DB");
 check(localStorage.getItem("owllm:settings:v1") === "{settings}",
   "project and model settings come back with the rest of the user state");
 check(localStorage.getItem("foreign:unrelated") === null,
   "rows outside the durable prefixes are ignored on restore");
+
+// ---- hot blobs: durable, but never on the localStorage broadcast path ----
+// Regression cover for the 4 GB overlay-renderer leak: Blink replicates every
+// localStorage mutation into every renderer hosting the origin, including
+// passive documents that never touch storage and never drain them.
+mirror.__resetStateMirrorForTests();
+globalThis.localStorage = makeStorage();
+// A pre-upgrade profile still holding the blob inline, plus a newer DB row.
+localStorage.setItem("owllm:code:page:p1", "{live-newer}");
+let hotSaves = [];
+globalThis.__invokeStub = async (cmd, args) => {
+  if (cmd === "state_mirror_load") return [{ key: "owllm:code:page:p1", value: "{db-older}" }];
+  hotSaves.push(args.input);
+  return null;
+};
+await mirror.restoreStateMirror();
+check(mirror.readHotBlob("owllm:code:page:p1") === "{live-newer}",
+  "the live profile copy wins over the older mirrored row (the sweep runs on a 20s cadence)");
+check(localStorage.getItem("owllm:code:page:p1") === "{live-newer}",
+  "the pre-upgrade copy is NOT deleted before the DB has the newer value");
+await mirror.flushHotBlobs();
+check(localStorage.getItem("owllm:code:page:p1") === null,
+  "it IS removed from localStorage once the DB acknowledges it");
+
+hotSaves = [];
+mirror.writeHotBlob("owllm:code:page:p1", "{v2}");
+check(localStorage.getItem("owllm:code:page:p1") === null,
+  "writeHotBlob never writes to localStorage");
+check(mirror.readHotBlob("owllm:code:page:p1") === "{v2}", "writeHotBlob is readable immediately (synchronous cache)");
+await mirror.flushHotBlobs();
+check(hotSaves.length === 1 && hotSaves[0].sets[0].value === "{v2}",
+  "a hot blob is persisted to SQLite on flush");
+hotSaves = [];
+mirror.writeHotBlob("owllm:code:page:p1", "{v2}");
+await mirror.flushHotBlobs();
+check(hotSaves.length === 0, "an unchanged hot blob produces zero DB traffic");
+
+// The sweep must not treat 'absent from localStorage' as a user deletion —
+// that would silently drop the user's history rows.
+hotSaves = [];
+await mirror.__sweepOnceForTests();
+check(!hotSaves.some((s) => s.deletes?.some((k) => k.startsWith("owllm:code:page:"))),
+  "the sweep never deletes a hot blob just because localStorage lacks it");
+
+mirror.deleteHotBlob("owllm:code:page:p1");
+await mirror.flushHotBlobs();
+check(mirror.readHotBlob("owllm:code:page:p1") === null, "deleteHotBlob clears the cache");
+check(hotSaves.some((s) => s.deletes.includes("owllm:code:page:p1")),
+  "deleteHotBlob drops the SQLite row too");
+
+// Backend down at boot: migrating must never destroy the only surviving copy.
+mirror.__resetStateMirrorForTests();
+globalThis.localStorage = makeStorage();
+localStorage.setItem("owllm:code:page:p2", "{only-copy}");
+globalThis.__invokeStub = async () => { throw new Error("backend down"); };
+await mirror.restoreStateMirror();
+await mirror.flushHotBlobs();
+check(localStorage.getItem("owllm:code:page:p2") === "{only-copy}",
+  "a dead backend leaves the pre-upgrade localStorage copy intact (history is never destroyed to migrate it)");
+check(mirror.readHotBlob("owllm:code:page:p2") === "{only-copy}",
+  "the value stays readable while the migration is pending");
 
 // ---- shipped upgrade recovery may replace a default already in new profile ----
 mirror.__resetStateMirrorForTests();

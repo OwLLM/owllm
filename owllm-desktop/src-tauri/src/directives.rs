@@ -178,7 +178,7 @@ fn touch_directives(conn: &rusqlite::Connection, project_id: &str) {
 /// new native set. `directives_seeded` doubles as the seed VERSION (0 = never).
 /// On upgrade we replace only untouched builtins — a rule the user edited is
 /// promoted to source='user_typed' (see directives_update) and is kept.
-pub(crate) const CURRENT_SEED_VERSION: i64 = 3;
+pub(crate) const CURRENT_SEED_VERSION: i64 = 4;
 
 /// Native best-practice rules every project starts with, so nobody writes a rule
 /// list from zero. They are NORMAL directives (the user can edit or delete any of
@@ -196,6 +196,12 @@ pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
     ("must", "Stop and ask when blocked, when ambiguity would materially affect the solution (implementation, safety, data, API, or user-facing behavior), or before any destructive or irreversible action (deleting files, user data, production data, database records, force-pushes, history rewrites, overwriting user content, credential changes, schema migrations, API contract changes, or production-impacting actions)."),
     ("must", "Design for the intended users, deployment environments, and edge cases, not only the current machine or dataset."),
     ("must", "Never bundle, embed, commit, or ship credentials, secrets, API keys, tokens, private keys, vaults, or user account data in application builds, installers, release artifacts, or version control. Keep all secrets in per-user local runtime storage only — a build or repository must work with zero embedded credentials."),
+    ("must", "Prove the mechanism of a bug with a controlled experiment before fixing it. Name the cause, then show the measurement or test that confirms it. A fix built on an unverified hypothesis is a guess, and it will be mistaken for a solved problem."),
+    ("must", "Ship every bug fix with a regression check that fails on the old code and passes on the new, and wire that check into the automated gate that actually runs before release. An unguarded fix will be undone by a later change."),
+    ("must", "Confirm that a check you rely on really executes. A test, guard, or verifier that is never discovered or never run is not protection, and it makes the system look safer than it is."),
+    ("must", "Verify that the artifact you are observing is the one you changed — check version, build identifier, and that the modified code is present in what is actually running — before concluding a fix worked or failed."),
+    ("prefer", "Validate the instrument before trusting a negative result. If a test cannot distinguish the competing explanations, or cannot detect the effect it is meant to measure, it is not evidence of absence."),
+    ("prefer", "Re-examine the assumption behind a fix when it does not work, instead of adding another layer on top. An unexplained failure usually means the mechanism was misidentified, not that the fix was too small."),
     ("prefer", "Reuse existing functions, components, tools, and patterns before introducing new ones."),
     ("prefer", "Choose clear names and straightforward implementations over clever or complex solutions."),
     ("prefer", "Surface errors with actionable diagnostics. Never fail silently."),
@@ -208,6 +214,8 @@ pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
     ("avoid", "Leaving debug prints, dead code, commented-out experiments, temporary hacks, or vague TODOs."),
     ("avoid", "Changing public behavior, APIs, schemas, file formats, or user workflows unless required and explicitly disclosed."),
     ("avoid", "Adding dependencies, services, frameworks, or infrastructure without clear justification."),
+    ("avoid", "Treating your own notes, logs, or generated output as independent evidence — a theory confirmed by text you wrote yourself is confirmed by nothing."),
+    ("avoid", "Putting large or frequently-rewritten data in a store that broadcasts, syncs, or replicates every write to other processes, tabs, devices, or peers. The cost lands on components that never asked for the data and may never release it."),
 ];
 
 /// Insert the built-in rules for a project. When `skip_existing_by_text` is set,

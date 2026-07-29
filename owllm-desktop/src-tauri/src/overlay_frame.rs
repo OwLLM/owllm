@@ -154,15 +154,19 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     }
 
     // The overlay must never read `localStorage` for its cold-boot accent.
-    // Touching localStorage binds the document to Blink's per-origin storage
-    // area, and every same-origin mutation is then replicated into THIS
-    // renderer — including the Code page's multi-megabyte session blobs, which
-    // it re-persists on a 250ms debounce. The overlay is a passive, occluded,
-    // click-through window that runs no tasks, so nothing ever drains those
-    // copies: measured live at ~45 MB/min of monotonic, never-GC'd growth
-    // (176 MB → 4 GB over a session) for a 12 KB static page. Rust reads the
-    // accent from the SQLite state mirror instead and injects it here, before
-    // any page script runs — race-free and with no storage binding.
+    // It is a passive, occluded, click-through window that runs no tasks, so
+    // anything pushed into its renderer is never drained: measured live at
+    // ~45 MB/min of monotonic, never-GC'd growth (176 MB → 4 GB over a
+    // session) for a 12 KB static page. Rust reads the accent from the SQLite
+    // state mirror instead and injects it here, before any page script runs —
+    // race-free and with no storage dependency.
+    //
+    // That is hygiene, NOT the cure. Blink replicates every localStorage
+    // mutation into every renderer hosting the origin, including documents
+    // that never touch storage (measured: two passive same-origin pages
+    // reached 944/903 MB while the writer held 55 MB). What actually stops the
+    // growth is keeping large, hot-path payloads out of localStorage — see
+    // HOT_BLOB_PREFIXES in ui/src/runtime/stateMirror.ts.
     let accent = crate::state_mirror::mirrored_value("owllm:theme:accent")
         .unwrap_or_else(|| "indigo".to_string());
     let init = format!(

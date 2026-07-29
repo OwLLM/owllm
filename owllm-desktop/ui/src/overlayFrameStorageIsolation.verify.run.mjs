@@ -1,14 +1,21 @@
 // Focused verification for the overlay-frame memory leak fix.
 //
 // The decorative overlay window used to read `localStorage` for its accent and
-// listen for `storage` events to track frame visibility. Any localStorage
-// access binds that document to Blink's per-origin storage area, after which
-// EVERY same-origin mutation is replicated into that renderer — including the
-// Code page's ~1.5 MB session blob, which is re-persisted on a 250ms debounce.
-// The overlay is passive, occluded and click-through: it runs no tasks, so it
-// never drains the copies. Measured live at ~45 MB/min of monotonic, never-GC'd
-// growth, reaching ~4 GB in a session for a 12 KB static page — roughly 85% of
-// the app's footprint, and the cause of system-wide paging stalls.
+// listen for `storage` events to track frame visibility. It is passive,
+// occluded and click-through: it runs no tasks, so anything pushed into it is
+// never drained. Measured live at ~45 MB/min of monotonic, never-GC'd growth,
+// reaching ~4 GB in a session for a 12 KB static page — roughly 85% of the
+// app's footprint, and the cause of system-wide paging stalls.
+//
+// IMPORTANT — do not "fix" this by re-reading localStorage here. Removing the
+// overlay's own storage calls is necessary hygiene but is NOT what stops the
+// growth: Blink replicates every localStorage mutation into every renderer
+// hosting the origin, including documents that never touch storage and have no
+// `storage` listener. Controlled measurement (three same-origin pages, separate
+// renderers, one writing 1.4 MB 8x/s): writer 55 MB, two never-touching passive
+// pages 944 MB and 903 MB. The actual cure is keeping large, hot-path payloads
+// out of localStorage entirely — see HOT_BLOB_PREFIXES in runtime/stateMirror
+// and hotBlobStorage.verify.run.mjs.
 //
 // It cannot use Tauri events either: the app's only capability is scoped to
 // `windows: ["main"]` and `withGlobalTauri` is off, so `window.__TAURI__` is

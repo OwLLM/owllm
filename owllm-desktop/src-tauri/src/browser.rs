@@ -61,10 +61,10 @@ const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
 
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
-/// a 28px tab strip over a 68px identity/nav row. The nav row is 30px taller
-/// than a plain toolbar so it can carry the open site's real logo at a size the
-/// user recognises at a glance (user spec 2026-07-28) — keep in step with
-/// browser-chrome.html's #navrow.
+/// a 58px identity strip (30px taller than a plain tab bar) that carries the
+/// open site's real logo at a size the user recognises at a glance, over a
+/// 38px nav toolbar with back/reload/URL (user spec 2026-07-29) — keep in
+/// step with browser-chrome.html's #tabsrow.
 const CHROME_H: f64 = 96.0;
 
 /// X where parked (inactive) tab webviews live. Tauri has no cross-platform

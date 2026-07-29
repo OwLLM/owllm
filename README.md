@@ -83,6 +83,25 @@ flowchart LR
 | 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
 | 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
 
+## Built to work beside your editor — not imitate it
+
+Keep VS Code, JetBrains, Neovim, or whatever editor you already love. OwLLM does not try to replace their IntelliSense, debugger, or extension ecosystem. It owns the larger workflow an editor was never designed to own:
+
+| Your editor handles | OwLLM handles |
+|---|---|
+| Editing, navigation, debugging | **An agent workforce** — orchestrator + specialists working in parallel, with each Code page isolated in its own Git worktree |
+| One vendor's AI plan or an API key | **The model you choose** — local GGUF, cloud APIs, or subscription CLIs you already pay for: Claude Code, Codex, Gemini, and Kimi |
+| Calling a model | **Building the model** — PDF/DOCX/URL → instruction JSONL → LoRA/QLoRA → GGUF export → quantization → local serving |
+| An agent saying “done” | **A real verification gate** — the committed Project Card defines the command; only its exit code passes |
+| Saving source files | **Shipping the product** — deterministic bump → commit → tag → build → sign → release → updater verification |
+| A browser extension or test runner | **A native agent browser** — persistent signed-in sessions, localhost/live-site testing, form filling, mobile emulation, and an encrypted password vault |
+| One local working tree | **Cross-machine coordination** — private worktrees plus a fetch/classify/three-way-merge/push coordinator that never force-pushes and preserves real conflicts |
+| Your current computer | **Your fleet — even below the OS** — encrypted remote shells and agent commands across paired PCs; NanoKVM/PiKVM control reaches BIOS, boot menus, power, keyboard, and mouse |
+| A prompt/rules file | **Durable team memory** — facts and worklog are retrieved with RAG and synced across your own PCs |
+| A workstation install | **OwLLM Go** — portable mode redirects app state, models, configuration, and webview data to a USB drive |
+
+> **VS Code writes code. OwLLM runs the workforce that verifies it, ships it, and can operate the machines it runs on.**
+
 ## ⚔️ OwLLM vs the field
 
 Every tool below is good at its one thing. OwLLM's pitch is that **the whole pipeline lives in one app** — and the pieces compound: the team you built fine-tunes the model it runs on, inside a sandbox, reachable from your phone.

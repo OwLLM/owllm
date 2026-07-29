@@ -4,13 +4,15 @@
      the browser looks like OwLLM, not a stock OS window, and this bar never
      covers website content. App-origin: shares localStorage with the main UI,
      so it reads the same theme/accent keys the app writes.
-     Two rows, like a normal browser: a TAB STRIP (app icon + OwLLM title +
-     one pill per open page + New tab) over a NAV BAR that leads with the open
-     site's REAL logo + name (so WhatsApp/Gmail/Drive are recognisable without
-     reading the URL) followed by back/reload/URL. The nav row is 30px taller
-     than a plain toolbar to fit that mark — browser.rs CHROME_H must match. The
-     bar background follows the app header's --bg-header recipe (70% accent
-     over #1c2244 navy — theme.ts resolveHeaderHex) so both headers match.
+     Two rows, like a normal browser: an IDENTITY STRIP that leads with the
+     app icon + OwLLM title, then the open site's REAL logo + name at a size
+     the user recognises at a glance (WhatsApp/Gmail/Drive), then one pill per
+     open page + New tab. That strip is 30px taller than a plain tab bar so the
+     site mark reads as the page's identity, not decoration (user spec
+     2026-07-29). Under it, a THIN NAV BAR carries back/reload/URL only —
+     browser.rs CHROME_H must match the sum of both. The bar background follows
+     the app header's --bg-header recipe (70% accent over #1c2244 navy —
+     theme.ts resolveHeaderHex) so both headers match.
      Rust link: NO IPC — buttons/drag/URL entry write sentinel-tagged events
      into document.title (same channel the page bridge uses); Rust's
      on_document_title_changed on this webview acts on them. Rust pushes page
@@ -36,9 +38,12 @@
         font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       }
       #rows { display: flex; flex-direction: column; height: 100%; }
+      /* The identity row is 30px taller than a plain tab bar so the open
+         page's real logo reads as the page's identity, not a decoration
+         alongside a URL (user spec 2026-07-29). */
       #tabsrow {
-        display: flex; align-items: center; gap: 4px;
-        height: 28px; flex: none; padding: 0 4px 0 8px; box-sizing: border-box;
+        display: flex; align-items: center; gap: 8px;
+        height: 58px; flex: none; padding: 0 6px 0 10px; box-sizing: border-box;
       }
       #navrow {
         display: flex; align-items: center; gap: 6px;
@@ -47,24 +52,26 @@
         border-bottom: 1px solid var(--border);
       }
       /* Site identity — the open page's own logo, big enough to recognise
-         without reading the URL. */
+         without reading the URL. Lives INSIDE the identity row so the tall
+         header carries the mark itself, rather than pushing it to a
+         separate row below. */
       #site {
-        flex: none; display: flex; align-items: center; gap: 9px;
-        max-width: 210px; min-width: 0; padding-right: 4px;
+        flex: none; display: flex; align-items: center; gap: 10px;
+        min-width: 0; max-width: 260px; padding: 0 6px 0 4px;
       }
       #sitemark {
         flex: none; display: flex; align-items: center; justify-content: center;
-        width: 38px; height: 38px; border-radius: 10px;
+        width: 46px; height: 46px; border-radius: 12px;
         background: rgba(255,255,255,0.94);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.28);
         overflow: hidden;
       }
-      #sitemark svg, #sitemark img { width: 26px; height: 26px; display: block; }
+      #sitemark svg, #sitemark img { width: 32px; height: 32px; display: block; }
       /* Lettermark fallback: brand colour fills the tile, initial on top. */
-      #sitemark.letter { color: #fff; font-size: 21px; font-weight: 800; }
+      #sitemark.letter { color: #fff; font-size: 26px; font-weight: 800; }
       #sitename {
         min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        color: var(--fg); font-size: 13px; font-weight: 700;
+        color: var(--fg); font-size: 15px; font-weight: 700; letter-spacing: 0.2px;
       }
       .btn {
         flex: none; display: flex; align-items: center; justify-content: center;
@@ -122,6 +129,7 @@
       <div id="tabsrow">
         <img id="logo" src="app-icon.png" alt="" />
         <span id="ttl">OwLLM Browser</span>
+        <div id="site"><span id="sitemark"></span><span id="sitename"></span></div>
         <div id="tabs"></div>
         <button id="newtab" title="New tab">+</button>
         <div id="drag"></div>
@@ -132,7 +140,6 @@
         </div>
       </div>
       <div id="navrow">
-        <div id="site"><span id="sitemark"></span><span id="sitename"></span></div>
         <button class="btn" id="back" title="Back">←</button>
         <button class="btn" id="reload" title="Reload">⟳</button>
         <input id="url" spellcheck="false" placeholder="Enter a URL and press Enter" />

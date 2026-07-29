@@ -105,6 +105,9 @@ import {
   TEAM_MEMORY_HINT_LEAN,
   projectWorkspaceBlock,
   providerFor as providerForShared,
+  abortable,
+  isAbortError,
+  sleepAbortable,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -8880,14 +8883,20 @@ export function AgentsPage({
   // first-message-cold-start path stuck supSendBusy=true forever
   // and they hammered the button).
   const supSendAbortRef = useRef<AbortController | null>(null);
+  // The dock's "Load model" button owns its own job (server start + /health
+  // wait, up to 10 min) with no send behind it, so it needs its own controller
+  // — otherwise Stop cannot reach the single longest-running thing in the dock.
+  const dockLoadAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     const onAbort = () => {
-      // Abort BOTH controllers. A team chat routes through dispatchGoal, which
-      // runs on abortRef (NOT supSendAbortRef) — so aborting only supSendAbortRef
-      // left the real dispatch running and the Stop button looked dead. Abort
-      // whichever is live; the dispatch's finally{} clears the busy/running flags.
+      // Abort EVERY controller that can be live. A team chat routes through
+      // dispatchGoal, which runs on abortRef (NOT supSendAbortRef) — so aborting
+      // only supSendAbortRef left the real dispatch running and the Stop button
+      // looked dead. Abort whichever is live; the dispatch's finally{} clears the
+      // busy/running flags.
       try { supSendAbortRef.current?.abort(); } catch { /* already aborted */ }
       try { abortRef.current?.abort(); } catch { /* already aborted */ }
+      try { dockLoadAbortRef.current?.abort(); } catch { /* already aborted */ }
       // And kill any spawned CLI children — the JS abort never reaches them,
       // so without this the agent process keeps working and Stop looks dead.
       void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
@@ -10435,8 +10444,11 @@ export function AgentsPage({
         };
         setSupChat(prev => [...prev, startMsg]);
         appendLog("system", startMsg);
-        const ok = await ensureLocalServer(supModelId);
+        const ok = await ensureLocalServer(supModelId, 90_000, supSendAbort.signal);
         if (!ok) {
+          // Stopped mid-load is a deliberate action, not a failure — the abort
+          // handler below already reports it; don't add a red "failed" line.
+          if (supSendAbort.signal.aborted) return;
           const errMsg: GoalMsg = {
             role: "system", color: "#ff8c8c",
             text: `(failed to start local model '${supModelId}' — check the Server tab and retry)`,
@@ -10805,30 +10817,51 @@ export function AgentsPage({
   // Returns true when ready, false on timeout. Used by dispatchGoal
   // so the first user message waits for the server before fanning
   // out to specialists.
-  async function ensureLocalServer(wanted: string, timeoutMs = 90_000): Promise<boolean> {
+  // `signal` is REQUIRED for Stop to work: this wait is up to 90 s (180 s from
+  // the dock), and it used to poll on a bare setTimeout that checked nothing —
+  // so Stop was a guaranteed no-op for the entire cold-load window, which is
+  // the longest, most "frozen-looking" part of a first send. Every await is now
+  // raced against the signal; aborting stops us WAITING, it does not tear down
+  // a server the rest of the team may be about to use.
+  async function ensureLocalServer(
+    wanted: string,
+    timeoutMs = 90_000,
+    signal?: AbortSignal | null,
+  ): Promise<boolean> {
     if (serverState.running && serverState.model_id === wanted) return true;
     setServerAutoStarting(wanted);
     try {
-      if (serverState.running) await invoke("server_stop").catch(() => {});
-      await invoke("server_start", { modelId: wanted, ctx: getServerCtx() });
+      if (serverState.running) {
+        await abortable(invoke("server_stop"), signal).catch((e) => {
+          // A failed stop is survivable (start re-kills the child); a Stop press is not.
+          if (isAbortError(e)) throw e;
+        });
+      }
+      await abortable(invoke("server_start", { modelId: wanted, ctx: getServerCtx() }), signal);
     } catch (e) {
-      console.warn("[agents] lazy server start failed:", e);
+      if (!isAbortError(e)) console.warn("[agents] lazy server start failed:", e);
       setServerAutoStarting(null);
       return false;
     }
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
+      if (signal?.aborted) break;
       try {
-        const s = await invoke<ServerStatus>("server_status");
+        const s = await abortable(invoke<ServerStatus>("server_status"), signal);
         setServerState(s);
         if (s.running && s.model_id === wanted && s.port) {
           setServerAutoStarting(null);
           return true;
         }
-      } catch {
-        // ignore, retry
+      } catch (e) {
+        if (isAbortError(e)) break;
+        // otherwise ignore, retry
       }
-      await new Promise((r) => setTimeout(r, 500));
+      try {
+        await sleepAbortable(500, signal);
+      } catch {
+        break; // stopped mid-wait
+      }
     }
     setServerAutoStarting(null);
     return false;
@@ -10961,6 +10994,12 @@ export function AgentsPage({
     if (dockLoadingModel) return;
     if (!dockModelId) return;
     setDockLoadingModel(true);
+    // A bare "Load model" is still a job the user must be able to call off:
+    // it owns the dock for up to 10 minutes (180 s start + /health wait) and
+    // had no controller at all, so Stop could not touch it. Register one that
+    // the shared owllm:dispatch-abort handler aborts like any other run.
+    const loadAbort = new AbortController();
+    dockLoadAbortRef.current = loadAbort;
     try {
       const startMsg: GoalMsg = {
         role: "system", color: "#9ad9ff",
@@ -10984,8 +11023,15 @@ export function AgentsPage({
           resolve(evt.payload.elapsed_ms);
         }).then(u => { unlisten = u; });
       });
-      const ok = await ensureLocalServer(dockModelId, 180_000);
+      const ok = await ensureLocalServer(dockModelId, 180_000, loadAbort.signal);
       if (!ok) {
+        if (loadAbort.signal.aborted) {
+          setSupChat(prev => [...prev, {
+            role: "system", color: "#ffb74d",
+            text: `⏹ Stopped waiting for '${dockModelId}'. It keeps loading in the background — the Server tab shows when it's ready.`,
+          }]);
+          return;
+        }
         const errMsg: GoalMsg = {
           role: "system", color: "#ff8c8c",
           text: `✗ Failed to start local model '${dockModelId}' — check the Server tab and retry.`,
@@ -10995,8 +11041,17 @@ export function AgentsPage({
       }
       let readyMs = 0;
       try {
-        readyMs = await readyPromise;
+        // The /health wait is the other 10-minute hostage: race it so Stop
+        // releases the dock instead of the user staring at a frozen button.
+        readyMs = await abortable(readyPromise, loadAbort.signal);
       } catch (e) {
+        if (isAbortError(e)) {
+          setSupChat(prev => [...prev, {
+            role: "system", color: "#ffb74d",
+            text: `⏹ Stopped waiting for '${dockModelId}'. It keeps loading in the background — the Server tab shows when it's ready.`,
+          }]);
+          return;
+        }
         const errMsg: GoalMsg = {
           role: "system", color: "#ff8c8c",
           text: `✗ Model '${dockModelId}' did not become ready: ${String(e)}`,
@@ -11014,6 +11069,7 @@ export function AgentsPage({
       if (text) onSupSend(text);
     } finally {
       setDockLoadingModel(false);
+      if (dockLoadAbortRef.current === loadAbort) dockLoadAbortRef.current = null;
     }
   };
 
@@ -11129,6 +11185,23 @@ export function AgentsPage({
         return;
       }
     }
+    // The run's abort controller is created HERE, before the local-server
+    // block below, and not at the dispatch site further down. The cold model
+    // load is the longest phase of a first send (up to 90 s), and with the
+    // controller created after it, abortRef still pointed at the PREVIOUS
+    // run — so Stop/Cancel had nothing live to abort and did nothing at all
+    // for that whole window. Registering it first is what makes Stop work
+    // during the load; `runAbort` is what the load block races against.
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
+    // Bail-outs below return before the run's try/finally installs its
+    // cleanup, so drop the registration by hand — leaving a stale controller
+    // makes the next Stop abort a run that never started.
+    const releaseRunAbort = () => {
+      if (abortRef.current === ctrl) abortRef.current = null;
+      if (agentRunAborts.get(agentSessId) === ctrl) agentRunAborts.delete(agentSessId);
+    };
     // Require the local server only when the orchestrator (or any
     // dispatched specialist) actually resolves to a local model. Cloud-
     // only teams should run without one.
@@ -11167,6 +11240,7 @@ export function AgentsPage({
       if (!wantedLocal) {
         setRunError("This team uses local model(s) but none are installed. Open the Models tab and add a local or tuned model first.");
         dispatchInFlightRef.current = false;
+        releaseRunAbort();
         return;
       }
       if (!serverState.running || !serverState.port || serverState.model_id !== wantedLocal) {
@@ -11174,14 +11248,28 @@ export function AgentsPage({
         // "Planning" was the misleading frozen label users stared at.
         setPhase("preparing");
         setRunError(`Starting local server (${wantedLocal})…`);
-        const ok = await ensureLocalServer(wantedLocal);
+        const ok = await ensureLocalServer(wantedLocal, 90_000, ctrl.signal);
         if (!ok) {
-          setRunError(`Local server failed to start for "${wantedLocal}" within 90s — try the Server tab manually.`);
+          // Stop during the load is deliberate — report it as stopped, not as
+          // a 90 s timeout the user never actually waited for.
+          setRunError(ctrl.signal.aborted
+            ? null
+            : `Local server failed to start for "${wantedLocal}" within 90s — try the Server tab manually.`);
+          if (ctrl.signal.aborted) setPhase("idle");
           dispatchInFlightRef.current = false;
+          releaseRunAbort();
           return;
         }
         setRunError(null);
       }
+    }
+    // Stopped while the weights were loading: leave before any run flag is set,
+    // so nothing has to be unwound and the UI simply never enters "running".
+    if (ctrl.signal.aborted) {
+      setPhase("idle");
+      dispatchInFlightRef.current = false;
+      releaseRunAbort();
+      return;
     }
     // Prompts below read the snapshot synchronously — make sure the refresh
     // kicked off at the top has landed (bounded by its own per-invoke timeout,
@@ -11238,9 +11326,20 @@ export function AgentsPage({
     // These attachment bytes (passed in by the chat dock's image attach)
     // belong to the orchestrator for the rest of the run.
     const runAttachments = attachments;
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
+    // `ctrl` was created and registered ABOVE the local-server block so Stop
+    // is live during the cold model load too — see the comment there. Stop can
+    // also land during the skill-sync/memory awaits just above, after the run
+    // flags went up, so unwind them here rather than starting a run the user
+    // already cancelled.
+    if (ctrl.signal.aborted) {
+      setBusy(false);
+      setRunning(false);
+      setPhase("idle");
+      setRunEndedAt(Date.now());
+      dispatchInFlightRef.current = false;
+      releaseRunAbort();
+      return;
+    }
 
     const orch = findOrchestratorSpec(runtimeTeam)!;
 

@@ -51,7 +51,7 @@ import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNorm
 import { isolationBadge } from "../agentic/isolationBadge";
 import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
-import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, type Attachment, type HistoryItem } from "../agentic/dispatch";
+import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, abortable, isAbortError, sleepAbortable, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
@@ -496,15 +496,29 @@ export default function ChatPage() {
   // serving that model. The 503-poll loop in sendOne handles the
   // "still loading weights" wait — this just kicks the spawn and
   // updates the local autoStarting flag for any UI that cares.
-  async function ensureLocalServer(wanted: string): Promise<boolean> {
+  //
+  // EVERY await here is raced against the run's abort signal. A cold GGUF load
+  // (and, on a fresh machine, a one-time engine module DOWNLOAD inside
+  // server_start) can run for minutes; without the race, Stop was a no-op for
+  // that whole window — the button flipped but the send sat there. Aborting
+  // stops us WAITING; the spawn completes in the background and the model stays
+  // warm (another column may be waiting on the very same server).
+  async function ensureLocalServer(wanted: string, signal?: AbortSignal): Promise<boolean> {
     if (status.running && status.model_id === wanted) return true;
     setAutoStarting(wanted);
     try {
-      if (status.running) await invoke("server_stop").catch(() => {});
-      await invoke("server_start", { modelId: wanted, ctx: getServerCtx() });
+      if (status.running) {
+        await abortable(invoke("server_stop"), signal).catch((e) => {
+          // A failed stop is survivable (start re-kills the child); a Stop press is not.
+          if (isAbortError(e)) throw e;
+        });
+      }
+      await abortable(invoke("server_start", { modelId: wanted, ctx: getServerCtx() }), signal);
       return true;
     } catch (e) {
-      updateCol("A", { error: `Failed to start server: ${e}` });
+      // Stop is a deliberate user action, not a failure — unwind silently
+      // instead of painting "Failed to start server" over their transcript.
+      if (!isAbortError(e)) updateCol("A", { error: `Failed to start server: ${e}` });
       return false;
     } finally {
       setAutoStarting(null);
@@ -766,7 +780,7 @@ export default function ChatPage() {
       const alreadyRight = status.running && status.model_id === wantedModelId;
       if (isServable && !alreadyRight) {
         updateCol(col.id, { error: `⏳ Starting server (${wantedModelId})…`, busy: true });
-        const ok = await ensureLocalServer(wantedModelId);
+        const ok = await ensureLocalServer(wantedModelId, signal);
         if (!ok) {
           updateCol(col.id, { busy: false });
           return;
@@ -787,7 +801,9 @@ export default function ChatPage() {
             // ignore, retry
           }
           if (ctrlAborted(col.id)) return;
-          await new Promise((r) => setTimeout(r, 400));
+          // Abortable wait: a bare timer made Stop land up to 400 ms late on
+          // every iteration of this 12 s poll.
+          try { await sleepAbortable(400, signal); } catch { return; }
         }
         if (!activePort) {
           updateCol(col.id, { error: "Server start timed out — check the Server tab logs.", busy: false });
@@ -959,7 +975,9 @@ export default function ChatPage() {
             if (Date.now() - startedAt > READY_TIMEOUT_MS) {
               throw new Error(`llama-server unresponsive for ${READY_TIMEOUT_MS / 1000}s — check the Server tab. Common causes: broken GGUF, GPU OOM, missing -ngl support.`);
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            // Abortable backoff: this loop can run for 3 minutes, and a bare
+            // timer made every Stop wait out the rest of its 1.5 s tick.
+            await sleepAbortable(1500, signal);
             continue;
           }
           clearTimeout(tid);
@@ -977,7 +995,9 @@ export default function ChatPage() {
             if (Date.now() - startedAt > READY_TIMEOUT_MS) {
               throw new Error("Model still loading after 3 minutes — likely OOM. Try a smaller quant (Q4_K_M).");
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            // Same here: the "Loading model into VRAM…" wait is the phase the
+            // user is most likely to give up on, so Stop must land instantly.
+            await sleepAbortable(1500, signal);
             continue;
           }
           break;

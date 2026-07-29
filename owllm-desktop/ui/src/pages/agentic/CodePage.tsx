@@ -22,7 +22,7 @@ import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import { useChatSession } from "../../runtime/useChatSession";
 import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
@@ -1783,15 +1783,28 @@ function CodeWorkspace({ pageId, onTitle }: {
   }, [isolatedNow, sbox?.available, isolation.enabled, wslStat]);
 
   // Start (or reuse) the llama-server for the chosen model; return its port.
-  async function ensureServer(id: string): Promise<number | null> {
+  //
+  // Takes the CALLER's signal rather than reading abortRef: this runs BEFORE
+  // the turn installs its controller, so abortRef still held the PREVIOUS
+  // run's — an already-aborted one made the wait exit instantly, and a live
+  // one made Stop unreachable for the whole 60 s load. Every await is raced
+  // against the signal so Stop lands the moment it's pressed.
+  async function ensureServer(id: string, signal?: AbortSignal): Promise<number | null> {
     const s = await invoke<ServerStatus>("server_status").catch(() => null);
     if (s && s.running && s.model_id === id && s.port) return s.port;
     setStatus(`Starting ${id}…`);
-    await invoke("server_start", { modelId: id, ctx: getServerCtx() });
-    for (let i = 0; i < 120 && !abortRef.current?.signal.aborted; i++) {
-      const st = await invoke<ServerStatus>("server_status").catch(() => null);
+    // An abort propagates out as an AbortError rather than becoming a null
+    // port: callers turn "no port" into a red "engine didn't come up" bubble,
+    // which is a lie when the user simply pressed Stop. Their existing
+    // isAbortError/`err.name === "AbortError"` branches already unwind quietly.
+    await abortable(invoke("server_start", { modelId: id, ctx: getServerCtx() }), signal);
+    for (let i = 0; i < 120; i++) {
+      const st = await abortable(invoke<ServerStatus>("server_status"), signal).catch((e) => {
+        if (isAbortError(e)) throw e;
+        return null;
+      });
       if (st && st.running && st.port) return st.port;
-      await new Promise((r) => setTimeout(r, 500));
+      await sleepAbortable(500, signal);
     }
     return null;
   }
@@ -2067,7 +2080,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(modelId);
+      const port = await ensureServer(modelId, signal);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
@@ -2102,7 +2115,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
     showSecondaryMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(secModel);
+      const port = await ensureServer(secModel, signal);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
@@ -2526,7 +2539,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
       setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
-        const port = await ensureServer(modelId);
+        const port = await ensureServer(modelId, ctrl.signal);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
         await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);

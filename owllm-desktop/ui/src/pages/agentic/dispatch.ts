@@ -1773,12 +1773,49 @@ export function isCodexUpgradeError(msg: string): boolean {
 }
 
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
-export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+/// A null/absent signal means "no run to cancel" — just sleep.
+export function sleepAbortable(ms: number, signal?: AbortSignal | null): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (!signal) { setTimeout(resolve, ms); return; }
     if (signal.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
     const onAbort = () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); };
     const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
     signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/// True for the cancellation any Stop button raises. Every abort path in this
+/// app rejects with a DOMException named "AbortError" (fetch's own contract),
+/// so callers can tell "the user stopped me" from "this actually failed" and
+/// stay quiet instead of painting a red error for a deliberate Stop.
+export function isAbortError(e: unknown): boolean {
+  return (e as { name?: string } | null)?.name === "AbortError";
+}
+
+/// Await `p`, but stop waiting the instant `signal` aborts.
+///
+/// This does NOT cancel the underlying work — a Tauri `invoke` has no
+/// cancellation channel, so the backend job runs to completion regardless.
+/// It releases the CALLER, which is the whole point: pressing Stop must never
+/// sit behind a job the UI cannot interrupt. The motivating case is
+/// `server_start`, whose await can span an engine auto-install (a module
+/// DOWNLOAD) plus a cold GGUF load — minutes during which Stop was a no-op.
+///
+/// Deliberately does not kill the half-started server either: the local
+/// llama-server is a SHARED resource (three chat columns, a whole agent team
+/// and the Server tab all point at one process), so tearing it down because
+/// one caller stopped waiting would break every concurrent run. The spawn
+/// finishes in the background and the model stays warm for the next send.
+export function abortable<T>(p: Promise<T>, signal?: AbortSignal | null): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(new DOMException("aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    const done = () => signal.removeEventListener("abort", onAbort);
+    // Swallow nothing: settle with whatever `p` produced, unless the abort
+    // already won the race (a settled promise ignores later settle calls).
+    p.then((v) => { done(); resolve(v); }, (e) => { done(); reject(e); });
   });
 }
 

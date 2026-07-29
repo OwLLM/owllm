@@ -143,8 +143,20 @@ check(chromeHtml.slice(navRowStart).match(/id="site"|id="sitemark"|id="sitename"
   "the nav toolbar never carries the site tile again (regression guard)");
 check(/#tabsrow\s*\{[^}]*height:\s*58px/.test(chromeHtml),
   "identity strip is the 58px height CHROME_H reserves for it");
-check(/#sitemark\s*\{[^}]*width:\s*46px[^}]*height:\s*46px/.test(chromeHtml),
+// The tile size is now ONE variable shared by the app logo, the open page and
+// every pill in the strip, so an unopened page is drawn just as big (user spec
+// 2026-07-29). Assert the size AND that the tile actually takes it.
+check(/--mark:\s*46px/.test(chromeHtml)
+  && /\.mark\s*\{[^}]*width:\s*var\(--mark\)[^}]*height:\s*var\(--mark\)/.test(chromeHtml),
   "site logo tile is drawn at the promised big size");
+check(/#logo\s*\{[^}]*width:\s*var\(--mark\)/.test(chromeHtml),
+  "the OwLLM logo is drawn at that same size");
+check(/paintMark\(mark,\s*t\.url/.test(chromeHtml),
+  "every page in the strip carries its own mark, open or not");
+// A name-length change used to resize the identity block and slide the whole
+// strip sideways under the user's cursor between clicks.
+check(/#site\s*\{[^}]*width:\s*\d+px/.test(chromeHtml),
+  "the identity block is fixed width so the strip never reflows");
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");

@@ -1107,21 +1107,21 @@ fn persist_session(app: &tauri::AppHandle) {
         return;
     };
     let live = list_tabs(app);
-    let tabs: Vec<String> = live
+    // Blank/loading tabs are dropped, so the remembered index MUST be counted
+    // over the kept tabs. Taking it from the unfiltered list shifted it by one
+    // per dropped tab and then fell back to 0 — restoring onto the first page
+    // instead of the one that was in front.
+    let kept: Vec<&BrowserTabInfo> = live
         .iter()
-        .map(|tab| tab.url.clone())
-        .filter(|url| !url.is_empty() && url != "about:blank")
+        .filter(|tab| !tab.url.is_empty() && tab.url != "about:blank")
         .collect();
-    if tabs.is_empty() {
+    if kept.is_empty() {
         // A window being destroyed reports no tabs. Keeping the previous
         // session is the whole point: an accidental close must be undoable.
         return;
     }
-    let active = live
-        .iter()
-        .position(|tab| tab.active)
-        .filter(|index| *index < tabs.len())
-        .unwrap_or(0);
+    let tabs: Vec<String> = kept.iter().map(|tab| tab.url.clone()).collect();
+    let active = kept.iter().position(|tab| tab.active).unwrap_or(0);
     write_session(
         &owner,
         &BrowserSession {
@@ -1856,6 +1856,13 @@ fn push_tabs(app: &tauri::AppHandle) {
                 json!({
                     "id": id,
                     "title": tabs.titles.get(id).cloned().unwrap_or_default(),
+                    // The strip draws every page's own brand mark, open or not,
+                    // so each pill needs its url — not just the active one's.
+                    "url": app
+                        .get_webview(&tab_label(*id))
+                        .and_then(|wv| wv.url().ok())
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
                     "active": *id == tabs.active,
                 })
             })

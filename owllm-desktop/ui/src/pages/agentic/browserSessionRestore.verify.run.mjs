@@ -171,7 +171,12 @@ try {
 // ---- Rust: what makes the mirror safe ------------------------------------
 check("the live tab set is mirrored per project", /static SESSION_OWNER: Mutex<Option<String>>/.test(browserRs));
 check("an empty tab set never overwrites a saved session",
-  /fn persist_session[\s\S]*?if tabs\.is_empty\(\) \{[\s\S]*?return;/.test(browserRs));
+  /fn persist_session[\s\S]*?if kept\.is_empty\(\) \{[\s\S]*?return;/.test(browserRs));
+// The remembered index must be counted over the tabs actually written. Counting
+// it over the unfiltered list shifted it by one per dropped blank tab and then
+// fell back to 0 — reopening on the FIRST page instead of the one in front.
+check("the active index is counted over the tabs that are kept",
+  /fn persist_session[\s\S]*?let active = kept\.iter\(\)\.position\(/.test(browserRs));
 check("only the owning project's session is written",
   /fn persist_session[\s\S]*?SESSION_OWNER[\s\S]*?write_session\(\s*&owner/.test(browserRs));
 check("session file names are sanitised before touching the filesystem",

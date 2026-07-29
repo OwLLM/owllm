@@ -108,9 +108,47 @@ check("chrome bar updates on navigation", /renderSite\(i\.url\)/.test(chrome));
 // The favicon is the only faithful source for brands that publish no mark.
 check("chrome bar falls back to the real favicon", /\/favicon\.ico/.test(chrome));
 
+// ---- one mark size, every page, open or not (user spec 2026-07-29) ----
+// The regression this pins: only the ACTIVE page carried a big mark, the strip
+// carried none, and the app logo was a 16px afterthought.
+check("marks share one size variable", /--mark:\s*\d+px/.test(chrome) && /--glyph:\s*\d+px/.test(chrome));
+check("the mark tile is sized from it", /\.mark\s*\{[^}]*width:\s*var\(--mark\)/.test(chrome));
+check("the app logo is a mark too", /#logo\s*\{[^}]*width:\s*var\(--mark\)/.test(chrome));
+check("no hard-coded mark size survives", !/#sitemark\s*\{/.test(chrome));
+// One painter for the identity block AND the strip — a second renderer is how
+// the two drifted apart in the first place.
+check("one shared mark painter", /function paintMark\(/.test(chrome));
+check("the identity block uses it", /paintMark\(\$\("sitemark"\)/.test(chrome));
+check("every page in the strip uses it", /paintMark\(mark,\s*t\.url/.test(chrome));
+
+// ---- brands whose standard mark is white-on-colour ----
+const solid = SITE_LOGOS.filter((l) => l.solid);
+check("solid brands are declared", solid.length >= 1);
+for (const logo of solid) {
+  check(`${logo.id}: solid brands still ship a real path`, logo.path.length > 40);
+}
+check("whatsapp is solid", siteLogoById("whatsapp").solid === true);
+check("chrome bar paints solid brands on their colour", /logo\.solid/.test(chrome) && /className = "mark solid"/.test(chrome));
+check("chrome bar knocks the glyph out in white", /logo\.solid \? "#ffffff"/.test(chrome));
+const component = read("src/components/SiteLogo.tsx");
+check("the React mark honours solid too", /logo\.solid/.test(component));
+
 const rust = fs.readFileSync(path.join(APP, "src-tauri/src/browser.rs"), "utf8").replace(/\r\n/g, "\n");
 const chromeH = Number(rust.match(/const CHROME_H: f64 = ([\d.]+);/)?.[1]);
 check("header grew by exactly 30px", chromeH === 96);
 check("chrome height is documented as shared", /browser-chrome\.html/.test(rust.split("const CHROME_H")[0].split("\n").slice(-6).join("\n")));
+
+// A page's mark must not depend on being in front, so the strip needs the url
+// of EVERY tab — not just the active one the identity block already had.
+const pushTabs = rust.split("fn push_tabs")[1].split("\nfn ")[0];
+check("rust sends a url per tab", /"url":/.test(pushTabs));
+
+// Restore must land on the page that was in front. The index is counted over
+// the tabs that are actually kept; counting it over the unfiltered list shifted
+// it per dropped blank tab and then silently fell back to the FIRST page.
+const persist = rust.split("fn persist_session")[1].split("\nfn ")[0];
+check("session keeps the tabs it indexes", /let kept/.test(persist));
+check("active index is counted over the kept tabs", /kept\.iter\(\)\.position\(/.test(persist));
+check("no index rescue that lands on the first page", !/\.filter\(\|index\| \*index < tabs\.len\(\)\)/.test(persist));
 
 console.log(`siteLogos: ${checks.length}/${checks.length} checks passed`);

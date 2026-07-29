@@ -19,18 +19,33 @@ type Props = {
 export const SiteLogo: React.FC<Props> = ({ url, id, size = 18, label }) => {
   const logo = (id ? siteLogoById(id) : null) ?? (url ? siteLogoForUrl(url) : null);
   if (logo?.path) {
-    return (
+    // `solid` brands ship their glyph knocked out of a brand-colour field, so
+    // the tile carries the colour and the path is white. Everything else is the
+    // vendor's coloured glyph on whatever sits behind it.
+    const svg = (
       <svg
-        width={size}
-        height={size}
+        width={logo.solid ? Math.round(size * 0.68) : size}
+        height={logo.solid ? Math.round(size * 0.68) : size}
         viewBox="0 0 24 24"
-        fill={logo.hex}
+        fill={logo.solid ? "#fff" : logo.hex}
         aria-label={logo.title}
         role="img"
         style={{ display: "block", flex: "none" }}
       >
         <path d={logo.path} />
       </svg>
+    );
+    if (!logo.solid) return svg;
+    return (
+      <span
+        style={{
+          display: "flex", flex: "none", alignItems: "center", justifyContent: "center",
+          width: size, height: size, borderRadius: Math.round(size * 0.28),
+          background: logo.hex,
+        }}
+      >
+        {svg}
+      </span>
     );
   }
   const tint = logo?.hex ?? "#6b7280";

@@ -112,4 +112,47 @@ check(!/data-ui="Settings\w+Row"/.test(afterAccount),
 check(/SettingsAccountRow[\s\S]*account\.connected \?/.test(popup),
   "the GitHub container renders both connected and signed-out states");
 
+// --- Every Settings destination opens as a POPUP, never a tab switch ---
+// Switching the workspace tab would disrupt whatever the user was doing, so
+// Assets / Bridges / MCP / Accounts all render through PageModal.
+check(/const \[settingsModalKey, setSettingsModalKey\] = useState<string \| null>\(null\)/.test(src),
+  "one settingsModalKey drives every Settings destination popup");
+check(/settingsModalPage && \([\s\S]{0,400}?dataUi="SettingsPageModal"[\s\S]{0,300}?<settingsModalPage\.component \/>/.test(src),
+  "the Settings destination renders inside a PageModal popup");
+check(/ALL_MODULES\.flatMap\(m => m\.pages\)\.find\(p => p\.key === settingsModalKey\)/.test(src),
+  "the popup page is resolved from the module registry, not a duplicate import");
+// Both navigation entry points (the dropdown's owllm:navigate event and a
+// direct tab click) must land on the popup, not on setActiveKey.
+check((src.match(/if \(SETTINGS_NAV_KEYS\.has\(key\)\) \{ setSettingsModalKey\(key\); return; \}/g) ?? []).length === 2,
+  "both the navigate event and the tab handler open the popup instead of switching tabs");
+check(!/<BridgesPage \/>/.test(src) && !/import BridgesPage/.test(src),
+  "Bridges no longer needs its own import/render — it goes through the shared popup");
+
+// --- The dropdown survives opening AND closing a popup ---
+check(!/setSettingsOpen\(false\); onOpenSettingsPage/.test(src)
+  && !/setSettingsOpen\(false\); onOpenSigning/.test(src),
+  "opening a Settings popup does not dismiss the dropdown");
+check(/data-owllm-overlay="1"/.test(src),
+  "PageModal marks itself as an overlay");
+const dismissAt = src.indexOf("const onPointerDown = (event: PointerEvent)");
+check(dismissAt !== -1, "the dropdown has an outside-click dismiss handler");
+const dismissBlock = src.slice(dismissAt, dismissAt + 900);
+check(/closest\?\.\("\[data-owllm-overlay\]"\)/.test(dismissBlock),
+  "clicking inside an open popup does not dismiss the dropdown behind it");
+check(/document\.querySelector\("\[data-owllm-overlay\]"\)/.test(dismissBlock),
+  "Esc closes the topmost popup rather than the dropdown");
+check(/if \(!settingsRef\.current\?\.contains\(target as Node\)\) setSettingsOpen\(false\)/.test(dismissBlock),
+  "a click outside the dropdown still closes it");
+
+// --- Chrome: same surface as the second header, static rainbow ring ---
+const popupStyleAt = popup.indexOf("maxHeight:");
+const popupStyle = popup.slice(popupStyleAt, popup.indexOf("</div>", popupStyleAt));
+check(popupStyle.includes("linear-gradient(var(--bg-card), var(--bg-card)) padding-box"),
+  "the dropdown surface matches the second header (--bg-card)");
+check(popupStyle.includes("${HEADER_AURA_GRADIENT} border-box")
+  && popupStyle.includes('border: "2px solid transparent"'),
+  "the dropdown wears the multicolour frame as a border-box ring");
+check(!/animation/.test(popupStyle),
+  "the dropdown frame is static — never spinning or glowing");
+
 console.log(`OK settings-dropdown-nav audit: ${passed} checks passed`);

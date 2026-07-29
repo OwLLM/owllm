@@ -34,7 +34,6 @@ import EmailBridgeRunner from "./bridges/EmailBridgeRunner";
 import WebhookBridgeRunner from "./bridges/WebhookBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 import { setLocalServerKey } from "./pages/agentic/inferenceEndpoint";
-import BridgesPage from "./pages/agentic/BridgesPage";
 import SigningPage from "./pages/advanced/SigningPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
@@ -688,10 +687,19 @@ function ModeBar({
   useEffect(() => {
     if (!settingsOpen) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (!settingsRef.current?.contains(event.target as Node)) setSettingsOpen(false);
+      const target = event.target as Element | null;
+      // Settings destinations (Assets / Bridges / MCP / Accounts / Signing)
+      // open as popups that render OUTSIDE this dropdown. Working inside one
+      // must not dismiss the dropdown behind it, so the dropdown is still
+      // there when the popup closes — only a click on the app itself closes it.
+      if (target?.closest?.("[data-owllm-overlay]")) return;
+      if (!settingsRef.current?.contains(target as Node)) setSettingsOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSettingsOpen(false);
+      if (event.key !== "Escape") return;
+      // Esc belongs to the topmost popup while one is open.
+      if (document.querySelector("[data-owllm-overlay]")) return;
+      setSettingsOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -801,8 +809,14 @@ function ModeBar({
                 position: "absolute", left: 0, top: 58, width: 344,
                 padding: 12, borderRadius: 10,
                 maxHeight: "calc(100vh - 86px)", overflowY: "auto",
-                background: "var(--bg-panel)", color: "var(--fg)",
-                border: "1px solid rgba(var(--accent-rgb),0.65)",
+                // Reads as an extension of the second header: same surface
+                // colour, wearing the header's rainbow ring painted
+                // padding-box/border-box. Deliberately NOT animated — this is
+                // chrome, not an activity signal, so it never spins or glows.
+                boxSizing: "border-box",
+                background: `linear-gradient(var(--bg-card), var(--bg-card)) padding-box, ${HEADER_AURA_GRADIENT} border-box`,
+                color: "var(--fg)",
+                border: "2px solid transparent",
                 boxShadow: "0 12px 32px rgba(0,0,0,0.48)",
               }}
             >
@@ -1031,7 +1045,7 @@ function ModeBar({
                   <button
                     key={item.key}
                     data-ui={`Settings${item.label}Button`}
-                    onClick={() => { setSettingsOpen(false); onOpenSettingsPage(item.key); }}
+                    onClick={() => onOpenSettingsPage(item.key)}
                     title={`Open ${item.label}`}
                     style={{
                       minWidth: 0, minHeight: 58, padding: "7px 3px", borderRadius: 8,
@@ -1054,7 +1068,7 @@ function ModeBar({
                   no longer a header tab, so this dropdown row is its only entry. */}
               <button
                 data-ui="SettingsSigningRow"
-                onClick={() => { setSettingsOpen(false); onOpenSigning(); }}
+                onClick={() => onOpenSigning()}
                 title="Certificates (Apple + Windows signing) and provider portal web-logins"
                 style={{
                   display: "flex", alignItems: "center", gap: 10, width: "100%",
@@ -1469,6 +1483,9 @@ function PageModal({
   return (
     <div
       data-ui={`${dataUi}Backdrop`}
+      // Marks the whole popup as an overlay so the Settings dropdown that
+      // opened it treats clicks in here as "still working", not "dismiss".
+      data-owllm-overlay="1"
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: "fixed", inset: 0, zIndex: 9000,
@@ -1612,7 +1629,10 @@ export default function AppShell() {
   );
   const [mode, setMode] = useState<ActiveMode>(initialNavigation.mode);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
-  const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
+  // Every Settings destination (Assets, Bridges, MCP, Accounts) opens as a
+  // popup over the current workspace instead of stealing the active tab, so
+  // opening one never disrupts the work in progress. One key drives them all.
+  const [settingsModalKey, setSettingsModalKey] = useState<string | null>(null);
   const [signingModalOpen, setSigningModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
@@ -1855,11 +1875,11 @@ export default function AppShell() {
       const detail = (e as CustomEvent<{ key?: string }>).detail;
       const key = detail?.key;
       if (typeof key !== "string") return;
-      // "server" / "bridges" are modals — intercept here so external
-      // nav requests open the popup instead of trying to switch to a
+      // "server" / the Settings destinations are modals — intercept here so
+      // external nav requests open the popup instead of trying to switch to a
       // (no-longer-rendered-inline) tab.
       if (key === "server") { setServerModalOpen(true); return; }
-      if (key === "bridges") { setBridgesModalOpen(true); return; }
+      if (SETTINGS_NAV_KEYS.has(key)) { setSettingsModalKey(key); return; }
       if (key === "signing") { setSigningModalOpen(true); return; }
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
@@ -1880,9 +1900,19 @@ export default function AppShell() {
   // SubTabs as a visible affordance; we just override the action).
   const handleTabChange = (key: string) => {
     if (key === "server") { setServerModalOpen(true); return; }
-    if (key === "bridges") { setBridgesModalOpen(true); return; }
+    if (SETTINGS_NAV_KEYS.has(key)) { setSettingsModalKey(key); return; }
     setActiveKey(key);
   };
+
+  // Resolve the Settings popup's page from the module registry rather than a
+  // per-page import, so every destination stays reachable even when its owning
+  // module is not the active mode.
+  const settingsModalPage = useMemo(
+    () => (settingsModalKey
+      ? ALL_MODULES.flatMap(m => m.pages).find(p => p.key === settingsModalKey)
+      : undefined),
+    [settingsModalKey],
+  );
 
   // Resolve the active page's component.
   const activePage = visiblePages.find(p => p.key === activeKey)
@@ -2013,13 +2043,13 @@ export default function AppShell() {
           <ServerPage />
         </PageModal>
       )}
-      {bridgesModalOpen && (
+      {settingsModalPage && (
         <PageModal
-          title="📱 Bridges"
-          dataUi="BridgesModal"
-          onClose={() => setBridgesModalOpen(false)}
+          title={settingsModalPage.label}
+          dataUi="SettingsPageModal"
+          onClose={() => setSettingsModalKey(null)}
         >
-          <BridgesPage />
+          <settingsModalPage.component />
         </PageModal>
       )}
       {signingModalOpen && (

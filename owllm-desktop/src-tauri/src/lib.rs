@@ -587,6 +587,7 @@ pub fn run() {
             models::list_models,
             overlay_frame::overlay_frame_enabled,
             overlay_frame::overlay_frame_set_visible,
+            overlay_frame::overlay_frame_set_accent,
             overlay_frame::overlay_frame_capture_geometry,
             projects::list_projects,
             projects::projects_root_get,

@@ -75,7 +75,6 @@ function isTauri(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
-const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
 const FRAME_IDLE_HIDE_MS = 1800;
 const FRAME_LEAVE_HIDE_MS = 700;
 const MARKETPLACE_URL = "https://marketplace.owllm.com/";
@@ -1692,13 +1691,18 @@ export default function AppShell() {
   }, []);
 
   // Windows draws the decorative art in a separate click-through webview.
-  // Broadcast the same visibility state there; the storage message is a
-  // reliable cross-webview fallback and the Tauri event handles it instantly.
+  // Rust relays the visibility there (CSS fade on Windows/macOS, native unmap
+  // on Linux). It can be neither a Tauri event nor a localStorage write: no
+  // capability covers the overlay window, and any localStorage access binds it
+  // to the origin's storage area, replicating every same-origin mutation —
+  // including the Code page's ~1.5 MB session blob, re-persisted on a 250ms
+  // debounce — into a renderer that never drains them. That leaked ~45 MB/min.
+  // See src-tauri/src/overlay_frame.rs.
   useEffect(() => {
-    const payload = { visible: frameVisible, nonce: Date.now() };
-    try { localStorage.setItem(FRAME_VISIBILITY_STATE_KEY, JSON.stringify(payload)); }
-    catch { /* localStorage blocked */ }
-    if (isTauri()) emit("owllm:frame-visibility", frameVisible).catch(() => {});
+    if (!isTauri()) return;
+    invoke("overlay_frame_set_visible", { visible: frameVisible }).catch(() => {
+      /* overlay disabled */
+    });
   }, [frameVisible]);
 
   // The Watcher (P0-8): summoned from the top-center owl. A small animated

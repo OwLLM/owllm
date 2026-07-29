@@ -9,8 +9,11 @@
 // Four sections:
 //   S  Static tripwires — one source assertion per shipped regression fix, so
 //      none of them can silently return. Each names the bug + version it guards.
-//   H  Layer-1 harnesses — every ui/src/pages/agentic/*.verify.run.mjs (routing,
-//      gate, preflight, …) must exit 0. Auto-discovers new harnesses.
+//   H  Layer-1 harnesses — every ui/src/**/*.verify.run.mjs (routing, gate,
+//      preflight, …) must exit 0. Auto-discovers new harnesses. Discovery was
+//      once limited to ui/src/pages/agentic, which silently excluded 12
+//      verifiers living elsewhere under ui/src (theme, framePreferences,
+//      localization, …) — they existed but never gated a release.
 //   P  Live provider cells — ONE REAL TURN per installed+logged-in CLI at the
 //      exact spawn shapes the Rust side builds (small prompt / ≥40 KB prompt via
 //      stdin / MCP tool round-trip against a mock gateway). Providers that are
@@ -110,18 +113,28 @@ function runStatic() {
 // -------------------------------------------------- H: layer-1 harnesses ---
 function runHarnesses() {
   console.log("\nH) Layer-1 harnesses (control-flow verifiers)");
-  const dir = path.join(APP, "ui/src/pages/agentic");
+  const root = path.join(APP, "ui/src");
   const tsc = path.join(APP, "node_modules/typescript/lib/typescript.js");
   if (!fs.existsSync(tsc)) {
     record("H", "all *.verify.run.mjs", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
     return;
   }
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".verify.run.mjs")).sort()) {
+  // Recursive: harnesses live beside the code they verify, not only under
+  // pages/agentic. Sorted by path so the run order is stable.
+  const found = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith(".verify.run.mjs")) found.push(p);
+    }
+  })(root);
+  for (const p of found.sort()) {
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, [path.join(dir, f)], { encoding: "utf8", timeout: 120_000 });
+    const r = spawnSync(process.execPath, [p], { encoding: "utf8", timeout: 120_000 });
     const ok = r.status === 0;
     const tail = ((r.stdout || "") + (r.stderr || "")).trim().split(/\r?\n/).slice(-1)[0] || "";
-    record("H", f, ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);
+    record("H", path.relative(root, p).replace(/\\/g, "/"), ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);
   }
 }
 

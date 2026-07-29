@@ -153,6 +153,23 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
         return Ok(existing);
     }
 
+    // The overlay must never read `localStorage` for its cold-boot accent.
+    // Touching localStorage binds the document to Blink's per-origin storage
+    // area, and every same-origin mutation is then replicated into THIS
+    // renderer — including the Code page's multi-megabyte session blobs, which
+    // it re-persists on a 250ms debounce. The overlay is a passive, occluded,
+    // click-through window that runs no tasks, so nothing ever drains those
+    // copies: measured live at ~45 MB/min of monotonic, never-GC'd growth
+    // (176 MB → 4 GB over a session) for a 12 KB static page. Rust reads the
+    // accent from the SQLite state mirror instead and injects it here, before
+    // any page script runs — race-free and with no storage binding.
+    let accent = crate::state_mirror::mirrored_value("owllm:theme:accent")
+        .unwrap_or_else(|| "indigo".to_string());
+    let init = format!(
+        "window.__OWLLM_ACCENT__ = {};",
+        serde_json::to_string(&accent).unwrap_or_else(|_| "\"indigo\"".into())
+    );
+
     // NOTE: NO `.always_on_top(true)` — that would make the chrome
     // float above every other app on the system (browsers, IDE,
     // explorer windows). The owner-relationship set in `set_owner_to_main`
@@ -163,6 +180,7 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
         OVERLAY_LABEL,
         WebviewUrl::App("overlay-frame.html".into()),
     )
+    .initialization_script(&init)
     .title("OwLLM Overlay Frame")
     .decorations(false)
     .transparent(true)
@@ -273,10 +291,41 @@ pub fn overlay_frame_set_visible(app: tauri::AppHandle, visible: bool) -> Result
             overlay.hide().map_err(|e| e.to_string())?;
         }
     }
+    // Windows/macOS keep the native window mapped and fade the art with CSS.
+    // Pushed by `eval` rather than a `storage` write or a Tauri event: the
+    // overlay must stay unbound from localStorage (see `create_overlay`), and
+    // it has no IPC capability to receive an event with.
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (app, visible);
+        push_js(
+            &app,
+            &format!("window.__owllmSetFrameVisible && window.__owllmSetFrameVisible({visible});"),
+        );
     }
+    Ok(())
+}
+
+/// Push a snippet into the overlay webview. Best-effort: the overlay may be
+/// disabled, still loading, or already closed.
+fn push_js(app: &tauri::AppHandle, js: &str) {
+    if let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) {
+        let _ = overlay.eval(js);
+    }
+}
+
+/// Push the live accent into the overlay webview.
+///
+/// `eval` is the ONLY channel available here: the app's single capability is
+/// scoped to `windows: ["main"]` and `withGlobalTauri` is off, so the overlay
+/// cannot receive Tauri events; and it must not use localStorage, which would
+/// re-bind it to the origin-wide mutation stream this whole design avoids.
+#[tauri::command]
+pub fn overlay_frame_set_accent(app: tauri::AppHandle, accent: String) -> Result<(), String> {
+    if !enabled() {
+        return Ok(());
+    }
+    let arg = serde_json::to_string(&accent).map_err(|e| e.to_string())?;
+    push_js(&app, &format!("window.__owllmSetAccent && window.__owllmSetAccent({arg});"));
     Ok(())
 }
 

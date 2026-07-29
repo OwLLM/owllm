@@ -60,7 +60,7 @@ const TRIPWIRES = [
   ["src-tauri/src/accounts.rs", /kimi_output_mcp_failed/, "kimi fatal abort on MCP connect failure → retry (v0.7.83)"],
   ["src-tauri/src/accounts.rs", /let gw_broken = false;/, "kimi browser MCP failure is per-run only, never a session-long tool blackout (v0.8.20)"],
   ["src-tauri/src/accounts.rs", /CLI_CHILD_TIMEOUT[\s\S]*20 \* 60/, "one-shot CLI providers cannot keep Agents page busy forever (v0.8.21)"],
-  ["src-tauri/src/accounts.rs", /is_browser_role_allowlist/, "browser gateway gated to Browser role, not every agent (v0.7.84)"],
+  ["src-tauri/src/accounts.rs", /is_browser_role_allowlist[\s\S]*is_unrestricted_tool_allowlist/, "isolated browser relay is limited to Browser + unrestricted Solo Generalist roles (v0.9.71)"],
   ["src-tauri/src/browser.rs", /browser_start_inner\(&app\)\?/, "serialized browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18/v0.8.96)"],
   ["src-tauri/src/paths.rs", /fn webview_profile_scope[\s\S]*exe\.parent\(\)\.map\(Path::to_path_buf\)/, "installed app never reuses poisoned default EBWebView profile (v0.8.97)"],
   ["src-tauri/src/paths.rs", /(?=[\s\S]*isolated-webview-v2)(?=[\s\S]*Default\/Local Storage)(?=[\s\S]*max_by_key)/, "isolated WebView upgrades preserve the richest chat/notebook profile (v0.8.98)"],

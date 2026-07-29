@@ -12,6 +12,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, "../../../..");
 const read = (relative) => fs.readFileSync(path.join(APP, relative), "utf8");
 const accounts = read("src-tauri/src/accounts.rs");
+const sandbox = read("src-tauri/src/sandbox.rs");
 const accountsPage = read("ui/src/pages/advanced/AccountsPage.tsx");
 const githubRs = read("src-tauri/src/github.rs");
 const vaultRs = read("src-tauri/src/vault.rs");
@@ -22,6 +23,7 @@ const codePage = read("ui/src/pages/agentic/CodePage.tsx");
 const notebook = read("ui/src/pages/agentic/RunNotebook.tsx");
 const githubTs = read("ui/src/pages/agentic/github.ts");
 const vaultSync = read("ui/src/runtime/vaultSync.ts");
+const localTools = read("ui/src/pages/agentic/localTools.ts");
 
 let failed = 0;
 function check(name, ok) {
@@ -35,13 +37,32 @@ function check(name, ok) {
 function legacyPromptTransportSafe(source) {
   return source.includes("fn kimi_prompt_uses_argv(new_flavor: bool, prompt_len: usize)")
     && source.includes("Ok(new_flavor)")
-    && source.includes("kimi_prompt_uses_argv(new_flavor, prompt_value.len())?")
+    && source.includes("kimi_prompt_uses_argv(child_new_flavor, prompt_value.len())?")
     && source.includes("fn kimi_prompt_transport_never_puts_legacy_team_prompts_on_argv()")
     && source.includes("kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4)")
     && source.includes('"--input-format".into()')
     && source.includes('"text".into()')
     && source.includes("cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() })")
     && source.includes("stdin.write_all(prompt_value.as_bytes())");
+}
+
+function kimiWslRelaySafe(source) {
+  return source.includes("write_cli_config_wsl(&app, cwd.as_deref())")
+    && source.includes("is_unrestricted_tool_allowlist(allowed_tools.as_ref())")
+    && source.includes('program_argv_unjailed(cwd.as_deref(), "kimi", &args)')
+    && source.includes('args.push("--mcp-config-file".into())')
+    && source.includes("required browser gateway was not wired");
+}
+
+function soloRelayCoversSubscriptionClis(source) {
+  const generalistGrants = source.match(
+    /browser_role \|\| is_unrestricted_tool_allowlist\(allowed_tools\.as_ref\(\)\)/g,
+  ) ?? [];
+  return generalistGrants.length >= 3
+    && (source.match(/gateway_host_run/g) ?? []).length >= 6
+    && source.includes('program_argv_unjailed(cwd.as_deref(), "claude", args)')
+    && source.includes('program_argv_unjailed(cwd.as_deref(), "codex", &args)')
+    && source.includes('program_argv_unjailed(cwd.as_deref(), "kimi", &args)');
 }
 
 check(
@@ -57,17 +78,62 @@ check(
   legacyPromptTransportSafe(accounts),
 );
 check(
+  "WSL Kimi receives the authenticated browser relay and Solo uses the interop-capable route",
+  kimiWslRelaySafe(accounts),
+);
+check(
+  "Solo Generalist gets the WSL browser relay across Claude, Codex, and Kimi",
+  soloRelayCoversSubscriptionClis(accounts),
+);
+check(
+  "macOS/Linux Browser and Solo roles launch host CLIs where the host gateway is reachable",
+  sandbox.includes("pub fn program_argv_unjailed(")
+    && sandbox.includes("Linux bwrap hides the real home/config and Lima has its")
+    && /#\[cfg\(not\(windows\)\)\][\s\S]{0,260}pub fn program_argv_unjailed\([\s\S]{0,220}\{\s*None\s*\}/.test(sandbox),
+);
+check(
+  "Kimi receives authoritative runtime identity instead of Claude-specific inference bait",
+  accounts.includes("RUNTIME IDENTITY: You are running through Kimi CLI, not Claude Code CLI.")
+    && accounts.includes("MCP tools under their bare names")
+    && accounts.includes("do not invent a mcp__owllm__ prefix")
+    && accounts.includes("do not look")
+    && !localTools.includes("IF (and only if) you are the Claude "),
+);
+check(
   "Kimi argv guard detects the July 27 regression shape",
   !legacyPromptTransportSafe(
     accounts
       .replace(
-        "let use_prompt_flag = kimi_prompt_uses_argv(new_flavor, prompt_value.len())?;",
+        "let use_prompt_flag = kimi_prompt_uses_argv(child_new_flavor, prompt_value.len())?;",
         "let use_prompt_flag = prompt_value.len() <= KIMI_ARGV_BUDGET;",
       )
       .replace(
         "assert!(!kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4).unwrap());",
         "assert!(kimi_prompt_uses_argv(false, KIMI_ARGV_BUDGET * 4).unwrap());",
       ),
+  ),
+);
+check(
+  "Kimi browser relay guard detects the old WSL tool-blind launch shape",
+  !kimiWslRelaySafe(
+    accounts
+      .replace(
+        'crate::sandbox::program_argv_unjailed(cwd.as_deref(), "kimi", &args)',
+        'crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)',
+      )
+      .replace(
+        "write_cli_config_wsl(&app, cwd.as_deref())",
+        "write_cli_config(&app)",
+      ),
+  ),
+);
+check(
+  "subscription-wide Solo relay guard detects specialist-only jail exceptions",
+  !soloRelayCoversSubscriptionClis(
+    accounts.replaceAll(
+      "browser_role || is_unrestricted_tool_allowlist(allowed_tools.as_ref())",
+      "browser_role",
+    ),
   ),
 );
 check(

@@ -3184,6 +3184,17 @@ pub(crate) fn is_browser_role_allowlist(allowed: Option<&Vec<String>>) -> bool {
         .unwrap_or(false)
 }
 
+/// An unrestricted role is the Solo Generalist: the user explicitly selected
+/// one agent with every connected capability. In an isolated WSL project this
+/// role needs the same unjailed browser-relay exception as the Browser role;
+/// otherwise its prompt says "all tools" while the runtime silently removes
+/// every host MCP tool.
+fn is_unrestricted_tool_allowlist(allowed: Option<&Vec<String>>) -> bool {
+    allowed
+        .map(|v| v.iter().any(|t| t.trim().eq_ignore_ascii_case("all")))
+        .unwrap_or(false)
+}
+
 fn codex_should_grant_browser(host_run: bool, jailed: bool, browser_role: bool) -> bool {
     // Browser tools are cross-cutting: every agent running where the transport
     // can reach the in-app gateway gets to drive the shared browser window,
@@ -3254,21 +3265,25 @@ pub async fn claude_cli_stream(
         //     deliberately excluded (jailed agent must not control the host browser).
         // Best-effort: any gateway failure logs and falls back gracefully.
         //
-        // BROWSER-ROLE JAIL EXCEPTION: the Browser role is the ONE role allowed
-        // to drive the host browser from an isolated project. Detected the same
+        // BROWSER/SOLO JAIL EXCEPTION: the Browser role and the deliberately
+        // unrestricted Solo Generalist may drive the host browser from an
+        // isolated project. Detected the same
         // way the Publisher is (capability keyed on the role's tool_allowlist —
         // browser.yaml is the only role naming browser_*), so no new dispatch
         // parameter is needed and both UI dispatch copies are covered. When it
         // would be bwrap-jailed, this role instead runs via PLAIN WSL routing
         // (program_argv_unjailed) so interop stays alive for the stdio relay.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
+        let browser_relay_role =
+            browser_role || is_unrestricted_tool_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+        let gateway_host_run = host_run || (browser_relay_role && cfg!(not(windows)));
         // Track the wiring outcome so it can be SURFACED INTO THE RUN LOG below.
         // Every prior failure in this chain was an eprintln nobody sees — the
         // agent then truthfully reports "no browser tools" and the user gets a
         // 10-turn goose chase instead of the one-line reason.
         let mut gateway_err: Option<String> = None;
-        let mcp_config_path: Option<String> = if host_run {
+        let mcp_config_path: Option<String> = if gateway_host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
                 Ok(p) => Some(p.to_string_lossy().to_string()),
                 Err(e) => {
@@ -3280,9 +3295,9 @@ pub async fn claude_cli_stream(
             #[cfg(windows)]
             {
                 // Wire relay for any non-jailed WSL run (full-access *or* no
-                // bwrap) — and for the Browser role, which is spawned unjailed
+                // bwrap) — and for Browser/Solo roles, which are spawned unjailed
                 // below precisely so this relay can work.
-                if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
+                if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_relay_role {
                     match crate::mcp_gateway::write_cli_config_wsl(&app, cwd.as_deref()) {
                         Ok(p) => Some(p),
                         Err(e) => {
@@ -3299,6 +3314,15 @@ pub async fn claude_cli_stream(
                 None
             }
         };
+        if browser_relay_role && mcp_config_path.is_none() {
+            return Err(format!(
+                "required browser gateway was not wired{}",
+                gateway_err
+                    .as_deref()
+                    .map(|e| format!(" — {e}"))
+                    .unwrap_or_default()
+            ));
+        }
         if let Some(e) = gateway_err.as_ref() {
             eprintln!("mcp gateway not wired ({e}); CLI agent runs without browser tools");
             // Non-fatal by design: the run continues, just without browser tools —
@@ -3308,7 +3332,7 @@ pub async fn claude_cli_stream(
                     "browser gateway not wired — {e}. Browser tools (mcp__owllm__browser_*) are unavailable for this run."
                 ),
             });
-        } else if mcp_config_path.is_some() && !host_run {
+        } else if mcp_config_path.is_some() && !host_run && cfg!(windows) {
             // The WSL relay is the fragile transport (interop + stdio bridge) —
             // record that it was wired so a later "0 tools" report can be
             // separated into app-side vs CLI-side at a glance.
@@ -3456,9 +3480,9 @@ pub async fn claude_cli_stream(
         let run_once = |args: &[String]| -> Result<String, String> {
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before (no regression for normal folders).
-        // The Browser role skips the bwrap jail (plain WSL) so the MCP relay's
+        // Browser/Solo roles skip the bwrap jail (plain WSL) so the MCP relay's
         // interop path works — every other role keeps today's routing.
-        let spawn_argv = if browser_role {
+        let spawn_argv = if browser_relay_role {
             crate::sandbox::program_argv_unjailed(cwd.as_deref(), "claude", args)
         } else {
             crate::sandbox::program_argv(cwd.as_deref(), "claude", args)
@@ -3862,17 +3886,24 @@ pub async fn codex_cli_stream(
         // Because the browser is cross-cutting, wiring the gateway on a host or
         // unjailed run means that agent needs `danger-full-access` to actually
         // execute MCP calls. This matches the local/API path, which already has
-        // full host access. The Browser role keeps a special WSL jail exception
+        // full host access. Browser/Solo roles keep a special WSL jail exception
         // so interop survives in bwrap-isolated projects.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
+        let browser_relay_role =
+            browser_role || is_unrestricted_tool_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+        // On macOS/Linux the Browser/Solo exception launches the host CLI
+        // directly, so use the authenticated host HTTP gateway even when the
+        // project itself is marked isolated.
+        let gateway_host_run = host_run || (browser_relay_role && cfg!(not(windows)));
         let jailed = crate::sandbox::is_bwrap_jailed(cwd.as_deref());
-        let grant_browser = codex_should_grant_browser(host_run, jailed, browser_role);
+        let grant_browser =
+            codex_should_grant_browser(gateway_host_run, jailed, browser_relay_role);
         let mut gateway_err: Option<String> = None;
         let mut gw_cfg: Vec<String> = Vec::new();
         let mut token_env: Option<String> = None;
         if grant_browser {
-            if host_run {
+            if gateway_host_run {
                 match crate::mcp_gateway::codex_http_config(&app) {
                     Ok((cfg, token)) => {
                         gw_cfg = cfg;
@@ -3884,9 +3915,9 @@ pub async fn codex_cli_stream(
                 #[cfg(windows)]
                 {
                     // WSL isolated run: the relay works for any non-jailed
-                    // environment (full-access or no bwrap) and for the Browser
-                    // role, which is spawned unjailed below as a jail exception.
-                    if !jailed || browser_role {
+                    // environment (full-access or no bwrap) and for Browser/Solo
+                    // roles, which are spawned unjailed below as a jail exception.
+                    if !jailed || browser_relay_role {
                         match crate::mcp_gateway::codex_wsl_config(&app, cwd.as_deref()) {
                             Ok(cfg) => gw_cfg = cfg,
                             Err(e) => gateway_err = Some(e),
@@ -3896,6 +3927,15 @@ pub async fn codex_cli_stream(
             }
         }
         let gateway_wired = !gw_cfg.is_empty();
+        if browser_relay_role && !gateway_wired {
+            return Err(format!(
+                "required browser gateway was not wired{}",
+                gateway_err
+                    .as_deref()
+                    .map(|e| format!(" — {e}"))
+                    .unwrap_or_default()
+            ));
+        }
         if let Some(e) = gateway_err.as_ref() {
             eprintln!("codex mcp gateway not wired ({e}); agent runs without browser tools");
             let _ = on_event.send(CodexStreamEvent::Error {
@@ -3903,7 +3943,7 @@ pub async fn codex_cli_stream(
                     "browser gateway not wired — {e}. Browser tools (mcp__owllm__browser_*) are unavailable for this run."
                 ),
             });
-        } else if gateway_wired && !host_run {
+        } else if gateway_wired && !host_run && cfg!(windows) {
             let _ = on_event.send(CodexStreamEvent::Thinking {
                 delta: "[owllm] browser gateway: wired via WSL interop relay\n".to_string(),
             });
@@ -3965,11 +4005,11 @@ pub async fn codex_cli_stream(
         append_codex_input_args(&mut args, image_paths.as_deref());
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
-        // BROWSER-ROLE JAIL EXCEPTION: the Browser role runs UNJAILED (plain WSL)
+        // BROWSER/SOLO JAIL EXCEPTION: these roles run UNJAILED (plain WSL)
         // even in a bwrap-isolated team, so interop stays alive for the stdio
         // relay — mirrors the claude_cli_stream exception. Every other role keeps
         // its normal (possibly jailed) routing.
-        let resolved = if browser_role && crate::sandbox::is_bwrap_jailed(cwd.as_deref()) {
+        let resolved = if browser_relay_role && crate::sandbox::is_bwrap_jailed(cwd.as_deref()) {
             crate::sandbox::program_argv_unjailed(cwd.as_deref(), "codex", &args)
         } else {
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
@@ -5634,21 +5674,23 @@ async fn kimi_cli_run(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
-    _allowed_tools: Option<Vec<String>>,
+    allowed_tools: Option<Vec<String>>,
     // TRUE for a read-only agent — see codex_cli_stream. `--print` mode
     // auto-approves every tool call, so without this a Kimi orchestrator had no
     // write boundary at all; `--plan` is kimi's read-only mode.
     read_only: Option<bool>,
     on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
-    // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
+    // Browser tools are a CROSS-CUTTING capability: every reachable Kimi agent
     // gets the in-app browser gateway, not just the Browser role. kimi-cli
     // fatally aborts a turn if ANY configured MCP server can't connect
     // (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error only
     // in stdout), so we keep a session cache: once the gateway proves
     // unreachable we stop wiring it for the rest of the session.
-    // WSL-isolated runs skip it regardless: the distro kimi can't reach host
-    // loopback and no relay is plumbed for this one-shot path yet.
+    // WSL runs use the same stdio -> Windows curl.exe -> host-loopback relay as
+    // Claude and Codex. A bwrap-jailed process cannot execute Windows interop,
+    // so Browser and unrestricted Solo Generalist roles use the narrow existing
+    // unjailed relay exception. Other jailed specialists keep their isolation.
     // Session cache: 0=unknown, 1=reachable, 2=last attempt failed.
     // Do not use the failure state to suppress future wiring: the gateway is
     // ephemeral and a transient MCP-load failure otherwise makes every later
@@ -5659,23 +5701,74 @@ async fn kimi_cli_run(
     let _last_gateway_state = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed);
     let gw_broken = false;
     let new_flavor = kimi_is_new_flavor();
+    let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
+    let browser_relay_role =
+        browser_role || is_unrestricted_tool_allowlist(allowed_tools.as_ref());
+    let gateway_host_run = host_run || (browser_relay_role && cfg!(not(windows)));
 
-    // Legacy CLI needs a JSON `--mcp-config-file`; new kimi-code reads
-    // `mcp.json` from `KIMI_CODE_HOME`, so the MCP wiring is done inside the
-    // temporary home in the spawn-blocking closure below.
-    let old_mcp_config: Option<String> = if !new_flavor && host_run && !gw_broken {
+    // Python Kimi (the flavor provisioned in WSL) consumes
+    // `--mcp-config-file`. Host modern kimi-code instead reads mcp.json from
+    // its temporary KIMI_CODE_HOME below.
+    let mut gateway_err: Option<String> = None;
+    let cli_mcp_config: Option<String> = if gw_broken || (new_flavor && gateway_host_run) {
+        None
+    } else if gateway_host_run {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
-                eprintln!(
-                    "kimi: browser gateway not wired ({e}); run continues without browser tools"
-                );
+                gateway_err = Some(e);
                 None
             }
         }
     } else {
-        None
+        #[cfg(windows)]
+        {
+            // Full-access WSL runs already have interop. Browser/Solo roles get
+            // the deliberate unjailed exception so the relay can execute too.
+            if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_relay_role {
+                match crate::mcp_gateway::write_cli_config_wsl(&app, cwd.as_deref()) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        gateway_err = Some(e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     };
+    let gateway_ready =
+        cli_mcp_config.is_some() || (new_flavor && gateway_host_run && !gw_broken);
+    if browser_relay_role && !gateway_ready {
+        return Err(format!(
+            "kimi: required browser gateway was not wired{}",
+            gateway_err
+                .as_deref()
+                .map(|e| format!(" — {e}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(e) = gateway_err.as_ref() {
+        eprintln!("kimi: browser gateway not wired ({e}); run continues without browser tools");
+    }
+
+    // Do not make Kimi infer its runtime from provider-specific fallback prose
+    // elsewhere in the prompt. That caused Kimi to announce "I am Claude Code
+    // CLI" and then hunt for Claude's ToolSearch instead of calling its native
+    // MCP tools.
+    let system_prompt = format!(
+        "RUNTIME IDENTITY: You are running through Kimi CLI, not Claude Code CLI. \
+         Never infer a different runtime from tool instructions. Kimi exposes configured \
+         MCP tools under their bare names (for example browser_tabs and browser_snapshot); \
+         call those names directly, do not invent a mcp__owllm__ prefix, and do not look \
+         for Claude's ToolSearch.\n\n{}",
+        system_prompt.trim()
+    );
 
     tokio::task::spawn_blocking(move || {
         let system_empty = system_prompt.trim().is_empty();
@@ -5703,16 +5796,25 @@ async fn kimi_cli_run(
             // spawned directly on the host. The WSL route is a `wsl.exe bash -lc`
             // wrapper; environment variables don't propagate, so fall back to
             // folding the system prompt into the user prompt there.
-            let will_use_wsl = crate::sandbox::program_argv(cwd.as_deref(), "kimi", &[]).is_some();
-            let injection: Option<Injection> = if will_use_wsl {
+            let will_use_isolated_child = if browser_relay_role && with_mcp {
+                crate::sandbox::program_argv_unjailed(cwd.as_deref(), "kimi", &[]).is_some()
+            } else {
+                crate::sandbox::program_argv(cwd.as_deref(), "kimi", &[]).is_some()
+            };
+            // OWLLM provisions Python Kimi inside WSL even when a different
+            // flavor is installed on the Windows host. On macOS/Linux the
+            // unjailed Browser/Solo exception launches the host flavor instead.
+            // Transport decisions must describe the child we actually launch.
+            let child_new_flavor = new_flavor && !will_use_isolated_child;
+            let injection: Option<Injection> = if will_use_isolated_child {
                 None
-            } else if new_flavor && (with_mcp || !system_empty) {
+            } else if child_new_flavor && (with_mcp || !system_empty) {
                 Some(Injection::TempHome(prepare_kimi_code_home(
                     &app,
                     &system_prompt,
                     with_mcp,
                 )?))
-            } else if !new_flavor && !system_empty {
+            } else if !child_new_flavor && !system_empty {
                 Some(Injection::AgentFile(prepare_kimi_agent_file(&system_prompt)?))
             } else {
                 None
@@ -5731,7 +5833,7 @@ async fn kimi_cli_run(
             // 28 KB folded team prompt expands to ~37 KB and CreateProcessW
             // fails with os error 206 before Kimi starts. Modern kimi-code has
             // no stdin prompt path, so retain its bounded --prompt transport.
-            let use_prompt_flag = kimi_prompt_uses_argv(new_flavor, prompt_value.len())?;
+            let use_prompt_flag = kimi_prompt_uses_argv(child_new_flavor, prompt_value.len())?;
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
@@ -5759,8 +5861,8 @@ async fn kimi_cli_run(
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
-            if !new_flavor && with_mcp {
-                if let Some(cfg) = old_mcp_config.as_ref() {
+            if !child_new_flavor && with_mcp {
+                if let Some(cfg) = cli_mcp_config.as_ref() {
                     args.push("--mcp-config-file".into());
                     args.push(cfg.clone());
                 }
@@ -5781,9 +5883,12 @@ async fn kimi_cli_run(
             }
 
             // WSL-isolated project → run `kimi` inside the distro; else host CLI.
-            let mut cmd = if let Some((exe, sargs)) =
+            let routed = if browser_relay_role && with_mcp && cli_mcp_config.is_some() {
+                crate::sandbox::program_argv_unjailed(cwd.as_deref(), "kimi", &args)
+            } else {
                 crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
-            {
+            };
+            let mut cmd = if let Some((exe, sargs)) = routed {
                 let mut c = Command::new(exe);
                 c.args(sargs);
                 c
@@ -5911,8 +6016,8 @@ async fn kimi_cli_run(
             Ok((reply, mcp_failed))
         };
 
-        let wired = old_mcp_config.is_some()
-            || (new_flavor && host_run && !gw_broken);
+        let wired =
+            cli_mcp_config.is_some() || (new_flavor && gateway_host_run && !gw_broken);
         let (mut reply, mcp_failed) = match attempt(wired, true) {
             Ok(r) => r,
             Err(e) if kimi_output_llm_unset(&e) => {
@@ -6011,7 +6116,7 @@ pub async fn kimi_cli_stream(
 mod tests {
     use super::{
         append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
-        is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
+        is_browser_role_allowlist, is_unrestricted_tool_allowlist, kimi_agent_yaml, kimi_config_has_default,
         kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
         kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
         ClaudeStreamEvent,
@@ -6255,6 +6360,17 @@ mod tests {
         // "web_fetch"/"web_search" must NOT trip the browser exception.
         let researcher = vec!["web_fetch".to_string(), "web_search".to_string()];
         assert!(!is_browser_role_allowlist(Some(&researcher)));
+    }
+
+    #[test]
+    fn solo_generalist_is_the_unrestricted_browser_relay_role() {
+        assert!(is_unrestricted_tool_allowlist(Some(&vec!["all".into()])));
+        assert!(is_unrestricted_tool_allowlist(Some(&vec![" ALL ".into()])));
+        assert!(!is_unrestricted_tool_allowlist(Some(&vec![
+            "read_file".into(),
+            "shell".into(),
+        ])));
+        assert!(!is_unrestricted_tool_allowlist(None));
     }
 
     #[test]

@@ -278,23 +278,24 @@ export async function refreshBrowserState(): Promise<void> {
   // and — this is the trap — DIFFERENT CLIs surface them differently:
   //   * Codex / most CLIs: the mcp__owllm__browser_* tools are ALREADY in the native
   //     tool list; the agent must just CALL them. Codex has NO ToolSearch tool.
-  //   * Claude Code CLI: MCP tools may be DEFERRED behind ToolSearch (query 'browser').
-  // The old guidance told EVERY CLI to "load them with ToolSearch" — but a Codex agent
+  //   * Some runtimes may defer MCP schemas behind a discovery tool.
+  // The old guidance told EVERY CLI to "load them with ToolSearch" — but a Codex/Kimi agent
   // then hunts for a ToolSearch tool that doesn't exist, concludes "0 tools", and refuses
   // (verified against codex 0.128.0: it says "there's no ToolSearch tool exposed here").
   // Verified the opposite too: told to call mcp__owllm__browser_snapshot directly, codex
-  // calls it and returns the result. So: lead with "call them directly", make ToolSearch a
-  // Claude-only fallback, and explicitly tell agents NOT to chase a ToolSearch they lack.
+  // calls it and returns the result. So: lead with "call them directly" and mention
+  // discovery only conditionally, without naming a provider that another model may
+  // mistakenly adopt as its own runtime identity.
   const CAP =
     "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
     "read them, and click/fill/select to complete tasks and forms. These tools are ALREADY in your " +
     "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_tabs, browser_tab_select, browser_tab_close, browser_navigate, " +
     "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
     "browser_press, browser_device — OR the same names prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
-    "Look in your tools for any name containing 'browser_' and invoke it. IF (and only if) you are the Claude " +
-    "Code CLI and don't see them, they may be deferred — surface them with ToolSearch query 'browser'. On Codex " +
-    "or any other CLI there is NO ToolSearch tool: do not hunt for one — the mcp__owllm__browser_* tools are " +
-    "already callable, so just call them. DISREGARD any team-memory note claiming browser tools are unavailable " +
+    "Look in your tools for any name containing 'browser_' and invoke it. If your runtime exposes a tool-schema " +
+    "discovery tool, use it to search for 'browser'; if no such discovery tool exists, do not hunt for one — call " +
+    "the mcp__owllm__browser_* tools directly. Never infer your model/provider identity from this fallback guidance. " +
+    "DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
     "browser_open returns a stable tab ID; pass tab_id to later actions so the user's active tab is never hijacked. " +
     "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see.";

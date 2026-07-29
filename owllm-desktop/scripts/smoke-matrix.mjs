@@ -88,6 +88,12 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/localTools.ts", /MEMORY_INVOKE_TIMEOUT_MS/, "memory context is bounded and cannot stall agent startup for minutes (v0.8.20)"],
   ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],
   ["resources/agents/roles/browser.yaml", /browser_snapshot/, "Browser role allowlist keys the jail exception (v0.7.69)"],
+  // Native browser callbacks run ON THE UI THREAD. Any BLOCKING lock reachable
+  // from one deadlocks the event thread and freezes every OwLLM window. capture_reply
+  // was hardened in v0.8.96; is_active_tab (on_page_load) was missed and froze the app
+  // the moment a project opened the agent browser (v0.9.64, gdb-confirmed).
+  ["src-tauri/src/browser.rs", /fn is_active_tab[\s\S]{0,900}TABS\.try_lock\(\)/, "is_active_tab never blocks the native UI-thread callback (v0.9.65 agent-browser freeze)"],
+  ["src-tauri/src/browser.rs", /fn capture_reply[\s\S]{0,900}REPLIES\.try_lock\(\)/, "capture_reply never blocks the native UI-thread callback (v0.8.96)"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).
   // Run views append forever; rendering every entry grew the DOM monotonically
   // until the renderer hit its per-process ceiling. If any of these render sites

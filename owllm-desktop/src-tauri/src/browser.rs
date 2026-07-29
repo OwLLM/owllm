@@ -103,12 +103,27 @@ fn tab_label(id: u64) -> String {
     format!("{CONTENT_LABEL}-{id}")
 }
 
+/// True when `id` is the active tab. **NEVER BLOCKS.**
+///
+/// This is reached from `attach_tab`'s `on_page_load` — a NATIVE WebView2 /
+/// WKWebView / WebKitGTK callback that runs ON THE UI THREAD. Waiting here for a
+/// Rust worker that holds TABS deadlocks the event thread and freezes every OwLLM
+/// window (observed live on v0.9.64: main thread parked in
+/// `Mutex::lock_contended` inside `browser::attach_tab::{closure#2}`, under a
+/// WebView2 `WebResourceRequested` handler — the app hung the moment a project
+/// opened the agent browser).
+///
+/// Both call sites only gate a COSMETIC chrome-bar refresh, so on contention we
+/// answer `false` and let the next title/`sync_tabs` event repaint — the same
+/// trade `capture_reply` already makes for REPLIES. A stale URL bar for one load
+/// is invisible; a frozen app is not.
 fn is_active_tab(id: u64) -> bool {
-    TABS.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map(|t| t.active == id)
-        .unwrap_or(false)
+    let active_is = |t: &Option<Tabs>| t.as_ref().map(|t| t.active == id).unwrap_or(false);
+    match TABS.try_lock() {
+        Ok(guard) => active_is(&guard),
+        Err(TryLockError::Poisoned(p)) => active_is(&p.into_inner()),
+        Err(TryLockError::WouldBlock) => false,
+    }
 }
 
 fn active_tab_id() -> Option<u64> {

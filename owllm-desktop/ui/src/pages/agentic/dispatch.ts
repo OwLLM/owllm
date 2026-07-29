@@ -62,7 +62,13 @@ import { makeGenMeter } from "../../utils/genStats";
 // Deterministic routing — shared with the desktop path so BOTH dispatch loops
 // route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
 // this module, so this is a type-only cycle at runtime — safe.
-import { classifyGoal, bestAgentForGoal, agentDomain, roleCanWrite } from "./teamConfig";
+import {
+  classifyGoal,
+  bestAgentForGoal,
+  agentDomain,
+  normalizeRoleToolAllowlist,
+  roleCanWrite,
+} from "./teamConfig";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1127,9 +1133,7 @@ export function rolesFromBackend(rows: AgentRoleBackend[]): Map<string, RoleData
       systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
       canDispatch: d.can_dispatch === true,
       defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-      toolAllowlist: Array.isArray(d.tool_allowlist)
-        ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-        : undefined,
+      toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
       skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
         .filter((s: unknown): s is string => typeof s === "string"),
     });

@@ -2068,6 +2068,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     // tools, and the system prompt forbids edits/state-changing commands.
     const chatOnly = agentMode === "chat";
     const roTools = ["read_file", "list_dir", "grep", "glob", "web_search", "web_fetch"];
+    // Keep unrestricted explicit across the Tauri boundary. `undefined` is
+    // unrestricted for local tools, but isolated subscription CLIs need the
+    // `all` sentinel to receive the unjailed host-browser relay.
+    const runtimeTools = chatOnly ? roTools : ["all"];
     // Project rules ride every turn — the same directives the agentic team
     // follows (empty string when the scope has none yet).
     // Shared agent-browser awareness: refresh (cheap window probe) so the coder
@@ -2087,11 +2091,11 @@ function CodeWorkspace({ pageId, onTitle }: {
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
-        allowedTools: chatOnly ? roTools : undefined,
+        allowedTools: runtimeTools,
         getSteer: drainSteer,
       });
     }
-    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
+    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, runtimeTools, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
   // Second-agent turn: same backend as the primary chat, but streams into the
@@ -2122,10 +2126,11 @@ function CodeWorkspace({ pageId, onTitle }: {
         userContent: enrichedUser, temperature: 0.3,
         signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
+        allowedTools: ["all"],
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, undefined, undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,

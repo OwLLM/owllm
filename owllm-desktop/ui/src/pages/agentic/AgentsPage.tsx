@@ -124,7 +124,7 @@ import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish,
-  soloGeneralistForTeam } from "./teamConfig";
+  normalizeRoleToolAllowlist, soloGeneralistForTeam } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -9413,9 +9413,7 @@ export function AgentsPage({
         systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
         canDispatch: d.can_dispatch === true,
         defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-        toolAllowlist: Array.isArray(d.tool_allowlist)
-          ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-          : undefined,
+        toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
         skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
           .filter((s: unknown): s is string => typeof s === "string"),
       });
@@ -9470,9 +9468,7 @@ export function AgentsPage({
           systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
           canDispatch: d.can_dispatch === true,
           defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-          toolAllowlist: Array.isArray(d.tool_allowlist)
-            ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-            : undefined,
+          toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
           skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
             .filter((s: unknown): s is string => typeof s === "string"),
         });

@@ -34,7 +34,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
@@ -92,6 +92,12 @@ pub struct BrowserTabInfo {
 
 static TABS: Mutex<Option<Tabs>> = Mutex::new(None);
 static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
+/// Linux/WebKitGTK on NVIDIA/Tegra can abort the entire process with
+/// `BadDrawable` when a top-level WebView window is destroyed. A stopped
+/// browser therefore remains allocated but hidden and blank until it is reused.
+static BROWSER_SUSPENDED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "linux")]
+static RETIRED_LINUX_TABS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 fn tab_label(id: u64) -> String {
     format!("{CONTENT_LABEL}-{id}")
@@ -838,6 +844,86 @@ fn get_window(app: &tauri::AppHandle) -> Option<Window> {
         .or_else(|| active_tab_id().and_then(|id| app.get_window(&tab_label(id))))
 }
 
+fn browser_is_suspended() -> bool {
+    BROWSER_SUSPENDED.load(Ordering::SeqCst)
+}
+
+fn resume_browser(app: &tauri::AppHandle, navigate_to: Option<tauri::Url>) -> Result<(), String> {
+    let Some(id) = active_tab_id() else {
+        return Err("browser has no reusable tab".to_string());
+    };
+    if let Some(url) = navigate_to {
+        app.get_webview(&tab_label(id))
+            .ok_or_else(|| "browser page is unavailable".to_string())?
+            .navigate(url)
+            .map_err(|e| format!("navigate failed: {e}"))?;
+    }
+    BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+    activate_tab(app, id);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retire_linux_tab(app: &tauri::AppHandle, id: u64) {
+    if let Some(webview) = app.get_webview(&tab_label(id)) {
+        if let Ok(blank) = "about:blank".parse() {
+            let _ = webview.navigate(blank);
+        }
+    }
+    if let Some(window) = app.get_window(&tab_label(id)) {
+        let _ = window.hide();
+    }
+    let mut retired = RETIRED_LINUX_TABS.lock().unwrap_or_else(|p| p.into_inner());
+    if !retired.contains(&id) {
+        retired.push(id);
+    }
+}
+
+/// Stop the Linux browser without destroying a WebKitGTK top-level window.
+/// Keep the active window as the reusable seed and retire the rest. All pages
+/// navigate to about:blank so a stopped browser does not leave sites executing
+/// invisibly or retain their renderer memory.
+#[cfg(target_os = "linux")]
+fn suspend_linux_browser(app: &tauri::AppHandle) -> Result<(), String> {
+    let (active, inactive) = {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tabs) = guard.as_mut() else {
+            BROWSER_SUSPENDED.store(true, Ordering::SeqCst);
+            return Ok(());
+        };
+        let active = tabs.active;
+        let inactive = tabs
+            .order
+            .iter()
+            .copied()
+            .filter(|id| *id != active)
+            .collect::<Vec<_>>();
+        tabs.order.clear();
+        tabs.order.push(active);
+        tabs.titles.clear();
+        (active, inactive)
+    };
+    for id in inactive {
+        retire_linux_tab(app, id);
+    }
+    let blank = "about:blank"
+        .parse()
+        .map_err(|e| format!("bad blank browser url: {e}"))?;
+    if let Some(webview) = app.get_webview(&tab_label(active)) {
+        webview
+            .navigate(blank)
+            .map_err(|e| format!("blank browser page: {e}"))?;
+    }
+    if let Some(window) = app.get_window(&tab_label(active)) {
+        window
+            .hide()
+            .map_err(|e| format!("hide browser window: {e}"))?;
+    }
+    BROWSER_SUSPENDED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn destroy_browser_windows(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_window(BROWSER_LABEL) {
         return window.destroy().map_err(|e| format!("close failed: {e}"));
@@ -1130,7 +1216,13 @@ enum BrowserUiEvent {
         url: String,
         activate: bool,
     },
-    LegacyTabClosed {
+    /// Linux title-bar close requests are intercepted before WebKitGTK can
+    /// destroy the native window. The worker applies normal tab-close
+    /// semantics after the native callback has returned.
+    LegacyTabCloseRequested {
+        id: u64,
+    },
+    LegacyTabDestroyed {
         id: u64,
     },
 }
@@ -1146,7 +1238,8 @@ struct BrowserUiBatch {
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
     open_tabs: Vec<(String, bool)>,
-    legacy_closed: Vec<u64>,
+    legacy_close_requested: Vec<u64>,
+    legacy_destroyed: Vec<u64>,
 }
 
 impl BrowserUiBatch {
@@ -1171,7 +1264,8 @@ impl BrowserUiBatch {
                 self.autofills.insert(id, url);
             }
             BrowserUiEvent::OpenTab { url, activate } => self.open_tabs.push((url, activate)),
-            BrowserUiEvent::LegacyTabClosed { id } => self.legacy_closed.push(id),
+            BrowserUiEvent::LegacyTabCloseRequested { id } => self.legacy_close_requested.push(id),
+            BrowserUiEvent::LegacyTabDestroyed { id } => self.legacy_destroyed.push(id),
         }
     }
 }
@@ -1233,7 +1327,10 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                 eprintln!("[browser] requested tab failed: {e}");
             }
         }
-        for id in batch.legacy_closed {
+        for id in batch.legacy_close_requested {
+            close_tab(&app, id);
+        }
+        for id in batch.legacy_destroyed {
             on_legacy_tab_closed(&app, id);
         }
         if let Some((width, height)) = batch.layout {
@@ -1282,7 +1379,16 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
             }
         }
         "close" => {
-            let _ = win.destroy();
+            #[cfg(target_os = "linux")]
+            {
+                persist_session(app);
+                mark_session_closed();
+                let _ = suspend_linux_browser(app);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = win.destroy();
+            }
         }
         "back" => {
             if let Some(wv) = content_webview(app) {
@@ -1469,6 +1575,60 @@ fn attach_tab(
 
 /// Open a fresh tab and optionally make it active. Agent-created tabs default
 /// to background; user/new-window requests select their new tab.
+#[cfg(target_os = "linux")]
+fn reuse_retired_linux_tab(
+    app: &tauri::AppHandle,
+    parsed: tauri::Url,
+    activate: bool,
+) -> Result<Option<u64>, String> {
+    let id = {
+        let mut retired = RETIRED_LINUX_TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let position = retired.iter().rposition(|id| {
+            app.get_window(&tab_label(*id)).is_some() && app.get_webview(&tab_label(*id)).is_some()
+        });
+        position.map(|index| retired.remove(index))
+    };
+    let Some(id) = id else { return Ok(None) };
+    let previous_active = {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let tabs = guard
+            .as_mut()
+            .ok_or_else(|| "browser has no tab session".to_string())?;
+        let previous = tabs.active;
+        tabs.order.push(id);
+        tabs.titles.remove(&id);
+        if activate {
+            tabs.active = id;
+        }
+        previous
+    };
+    if let Err(error) = app
+        .get_webview(&tab_label(id))
+        .ok_or_else(|| "retired browser page is unavailable".to_string())?
+        .navigate(parsed)
+        .map_err(|e| format!("navigate failed: {e}"))
+    {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tabs) = guard.as_mut() {
+            tabs.order.retain(|tab| *tab != id);
+            tabs.active = previous_active;
+        }
+        RETIRED_LINUX_TABS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(id);
+        return Err(error);
+    }
+    if activate {
+        activate_tab(app, id);
+        update_chrome_bar(app, Some(""), Some(""));
+    } else if let Some(window) = app.get_window(&tab_label(id)) {
+        let _ = window.hide();
+    }
+    sync_tabs(app);
+    Ok(Some(id))
+}
+
 fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, String> {
     let framed = app.get_webview(CHROME_LABEL).is_some();
     let win = framed.then(|| get_window(app)).flatten();
@@ -1476,6 +1636,10 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
         return Err("browser has no tab session".to_string());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    #[cfg(target_os = "linux")]
+    if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
+        return Ok(id);
+    }
     let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
     let mut previous_active = None;
     {
@@ -1569,8 +1733,10 @@ fn activate_tab(app: &tauri::AppHandle, id: u64) {
     sync_tabs(app);
 }
 
-/// Close one tab; closing the last tab closes the whole window.
+/// Close one tab; closing the last tab stops the browser. Linux retires native
+/// WebKitGTK windows for reuse because destroying one can abort the whole app.
 fn close_tab(app: &tauri::AppHandle, id: u64) {
+    #[cfg(not(target_os = "linux"))]
     let target_window = app
         .get_window(BROWSER_LABEL)
         .or_else(|| app.get_window(&tab_label(id)));
@@ -1581,13 +1747,21 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
             return;
         }
         let Some(next) = next_active_after_close(&tabs.order, id, tabs.active) else {
-            *guard = None;
             drop(guard);
             // Closing the last tab is a deliberate "put the browser away": keep
             // the pages for the next project open, but don't self-reopen.
+            persist_session(app);
             mark_session_closed();
-            if let Some(win) = target_window {
-                let _ = win.destroy();
+            #[cfg(target_os = "linux")]
+            {
+                let _ = suspend_linux_browser(app);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                if let Some(win) = target_window {
+                    let _ = win.destroy();
+                }
             }
             return;
         };
@@ -1600,8 +1774,13 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         if let Some(wv) = app.get_webview(&tab_label(id)) {
             let _ = wv.close();
         }
-    } else if let Some(window) = app.get_window(&tab_label(id)) {
-        let _ = window.destroy();
+    } else {
+        #[cfg(target_os = "linux")]
+        retire_linux_tab(app, id);
+        #[cfg(not(target_os = "linux"))]
+        if let Some(window) = app.get_window(&tab_label(id)) {
+            let _ = window.destroy();
+        }
     }
     activate_tab(app, next);
 }
@@ -2002,8 +2181,23 @@ fn attach_legacy_tab(
         apply_chrome(&win);
         let handle = app.clone();
         win.on_window_event(move |event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                queue_browser_ui(&handle, BrowserUiEvent::LegacyTabClosed { id });
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        // A native destroy can terminate OwLLM with X11
+                        // BadDrawable on NVIDIA/Tegra. Close the logical tab
+                        // through the dispatcher and retain the native WebView.
+                        api.prevent_close();
+                        queue_browser_ui(&handle, BrowserUiEvent::LegacyTabCloseRequested { id });
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = api;
+                }
+                WindowEvent::Destroyed => {
+                    queue_browser_ui(&handle, BrowserUiEvent::LegacyTabDestroyed { id });
+                }
+                _ => {}
             }
         });
     }
@@ -2019,12 +2213,17 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
+        if browser_is_suspended() {
+            resume_browser(app, None)?;
+            return Ok("browser started".to_string());
+        }
         return Ok("browser already running".to_string());
     }
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
     build_window(app, start_url)?;
+    BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())
 }
 
@@ -2054,8 +2253,12 @@ pub(crate) fn open_web_url(app: &tauri::AppHandle, raw_url: &str) -> Result<Stri
     let parsed = parse_web_url(url)?;
 
     let _operation = lock_browser_operation();
-    let tab_id = if get_window(app).is_none() {
+    let tab_id = if browser_is_suspended() && get_window(app).is_some() {
+        resume_browser(app, Some(parsed))?;
+        active_tab_id()
+    } else if get_window(app).is_none() {
         build_window(app, parsed)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id()
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
         Some(new_tab(app, parsed.as_str(), true)?)
@@ -2109,8 +2312,12 @@ pub fn browser_open_tab(
     let _operation = lock_browser_operation();
     let parsed = parse_navigation_url(&url)?;
     let activate = activate.unwrap_or(false);
-    let id = if get_window(&app).is_none() {
+    let id = if browser_is_suspended() && get_window(&app).is_some() {
+        resume_browser(&app, Some(parsed))?;
+        active_tab_id().unwrap_or(0)
+    } else if get_window(&app).is_none() {
         build_window(&app, parsed)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id().unwrap_or(0)
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
         new_tab(&app, parsed.as_str(), activate)?
@@ -2131,12 +2338,18 @@ pub fn browser_open_tab(
 
 #[tauri::command(async)]
 pub fn browser_list_tabs(app: tauri::AppHandle) -> Result<String, String> {
+    if browser_is_suspended() {
+        return Ok("[]".to_string());
+    }
     Ok(serde_json::to_string(&list_tabs(&app)).map_err(|e| e.to_string())?)
 }
 
 #[tauri::command(async)]
 pub fn browser_select_tab(app: tauri::AppHandle, tab_id: u64) -> Result<String, String> {
     let _operation = lock_browser_operation();
+    if browser_is_suspended() {
+        return Err("browser not running".to_string());
+    }
     if !list_tabs(&app).iter().any(|tab| tab.id == tab_id) {
         return Err(format!("browser tab {tab_id} does not exist"));
     }
@@ -2149,6 +2362,9 @@ pub fn browser_select_tab(app: tauri::AppHandle, tab_id: u64) -> Result<String, 
 #[tauri::command(async)]
 pub fn browser_close_tab(app: tauri::AppHandle, tab_id: u64) -> Result<String, String> {
     let _operation = lock_browser_operation();
+    if browser_is_suspended() {
+        return Err("browser not running".to_string());
+    }
     if !list_tabs(&app).iter().any(|tab| tab.id == tab_id) {
         return Err(format!("browser tab {tab_id} does not exist"));
     }
@@ -2159,11 +2375,45 @@ pub fn browser_close_tab(app: tauri::AppHandle, tab_id: u64) -> Result<String, S
     Ok(format!("closed browser tab {tab_id}"))
 }
 
-/// Switch device emulation (desktop / iphone / android / tablet). The UA can
-/// only be set at build time, so if the window is open we rebuild it in place
-/// and re-navigate to the page it was on. Logins survive (stable profile dir).
-/// A rebuild reloads every tab under the new engine profile. Native back/forward
-/// history resets, but background pages remain open and independently addressable.
+#[cfg(target_os = "linux")]
+fn apply_linux_device(app: &tauri::AppHandle, dev: &'static Device) -> Result<(), String> {
+    let ids = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|tabs| tabs.order.clone())
+        .unwrap_or_default();
+    for id in ids {
+        if let Some(webview) = app.get_webview(&tab_label(id)) {
+            let user_agent = dev.ua.map(str::to_string);
+            webview
+                .with_webview(move |platform| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = platform.inner().settings() {
+                        settings.set_user_agent(user_agent.as_deref());
+                    }
+                    platform.inner().reload();
+                })
+                .map_err(|e| format!("apply browser user-agent: {e}"))?;
+        }
+        if let Some(window) = app.get_window(&tab_label(id)) {
+            window
+                .set_size(LogicalSize::new(dev.width, dev.height))
+                .map_err(|e| format!("resize browser for {}: {e}", dev.name))?;
+        }
+    }
+    if !browser_is_suspended() {
+        if let Some(active) = active_tab_id() {
+            activate_tab(app, active);
+        }
+    }
+    Ok(())
+}
+
+/// Switch device emulation (desktop / iphone / android / tablet). Windows and
+/// macOS rebuild the browser so the UA applies at construction. Linux updates
+/// WebKitGTK settings in place because destroying a browser window can abort
+/// the whole process on NVIDIA/Tegra.
 #[tauri::command(async)]
 pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
     let _operation = lock_browser_operation();
@@ -2181,57 +2431,76 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
             dev.name
         ));
     };
-    // Remember every tab, tear down, rebuild with the new UA + viewport. Native
-    // engine rebuilds reset history, but no background page is silently lost.
-    let tabs_before = list_tabs(&app);
-    let back_to = content_webview(&app)
-        .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
-        .unwrap_or_default();
-    destroy_browser_windows(&app).map_err(|e| format!("could not rebuild browser window: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while get_window(&app).is_some() {
-        if Instant::now() > deadline {
-            return Err("old browser window did not close".to_string());
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    #[cfg(target_os = "linux")]
+    {
+        apply_linux_device(&app, dev)?;
+        return Ok(format!(
+            "device set to {} ({}횞{}{})",
+            dev.name,
+            dev.width as u32,
+            dev.height as u32,
+            if dev.ua.is_some() {
+                ", mobile user-agent"
+            } else {
+                ""
+            }
+        ));
     }
-    let url = if back_to.is_empty() || back_to == "about:blank" {
-        "about:blank".to_string()
-    } else {
-        back_to
-    };
-    let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
-    build_window(&app, parsed)?;
-    for tab in tabs_before.iter().filter(|tab| !tab.active) {
-        let restore_url = if tab.url.is_empty() {
-            "about:blank"
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Remember every tab, tear down, rebuild with the new UA + viewport. Native
+        // engine rebuilds reset history, but no background page is silently lost.
+        let tabs_before = list_tabs(&app);
+        let back_to = content_webview(&app)
+            .and_then(|wv| wv.url().ok())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        destroy_browser_windows(&app)
+            .map_err(|e| format!("could not rebuild browser window: {e}"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while get_window(&app).is_some() {
+            if Instant::now() > deadline {
+                return Err("old browser window did not close".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let url = if back_to.is_empty() || back_to == "about:blank" {
+            "about:blank".to_string()
         } else {
-            &tab.url
+            back_to
         };
-        if let Err(error) = new_tab(&app, restore_url, false) {
-            eprintln!(
-                "[browser] could not restore tab {} after device switch: {error}",
-                tab.id
-            );
+        let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+        build_window(&app, parsed)?;
+        for tab in tabs_before.iter().filter(|tab| !tab.active) {
+            let restore_url = if tab.url.is_empty() {
+                "about:blank"
+            } else {
+                &tab.url
+            };
+            if let Err(error) = new_tab(&app, restore_url, false) {
+                eprintln!(
+                    "[browser] could not restore tab {} after device switch: {error}",
+                    tab.id
+                );
+            }
         }
+        Ok(format!(
+            "device set to {} ({}×{}{}) — reloaded {}",
+            dev.name,
+            dev.width as u32,
+            dev.height as u32,
+            if dev.ua.is_some() {
+                ", mobile user-agent"
+            } else {
+                ""
+            },
+            if url == "about:blank" {
+                "blank page".to_string()
+            } else {
+                url
+            }
+        ))
     }
-    Ok(format!(
-        "device set to {} ({}×{}{}) — reloaded {}",
-        dev.name,
-        dev.width as u32,
-        dev.height as u32,
-        if dev.ua.is_some() {
-            ", mobile user-agent"
-        } else {
-            ""
-        },
-        if url == "about:blank" {
-            "blank page".to_string()
-        } else {
-            url
-        }
-    ))
 }
 
 /// Run one action against the live page and return its text reply.
@@ -2242,7 +2511,7 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let _operation = lock_browser_operation();
-    if get_window(&app).is_none() {
+    if get_window(&app).is_none() || browser_is_suspended() {
         browser_start_inner(&app)?;
     }
     let tab_id = tab_id_from_params(&params)?;
@@ -2361,18 +2630,20 @@ fn eval_until_reply(
 /// Close the agent-browser window. Safe when nothing is open.
 #[tauri::command(async)]
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
-    match get_window(&app) {
-        Some(_) => {
+    match (get_window(&app), browser_is_suspended()) {
+        (_, true) => Ok("browser was not running".to_string()),
+        (Some(_), false) => {
             // Record the pages BEFORE the teardown: once the windows are gone
             // there is nothing left to read them from.
             persist_session(&app);
             mark_session_closed();
-            // destroy() tears the window down unconditionally — close() asks
-            // the page politely, and an unresponsive page could refuse.
+            #[cfg(target_os = "linux")]
+            suspend_linux_browser(&app)?;
+            #[cfg(not(target_os = "linux"))]
             destroy_browser_windows(&app)?;
             Ok("browser stopped".to_string())
         }
-        None => Ok("browser was not running".to_string()),
+        (None, false) => Ok("browser was not running".to_string()),
     }
 }
 
@@ -2380,6 +2651,9 @@ pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command(async)]
 pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
     let _operation = lock_browser_operation();
+    if browser_is_suspended() {
+        return Err("browser not running".to_string());
+    }
     let win = content_webview(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
     eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))
@@ -2388,6 +2662,10 @@ pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
 /// Focus/raise the agent-browser window so the user can watch or log in.
 #[tauri::command(async)]
 pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
+    let _operation = lock_browser_operation();
+    if get_window(&app).is_none() || browser_is_suspended() {
+        browser_start_inner(&app)?;
+    }
     if let Some(win) = get_window(&app) {
         let _ = win.show();
         let _ = win.set_focus();
@@ -2679,6 +2957,15 @@ mod tests {
 #[tauri::command(async)]
 pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
     let device = current_device().name.to_string();
+    if browser_is_suspended() {
+        return Ok(BrowserStatus {
+            running: false,
+            url: String::new(),
+            device,
+            active_tab_id: None,
+            tabs: Vec::new(),
+        });
+    }
     match get_window(&app) {
         Some(_) => {
             let url = content_webview(&app)

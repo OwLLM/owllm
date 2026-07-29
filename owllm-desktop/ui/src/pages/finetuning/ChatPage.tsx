@@ -195,6 +195,8 @@ type Persisted = {
   columns: Column[];
   converse: boolean;
   maxTurns: number;
+  chatMode: ChatMode;
+  toolsEnabled: boolean;
 };
 
 // LS_KEY is a hot blob: the whole transcript of every column is rewritten on
@@ -300,8 +302,19 @@ export default function ChatPage() {
   };
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
-  const [chatMode, setChatMode] = useState<ChatMode>("agent");
-  const [toolsEnabled, setToolsEnabled] = useState<boolean>(true);
+  // Ask (no tools) is the default. This is a model-comparison chat, and
+  // attaching the full local tool catalog to every request makes small
+  // local models spend their whole token budget deliberating about tools
+  // instead of answering. Measured against supergemma4-e4b-Q4_K_M on the
+  // bundled CUDA llama-server, same question ("What is 2 + 2?"):
+  //   no tools  -> 2 generated tokens, content "4"
+  //   40 tools  -> 256 generated tokens, ALL reasoning_content, content ""
+  // The reasoning goes to the collapsed thinking buffer, so the user just
+  // watches an empty bubble. Agent mode stays one click away in the mode
+  // row, and the choice is now persisted so it survives a page switch
+  // (pages unmount on tab change).
+  const [chatMode, setChatMode] = useState<ChatMode>(persisted.chatMode ?? "ask");
+  const [toolsEnabled, setToolsEnabled] = useState<boolean>(persisted.toolsEnabled ?? true);
   const [slashOpen, setSlashOpen] = useState<boolean>(false);
   // Right-side settings panel — Qt main.py:18667-18690 ships a
   // QStackedWidget driven by A/B/C toggle buttons. We mirror that
@@ -405,7 +418,7 @@ export default function ChatPage() {
   const saveRef = useRef<() => void>(() => {});
   saveRef.current = () => {
     const merged = columns.map((c) => ({ ...c, messages: colMsgs(c.id), busy: false, error: null }));
-    saveState({ count, columns: merged, converse, maxTurns });
+    saveState({ count, columns: merged, converse, maxTurns, chatMode, toolsEnabled });
   };
   useEffect(() => {
     for (const id of ["A", "B", "C"] as const) {
@@ -422,7 +435,7 @@ export default function ChatPage() {
   useEffect(() => {
     saveRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count, columns, converse, maxTurns]);
+  }, [count, columns, converse, maxTurns, chatMode, toolsEnabled]);
 
   // Poll server status every 2 s.
   useEffect(() => {
@@ -1869,7 +1882,11 @@ export default function ChatPage() {
                   e.preventDefault();
                   sendComposer();
                 }
-                if (e.key === "Escape") setSlashOpen(false);
+                if (e.key === "Escape") {
+                  setSlashOpen(false);
+                  // VS Code parity: Esc interrupts an in-flight generation.
+                  if (anyBusy) { e.preventDefault(); stopAll(); }
+                }
               }}
               placeholder="Ask, edit, or run an agent task. Type / for commands, # for context."
               style={{
@@ -1886,18 +1903,44 @@ export default function ChatPage() {
               <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={footerComposerBtn}>📎 Attach</button>
               <button onClick={resetAll} title="Clear all transcripts" style={footerComposerBtn}>Clear</button>
               <button onClick={saveJson} title="Save chat as JSON" style={footerComposerBtn}>Save</button>
-              {anyBusy ? (
-                <button onClick={stopAll} style={{ ...footerComposerBtn, borderColor: "#f44336", color: "#ffb0b0" }}>Stop</button>
-              ) : (
-                (() => { const canSend = !!draft.trim() || chatAttachments.length > 0; return (
-                <button onClick={sendComposer} disabled={!canSend} style={{
-                  ...footerComposerBtn,
-                  background: canSend ? "var(--accent)" : "var(--bg-surface)",
-                  borderColor: canSend ? "var(--accent)" : "var(--border)",
-                  color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
-                  cursor: canSend ? "pointer" : "not-allowed",
-                }}>Send</button>); })()
-              )}
+              {/* One primary interaction button (VS Code / ChatGPT pattern):
+                  it holds a single fixed slot and morphs Send -> Stop while
+                  any column is generating, so the control never moves and
+                  Stop is always where Send just was. Esc stops too — see the
+                  composer textarea's onKeyDown. */}
+              {(() => {
+                const canSend = !!draft.trim() || chatAttachments.length > 0;
+                return anyBusy ? (
+                  <button
+                    onClick={stopAll}
+                    title="Stop generating (Esc)"
+                    aria-label="Stop generating"
+                    style={{
+                      ...footerComposerBtn,
+                      minWidth: 92,
+                      background: "rgba(var(--error-rgb),0.16)",
+                      borderColor: "var(--error)",
+                      color: "var(--error)",
+                      cursor: "pointer",
+                    }}
+                  >■ Stop</button>
+                ) : (
+                  <button
+                    onClick={sendComposer}
+                    disabled={!canSend}
+                    title={canSend ? "Send (Enter)" : "Type a message first"}
+                    aria-label="Send message"
+                    style={{
+                      ...footerComposerBtn,
+                      minWidth: 92,
+                      background: canSend ? "var(--accent)" : "var(--bg-surface)",
+                      borderColor: canSend ? "var(--accent)" : "var(--border)",
+                      color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
+                      cursor: canSend ? "pointer" : "not-allowed",
+                    }}
+                  >➤ Send</button>
+                );
+              })()}
             </div>
           </div>
         </div>

@@ -13,6 +13,7 @@ const capture = read(path.join(UI, "pages/advanced/authUrlCapture.ts"));
 const terminal = read(path.join(UI, "pages/advanced/PtyTerminal.tsx"));
 const accounts = read(path.join(UI, "pages/advanced/AccountsPage.tsx"));
 const pty = read(path.join(ROOT, "src-tauri/src/pty.rs"));
+const browser = read(path.join(ROOT, "src-tauri/src/browser.rs"));
 
 let passed = 0;
 function check(name, condition) {
@@ -101,6 +102,31 @@ try {
   check("Claude reconnect never deletes the last credential before OAuth succeeds",
     accounts.includes('if (route.backend === "kimi_cli")')
       && accounts.includes("Keeping the existing ${provider.name} credential until the replacement sign-in succeeds."));
+  const nativeAuthGuard = browser.slice(
+    browser.indexOf("fn validate_provider_auth_url"),
+    browser.indexOf("fn parse_web_url"),
+  );
+  check("native browser boundary rejects incomplete Claude and Kimi authorization URLs",
+    nativeAuthGuard.includes('Some("claude.ai"), "/oauth/authorize"')
+      && nativeAuthGuard.includes('"client_id", "redirect_uri", "code_challenge"')
+      && nativeAuthGuard.includes('Some("www.kimi.com"), "/code/authorize_device"')
+      && nativeAuthGuard.includes('!has_param("user_code")'));
+  const nativeOpenRoute = browser.slice(
+    browser.indexOf("fn parse_web_url"),
+    browser.indexOf("pub(crate) fn open_web_url"),
+  );
+  const nativeNavigationRoute = browser.slice(
+    browser.indexOf("fn parse_navigation_url"),
+    browser.indexOf("#[tauri::command(async)]\\npub fn browser_open_url"),
+  );
+  const nativeTabRoute = browser.slice(
+    browser.indexOf("fn new_tab"),
+    browser.indexOf("fn on_tab_title"),
+  );
+  check("every native browser-opening route applies the provider authorization guard",
+    nativeOpenRoute.includes("validate_provider_auth_url(&parsed)?")
+      && nativeNavigationRoute.includes("validate_provider_auth_url(&parsed)?")
+      && nativeTabRoute.includes("validate_provider_auth_url(&parsed)?"));
   check("Windows Kimi browser suppression is a valid Python webbrowser template",
     pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0 %s")')
       && !pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0");'));

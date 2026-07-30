@@ -1826,6 +1826,7 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
         return Err("browser has no tab session".to_string());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
     #[cfg(target_os = "linux")]
     if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
         return Ok(id);
@@ -2441,6 +2442,35 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
 /// such as "Get a token" must return immediately even when the destination is
 /// a slow login page. Agent browser tools continue to use `browser_cmd`, which
 /// waits for the document because they need to interact with its contents.
+fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
+    let has_param = |name: &str| {
+        url.query_pairs()
+            .any(|(key, value)| key == name && !value.trim().is_empty())
+    };
+    match (url.host_str(), url.path()) {
+        (Some("claude.ai"), "/oauth/authorize") => {
+            let missing = ["client_id", "redirect_uri", "code_challenge"]
+                .into_iter()
+                .filter(|name| !has_param(name))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "incomplete Claude authorization URL (missing {}); waiting for the CLI to print the complete URL",
+                    missing.join(", ")
+                ));
+            }
+        }
+        (Some("www.kimi.com"), "/code/authorize_device") if !has_param("user_code") => {
+            return Err(
+                "incomplete Kimi authorization URL (missing user_code); waiting for the CLI to print the complete URL"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -2452,6 +2482,7 @@ fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) urls can open in the OwLLM browser".to_string());
     }
+    validate_provider_auth_url(&parsed)?;
     Ok(parsed)
 }
 
@@ -2499,7 +2530,9 @@ fn parse_navigation_url(raw_url: &str) -> Result<tauri::Url, String> {
     } else {
         format!("https://{value}")
     };
-    full.parse().map_err(|e| format!("bad url {full:?}: {e}"))
+    let parsed = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
+    Ok(parsed)
 }
 
 #[tauri::command(async)]
@@ -3022,6 +3055,39 @@ mod tests {
             assert!(
                 parse_web_url(bad).is_err(),
                 "{bad:?} must not open as web content"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_provider_authorization_urls_never_reach_the_browser() {
+        let claude_prefix = "https://claude.ai/oauth/authorize?code=true&client_id=owllm";
+        let claude_complete = concat!(
+            "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
+            "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
+            "&code_challenge=pkce"
+        );
+        let kimi_prefix = "https://www.kimi.com/code/authorize_device?user_cod";
+        let kimi_complete = "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
+
+        for incomplete in [claude_prefix, kimi_prefix] {
+            assert!(
+                parse_web_url(incomplete).is_err(),
+                "{incomplete} must not open through the global web-link route"
+            );
+            assert!(
+                parse_navigation_url(incomplete).is_err(),
+                "{incomplete} must not open through browser navigation"
+            );
+        }
+        for complete in [claude_complete, kimi_complete] {
+            assert!(
+                parse_web_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
+            );
+            assert!(
+                parse_navigation_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
             );
         }
     }

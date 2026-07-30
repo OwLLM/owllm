@@ -121,10 +121,6 @@ function runHarnesses() {
   console.log("\nH) Layer-1 harnesses (control-flow verifiers)");
   const root = path.join(APP, "ui/src");
   const tsc = path.join(APP, "node_modules/typescript/lib/typescript.js");
-  if (!fs.existsSync(tsc)) {
-    record("H", "all *.verify.run.mjs", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
-    return;
-  }
   // Recursive: harnesses live beside the code they verify, not only under
   // pages/agentic. Sorted by path so the run order is stable.
   const found = [];
@@ -135,7 +131,9 @@ function runHarnesses() {
       else if (e.name.endsWith(".verify.run.mjs")) found.push(p);
     }
   })(root);
-  for (const p of found.sort()) {
+  const dependencyFree = new Set(["organizationProfile.verify.run.mjs"]);
+  const files = found.sort();
+  const runHarness = (p) => {
     const t0 = Date.now();
     const r = spawnSync(process.execPath, [p], {
       encoding: "utf8",
@@ -148,9 +146,16 @@ function runHarnesses() {
     const ok = r.status === 0;
     const tail = ((r.stdout || "") + (r.stderr || "")).trim().split(/\r?\n/).slice(-1)[0] || "";
     record("H", path.relative(root, p).replace(/\\/g, "/"), ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);
-  }
-}
+  };
 
+  for (const p of files.filter((p) => dependencyFree.has(path.basename(p)))) runHarness(p);
+
+  if (!fs.existsSync(tsc)) {
+    record("H", "TypeScript-dependent *.verify.run.mjs", "SKIP", "node_modules/typescript missing - run npm install in owllm-desktop first");
+    return;
+  }
+  for (const p of files.filter((p) => !dependencyFree.has(path.basename(p)))) runHarness(p);
+}
 // ---------------------------------------- T: undefined-identifier sweep ----
 // The [merge:code] squash merges have repeatedly kept a symbol's USAGES while
 // dropping its DEFINITION (SmartImage ×2, LINUX_TRANSPARENT_WINDOW,

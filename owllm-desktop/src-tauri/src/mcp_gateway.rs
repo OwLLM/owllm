@@ -633,8 +633,16 @@ fn tool_specs() -> Vec<Value> {
             "description": "Click an interactive element by its index from the latest snapshot.",
             "inputSchema": { "type": "object", "properties": { "index": idx, "tab_id": tab }, "required": ["index"] } }),
         json!({ "name": "browser_fill",
-            "description": "Type text into an input/textarea by index.",
+            "description": "Type text into an input, textarea, or contenteditable editor by index. Emits the input events required by controlled web apps.",
             "inputSchema": { "type": "object", "properties": { "index": idx, "text": { "type": "string" }, "tab_id": tab }, "required": ["index", "text"] } }),
+        json!({ "name": "browser_scroll",
+            "description": "Scroll a virtualized list, message history, mail list, or page. Pass an element index to scroll that region (or its scrollable ancestor); omit it to use the focused or largest visible scroll region. Snapshot again afterward if more history is needed.",
+            "inputSchema": { "type": "object", "properties": {
+                "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "Scroll direction; defaults to down." },
+                "amount": { "type": "number", "minimum": 20, "maximum": 5000, "description": "Distance in CSS pixels; defaults to about 80% of the region." },
+                "index": idx,
+                "tab_id": tab
+            } } }),
         json!({ "name": "browser_select",
             "description": "Choose an option in a <select> by index and option value or label.",
             "inputSchema": { "type": "object", "properties": { "index": idx, "value": { "type": "string" }, "tab_id": tab }, "required": ["index", "value"] } }),
@@ -775,6 +783,16 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             app.clone(),
             "fill".into(),
             json!({ "index": as_index(args, "index"), "text": as_str(args, "text"), "tab_id": as_optional_index(args, "tab_id") }),
+        ),
+        "browser_scroll" => crate::browser::browser_cmd(
+            app.clone(),
+            "scroll".into(),
+            json!({
+                "direction": as_str(args, "direction"),
+                "amount": args.get("amount").cloned().unwrap_or(Value::Null),
+                "index": as_optional_index(args, "index"),
+                "tab_id": as_optional_index(args, "tab_id")
+            }),
         ),
         "browser_select" => crate::browser::browser_cmd(
             app.clone(),

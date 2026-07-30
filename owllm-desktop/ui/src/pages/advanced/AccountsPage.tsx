@@ -1191,19 +1191,31 @@ export default function AccountsPage() {
         return;
       }
       if (resetStaleLogin) {
-        try {
-          await invoke<string>("subscription_cli_logout", { backend: route.backend });
-          setCardState(route.key, {
-            connected: false,
-            reauthRequired: false,
-            remediation: null,
-            testText: "",
-            testOk: null,
-          });
-          logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
-        } catch (e: any) {
-          logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
-          return;
+        // Dedicated login commands can replace a stale token transactionally.
+        // Keep the old Claude/Codex/Gemini credential until that replacement
+        // succeeds: deleting it first turns any browser/OAuth failure into a
+        // logout and was the reason Claude credentials disappeared here.
+        //
+        // Kimi is the exception: its CLI resumes a broken session instead of
+        // entering device auth, so its established recovery path still needs
+        // the local credential removed before login.
+        if (route.backend === "kimi_cli") {
+          try {
+            await invoke<string>("subscription_cli_logout", { backend: route.backend });
+            setCardState(route.key, {
+              connected: false,
+              reauthRequired: false,
+              remediation: null,
+              testText: "",
+              testOk: null,
+            });
+            logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
+          } catch (e: any) {
+            logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
+            return;
+          }
+        } else {
+          logInfo(route.backend, `Keeping the existing ${provider.name} credential until the replacement sign-in succeeds.`);
         }
       }
       const hint: Record<string, string> = {

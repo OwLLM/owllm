@@ -11,6 +11,7 @@ const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 const agents = read(path.join(HERE, "AgentsPage.tsx"));
 const capture = read(path.join(UI, "pages/advanced/authUrlCapture.ts"));
 const terminal = read(path.join(UI, "pages/advanced/PtyTerminal.tsx"));
+const accounts = read(path.join(UI, "pages/advanced/AccountsPage.tsx"));
 const pty = read(path.join(ROOT, "src-tauri/src/pty.rs"));
 
 let passed = 0;
@@ -69,8 +70,22 @@ try {
   check("ordinary banner links cannot consume the one automatic auth-tab open",
     firstCompleteAuthUrl(
       "Learn more: https://support.claude.com/en/articles/promotion \r\n"
-        + "Authorize: https://claude.ai/oauth/authorize?client_id=owllm \r\n",
-    ) === "https://claude.ai/oauth/authorize?client_id=owllm");
+        + "Authorize: https://claude.ai/oauth/authorize?client_id=owllm"
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n",
+    ) === "https://claude.ai/oauth/authorize?client_id=owllm"
+      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce");
+  const claudePrefix = "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
+  const claudeComplete = `${claudePrefix}`
+    + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce";
+  check("wrapped Claude OAuth prefix without redirect_uri is never opened",
+    firstCompleteAuthUrl(`Authorize: ${claudePrefix} \r\n`) === null);
+  check("hard-wrapped Claude OAuth is reassembled instead of opening its prefix",
+    firstCompleteAuthUrl(
+      `Authorize: ${claudePrefix}\r\n`
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n",
+    ) === claudeComplete);
+  check("Claude OAuth opens only after callback and PKCE parameters arrive",
+    firstCompleteAuthUrl(`Authorize: ${claudeComplete} \r\n`) === claudeComplete);
   check("a support link alone is never treated as an authorization URL",
     firstCompleteAuthUrl("Help: https://support.claude.com/en \r\n") === null);
   check("a complete URL is never glued onto the next log line",
@@ -83,6 +98,9 @@ try {
   check("PTY terminal uses only the complete-URL extractor",
     terminal.includes('import { firstCompleteAuthUrl } from "./authUrlCapture"')
       && terminal.includes("const url = firstCompleteAuthUrl(outputText);"));
+  check("Claude reconnect never deletes the last credential before OAuth succeeds",
+    accounts.includes('if (route.backend === "kimi_cli")')
+      && accounts.includes("Keeping the existing ${provider.name} credential until the replacement sign-in succeeds."));
   check("Windows Kimi browser suppression is a valid Python webbrowser template",
     pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0 %s")')
       && !pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0");'));

@@ -435,6 +435,14 @@ const BRIDGE_JS: &str = r##"
     var st = getComputedStyle(el);
     return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
   }
+  function scrollableRegion(el, axis) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    var st = getComputedStyle(el);
+    if (axis !== "x" && el.scrollHeight > el.clientHeight + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowY)) return true;
+    return axis !== "y" && el.scrollWidth > el.clientWidth + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowX);
+  }
   var SEL = "a,button,input,select,textarea,[role=button],[role=link]," +
             "[role=checkbox],[role=radio],[role=tab],[role=menuitem]," +
             "[role=option],[contenteditable=true],[onclick]";
@@ -456,8 +464,33 @@ const BRIDGE_JS: &str = r##"
   function reindex() {
     var els = [];
     var primary = document.querySelectorAll(SEL);
-    for (var i = 0; i < primary.length && els.length < 150; i++) {
+    // Reserve a few indexes for scroll regions. Virtualized chat/mail/contact
+    // lists often expose no useful control beyond the items currently mounted.
+    for (var i = 0; i < primary.length && els.length < 140; i++) {
       if (visible(primary[i])) els.push(primary[i]);
+    }
+    var scrollCandidates = [];
+    for (var si = 0; si < els.length; si++) {
+      for (var parent = els[si].parentElement; parent; parent = parent.parentElement) {
+        if (scrollableRegion(parent) && scrollCandidates.indexOf(parent) === -1) {
+          scrollCandidates.push(parent);
+        }
+      }
+    }
+    var regions = document.querySelectorAll("main,section,div,ul,ol,[role=list],[role=grid],[role=feed],[role=log]");
+    for (var sr = 0; sr < regions.length && sr < 5000; sr++) {
+      if (visible(regions[sr]) && scrollableRegion(regions[sr]) &&
+          scrollCandidates.indexOf(regions[sr]) === -1) scrollCandidates.push(regions[sr]);
+    }
+    // Prefer the innermost regions: scrolling a chat list is useful; scrolling
+    // its full-page wrapper usually is not.
+    scrollCandidates.sort(function (a, b) {
+      if (a.contains(b)) return 1;
+      if (b.contains(a)) return -1;
+      return 0;
+    });
+    for (var sc = 0; sc < scrollCandidates.length && els.length < 150; sc++) {
+      if (els.indexOf(scrollCandidates[sc]) === -1) els.push(scrollCandidates[sc]);
     }
     if (els.length < 150) {
       var extra = document.querySelectorAll("div,span,li");
@@ -475,6 +508,11 @@ const BRIDGE_JS: &str = r##"
                el.getAttribute("name") || el.value || el.innerText || el.textContent || "").trim();
     txt = txt.replace(/\s+/g, " ").slice(0, 80);
     var extra = tag === "input" ? ("[" + (el.getAttribute("type") || "text") + "]") : "";
+    if (scrollableRegion(el)) {
+      var axes = (scrollableRegion(el, "x") ? "x" : "") + (scrollableRegion(el, "y") ? "y" : "");
+      extra += "[scrollable-" + axes + " " + Math.round(el.scrollLeft) + "," +
+               Math.round(el.scrollTop) + "]";
+    }
     return "#" + tag + extra + (txt ? " " + txt : "");
   }
   function snapshot() {
@@ -486,6 +524,64 @@ const BRIDGE_JS: &str = r##"
   }
   function elAt(i) { var e = (window.__owllmEls || [])[i]; if (!e) throw new Error("no element at index " + i); return e; }
   function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+  function textInputEvent(el, type, text, cancelable) {
+    var event;
+    try {
+      event = new InputEvent(type, {
+        bubbles: true, cancelable: !!cancelable, composed: true,
+        inputType: "insertText", data: text
+      });
+    } catch (e) {
+      event = new Event(type, { bubbles: true, cancelable: !!cancelable, composed: true });
+    }
+    return el.dispatchEvent(event);
+  }
+  function setNativeTextValue(el, text) {
+    var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, "value");
+    if (setter && setter.set) setter.set.call(el, text); else el.value = text;
+    textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function replaceEditableText(el, text) {
+    var selection = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    var emitted = false;
+    var mark = function () { emitted = true; };
+    el.addEventListener("input", mark, { once: true });
+    var inserted = false;
+    try { inserted = document.execCommand("insertText", false, text); } catch (e) {}
+    if (!inserted) {
+      range.deleteContents();
+      range.insertNode(document.createTextNode(text));
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    if (!emitted) textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function nearestScrollable(el, axis) {
+    for (var node = el; node; node = node.parentElement) {
+      if (scrollableRegion(node, axis)) return node;
+    }
+    return null;
+  }
+  function bestScrollable(axis) {
+    var active = nearestScrollable(document.activeElement, axis);
+    if (active) return active;
+    var els = window.__owllmEls || reindex();
+    var best = null, area = -1;
+    for (var i = 0; i < els.length; i++) {
+      if (!visible(els[i]) || !scrollableRegion(els[i], axis)) continue;
+      var r = els[i].getBoundingClientRect();
+      if (r.width * r.height > area) { best = els[i]; area = r.width * r.height; }
+    }
+    return best || document.scrollingElement || document.documentElement;
+  }
   // A bare el.click() dispatches ONLY a 'click' event — it skips the hover and
   // pointer/mouse-down events a real cursor emits. Menus that open on hover or
   // pointerdown (React/Radix/Headless language switchers, custom dropdowns)
@@ -535,10 +631,46 @@ const BRIDGE_JS: &str = r##"
         }
         case "fill": {
           var f = elAt(p.index); f.focus();
-          if (f.isContentEditable) { f.textContent = p.text; }
-          else { f.value = p.text; }
-          fire(f, "input"); fire(f, "change");
+          if (f.isContentEditable) replaceEditableText(f, String(p.text == null ? "" : p.text));
+          else if (f.tagName === "INPUT" || f.tagName === "TEXTAREA") {
+            setNativeTextValue(f, String(p.text == null ? "" : p.text));
+          } else {
+            throw new Error("element at index " + p.index + " is not a text field");
+          }
           return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
+        }
+        case "scroll": {
+          var direction = /^(up|down|left|right)$/.test(p.direction) ? p.direction : "down";
+          var axis = direction === "left" || direction === "right" ? "x" : "y";
+          var target = null;
+          if (p.index !== undefined && p.index !== null) {
+            var indexed = elAt(p.index);
+            target = scrollableRegion(indexed, axis) ? indexed : nearestScrollable(indexed, axis);
+            if (!target) throw new Error("no " + axis + "-scrollable region at or above index " + p.index);
+          } else {
+            target = bestScrollable(axis);
+          }
+          var viewport = axis === "x" ? target.clientWidth : target.clientHeight;
+          var amount = Number(p.amount);
+          if (!isFinite(amount) || amount <= 0) amount = Math.max(120, Math.round(viewport * 0.8));
+          amount = Math.min(5000, Math.max(20, amount));
+          if (direction === "up" || direction === "left") amount = -amount;
+          var before = axis === "x" ? target.scrollLeft : target.scrollTop;
+          if (target.scrollBy) {
+            target.scrollBy(axis === "x" ? { left: amount, behavior: "auto" } : { top: amount, behavior: "auto" });
+          } else if (axis === "x") {
+            target.scrollLeft += amount;
+          } else {
+            target.scrollTop += amount;
+          }
+          return setTimeout(function () {
+            var after = axis === "x" ? target.scrollLeft : target.scrollTop;
+            var maximum = axis === "x"
+              ? Math.max(0, target.scrollWidth - target.clientWidth)
+              : Math.max(0, target.scrollHeight - target.clientHeight);
+            report(reqId, "scrolled " + direction + " from " + Math.round(before) + " to " +
+              Math.round(after) + " of " + Math.round(maximum) + "\n\n" + snapshot());
+          }, 250);
         }
         case "fill_device_code": {
           // GitHub's Device Flow gives OWLLM the short code before the page is

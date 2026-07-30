@@ -699,6 +699,7 @@ fn canonical_tool_names() -> BTreeSet<&'static str> {
         "browser_open",
         "browser_press",
         "browser_reload",
+        "browser_scroll",
         "browser_screenshot",
         "browser_select",
         "browser_snapshot",

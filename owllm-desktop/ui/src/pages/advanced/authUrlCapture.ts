@@ -1,5 +1,7 @@
 const KIMI_DEVICE_ORIGIN = "https://www.kimi.com";
 const KIMI_DEVICE_PATH = "/code/authorize_device";
+const CLAUDE_AUTH_ORIGIN = "https://claude.ai";
+const CLAUDE_AUTH_PATH = "/oauth/authorize";
 
 // A PTY hard-wrap can split a URL anywhere, including inside its host, and
 // `https://www` still parses as a valid URL. Require a host that can actually
@@ -36,6 +38,16 @@ function isCompleteAuthUrl(raw: string): boolean {
   if (!hasRoutableHost(url)) return false;
   if (url.origin === KIMI_DEVICE_ORIGIN && url.pathname === KIMI_DEVICE_PATH) {
     return Boolean(url.searchParams.get("user_code")?.trim());
+  }
+  // Claude Code prints a long PKCE authorization URL. ConPTY commonly wraps
+  // it immediately after client_id; that prefix still parses and its
+  // `/oauth/authorize` path used to make us open it prematurely. Claude then
+  // rejects the request with "Missing redirect_uri parameter". Do not accept
+  // a Claude authorization prefix until the parameters required to bind the
+  // callback and PKCE exchange have arrived.
+  if (url.origin === CLAUDE_AUTH_ORIGIN && url.pathname === CLAUDE_AUTH_PATH) {
+    return ["client_id", "redirect_uri", "code_challenge"]
+      .every((key) => Boolean(url.searchParams.get(key)?.trim()));
   }
   return isAuthenticationUrl(url);
 }

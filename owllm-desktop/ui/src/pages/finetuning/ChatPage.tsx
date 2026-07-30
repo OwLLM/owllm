@@ -51,10 +51,11 @@ import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNorm
 import { isolationBadge } from "../agentic/isolationBadge";
 import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
-import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, type Attachment, type HistoryItem } from "../agentic/dispatch";
+import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, abortable, isAbortError, sleepAbortable, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
+import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
 
 // Session id for a column's chat stream in the ChatRuntime store. The
 // store lives above the router, so an in-flight stream survives this
@@ -194,17 +195,22 @@ type Persisted = {
   columns: Column[];
   converse: boolean;
   maxTurns: number;
+  chatMode: ChatMode;
+  toolsEnabled: boolean;
 };
 
+// LS_KEY is a hot blob: the whole transcript of every column is rewritten on
+// the chatRuntime 250 ms debounce, and localStorage replicates each write into
+// every same-origin renderer (see HOT_BLOB_PREFIXES). It lives in SQLite only.
 function loadState(): Partial<Persisted> {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = readHotBlob(LS_KEY);
     if (!raw) return {};
     return JSON.parse(raw);
   } catch { return {}; }
 }
 function saveState(s: Persisted) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+  try { writeHotBlob(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
 function statusColor(status?: ChatMsg["status"]) {
@@ -296,8 +302,19 @@ export default function ChatPage() {
   };
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
-  const [chatMode, setChatMode] = useState<ChatMode>("agent");
-  const [toolsEnabled, setToolsEnabled] = useState<boolean>(true);
+  // Ask (no tools) is the default. This is a model-comparison chat, and
+  // attaching the full local tool catalog to every request makes small
+  // local models spend their whole token budget deliberating about tools
+  // instead of answering. Measured against supergemma4-e4b-Q4_K_M on the
+  // bundled CUDA llama-server, same question ("What is 2 + 2?"):
+  //   no tools  -> 2 generated tokens, content "4"
+  //   40 tools  -> 256 generated tokens, ALL reasoning_content, content ""
+  // The reasoning goes to the collapsed thinking buffer, so the user just
+  // watches an empty bubble. Agent mode stays one click away in the mode
+  // row, and the choice is now persisted so it survives a page switch
+  // (pages unmount on tab change).
+  const [chatMode, setChatMode] = useState<ChatMode>(persisted.chatMode ?? "ask");
+  const [toolsEnabled, setToolsEnabled] = useState<boolean>(persisted.toolsEnabled ?? true);
   const [slashOpen, setSlashOpen] = useState<boolean>(false);
   // Right-side settings panel — Qt main.py:18667-18690 ships a
   // QStackedWidget driven by A/B/C toggle buttons. We mirror that
@@ -401,7 +418,7 @@ export default function ChatPage() {
   const saveRef = useRef<() => void>(() => {});
   saveRef.current = () => {
     const merged = columns.map((c) => ({ ...c, messages: colMsgs(c.id), busy: false, error: null }));
-    saveState({ count, columns: merged, converse, maxTurns });
+    saveState({ count, columns: merged, converse, maxTurns, chatMode, toolsEnabled });
   };
   useEffect(() => {
     for (const id of ["A", "B", "C"] as const) {
@@ -418,7 +435,7 @@ export default function ChatPage() {
   useEffect(() => {
     saveRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count, columns, converse, maxTurns]);
+  }, [count, columns, converse, maxTurns, chatMode, toolsEnabled]);
 
   // Poll server status every 2 s.
   useEffect(() => {
@@ -479,15 +496,29 @@ export default function ChatPage() {
   // serving that model. The 503-poll loop in sendOne handles the
   // "still loading weights" wait — this just kicks the spawn and
   // updates the local autoStarting flag for any UI that cares.
-  async function ensureLocalServer(wanted: string): Promise<boolean> {
+  //
+  // EVERY await here is raced against the run's abort signal. A cold GGUF load
+  // (and, on a fresh machine, a one-time engine module DOWNLOAD inside
+  // server_start) can run for minutes; without the race, Stop was a no-op for
+  // that whole window — the button flipped but the send sat there. Aborting
+  // stops us WAITING; the spawn completes in the background and the model stays
+  // warm (another column may be waiting on the very same server).
+  async function ensureLocalServer(wanted: string, signal?: AbortSignal): Promise<boolean> {
     if (status.running && status.model_id === wanted) return true;
     setAutoStarting(wanted);
     try {
-      if (status.running) await invoke("server_stop").catch(() => {});
-      await invoke("server_start", { modelId: wanted, ctx: getServerCtx() });
+      if (status.running) {
+        await abortable(invoke("server_stop"), signal).catch((e) => {
+          // A failed stop is survivable (start re-kills the child); a Stop press is not.
+          if (isAbortError(e)) throw e;
+        });
+      }
+      await abortable(invoke("server_start", { modelId: wanted, ctx: getServerCtx() }), signal);
       return true;
     } catch (e) {
-      updateCol("A", { error: `Failed to start server: ${e}` });
+      // Stop is a deliberate user action, not a failure — unwind silently
+      // instead of painting "Failed to start server" over their transcript.
+      if (!isAbortError(e)) updateCol("A", { error: `Failed to start server: ${e}` });
       return false;
     } finally {
       setAutoStarting(null);
@@ -749,7 +780,7 @@ export default function ChatPage() {
       const alreadyRight = status.running && status.model_id === wantedModelId;
       if (isServable && !alreadyRight) {
         updateCol(col.id, { error: `⏳ Starting server (${wantedModelId})…`, busy: true });
-        const ok = await ensureLocalServer(wantedModelId);
+        const ok = await ensureLocalServer(wantedModelId, signal);
         if (!ok) {
           updateCol(col.id, { busy: false });
           return;
@@ -770,7 +801,9 @@ export default function ChatPage() {
             // ignore, retry
           }
           if (ctrlAborted(col.id)) return;
-          await new Promise((r) => setTimeout(r, 400));
+          // Abortable wait: a bare timer made Stop land up to 400 ms late on
+          // every iteration of this 12 s poll.
+          try { await sleepAbortable(400, signal); } catch { return; }
         }
         if (!activePort) {
           updateCol(col.id, { error: "Server start timed out — check the Server tab logs.", busy: false });
@@ -942,7 +975,9 @@ export default function ChatPage() {
             if (Date.now() - startedAt > READY_TIMEOUT_MS) {
               throw new Error(`llama-server unresponsive for ${READY_TIMEOUT_MS / 1000}s — check the Server tab. Common causes: broken GGUF, GPU OOM, missing -ngl support.`);
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            // Abortable backoff: this loop can run for 3 minutes, and a bare
+            // timer made every Stop wait out the rest of its 1.5 s tick.
+            await sleepAbortable(1500, signal);
             continue;
           }
           clearTimeout(tid);
@@ -960,7 +995,9 @@ export default function ChatPage() {
             if (Date.now() - startedAt > READY_TIMEOUT_MS) {
               throw new Error("Model still loading after 3 minutes — likely OOM. Try a smaller quant (Q4_K_M).");
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            // Same here: the "Loading model into VRAM…" wait is the phase the
+            // user is most likely to give up on, so Stop must land instantly.
+            await sleepAbortable(1500, signal);
             continue;
           }
           break;
@@ -1865,7 +1902,11 @@ export default function ChatPage() {
                   e.preventDefault();
                   sendComposer();
                 }
-                if (e.key === "Escape") setSlashOpen(false);
+                if (e.key === "Escape") {
+                  setSlashOpen(false);
+                  // VS Code parity: Esc interrupts an in-flight generation.
+                  if (anyBusy) { e.preventDefault(); stopAll(); }
+                }
               }}
               placeholder="Ask, edit, or run an agent task. Type / for commands, # for context."
               style={{
@@ -1882,18 +1923,44 @@ export default function ChatPage() {
               <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={footerComposerBtn}>📎 Attach</button>
               <button onClick={resetAll} title="Clear all transcripts" style={footerComposerBtn}>Clear</button>
               <button onClick={saveJson} title="Save chat as JSON" style={footerComposerBtn}>Save</button>
-              {anyBusy ? (
-                <button onClick={stopAll} style={{ ...footerComposerBtn, borderColor: "#f44336", color: "#ffb0b0" }}>Stop</button>
-              ) : (
-                (() => { const canSend = !!draft.trim() || chatAttachments.length > 0; return (
-                <button onClick={sendComposer} disabled={!canSend} style={{
-                  ...footerComposerBtn,
-                  background: canSend ? "var(--accent)" : "var(--bg-surface)",
-                  borderColor: canSend ? "var(--accent)" : "var(--border)",
-                  color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
-                  cursor: canSend ? "pointer" : "not-allowed",
-                }}>Send</button>); })()
-              )}
+              {/* One primary interaction button (VS Code / ChatGPT pattern):
+                  it holds a single fixed slot and morphs Send -> Stop while
+                  any column is generating, so the control never moves and
+                  Stop is always where Send just was. Esc stops too — see the
+                  composer textarea's onKeyDown. */}
+              {(() => {
+                const canSend = !!draft.trim() || chatAttachments.length > 0;
+                return anyBusy ? (
+                  <button
+                    onClick={stopAll}
+                    title="Stop generating (Esc)"
+                    aria-label="Stop generating"
+                    style={{
+                      ...footerComposerBtn,
+                      minWidth: 92,
+                      background: "rgba(var(--error-rgb),0.16)",
+                      borderColor: "var(--error)",
+                      color: "var(--error)",
+                      cursor: "pointer",
+                    }}
+                  >■ Stop</button>
+                ) : (
+                  <button
+                    onClick={sendComposer}
+                    disabled={!canSend}
+                    title={canSend ? "Send (Enter)" : "Type a message first"}
+                    aria-label="Send message"
+                    style={{
+                      ...footerComposerBtn,
+                      minWidth: 92,
+                      background: canSend ? "var(--accent)" : "var(--bg-surface)",
+                      borderColor: canSend ? "var(--accent)" : "var(--border)",
+                      color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
+                      cursor: canSend ? "pointer" : "not-allowed",
+                    }}
+                  >➤ Send</button>
+                );
+              })()}
             </div>
           </div>
         </div>

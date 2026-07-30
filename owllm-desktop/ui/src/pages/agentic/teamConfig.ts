@@ -17,6 +17,22 @@ import type { Team, Edge, AgentSpec, RoleData } from "./dispatch";
 
 export type RoleKind = "orchestrator" | "critic" | "specialist";
 
+/// Normalize the backend's YAML-shaped tool allowlist into the runtime contract.
+/// Most roles use a YAML list, while unrestricted roles use the supported
+/// shorthand `tool_allowlist: all`, which arrives from Rust as a string.
+/// Dropping that scalar to `undefined` loses the explicit sentinel before it
+/// reaches subscription CLIs, so isolated Solo/Operator runs never receive the
+/// host browser relay.
+export function normalizeRoleToolAllowlist(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    return value.filter((tool): tool is string => typeof tool === "string");
+  }
+  if (typeof value === "string" && value.trim().toLowerCase() === "all") {
+    return ["all"];
+  }
+  return undefined;
+}
+
 export type TeamNormalizeReport<T extends Team = Team> = {
   /// The normalized team — safe to run / save. Preserves the caller's exact
   /// team type (AgentsPage's Team carries extra fields like visibility), since
@@ -47,6 +63,29 @@ const WRITE_SKILL = /write|edit|shell|create|ssh|patch|apply/i;
 export function roleCanWrite(role: RoleData | undefined): boolean {
   const { unrestricted, tools } = roleSkills(role);
   return unrestricted || tools.some((s) => WRITE_SKILL.test(s));
+}
+
+/// Every team has the same deterministic SOLO runtime agent. It is synthetic:
+/// the authored team stays domain-specific in orchestrated mode, while Solo
+/// never inherits a narrow specialist prompt/tool allowlist by accident.
+///
+/// The backing `solo_generalist` role is unrestricted, so every connected tool
+/// is available (execution-time auth, sandbox and approval gates still apply).
+/// Skill instructions remain progressive/on-demand.
+export const SOLO_GENERALIST_BASE = "solo_generalist";
+export const SOLO_GENERALIST_NAME = "solo_generalist";
+export function soloGeneralistForTeam(team: Pick<Team, "agents">): AgentSpec {
+  const explicit = team.agents.find((agent) => agent.base === SOLO_GENERALIST_BASE);
+  if (explicit) return explicit;
+  const names = new Set(team.agents.map((agent) => agent.name));
+  let name = SOLO_GENERALIST_NAME;
+  for (let suffix = 2; names.has(name); suffix++) name = `${SOLO_GENERALIST_NAME}_${suffix}`;
+  return {
+    name,
+    base: SOLO_GENERALIST_BASE,
+    icon: "owl:owl_operator",
+    description: "Solo generalist with every connected tool available; loads task-specific skills on demand.",
+  };
 }
 
 /// Classify an agent's topology role from its role data + name/base heuristics,

@@ -41,6 +41,14 @@ import { parseProjectCard, lintProjectCard, type CardFinding, type CardFacts } f
 /// installed. Kept in LOCAL_TOOL_SPECS so the name normalizer + validator know
 /// them; force-added in formatToolsForOpenAI so an allowlist can't hide them.
 export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
+/// Agent-facing capability control plane. Kept universal like skill discovery:
+/// role prompts may specialize an agent, but they must not hide the path that
+/// connects a genuinely missing reviewed tool.
+export const CAPABILITY_TOOL_NAMES = new Set([
+  "mcp_search_capabilities",
+  "mcp_install_curated",
+  "mcp_call_connected",
+]);
 
 /// Shared team-memory tools — a RAG-like store every agent can read/write so the
 /// team builds a common, durable knowledge base (decisions, build commands,
@@ -270,26 +278,29 @@ export async function refreshBrowserState(): Promise<void> {
   // and — this is the trap — DIFFERENT CLIs surface them differently:
   //   * Codex / most CLIs: the mcp__owllm__browser_* tools are ALREADY in the native
   //     tool list; the agent must just CALL them. Codex has NO ToolSearch tool.
-  //   * Claude Code CLI: MCP tools may be DEFERRED behind ToolSearch (query 'browser').
-  // The old guidance told EVERY CLI to "load them with ToolSearch" — but a Codex agent
+  //   * Some runtimes may defer MCP schemas behind a discovery tool.
+  // The old guidance told EVERY CLI to "load them with ToolSearch" — but a Codex/Kimi agent
   // then hunts for a ToolSearch tool that doesn't exist, concludes "0 tools", and refuses
   // (verified against codex 0.128.0: it says "there's no ToolSearch tool exposed here").
   // Verified the opposite too: told to call mcp__owllm__browser_snapshot directly, codex
-  // calls it and returns the result. So: lead with "call them directly", make ToolSearch a
-  // Claude-only fallback, and explicitly tell agents NOT to chase a ToolSearch they lack.
+  // calls it and returns the result. So: lead with "call them directly" and mention
+  // discovery only conditionally, without naming a provider that another model may
+  // mistakenly adopt as its own runtime identity.
   const CAP =
     "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
     "read them, and click/fill/select to complete tasks and forms. These tools are ALREADY in your " +
     "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_tabs, browser_tab_select, browser_tab_close, browser_navigate, " +
-    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
+    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_scroll, browser_select, " +
     "browser_press, browser_device — OR the same names prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
-    "Look in your tools for any name containing 'browser_' and invoke it. IF (and only if) you are the Claude " +
-    "Code CLI and don't see them, they may be deferred — surface them with ToolSearch query 'browser'. On Codex " +
-    "or any other CLI there is NO ToolSearch tool: do not hunt for one — the mcp__owllm__browser_* tools are " +
-    "already callable, so just call them. DISREGARD any team-memory note claiming browser tools are unavailable " +
+    "Look in your tools for any name containing 'browser_' and invoke it. If your runtime exposes a tool-schema " +
+    "discovery tool, use it to search for 'browser'; if no such discovery tool exists, do not hunt for one — call " +
+    "the mcp__owllm__browser_* tools directly. Never infer your model/provider identity from this fallback guidance. " +
+    "DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
     "browser_open returns a stable tab ID; pass tab_id to later actions so the user's active tab is never hijacked. " +
-    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see.";
+    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see. " +
+    "For chat, mail, contacts, and other long histories, use the site's search first; use browser_scroll on an indexed " +
+    "scrollable region as the fallback, snapshot after each move, and stop only when found or the reported position no longer changes.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
     if (st && st.running) {
@@ -807,6 +818,7 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
     : LOCAL_TOOL_SPECS
   ).filter((t) =>
     !SKILL_TOOL_NAMES.has(t.name) &&
+    !CAPABILITY_TOOL_NAMES.has(t.name) &&
     !MEMORY_TOOL_NAMES.has(t.name) &&
     !BROWSER_TOOL_NAMES.has(t.name) &&
     !KVM_TOOL_NAMES.has(t.name) &&
@@ -819,6 +831,10 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
       SKILL_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
       localTools.push(t);
     }
+  }
+  for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+    CAPABILITY_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
+    localTools.push(t);
   }
   // Shared team-memory tools — always advertised (cross-cutting, never
   // allowlist-gated) so any agent can consult / contribute to the team's
@@ -1388,6 +1404,44 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
+    name: "mcp_search_capabilities",
+    aliases: ["find_tool", "find_capability", "search_mcp", "discover_mcp", "missing_tool"],
+    description:
+      "Search OWLLM's reviewed MCP catalog and show matching installed/connected tools. " +
+      "Use when the task needs a capability you do not currently have. If no reviewed " +
+      "entry matches, deeply research the official MCP Registry and vendor sources with " +
+      "web_search/web_fetch, explain provenance and requested permissions, and ask the " +
+      "user before any arbitrary third-party install.",
+    args: [
+      { name: "query", required: true, description: "Capability needed, e.g. 'search Slack', 'GitHub issues', or 'web research'.", aliases: ["q", "capability", "tool", "need"] },
+    ],
+  },
+  {
+    name: "mcp_install_curated",
+    aliases: ["install_mcp", "connect_mcp", "add_mcp"],
+    description:
+      "Install, start, and VERIFY one exact OWLLM-reviewed MCP returned by " +
+      "mcp_search_capabilities. Keyless reviewed entries install automatically. " +
+      "Credentialed entries return the missing per-user configuration and never " +
+      "accept secrets in chat. Arbitrary internet packages are rejected.",
+    args: [
+      { name: "name", required: true, description: "Exact reviewed MCP name returned by mcp_search_capabilities.", aliases: ["server", "mcp", "id"] },
+    ],
+  },
+  {
+    name: "mcp_call_connected",
+    aliases: ["call_mcp", "use_mcp", "run_mcp_tool"],
+    description:
+      "Call a tool exposed by a connected MCP immediately after installation, without " +
+      "waiting for another user turn. Use the exact server/tool names and input schema " +
+      "returned by mcp_install_curated or mcp_search_capabilities.",
+    args: [
+      { name: "server", required: true, description: "Connected MCP server name.", aliases: ["mcp"] },
+      { name: "tool", required: true, description: "Exact tool name exposed by that server.", aliases: ["name"] },
+      { name: "arguments", required: false, description: "JSON object containing the MCP tool arguments.", aliases: ["args", "input", "parameters"] },
+    ],
+  },
+  {
     name: "list_skills",
     aliases: ["skills", "available_skills", "show_skills", "discover_skills"],
     description:
@@ -1528,11 +1582,26 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_fill",
     aliases: ["fill", "type_text", "browser_type", "fill_input"],
     description:
-      "Type text into the input/textarea element at the given index from the latest " +
-      "browser_snapshot. Snapshot first to get the index.",
+      "Type text into the input, textarea, or contenteditable element at the given " +
+      "index from the latest browser_snapshot. Emits the events required by controlled " +
+      "React/Vue web apps. Snapshot first to get the index.",
     args: [
       { name: "index", required: true, description: "Input element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
       { name: "text", required: true, description: "The text to type into the field.", aliases: ["value", "content", "input", "str"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
+    ],
+  },
+  {
+    name: "browser_scroll",
+    aliases: ["scroll", "scroll_page", "scroll_list", "scroll_history"],
+    description:
+      "Scroll a virtualized list, message history, mail list, or page. Pass an element " +
+      "index to scroll that region (or its scrollable ancestor); omit it to use the " +
+      "focused or largest visible scroll region. The result includes a fresh snapshot.",
+    args: [
+      { name: "direction", required: false, description: "up, down, left, or right (default: down).", aliases: ["dir"] },
+      { name: "amount", required: false, description: "CSS pixels to scroll (default: about 80% of the region).", aliases: ["pixels", "distance", "px"] },
+      { name: "index", required: false, description: "Scrollable region or child element index from browser_snapshot.", aliases: ["idx", "i", "element"] },
       { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
     ],
   },
@@ -2080,6 +2149,40 @@ async function executeToolCallInner(
         });
         return { ok: true, output: `screenshot saved: ${saved}` };
       }
+      case "mcp_search_capabilities": {
+        const result = await invoke<unknown>("mcp_search_capabilities", {
+          query: call.args.query ?? "",
+        });
+        return { ok: true, output: JSON.stringify(result, null, 2) };
+      }
+      case "mcp_install_curated": {
+        const result = await invoke<unknown>("mcp_install_curated", {
+          name: call.args.name ?? "",
+          workspace: cwd ?? null,
+        });
+        const rendered = JSON.stringify(result, null, 2);
+        return {
+          ok: !rendered.includes('"status": "needs_configuration"'),
+          output: rendered,
+        };
+      }
+      case "mcp_call_connected": {
+        let args: unknown = {};
+        const raw = call.args.arguments ?? "";
+        if (raw.trim()) {
+          try { args = JSON.parse(raw); }
+          catch (e) { return { ok: false, output: `mcp_call_connected arguments must be a JSON object: ${String(e)}` }; }
+        }
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+          return { ok: false, output: "mcp_call_connected arguments must be a JSON object." };
+        }
+        const text = await invoke<string>("mcp_call_tool", {
+          server: call.args.server ?? "",
+          tool: call.args.tool ?? "",
+          arguments: args,
+        });
+        return { ok: true, output: truncate(text, 8000) };
+      }
       case "list_skills": {
         const ids = policySkillIds(allowedTools);
         const brief = await skillCatalogBrief(ids ?? [], ids);
@@ -2193,6 +2296,18 @@ async function executeToolCallInner(
       }
       case "browser_fill": {
         const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text, tab_id: call.args.tab_id ?? null } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_scroll": {
+        const result = await invoke<string>("browser_cmd", {
+          action: "scroll",
+          params: {
+            direction: call.args.direction ?? "down",
+            amount: call.args.amount == null ? null : Number(call.args.amount),
+            index: call.args.index == null ? null : Number(call.args.index),
+            tab_id: call.args.tab_id ?? null,
+          },
+        });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_press": {

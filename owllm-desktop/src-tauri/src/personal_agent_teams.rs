@@ -597,12 +597,16 @@ fn runtime_tool_names() -> BTreeSet<&'static str> {
         "browser_open",
         "browser_press",
         "browser_reload",
+        "browser_scroll",
         "browser_screenshot",
         "browser_select",
         "browser_snapshot",
         "browser_tab_close",
         "browser_tab_select",
         "browser_tabs",
+        "mcp_call_connected",
+        "mcp_install_curated",
+        "mcp_search_capabilities",
     ]
     .into_iter()
     .collect()
@@ -1279,7 +1283,10 @@ fn browser_params(arguments: &Value) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn execute_runtime_tool(app: tauri::AppHandle, call: &RuntimeToolCall) -> Result<String, String> {
+async fn execute_runtime_tool(
+    app: tauri::AppHandle,
+    call: &RuntimeToolCall,
+) -> Result<String, String> {
     let args = browser_params(&call.arguments);
     match call.name.as_str() {
         "browser_open" => crate::browser::browser_open_tab(
@@ -1310,11 +1317,33 @@ fn execute_runtime_tool(app: tauri::AppHandle, call: &RuntimeToolCall) -> Result
         "browser_click" => crate::browser::browser_cmd(app, "click".into(), args),
         "browser_fill" => crate::browser::browser_cmd(app, "fill".into(), args),
         "browser_press" => crate::browser::browser_cmd(app, "press".into(), args),
+        "browser_scroll" => crate::browser::browser_cmd(app, "scroll".into(), args),
         "browser_select" => crate::browser::browser_cmd(app, "select".into(), args),
         "browser_screenshot" => crate::browser::browser_cmd(app, "screenshot".into(), args),
         "browser_get_text" => crate::browser::browser_cmd(app, "get_text".into(), args),
         "browser_back" => crate::browser::browser_cmd(app, "back".into(), args),
         "browser_reload" => crate::browser::browser_cmd(app, "reload".into(), args),
+        "mcp_search_capabilities" => {
+            crate::mcp::mcp_search_capabilities(tool_arg_str(&args, "query")?.to_string())
+                .await
+                .and_then(|value| serde_json::to_string_pretty(&value).map_err(|e| e.to_string()))
+        }
+        "mcp_install_curated" => crate::mcp::mcp_install_curated(
+            tool_arg_str(&args, "name")?.to_string(),
+            args.get("workspace")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+        .await
+        .and_then(|value| serde_json::to_string_pretty(&value).map_err(|e| e.to_string())),
+        "mcp_call_connected" => {
+            crate::mcp::mcp_call_tool(
+                tool_arg_str(&args, "server")?.to_string(),
+                tool_arg_str(&args, "tool")?.to_string(),
+                args.get("arguments").cloned().unwrap_or_else(|| json!({})),
+            )
+            .await
+        }
         other => Err(format!(
             "personal-team runtime tool is not supported: {other}"
         )),
@@ -1516,7 +1545,7 @@ impl ModelExecutor for RuntimeModelExecutor {
                     .app
                     .clone()
                     .ok_or_else(|| "runtime AppHandle is unavailable".to_string())?;
-                let tool_result = execute_runtime_tool(app, &tool_call)?;
+                let tool_result = execute_runtime_tool(app, &tool_call).await?;
                 conversation.push_str(&format!(
                     "\n\nAssistant requested tool:\n{}\n\nTool result for {}:\n{}\n\nContinue the task. Call another authorized tool if needed, otherwise return the final answer.",
                     reply,

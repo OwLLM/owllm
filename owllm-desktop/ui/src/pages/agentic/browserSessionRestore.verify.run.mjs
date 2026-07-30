@@ -21,6 +21,7 @@ const ROOT = path.resolve(UI, "../..");
 const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 const envSource = read(path.join(HERE, "projectEnvironment.ts"));
 const agents = read(path.join(HERE, "AgentsPage.tsx"));
+const dialog = read(path.join(HERE, "ProjectSettingsDialog.tsx"));
 const browserRs = read(path.join(ROOT, "src-tauri/src/browser.rs"));
 const libRs = read(path.join(ROOT, "src-tauri/src/lib.rs"));
 
@@ -171,9 +172,14 @@ try {
 // ---- Rust: what makes the mirror safe ------------------------------------
 check("the live tab set is mirrored per project", /static SESSION_OWNER: Mutex<Option<String>>/.test(browserRs));
 check("an empty tab set never overwrites a saved session",
-  /fn persist_session[\s\S]*?if tabs\.is_empty\(\) \{[\s\S]*?return;/.test(browserRs));
-check("only the owning project's session is written",
-  /fn persist_session[\s\S]*?SESSION_OWNER[\s\S]*?write_session\(\s*&owner/.test(browserRs));
+  /fn persist_session[\s\S]*?if kept\.is_empty\(\) \{[\s\S]*?return;/.test(browserRs));
+// The remembered index must be counted over the tabs actually written. Counting
+// it over the unfiltered list shifted it by one per dropped blank tab and then
+// fell back to 0 — reopening on the FIRST page instead of the one in front.
+check("the active index is counted over the tabs that are kept",
+  /fn persist_session[\s\S]*?let active = kept\.iter\(\)\.position\(/.test(browserRs));
+check("every live tab set is written only to its resolved project-or-personal session",
+  /fn persist_session[\s\S]*?let stem = live_session_stem\(\)[\s\S]*?write_session\(\s*&stem/.test(browserRs));
 check("session file names are sanitised before touching the filesystem",
   /fn session_file_stem[\s\S]*?is_ascii_alphanumeric\(\)/.test(browserRs));
 check("browser_stop records the pages BEFORE tearing the windows down",
@@ -189,6 +195,15 @@ check("sync_tabs pushes the strip AND persists it, so the two cannot drift",
 check("binding never steals a browser another project is using",
   /fn browser_session_bind[\s\S]*?owned_by_other[\s\S]*?if !owned_by_other \{\s*\*owner = Some/.test(browserRs));
 check("browser_session_bind is registered as a command", /browser::browser_session_bind,/.test(libRs));
+check("tabs outside a project use a reserved personal-agent session instead of being discarded",
+  /const PERSONAL_SESSION_STEM: &str = "_personal"/.test(browserRs)
+  && /fn live_session_stem[\s\S]*?PERSONAL_SESSION_STEM/.test(browserRs));
+check("recently closed tabs survive later session writes and stay bounded",
+  /fn persist_session[\s\S]*?let closed = read_session\(&stem\)\.closed/.test(browserRs)
+  && /CLOSED_HISTORY_MAX[\s\S]*?session\.closed\.drain/.test(browserRs));
+check("the native recovery commands are registered on every desktop OS",
+  /browser::browser_session_reopen,/.test(libRs)
+  && /browser::browser_reopen_closed,/.test(libRs));
 
 // ---- AgentsPage wiring ---------------------------------------------------
 check("the Agents page restores a project's browser when the project is opened",
@@ -207,5 +222,66 @@ check("a newly created project claims its session through the same restore path"
 check("creation and selection never launch the same environment twice",
   /justCreatedProjectRef\.current = target\.id;/.test(agents)
   && /justCreatedProjectRef\.current === projectId/.test(agents));
+check("the project toolbar exposes an obvious saved-browser reopen action",
+  /data-ui="ReopenProjectBrowserBtn"/.test(agents)
+  && /reopenSelectedProjectBrowser\(\)/.test(agents));
+check("the explicit reopen bypasses the once-per-page automatic restore guard",
+  /const reopenSelectedProjectBrowser[\s\S]*?restoreProjectBrowser\([\s\S]*?\{ boot: false \}/.test(agents));
+check("Project settings reuses the saved-session restore instead of reopening only the original recipe",
+  /onReopenBrowser\?[\s\S]*?await onReopenBrowser\(\)[\s\S]*?Reopen browser/.test(dialog));
+
+// ---- Pages that belong to no project ------------------------------------
+// The first cut persisted a session ONLY while a project owned the browser.
+// A personal agent's desk of logged-in apps belongs to no project, so closing
+// it wrote nothing at all and there was no way back. Strip comments first: the
+// prose above must never be what satisfies these checks.
+const rsCode = browserRs.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+const chrome = read(path.join(UI, "../public/browser-chrome.html")).replace(/<!--[\s\S]*?-->/g, "");
+const agentsCode = agents.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+const envCode = envSource.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+
+check("ownerless tabs still get a session file",
+  /const PERSONAL_SESSION_STEM/.test(rsCode) && /fn live_session_stem/.test(rsCode));
+check("the personal session file cannot collide with a project's",
+  /PERSONAL_SESSION_STEM: &str = "_/.test(rsCode) && /trim_matches\('_'\)/.test(rsCode));
+check("persisting no longer bails out when no project owns the browser",
+  !/fn persist_session[\s\S]*?let Some\(owner\) = SESSION_OWNER/.test(rsCode)
+  && /fn persist_session[\s\S]*?live_session_stem\(\)/.test(rsCode));
+check("closing the browser is remembered even with no project selected",
+  !/fn mark_session_closed[\s\S]*?let Some\(owner\) = SESSION_OWNER/.test(rsCode)
+  && /fn mark_session_closed[\s\S]*?live_session_stem\(\)/.test(rsCode));
+
+// ---- Undoing a closed tab ------------------------------------------------
+check("the session keeps a closed-page history", /pub closed: Vec<String>/.test(rsCode));
+check("the closed-page history is capped", /CLOSED_HISTORY_MAX/.test(rsCode)
+  && /fn remember_closed_tab[\s\S]*?CLOSED_HISTORY_MAX[\s\S]*?drain\(\.\./.test(rsCode));
+check("a closed page is recorded before the strip is rewritten without it",
+  /fn close_tab[\s\S]*?let closing_url[\s\S]*?remember_closed_tab\(&closing_url\)/.test(rsCode));
+check("the closed page is read outside the TABS lock",
+  /let closing_url = list_tabs\(app\)[\s\S]*?let next = \{/.test(rsCode));
+check("persisting the strip preserves the reopen history",
+  /fn persist_session[\s\S]*?let closed = read_session\(&stem\)\.closed;[\s\S]*?closed,\s*\},?\s*\);/.test(rsCode));
+check("a page that fails to reopen cannot wedge the history",
+  /fn browser_reopen_closed[\s\S]*?session\.closed\.pop\(\)[\s\S]*?write_session\(&stem, &session\);[\s\S]*?browser_open_tab/.test(rsCode));
+check("reopening the whole desk survives one dead page",
+  /fn browser_session_reopen[\s\S]*?Err\(e\) => failed\.push/.test(rsCode));
+check("both reopen commands are registered",
+  /browser::browser_session_reopen,/.test(libRs) && /browser::browser_reopen_closed,/.test(libRs));
+
+// ---- Reopen has to be reachable -----------------------------------------
+check("the tab strip offers a reopen control", /id="reopen"/.test(chrome)
+  && /\$\("reopen"\)\.addEventListener\("click"[\s\S]*?evt\("tabreopen"\)/.test(chrome));
+check("Ctrl/Cmd+Shift+T reopens the last closed tab",
+  /shiftKey && \(e\.key === "T"[\s\S]*?evt\("tabreopen"\)/.test(chrome));
+check("the reopen control is localized like every other chrome control",
+  /\$\("reopen"\)\.title = copy\[9\]/.test(chrome));
+check("the chrome reopen action reaches Rust", /"tabreopen" =>[\s\S]*?browser_reopen_closed/.test(rsCode));
+check("the toolbar reopen works with no project selected",
+  !/const reopenSelectedProjectBrowser = async \(\) => \{\s*if \(!selectedProject\) \{\s*throw/.test(agentsCode)
+  && /if \(!selectedProject\) \{\s*return await reopenPersonalBrowserSession/.test(agentsCode));
+check("the reopen button is not disabled without a project",
+  !/data-ui="ReopenProjectBrowserBtn"[\s\S]{0,600}?disabled=\{!selectedProjectId/.test(agentsCode));
+check("the personal reopen surfaces pages it could not restore",
+  /export async function reopenPersonalBrowserSession[\s\S]*?failed[\s\S]*?could not be reopened/.test(envCode));
 
 console.log(`\nbrowserSessionRestore: ${passed}/${passed} checks passed`);

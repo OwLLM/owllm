@@ -81,6 +81,102 @@ pub struct McpPackInstallResult {
     pub config_path: String,
 }
 
+#[derive(Clone, Copy)]
+struct CuratedMcp {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    command: &'static str,
+    args: &'static [&'static str],
+    required_env: &'static [&'static str],
+}
+
+const CURATED_MCPS: &[CuratedMcp] = &[
+    CuratedMcp {
+        name: "duckduckgo",
+        aliases: &["search", "web search", "internet research"],
+        description: "Keyless web search through DuckDuckGo.",
+        command: "uvx",
+        args: &["duckduckgo-mcp-server"],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "filesystem",
+        aliases: &["files", "file access"],
+        description: "Sandboxed file operations rooted at the current project.",
+        command: "npx",
+        args: &[
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "{{WORKSPACE}}",
+        ],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "git",
+        aliases: &["repository", "source control"],
+        description: "Git log, diff, blame and branch operations for the current project.",
+        command: "uvx",
+        args: &["mcp-server-git", "--repository", "{{WORKSPACE}}"],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "github",
+        aliases: &["issues", "pull requests", "repos"],
+        description: "GitHub repositories, issues, pull requests and files.",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-github"],
+        required_env: &["GITHUB_PERSONAL_ACCESS_TOKEN"],
+    },
+    CuratedMcp {
+        name: "slack",
+        aliases: &["channels", "workspace messages"],
+        description: "Slack channels, messages and search.",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-slack"],
+        required_env: &["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+    },
+    CuratedMcp {
+        name: "puppeteer",
+        aliases: &["headless browser", "web automation"],
+        description: "Headless Chromium navigation, screenshots, clicking and scraping.",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-puppeteer"],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "fetch",
+        aliases: &["http", "url reader"],
+        description: "Fetch a URL and return readable markdown.",
+        command: "uvx",
+        args: &["mcp-server-fetch"],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "memory",
+        aliases: &["knowledge graph", "persistent memory"],
+        description: "Persistent knowledge-graph memory across sessions.",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-memory"],
+        required_env: &[],
+    },
+    CuratedMcp {
+        name: "time",
+        aliases: &["timezone", "date conversion"],
+        description: "Timezone-aware time queries and conversion.",
+        command: "uvx",
+        args: &["mcp-server-time"],
+        required_env: &[],
+    },
+];
+
+fn curated_mcp(name: &str) -> Option<&'static CuratedMcp> {
+    let needle = name.trim().to_ascii_lowercase();
+    CURATED_MCPS
+        .iter()
+        .find(|entry| entry.name == needle || entry.aliases.iter().any(|alias| *alias == needle))
+}
+
 fn config_path() -> Option<PathBuf> {
     // Honors portable mode via the shared resolver (USB-portable Block 1).
     Some(crate::paths::owllm_config_home()?.join("mcp_config.json"))
@@ -606,6 +702,135 @@ pub async fn mcp_list_servers() -> Result<Vec<McpServerStatus>, String> {
         }
     }
     Ok(out)
+}
+
+/// Search installed servers and OWLLM's reviewed catalog. Broad internet
+/// research remains available through web_search/web_fetch, but only an exact
+/// reviewed entry can cross the code-execution boundary automatically.
+#[tauri::command]
+pub async fn mcp_search_capabilities(query: String) -> Result<Value, String> {
+    let needle = query.trim().to_ascii_lowercase();
+    let config = mcp_load_config()?;
+    let statuses = mcp_list_servers().await?;
+    let matches: Vec<Value> = CURATED_MCPS
+        .iter()
+        .filter(|entry| {
+            needle.is_empty()
+                || entry.name.contains(&needle)
+                || entry.description.to_ascii_lowercase().contains(&needle)
+                || entry.aliases.iter().any(|alias| alias.contains(&needle))
+        })
+        .map(|entry| {
+            let configured = config.servers.iter().any(|server| server.name == entry.name);
+            let status = statuses.iter().find(|server| server.name == entry.name);
+            json!({
+                "name": entry.name,
+                "description": entry.description,
+                "runtime": entry.command,
+                "packageArguments": entry.args,
+                "configured": configured,
+                "running": status.is_some_and(|server| server.running),
+                "tools": status.map(|server| server.tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>()).unwrap_or_default(),
+                "requiresConfiguration": entry.required_env,
+                "automaticInstall": entry.required_env.is_empty(),
+                "provenance": "OWLLM-reviewed catalog entry; verify current publisher/maintenance details in the official MCP Registry before proposing an alternative.",
+            })
+        })
+        .collect();
+    Ok(json!({
+        "query": query,
+        "matches": matches,
+        "policy": "Install exact reviewed entries with mcp_install_curated. If none match, research the official MCP Registry and vendor source, explain provenance and permissions, and request user approval before adding an arbitrary package in Settings > MCP.",
+        "registry": "https://registry.modelcontextprotocol.io/",
+    }))
+}
+
+/// Install, start, and verify one reviewed entry. Credentialed entries fail
+/// closed until their values already exist in per-user MCP config: secrets are
+/// never accepted as tool arguments or copied through model context.
+#[tauri::command]
+pub async fn mcp_install_curated(name: String, workspace: Option<String>) -> Result<Value, String> {
+    let entry = curated_mcp(&name).ok_or_else(|| {
+        format!(
+            "'{}' is not in OWLLM's reviewed MCP catalog; research it, then ask the user to approve a manual Settings > MCP install",
+            name.trim()
+        )
+    })?;
+    let config = mcp_load_config()?;
+    let existing = config
+        .servers
+        .iter()
+        .find(|server| server.name == entry.name);
+    let missing: Vec<&str> = entry
+        .required_env
+        .iter()
+        .copied()
+        .filter(|key| {
+            existing
+                .and_then(|server| server.env.get(*key))
+                .is_none_or(|value| value.trim().is_empty())
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Ok(json!({
+            "status": "needs_configuration",
+            "name": entry.name,
+            "missing": missing,
+            "action": "Open Settings > MCP and enter these credentials. They stay in per-user runtime storage and must never be passed through agent chat.",
+        }));
+    }
+
+    let workspace = workspace.unwrap_or_default();
+    let args: Vec<String> = entry
+        .args
+        .iter()
+        .map(|arg| {
+            if *arg == "{{WORKSPACE}}" {
+                if workspace.trim().is_empty() {
+                    Err(format!(
+                        "{} requires the current project workspace",
+                        entry.name
+                    ))
+                } else {
+                    Ok(workspace.clone())
+                }
+            } else {
+                Ok((*arg).to_string())
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    let server = McpServerConfig {
+        name: entry.name.to_string(),
+        command: entry.command.to_string(),
+        args,
+        env: existing
+            .map(|server| server.env.clone())
+            .unwrap_or_default(),
+        enabled: true,
+    };
+    let install = mcp_install_pack(vec![server]).await?;
+    mcp_stop_server(entry.name.to_string()).await?;
+    let status = mcp_start_server(entry.name.to_string()).await?;
+    if !status.running || status.tools.is_empty() {
+        return Err(format!(
+            "installed '{}' but its MCP handshake exposed no tools{}",
+            entry.name,
+            if status.error.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", status.error)
+            }
+        ));
+    }
+    Ok(json!({
+        "status": "connected",
+        "name": entry.name,
+        "added": install.added,
+        "updated": install.updated,
+        "tools": status.tools,
+        "verified": true,
+        "next": "Call mcp_call_connected with this server name, an exact returned tool name, and arguments matching its inputSchema to resume the original task now.",
+    }))
 }
 
 /// Aggregate every tool from every RUNNING MCP server. Names come

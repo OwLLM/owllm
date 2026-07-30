@@ -193,35 +193,47 @@
       window.addEventListener("resize", layout);
       layout();
 
+      // ─ How this window receives state ─────────────────────────────
+      // NOTHING here may touch localStorage, and there is no Tauri IPC.
+      //
+      // The first `localStorage` access binds this document to Blink's
+      // per-origin storage area, after which EVERY same-origin mutation is
+      // replicated into this renderer — including the Code page's ~1.5 MB
+      // session blob, which it re-persists on a 250ms debounce. This window is
+      // passive, occluded and click-through, so it runs no tasks and never
+      // drains those copies: measured at ~45 MB/min of monotonic, never-GC'd
+      // growth, reaching 4 GB in a session for a 12 KB static page. That was
+      // ~85% of the app's memory footprint and the cause of system-wide
+      // paging stalls in other apps.
+      //
+      // Tauri events can't replace it either: the app's only capability is
+      // scoped to `windows: ["main"]` and `withGlobalTauri` is off, so
+      // `window.__TAURI__` is undefined here. (Earlier code listened for
+      // `owllm:frame-visibility` / `owllm:accent-changed` — that was dead code,
+      // which is why the localStorage path was load-bearing.)
+      //
+      // So Rust pushes in: the cold-boot accent via an initialization script
+      // (`window.__OWLLM_ACCENT__`), and live changes via `eval` calling the
+      // `__owllm*` hooks below. See src-tauri/src/overlay_frame.rs.
+
       // The main webview owns the auto-hide timer and persisted preference.
       // This window only paints, so applying a class keeps the Windows overlay
       // animation in lockstep with the in-page frame used on other platforms.
-      const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
       function setFrameVisible(visible) {
         const frame = el("frame");
         frame.classList.toggle("frame-visible", visible);
         frame.classList.toggle("frame-hidden", !visible);
       }
-      window.addEventListener("storage", (event) => {
-        if (event.key !== FRAME_VISIBILITY_STATE_KEY || !event.newValue) return;
-        try { setFrameVisible(JSON.parse(event.newValue).visible !== false); }
-        catch { /* ignore malformed state from older builds */ }
-      });
-      if (window.__TAURI__?.event) {
-        window.__TAURI__.event.listen("owllm:frame-visibility", (event) => {
-          setFrameVisible(event.payload !== false);
-        });
-      }
+      window.__owllmSetFrameVisible = setFrameVisible;
 
       // ─ Accent integration ─────────────────────────────────────────
       // The overlay frame is a SEPARATE Tauri webview, so the React
-      // app's runtime applyAccent() doesn't reach it. We read the
-      // shared localStorage key the main app writes, look up the
-      // accent hex from the same 6-entry table, then rewrite
-      // --frame-line / --frame-accent / --frame-bg on :root. Without
-      // this the overlay frame stayed permanently cyan no matter
-      // which colour square the user picked, and flashed bright cyan
-      // every launch.
+      // app's runtime applyAccent() doesn't reach it. Rust supplies the
+      // accent (see the channel note above), and we look up the hex from
+      // the same 6-entry table, then rewrite --frame-line / --frame-accent
+      // / --frame-bg on :root. Without this the overlay frame stayed
+      // permanently cyan no matter which colour square the user picked,
+      // and flashed bright cyan every launch.
       const ACCENTS = {
         indigo:  "#667eea",
         amber:   "#fbbf24",
@@ -298,20 +310,10 @@
           root.style.setProperty("--frame-bg", `rgba(${mR}, ${mG}, ${mB}, 0.95)`);
         }
       }
-      try {
-        applyOverlayAccent(localStorage.getItem("owllm:theme:accent") || "indigo");
-      } catch { /* localStorage blocked */ }
-      // Listen for live accent changes pushed by the main webview.
-      window.addEventListener("storage", (e) => {
-        if (e.key === "owllm:theme:accent" && e.newValue) {
-          applyOverlayAccent(e.newValue);
-        }
-      });
-      if (window.__TAURI__?.event) {
-        window.__TAURI__.event.listen("owllm:accent-changed", (ev) => {
-          if (typeof ev.payload === "string") applyOverlayAccent(ev.payload);
-        });
-      }
+      // Cold boot: injected by Rust before this script runs, read from the
+      // SQLite state mirror. Live changes: pushed by Rust via eval.
+      window.__owllmSetAccent = applyOverlayAccent;
+      applyOverlayAccent(window.__OWLLM_ACCENT__ || "indigo");
     </script>
   </body>
 </html>

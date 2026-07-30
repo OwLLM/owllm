@@ -19,7 +19,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getServerCtx } from "../core/serverContext";
-import { streamChatCompletion, providerFor, type ModelInfo } from "../agentic/dispatch";
+import { streamChatCompletion, providerFor, abortable, isAbortError, sleepAbortable, type ModelInfo } from "../agentic/dispatch";
 import { LogBox } from "../../components/LogBox";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -164,7 +164,10 @@ export default function DatasetBuilderPage() {
 
   // Resolve a usable port for the picked model — start the local server if the
   // model is servable and not already running; cloud models need no port.
-  const resolvePort = async (): Promise<number> => {
+  // Takes the run's signal so Stop lands DURING the cold model load, not just
+  // between polls: server_start can span an engine module download plus a
+  // multi-GB GGUF load, and the 90 s wait below used to sit on bare timers.
+  const resolvePort = async (signal?: AbortSignal): Promise<number> => {
     const m = models.find((x) => x.model_id === modelId);
     const provider = m?.provider ?? providerFor(modelId, models);
     type S = { running: boolean; port: number | null; model_id: string };
@@ -172,12 +175,19 @@ export default function DatasetBuilderPage() {
     if (!SERVABLE.has(provider)) return status0.port ?? 0;
     if (status0.running && status0.model_id === modelId && status0.port) return status0.port;
     addLog(`Starting local server for ${modelId}…`);
-    if (status0.running) await invoke("server_stop").catch(() => {});
-    await invoke("server_start", { modelId, ctx: getServerCtx() });
+    if (status0.running) {
+      await abortable(invoke("server_stop"), signal).catch((e) => {
+        if (isAbortError(e)) throw e;
+      });
+    }
+    await abortable(invoke("server_start", { modelId, ctx: getServerCtx() }), signal);
     for (let i = 0; i < 90; i++) {
-      if (abortRef.current?.signal.aborted) throw new Error("cancelled");
-      await new Promise((r) => setTimeout(r, 1000));
-      const s = await invoke<S>("server_status").catch(() => null);
+      if (signal?.aborted) throw new Error("cancelled");
+      await sleepAbortable(1000, signal);
+      const s = await abortable(invoke<S>("server_status"), signal).catch((e) => {
+        if (isAbortError(e)) throw e;
+        return null;
+      });
       if (s?.running && s.port && s.model_id === modelId) return s.port;
     }
     throw new Error("the local model didn't come up — start it on the Server tab, then retry.");
@@ -217,7 +227,7 @@ export default function DatasetBuilderPage() {
       if (limited.length < chunks.length) addLog(`Capping at ${limited.length}/${chunks.length} chunks (max-chunks setting).`);
 
       // 2. GENERATE
-      const port = await resolvePort();
+      const port = await resolvePort(ctrl.signal);
       addLog(`Generating with ${modelId} — up to ${pairsPerChunk} pair(s) per chunk over ${limited.length} chunk(s).`);
       let made = 0;
       for (let i = 0; i < limited.length; i++) {

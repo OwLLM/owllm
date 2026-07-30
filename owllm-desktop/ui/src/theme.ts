@@ -165,15 +165,15 @@ export function useTheme() {
   useEffect(() => {
     applyAccent(guiColor);
     saveGuiColor(accentKey);
-    // Push to the overlay-frame webview so its cyan corners flip
-    // immediately on a picker click (cold-boot is handled by the
-    // overlay's own localStorage read).
-    try {
-      const tauri = (window as any).__TAURI__;
-      if (tauri?.event?.emit) {
-        tauri.event.emit("owllm:accent-changed", accentKey);
-      }
-    } catch { /* not in Tauri ctx */ }
+    // Push to the overlay-frame webview so its corners flip immediately on a
+    // picker click. Rust relays this with `eval`; the overlay can neither
+    // receive Tauri events (no capability covers that window) nor read
+    // localStorage (binding it to the origin's storage area leaked GBs — see
+    // src-tauri/src/overlay_frame.rs). Cold boot is injected at window
+    // creation from the SQLite state mirror.
+    invoke("overlay_frame_set_accent", { accent: accentKey }).catch(() => {
+      /* overlay disabled or not in Tauri ctx */
+    });
   }, [accentKey, guiColor]);
 
   useEffect(() => {

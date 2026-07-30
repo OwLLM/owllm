@@ -4,13 +4,17 @@
      the browser looks like OwLLM, not a stock OS window, and this bar never
      covers website content. App-origin: shares localStorage with the main UI,
      so it reads the same theme/accent keys the app writes.
-     Two rows, like a normal browser: a TAB STRIP (app icon + OwLLM title +
-     one pill per open page + New tab) over a NAV BAR that leads with the open
-     site's REAL logo + name (so WhatsApp/Gmail/Drive are recognisable without
-     reading the URL) followed by back/reload/URL. The nav row is 30px taller
-     than a plain toolbar to fit that mark — browser.rs CHROME_H must match. The
-     bar background follows the app header's --bg-header recipe (70% accent
-     over #1c2244 navy — theme.ts resolveHeaderHex) so both headers match.
+     Two rows, like a normal browser: an IDENTITY STRIP that leads with the
+     app icon + OwLLM title, then the open site's REAL logo + name at a size
+     the user recognises at a glance (WhatsApp/Gmail/Drive), then one pill per
+     open page + New tab. EVERY mark in this bar is the same size — the OwLLM
+     logo, the open page, and each page in the strip whether or not it is the
+     one on screen, so an unopened page is exactly as recognisable (user spec
+     2026-07-29). That strip is 30px taller than a plain tab bar so the
+     site mark reads as the page's identity, not decoration. Under it, a THIN NAV BAR carries back/reload/URL only —
+     browser.rs CHROME_H must match the sum of both. The bar background follows
+     the app header's --bg-header recipe (70% accent over #1c2244 navy —
+     theme.ts resolveHeaderHex) so both headers match.
      Rust link: NO IPC — buttons/drag/URL entry write sentinel-tagged events
      into document.title (same channel the page bridge uses); Rust's
      on_document_title_changed on this webview acts on them. Rust pushes page
@@ -36,9 +40,12 @@
         font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       }
       #rows { display: flex; flex-direction: column; height: 100%; }
+      /* The identity row is 30px taller than a plain tab bar so the open
+         page's real logo reads as the page's identity, not a decoration
+         alongside a URL (user spec 2026-07-29). */
       #tabsrow {
-        display: flex; align-items: center; gap: 4px;
-        height: 28px; flex: none; padding: 0 4px 0 8px; box-sizing: border-box;
+        display: flex; align-items: center; gap: 8px;
+        height: 58px; flex: none; padding: 0 6px 0 10px; box-sizing: border-box;
       }
       #navrow {
         display: flex; align-items: center; gap: 6px;
@@ -46,25 +53,35 @@
         background: var(--bg-nav);
         border-bottom: 1px solid var(--border);
       }
+      /* ONE mark size everywhere in this bar — the OwLLM logo, the open page's
+         identity, and every page in the strip whether it is open or not (user
+         spec 2026-07-29). A page you are not looking at is exactly as easy to
+         recognise as the one you are. */
+      :root { --mark: 46px; --glyph: 32px; }
       /* Site identity — the open page's own logo, big enough to recognise
-         without reading the URL. */
+         without reading the URL. Lives INSIDE the identity row so the tall
+         header carries the mark itself, rather than pushing it to a
+         separate row below. Width is FIXED: a name-length change used to
+         reflow the whole strip sideways under the user's cursor. */
       #site {
-        flex: none; display: flex; align-items: center; gap: 9px;
-        max-width: 210px; min-width: 0; padding-right: 4px;
+        flex: none; display: flex; align-items: center; gap: 10px;
+        width: 250px; min-width: 0; padding: 0 6px 0 4px; box-sizing: border-box;
       }
-      #sitemark {
+      .mark {
         flex: none; display: flex; align-items: center; justify-content: center;
-        width: 38px; height: 38px; border-radius: 10px;
+        width: var(--mark); height: var(--mark); border-radius: 12px;
         background: rgba(255,255,255,0.94);
-        box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.28);
         overflow: hidden;
       }
-      #sitemark svg, #sitemark img { width: 26px; height: 26px; display: block; }
+      .mark svg, .mark img { width: var(--glyph); height: var(--glyph); display: block; }
       /* Lettermark fallback: brand colour fills the tile, initial on top. */
-      #sitemark.letter { color: #fff; font-size: 21px; font-weight: 800; }
+      .mark.letter { color: #fff; font-size: 26px; font-weight: 800; }
+      /* Brands whose standard mark is a white glyph in a coloured disc. */
+      .mark.solid { border-radius: 50%; }
       #sitename {
         min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        color: var(--fg); font-size: 13px; font-weight: 700;
+        color: var(--fg); font-size: 15px; font-weight: 700; letter-spacing: 0.2px;
       }
       .btn {
         flex: none; display: flex; align-items: center; justify-content: center;
@@ -74,38 +91,45 @@
       }
       .btn:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
       #close:hover { background: #e81123; color: #fff; }
-      #logo { flex: none; width: 16px; height: 16px; margin-right: 4px; }
+      /* The app's own logo is one of the marks, at the same size as the pages. */
+      #logo {
+        flex: none; width: var(--mark); height: var(--mark); margin-right: 6px;
+        border-radius: 12px;
+      }
       #ttl {
         flex: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
         white-space: nowrap; color: var(--fg); font-size: 12px; font-weight: 700;
       }
       #tabs {
-        display: flex; align-items: center; gap: 3px; margin: 0 2px;
-        min-width: 0; overflow: hidden; flex: none; max-width: 60%;
+        display: flex; align-items: center; gap: 6px; margin: 0 4px;
+        min-width: 0; overflow: hidden; flex: 0 1 auto;
       }
+      /* One pill per page. The mark inside never shrinks — when the strip runs
+         out of room the pills drop their title text, not their identity. */
       .tab {
-        display: flex; align-items: center; gap: 5px;
-        height: 22px; max-width: 150px; min-width: 48px;
-        padding: 0 4px 0 9px; border-radius: 7px 7px 0 0; border: none;
-        background: rgba(255,255,255,0.10); color: var(--fg-muted);
-        font-size: 11px; cursor: pointer;
+        position: relative; flex: none;
+        display: flex; align-items: center;
+        height: var(--mark); border-radius: 12px; border: none;
+        padding: 0; background: transparent; color: var(--fg-muted);
+        font-size: 11px; cursor: pointer; opacity: 0.72;
       }
-      .tab.active { background: var(--bg-nav); color: var(--fg); font-weight: 700; }
-      .tab:hover:not(.active) { background: rgba(255,255,255,0.18); }
-      .tab .tl {
-        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      }
+      .tab.active { opacity: 1; color: var(--fg); font-weight: 700; }
+      .tab.active .mark { box-shadow: 0 0 0 2px var(--fg), 0 2px 6px rgba(0,0,0,0.28); }
+      .tab:hover { opacity: 1; }
+      /* Close sits on the mark's corner so a pill stays exactly one mark wide. */
       .tab .tx {
-        flex: none; display: flex; align-items: center; justify-content: center;
-        width: 16px; height: 16px; border: none; border-radius: 4px;
-        background: transparent; color: inherit; font-size: 11px; cursor: pointer; padding: 0;
+        position: absolute; top: -3px; right: -3px;
+        display: flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border: none; border-radius: 50%;
+        background: var(--bg); color: var(--fg); font-size: 9px;
+        cursor: pointer; padding: 0; box-shadow: 0 0 0 1px var(--border);
       }
-      .tab .tx:hover { background: rgba(255,255,255,0.25); }
-      #newtab {
-        flex: none; width: 24px; height: 22px; border: none; border-radius: 6px;
-        background: transparent; color: var(--fg-muted); font-size: 14px; cursor: pointer; padding: 0;
+      .tab .tx:hover { background: #e81123; color: #fff; }
+      #newtab, #reopen {
+        flex: none; width: 28px; height: 28px; border: none; border-radius: 8px;
+        background: transparent; color: var(--fg-muted); font-size: 16px; cursor: pointer; padding: 0;
       }
-      #newtab:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
+      #newtab:hover, #reopen:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
       #url {
         flex: 1; min-width: 60px; height: 24px; border-radius: 999px;
         border: 1px solid var(--border); background: var(--bg-input);
@@ -122,8 +146,10 @@
       <div id="tabsrow">
         <img id="logo" src="app-icon.png" alt="" />
         <span id="ttl">OwLLM Browser</span>
+        <div id="site"><span id="sitemark" class="mark"></span><span id="sitename"></span></div>
         <div id="tabs"></div>
         <button id="newtab" title="New tab">+</button>
+        <button id="reopen" title="Reopen closed tab">↺</button>
         <div id="drag"></div>
         <div class="winbtns">
           <button class="btn" id="min" title="Minimize">─</button>
@@ -132,7 +158,6 @@
         </div>
       </div>
       <div id="navrow">
-        <div id="site"><span id="sitemark"></span><span id="sitename"></span></div>
         <button class="btn" id="back" title="Back">←</button>
         <button class="btn" id="reload" title="Reload">⟳</button>
         <input id="url" spellcheck="false" placeholder="Enter a URL and press Enter" />
@@ -158,8 +183,18 @@
       $("back").addEventListener("click", function () { evt("back"); });
       $("reload").addEventListener("click", function () { evt("reload"); });
       $("newtab").addEventListener("click", function () { evt("tabnew"); });
+      $("reopen").addEventListener("click", function () { evt("tabreopen"); });
       $("url").addEventListener("keydown", function (e) {
         if (e.key === "Enter" && this.value.trim()) { evt("nav", this.value.trim()); this.blur(); }
+      });
+      // Ctrl/Cmd+Shift+T is the undo every browser has trained the user to
+      // reach for. Only the chrome has focus-independent key handling here;
+      // the ↺ button is the same action for anyone who never learned it.
+      document.addEventListener("keydown", function (e) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "T" || e.key === "t")) {
+          e.preventDefault();
+          evt("tabreopen");
+        }
       });
       // Anywhere that isn't a control starts a window drag; double-click
       // toggles maximize (Rust decides which, we just report).
@@ -178,7 +213,7 @@
       { id: "google-drive", title: "Google Drive", hex: "#4285F4", hosts: ["drive.google.com"], path: "M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" },
       { id: "google-docs", title: "Google Docs", hex: "#4285F4", hosts: ["docs.google.com"], path: "M14.727 6.727H14V0H4.91c-.905 0-1.637.732-1.637 1.636v20.728c0 .904.732 1.636 1.636 1.636h14.182c.904 0 1.636-.732 1.636-1.636V6.727h-6zm-.545 10.455H7.09v-1.364h7.09v1.364zm2.727-3.273H7.091v-1.364h9.818v1.364zm0-3.273H7.091V9.273h9.818v1.363zM14.727 6h6l-6-6v6z" },
       { id: "google", title: "Google", hex: "#4285F4", hosts: ["google.com"], path: "M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z" },
-      { id: "whatsapp", title: "WhatsApp", hex: "#25D366", hosts: ["web.whatsapp.com","whatsapp.com"], path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" },
+      { id: "whatsapp", title: "WhatsApp", hex: "#25D366", hosts: ["web.whatsapp.com","whatsapp.com"], path: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z", solid: true },
       { id: "telegram", title: "Telegram", hex: "#26A5E4", hosts: ["web.telegram.org","telegram.org","t.me"], path: "M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" },
       { id: "messenger", title: "Messenger", hex: "#0866FF", hosts: ["messenger.com"], path: "M12 0C5.24 0 0 4.952 0 11.64c0 3.499 1.434 6.521 3.769 8.61a.96.96 0 0 1 .323.683l.065 2.135a.96.96 0 0 0 1.347.85l2.381-1.053a.96.96 0 0 1 .641-.046A13 13 0 0 0 12 23.28c6.76 0 12-4.952 12-11.64S18.76 0 12 0m6.806 7.44c.522-.03.971.567.63 1.094l-4.178 6.457a.707.707 0 0 1-.977.208l-3.87-2.504a.44.44 0 0 0-.49.007l-4.363 3.01c-.637.438-1.415-.317-.995-.966l4.179-6.457a.706.706 0 0 1 .977-.21l3.87 2.505c.15.097.344.094.491-.007l4.362-3.008a.7.7 0 0 1 .364-.13" },
       { id: "signal", title: "Signal", hex: "#3B45FD", hosts: ["signal.org"], path: "M12 0q-.934 0-1.83.139l.17 1.111a11 11 0 0 1 3.32 0l.172-1.111A12 12 0 0 0 12 0M9.152.34A12 12 0 0 0 5.77 1.742l.584.961a10.8 10.8 0 0 1 3.066-1.27zm5.696 0-.268 1.094a10.8 10.8 0 0 1 3.066 1.27l.584-.962A12 12 0 0 0 14.848.34M12 2.25a9.75 9.75 0 0 0-8.539 14.459c.074.134.1.292.064.441l-1.013 4.338 4.338-1.013a.62.62 0 0 1 .441.064A9.7 9.7 0 0 0 12 21.75c5.385 0 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25m-7.092.068a12 12 0 0 0-2.59 2.59l.909.664a11 11 0 0 1 2.345-2.345zm14.184 0-.664.909a11 11 0 0 1 2.345 2.345l.909-.664a12 12 0 0 0-2.59-2.59M1.742 5.77A12 12 0 0 0 .34 9.152l1.094.268a10.8 10.8 0 0 1 1.269-3.066zm20.516 0-.961.584a10.8 10.8 0 0 1 1.27 3.066l1.093-.268a12 12 0 0 0-1.402-3.383M.138 10.168A12 12 0 0 0 0 12q0 .934.139 1.83l1.111-.17A11 11 0 0 1 1.125 12q0-.848.125-1.66zm23.723.002-1.111.17q.125.812.125 1.66c0 .848-.042 1.12-.125 1.66l1.111.172a12.1 12.1 0 0 0 0-3.662M1.434 14.58l-1.094.268a12 12 0 0 0 .96 2.591l-.265 1.14 1.096.255.36-1.539-.188-.365a10.8 10.8 0 0 1-.87-2.35m21.133 0a10.8 10.8 0 0 1-1.27 3.067l.962.584a12 12 0 0 0 1.402-3.383zm-1.793 3.848a11 11 0 0 1-2.345 2.345l.664.909a12 12 0 0 0 2.59-2.59zm-19.959 1.1L.357 21.48a1.8 1.8 0 0 0 2.162 2.161l1.954-.455-.256-1.095-1.953.455a.675.675 0 0 1-.81-.81l.454-1.954zm16.832 1.769a10.8 10.8 0 0 1-3.066 1.27l.268 1.093a12 12 0 0 0 3.382-1.402zm-10.94.213-1.54.36.256 1.095 1.139-.266c.814.415 1.683.74 2.591.961l.268-1.094a10.8 10.8 0 0 1-2.35-.869zm3.634 1.24-.172 1.111a12.1 12.1 0 0 0 3.662 0l-.17-1.111q-.812.125-1.66.125a11 11 0 0 1-1.66-.125" },
@@ -230,35 +265,50 @@
       // Bundled mark first (crisp, offline, no request), then the site's own
       // favicon — the only faithful source for brands that publish no
       // redistributable mark — then a tinted initial. Never an invented icon.
-      function renderSite(url) {
-        var host = siteHost(url), mark = $("sitemark"), label = $("sitename");
+      // Paint ONE page's mark into `el`. The identity block and every pill in
+      // the strip share this, so a page you have not opened is drawn exactly
+      // like the one you are looking at. `stillWanted` guards the async favicon
+      // against landing on a mark that has since been repainted.
+      function paintMark(el, url, stillWanted) {
+        var host = siteHost(url);
         var logo = siteLogoForHost(host);
-        mark.textContent = ""; mark.className = ""; mark.style.background = "";
-        label.textContent = logo ? logo.title : host;
-        if (!host) { mark.style.background = "transparent"; return; }
+        el.textContent = ""; el.className = "mark"; el.style.background = "";
+        if (!host) { el.style.background = "transparent"; return logo; }
         if (logo && logo.path) {
+          // `solid` brands publish their glyph knocked out of a brand-colour
+          // disc (WhatsApp's white handset in the green bubble). Drawing the
+          // bare silhouette in brand colour instead is a restyled logo.
+          if (logo.solid) { el.className = "mark solid"; el.style.background = logo.hex; }
           var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
           svg.setAttribute("viewBox", "0 0 24 24");
-          svg.setAttribute("fill", logo.hex);
+          svg.setAttribute("fill", logo.solid ? "#ffffff" : logo.hex);
           var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
           p.setAttribute("d", logo.path);
-          svg.appendChild(p); mark.appendChild(svg);
-          return;
+          svg.appendChild(p); el.appendChild(svg);
+          return logo;
         }
         var tint = logo ? logo.hex : "#6b7280";
         var initial = (logo ? logo.title : host).charAt(0).toUpperCase() || "?";
         function lettermark() {
-          mark.textContent = initial; mark.className = "letter"; mark.style.background = tint;
+          el.textContent = initial; el.className = "mark letter"; el.style.background = tint;
         }
         lettermark();
         var img = new Image();
         img.onload = function () {
-          if (siteHost($("url").value) !== host) return;
-          mark.textContent = ""; mark.className = ""; mark.style.background = "rgba(255,255,255,0.94)";
-          mark.appendChild(img);
+          if (stillWanted && !stillWanted()) return;
+          el.textContent = ""; el.className = "mark"; el.style.background = "rgba(255,255,255,0.94)";
+          el.appendChild(img);
         };
         img.onerror = lettermark;
         img.src = "https://" + host + "/favicon.ico";
+        return logo;
+      }
+      function renderSite(url) {
+        var host = siteHost(url);
+        var logo = paintMark($("sitemark"), url, function () {
+          return siteHost($("url").value) === host;
+        });
+        $("sitename").textContent = logo ? logo.title : host;
       }
       // Rust → bar: current page url + title (skip the url while the user types).
       window.__owllmChromeSet = function (info) {
@@ -281,11 +331,11 @@
           for (var i = 0; i < tabs.length; i++) (function (t) {
             var pill = document.createElement("button");
             pill.className = "tab" + (t.active ? " active" : "");
-            pill.title = t.title || "";
-            var lbl = document.createElement("span");
-            lbl.className = "tl";
-            lbl.textContent = t.title || "…";
-            pill.appendChild(lbl);
+            // The mark is the pill, so the page's name lives in the tooltip.
+            pill.title = t.title || t.url || "";
+            var mark = document.createElement("span");
+            pill.appendChild(mark);
+            paintMark(mark, t.url || "");
             if (tabs.length > 1) {
               var x = document.createElement("span");
               x.className = "tx";
@@ -326,14 +376,14 @@
       // This chrome is a separate webview, so it cannot consume React context.
       // Keep its small static surface in sync through the same persisted locale.
       var CHROME_COPY = {
-        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close", "New tab", "Close tab"],
-        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭", "新标签页", "关闭标签页"],
-        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기", "새 탭", "탭 닫기"],
-        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる", "新しいタブ", "タブを閉じる"],
-        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق", "علامة تبويب جديدة", "إغلاق علامة التبويب"],
-        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi", "Nuova scheda", "Chiudi scheda"],
-        "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें"],
-        "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba"]
+        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close", "New tab", "Close tab", "Reopen closed tab"],
+        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭", "新标签页", "关闭标签页", "重新打开已关闭的标签页"],
+        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기", "새 탭", "탭 닫기", "닫은 탭 다시 열기"],
+        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる", "新しいタブ", "タブを閉じる", "閉じたタブを再度開く"],
+        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق", "علامة تبويب جديدة", "إغلاق علامة التبويب", "إعادة فتح علامة التبويب المغلقة"],
+        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi", "Nuova scheda", "Chiudi scheda", "Riapri scheda chiusa"],
+        "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें", "बंद टैब फिर से खोलें"],
+        "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba", "Reabrir aba fechada"]
       };
       function applyLanguage(language) {
         var copy = CHROME_COPY[language] || CHROME_COPY.en;
@@ -342,7 +392,7 @@
         if ($("ttl").textContent === "OwLLM Browser" || Object.keys(CHROME_COPY).some(function (key) { return $("ttl").textContent === CHROME_COPY[key][0]; })) $("ttl").textContent = copy[0];
         $("back").title = copy[1]; $("reload").title = copy[2]; $("url").placeholder = copy[3];
         $("min").title = copy[4]; $("max").title = copy[5]; $("close").title = copy[6];
-        $("newtab").title = copy[7]; closeTabTitle = copy[8];
+        $("newtab").title = copy[7]; closeTabTitle = copy[8]; $("reopen").title = copy[9];
       }
       try { applyLanguage(localStorage.getItem("owllm:language") || "en"); } catch (e) { applyLanguage("en"); }
       window.addEventListener("storage", function (e) {

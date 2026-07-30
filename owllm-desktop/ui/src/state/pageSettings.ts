@@ -30,6 +30,7 @@
 // setSetting/useSetting never change. That is the whole point of this layer.
 
 import { useEffect, useState } from "react";
+import { hotBlobKeys, readHotBlob } from "../runtime/stateMirror";
 
 export type JsonValue =
   | string
@@ -262,10 +263,13 @@ export function migratePageSettings(): void {
   //    stays device-local.
   if (!doc.mig.codeModel) {
     const PREFIX = "owllm:code:page:";
-    for (const k of lsKeys()) {
+    // These blobs live in the hot-blob store (SQLite), not localStorage — see
+    // HOT_BLOB_PREFIXES. A pre-upgrade profile may still hold them inline, so
+    // both sources are scanned. Runs after restoreStateMirror() hydrates them.
+    for (const k of [...lsKeys(), ...hotBlobKeys()]) {
       if (!k.startsWith(PREFIX)) continue;
       const pageId = k.slice(PREFIX.length);
-      const raw = lsGet(k);
+      const raw = lsGet(k) ?? readHotBlob(k);
       if (!raw) continue;
       try {
         const blob = JSON.parse(raw) as { modelId?: string; secondaryModelId?: string };

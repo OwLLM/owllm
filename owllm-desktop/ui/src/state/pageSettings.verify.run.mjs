@@ -49,9 +49,17 @@ const req = createRequire(path.join(REPO, "package.json"));
 // react is imported at module top; resolve it via the repo's node_modules.
 const Module = req("module");
 const reactPath = req.resolve("react"); // resolve ONCE, before patching (avoid recursion)
+// The legacy codeModel migration also scans the hot-blob store, because Code
+// page blobs no longer live in localStorage (see HOT_BLOB_PREFIXES). That
+// module talks to Tauri; this harness covers the localStorage half of the
+// migration, so it resolves to an empty stub. The hot-blob half is covered by
+// stateMirror.verify.run.mjs and hotBlobStorage.verify.run.mjs.
+const stubPath = path.join(TMP, "stateMirrorStub.cjs");
+fs.writeFileSync(stubPath, "exports.hotBlobKeys = () => [];\nexports.readHotBlob = () => null;\n");
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
   if (request === "react") return reactPath;
+  if (request.endsWith("runtime/stateMirror")) return stubPath;
   return origResolve.call(this, request, ...rest);
 };
 const S = req(modPath);

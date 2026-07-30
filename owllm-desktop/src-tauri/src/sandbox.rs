@@ -734,16 +734,18 @@ pub fn program_argv_unjailed(
         ],
     ))
 }
-/// Non-Windows: the sandbox model differs (bwrap/Lima share the host network
-/// namespace, so the gateway is reachable without an interop exception) —
-/// same routing as [`program_argv`].
+/// Non-Windows Browser/Solo exception: return `None` so the caller launches the
+/// host CLI directly. Linux bwrap hides the real home/config and Lima has its
+/// own loopback, so routing these roles through the isolated engine would make
+/// the authenticated host MCP gateway disappear. Ordinary roles still use
+/// [`program_argv`] and remain isolated.
 #[cfg(not(windows))]
 pub fn program_argv_unjailed(
-    cwd: Option<&str>,
-    program: &str,
-    args: &[String],
+    _cwd: Option<&str>,
+    _program: &str,
+    _args: &[String],
 ) -> Option<(String, Vec<String>)> {
-    program_argv(cwd, program, args)
+    None
 }
 
 #[cfg(windows)]

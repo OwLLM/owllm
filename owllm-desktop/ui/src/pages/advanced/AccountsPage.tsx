@@ -215,12 +215,14 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude: bare REPL — auto-type /login once it boots.
-///   * codex/kimi/grok: dedicated device-login command; PtyTerminal opens the
+///   * claude/codex/kimi/grok: dedicated login command; PtyTerminal opens the
 ///     emitted verification URL in OwLLM's browser.
 ///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
-  claude_cli: { cli: "claude", args: [], send: "/login\r" },
+  // A bare Claude REPL prints ordinary support/promotion URLs in its banner
+  // before it is ready for `/login`. Use the dedicated auth command so the
+  // terminal starts directly in the subscription OAuth flow.
+  claude_cli: { cli: "claude", args: ["auth", "login", "--claudeai"] },
   // Device-code auth avoids localhost callbacks and system-browser launches.
   // PtyTerminal opens the emitted URL in OwLLM's persistent browser instead.
   codex_cli:  { cli: "codex",  args: ["login", "--device-auth"] },
@@ -1189,23 +1191,35 @@ export default function AccountsPage() {
         return;
       }
       if (resetStaleLogin) {
-        try {
-          await invoke<string>("subscription_cli_logout", { backend: route.backend });
-          setCardState(route.key, {
-            connected: false,
-            reauthRequired: false,
-            remediation: null,
-            testText: "",
-            testOk: null,
-          });
-          logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
-        } catch (e: any) {
-          logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
-          return;
+        // Dedicated login commands can replace a stale token transactionally.
+        // Keep the old Claude/Codex/Gemini credential until that replacement
+        // succeeds: deleting it first turns any browser/OAuth failure into a
+        // logout and was the reason Claude credentials disappeared here.
+        //
+        // Kimi is the exception: its CLI resumes a broken session instead of
+        // entering device auth, so its established recovery path still needs
+        // the local credential removed before login.
+        if (route.backend === "kimi_cli") {
+          try {
+            await invoke<string>("subscription_cli_logout", { backend: route.backend });
+            setCardState(route.key, {
+              connected: false,
+              reauthRequired: false,
+              remediation: null,
+              testText: "",
+              testOk: null,
+            });
+            logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
+          } catch (e: any) {
+            logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
+            return;
+          }
+        } else {
+          logInfo(route.backend, `Keeping the existing ${provider.name} credential until the replacement sign-in succeeds.`);
         }
       }
       const hint: Record<string, string> = {
-        claude_cli: "auto-running /login — complete the browser sign-in.",
+        claude_cli: "starting subscription sign-in — complete it in the browser.",
         codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
         kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",

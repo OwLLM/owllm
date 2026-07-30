@@ -43,13 +43,30 @@ const js = ts.transpileModule(rawSrc, {
 }).outputText
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./_tauri.js")')
   .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")')
-  .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")');
+  .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")')
+  .replace(/require\("\.\/stateMirror"\)/g, 'require("./_stateMirror.js")');
+
+// Hot-blob prefixes come from the REAL stateMirror source so this stub cannot
+// drift from the app's list.
+const HOT_PREFIXES = [
+  ...(readLF(path.join(SRC, "runtime", "stateMirror.ts"))
+    .split("export const HOT_BLOB_PREFIXES")[1] ?? "").split("]")[0].matchAll(/"([^"]+)"/g),
+].map((m) => m[1]);
 
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nbsync-"));
 fs.writeFileSync(path.join(TMP, "vaultSync.js"), js);
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
 fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
+fs.writeFileSync(path.join(TMP, "_stateMirror.js"),
+  `const P = ${JSON.stringify(HOT_PREFIXES)};\n` +
+  "const m = new Map();\n" +
+  "module.exports = {\n" +
+  "  hotBlobKeys: () => [...m.keys()],\n" +
+  "  readHotBlob: (k) => (m.has(k) ? m.get(k) : null),\n" +
+  "  writeHotBlob: (k, v) => { m.set(k, String(v)); },\n" +
+  "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n" +
+  "};\n");
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 
 const reqTmp = createRequire(path.join(TMP, "vaultSync.js"));

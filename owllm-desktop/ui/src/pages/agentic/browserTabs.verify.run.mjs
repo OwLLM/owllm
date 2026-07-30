@@ -64,12 +64,12 @@ check(/fn destroy_browser_windows[\s\S]{0,900}tabs\.order\.clone\(\)[\s\S]{0,500
   "stopping or rebuilding closes every platform-specific tab window");
 check(browserRs.includes("__owllmTabsSet"),
   "Rust pushes the live tab list into the chrome strip");
-// 28px tab strip + a 68px identity/nav row — 30px taller than the original
-// toolbar so the open site's real logo is recognisable at a glance (user spec
-// 2026-07-28). Unchanged intent: the height Rust reserves for the chrome
+// 58px identity strip (30px taller than a plain tab bar, so the open page's
+// real logo reads as identity, not decoration — user spec 2026-07-29) over a
+// 38px nav toolbar. Unchanged intent: the height Rust reserves for the chrome
 // webview must match the bar the HTML actually draws.
 check(browserRs.includes("const CHROME_H: f64 = 96.0"),
-  "chrome bar is two rows (28px tab strip + 68px identity/nav row)");
+  "chrome bar is two rows (58px identity strip + 38px nav toolbar)");
 check(/fn content_webview_for_tab[\s\S]{0,500}tab_id\.or_else\(active_tab_id\)[\s\S]{0,300}tab_label\(id\)/.test(browserRs),
   "agent commands resolve an explicit tab id before falling back to the active tab");
 check(/pub fn browser_cmd[\s\S]{0,500}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
@@ -129,12 +129,45 @@ check(chromeHtml.includes("0.70 * r + 0.30 * 28") && chromeHtml.includes("0.70 *
   "chrome bar colour uses the app header's --bg-header recipe (70% accent over #1c2244)");
 check(chromeHtml.includes("__owllmTabsSet"),
   "chrome renders the tab strip Rust pushes");
+// The site tile (open page's real logo + name) must live INSIDE the identity
+// strip that grew by 30px — not in a separate row below (user spec 2026-07-29,
+// after a regression put it in #navrow beneath the header).
+const tabsRowStart = chromeHtml.indexOf('<div id="tabsrow">');
+const navRowStart = chromeHtml.indexOf('<div id="navrow">');
+const siteAt = chromeHtml.indexOf('<div id="site">');
+check(tabsRowStart !== -1 && navRowStart !== -1 && tabsRowStart < navRowStart,
+  "chrome structure has an identity strip above the nav toolbar");
+check(siteAt !== -1 && siteAt > tabsRowStart && siteAt < navRowStart,
+  "the big site tile renders inside the identity strip, not in a row below it");
+check(chromeHtml.slice(navRowStart).match(/id="site"|id="sitemark"|id="sitename"/) === null,
+  "the nav toolbar never carries the site tile again (regression guard)");
+check(/#tabsrow\s*\{[^}]*height:\s*58px/.test(chromeHtml),
+  "identity strip is the 58px height CHROME_H reserves for it");
+// The tile size is now ONE variable shared by the app logo, the open page and
+// every pill in the strip, so an unopened page is drawn just as big (user spec
+// 2026-07-29). Assert the size AND that the tile actually takes it.
+check(/--mark:\s*46px/.test(chromeHtml)
+  && /\.mark\s*\{[^}]*width:\s*var\(--mark\)[^}]*height:\s*var\(--mark\)/.test(chromeHtml),
+  "site logo tile is drawn at the promised big size");
+check(/#logo\s*\{[^}]*width:\s*var\(--mark\)/.test(chromeHtml),
+  "the OwLLM logo is drawn at that same size");
+check(/paintMark\(mark,\s*t\.url/.test(chromeHtml),
+  "every page in the strip carries its own mark, open or not");
+// A name-length change used to resize the identity block and slide the whole
+// strip sideways under the user's cursor between clicks.
+check(/#site\s*\{[^}]*width:\s*\d+px/.test(chromeHtml),
+  "the identity block is fixed width so the strip never reflows");
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");
+check(chromeHtml.includes('id="reopen"') && chromeHtml.includes('evt("tabreopen")')
+      && /ctrlKey \|\| e\.metaKey[\s\S]*?shiftKey[\s\S]*?tabreopen/.test(chromeHtml),
+  "the chrome exposes Reopen closed tab by button and Ctrl/Cmd+Shift+T");
+check(/"tabreopen"\s*=>[\s\S]*?browser_reopen_closed/.test(browserRs),
+  "the chrome reopen action reaches the native closed-tab history");
 const copyRows = chromeHtml.match(/"(en|zh-CN|ko|ja|ar|it|hi|pt)":\s*\[[^\]]+\]/g) || [];
-check(copyRows.length === 8 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 9 + 2),
-  "all eight languages localize the chrome incl. New tab / Close tab");
+check(copyRows.length === 8 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 10 + 2),
+  "all eight languages localize the chrome incl. New / Close / Reopen tab");
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

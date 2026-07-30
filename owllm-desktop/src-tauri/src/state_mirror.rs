@@ -115,6 +115,26 @@ fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+/// Read ONE mirrored localStorage value, by its un-prefixed key.
+///
+/// The overlay-frame webview needs its accent at cold boot but must NOT touch
+/// `localStorage` to get it: any localStorage access binds that document to
+/// Blink's per-origin storage area, which then replicates EVERY same-origin
+/// mutation — including the multi-megabyte Code-page session blobs — into that
+/// renderer, where nothing drains them (see the note in `overlay_frame.rs`).
+/// The overlay also has no IPC capability, so it cannot ask the main webview.
+/// Rust reads the value here instead and injects it as an init script.
+pub fn mirrored_value(key: &str) -> Option<String> {
+    let path = db_path()?;
+    let conn = crate::projects::open_state_db(&path).ok()?;
+    conn.query_row(
+        "SELECT value FROM kv WHERE key = ?1",
+        [format!("{LS_PREFIX}{key}")],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 fn load_sync(path: &std::path::Path) -> Result<Vec<MirrorEntry>, String> {
     let conn = crate::projects::open_state_db(path)?;
     ensure_kv(&conn)?;

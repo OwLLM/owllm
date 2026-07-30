@@ -20,8 +20,9 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import { useChatSession } from "../../runtime/useChatSession";
+import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
@@ -281,12 +282,12 @@ function savePages(pages: CodePageMeta[]): void {
 // whose absolute paths must never become runnable here.
 function savedPageMetasForLocalProject(project: Pick<ProjectCatalogRow, "location">): CodePageMeta[] {
   const catalog = new Map(loadPages().map((page) => [page.id, page]));
-  return savedPageIdsForLocalProject(localStorage, project.location, PAGE_SESSION_PREFIX)
+  return savedPageIdsForLocalProject(hotBlobStorage, project.location, PAGE_SESSION_PREFIX)
     .map((id) => {
       const known = catalog.get(id);
       if (known) return known;
       try {
-        const state = JSON.parse(localStorage.getItem(pageSessionKey(id)) || "{}") as Partial<CodeState>;
+        const state = JSON.parse(readHotBlob(pageSessionKey(id)) || "{}") as Partial<CodeState>;
         return { id, title: recoveredPageTitle(state) };
       } catch {
         return { id, title: "Recovered page" };
@@ -351,7 +352,7 @@ function closeStaleTimer(s: CodeState): CodeState {
 }
 function loadPageSession(pageId: string): CodeState | null {
   try {
-    const raw = localStorage.getItem(pageSessionKey(pageId));
+    const raw = readHotBlob(pageSessionKey(pageId));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
     const st = closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
@@ -368,8 +369,10 @@ function loadPageSession(pageId: string): CodeState | null {
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
   if (!s) return;
-  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false }, dropImages)); }
-  catch { /* quota / unavailable */ }
+  // NOT localStorage: this ~1 MB blob is rewritten every 250 ms while a stream
+  // runs, and Blink copies every localStorage mutation into every same-origin
+  // renderer — see HOT_BLOB_PREFIXES in runtime/stateMirror.
+  writeHotBlob(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false }, dropImages));
   // Mirror the model choice into the sync-ready settings layer (see load).
   // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
   // so this neither persists an empty pick nor churns on unrelated state saves.
@@ -377,7 +380,7 @@ function savePageSession(pageId: string, s: CodeState | null | undefined): void 
   setSetting(scope.page(pageId), SettingKey.secondaryModel, s.secondaryModelId || undefined);
 }
 function dropPageSession(pageId: string): void {
-  try { localStorage.removeItem(pageSessionKey(pageId)); } catch { /* best effort */ }
+  deleteHotBlob(pageSessionKey(pageId));
 }
 
 // ---- Per-project persistence (the thing that was missing) ------------------
@@ -424,12 +427,12 @@ const DEFAULT_JUSTCHAT: JustChatState = { chats: [], chatId: "", draft: "", busy
 let justChatAbort: AbortController | null = null;
 function loadChats(): ChatThread[] {
   try {
-    const a = JSON.parse(localStorage.getItem(CHATS_KEY) || "[]");
+    const a = JSON.parse(readHotBlob(CHATS_KEY) || "[]");
     return Array.isArray(a) ? a.filter((c) => c && typeof c.id === "string" && Array.isArray(c.messages)) : [];
   } catch { return []; }
 }
 function saveChats(chats: ChatThread[]): void {
-  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages)); } catch { /* private mode / quota */ }
+  writeHotBlob(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages));
 }
 /// Bucket threads by recency for the conversation sidebar, newest first. A pure
 /// read of the existing thread list — the sidebar is a second VIEW of
@@ -506,7 +509,7 @@ function codeSessionKey(ws: string): string {
 function loadCodeSession(ws: string): CodeState | null {
   if (!ws) return null;
   try {
-    const raw = localStorage.getItem(codeSessionKey(ws));
+    const raw = readHotBlob(codeSessionKey(ws));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
     return closeStaleTimer({
@@ -521,9 +524,7 @@ function loadCodeSession(ws: string): CodeState | null {
 function saveCodeSession(s: CodeState | null | undefined): void {
   const root = (s?.projectRoot || s?.workspace || "").trim();
   if (!s || !root) return; // no folder → nothing to save (onboarding state)
-  try {
-    localStorage.setItem(codeSessionKey(root), JSON.stringify({ ...s, busy: false }, dropImages));
-  } catch { /* quota / unavailable — best effort */ }
+  writeHotBlob(codeSessionKey(root), JSON.stringify({ ...s, busy: false }, dropImages));
 }
 
 function getCodeRecents(): string[] {
@@ -545,9 +546,9 @@ function rememberCodeProject(ws: string): string[] {
 
 function forgetCodeProject(ws: string): string[] {
   const next = getCodeRecents().filter((x) => x !== ws);
+  deleteHotBlob(codeSessionKey(ws));
   try {
     localStorage.setItem(CODE_RECENTS_KEY, JSON.stringify(next));
-    localStorage.removeItem(codeSessionKey(ws));
     if ((localStorage.getItem(CODE_LAST_KEY) || "") === ws) localStorage.removeItem(CODE_LAST_KEY);
     patchRecentMeta(ws, {}); // drops name/pin for the forgotten project
   } catch { /* best effort */ }
@@ -665,13 +666,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const chatHydratedRef = useRef(false);
   if (!chatHydratedRef.current) {
     chatHydratedRef.current = true;
-    let activeThread = "";
-    try { activeThread = localStorage.getItem(CHAT_ACTIVE_KEY) || ""; } catch { /* best effort */ }
+    const activeThread = readHotBlob(CHAT_ACTIVE_KEY) || "";
     chatRuntime.hydrateIfIdle(CHAT_SID, { ...DEFAULT_JUSTCHAT, chats: loadChats(), chatId: activeThread });
     chatRuntime.registerPersister(CHAT_SID, (p) => {
       const jc = p as JustChatState;
       saveChats(jc.chats);
-      try { localStorage.setItem(CHAT_ACTIVE_KEY, jc.chatId); } catch { /* best effort */ }
+      writeHotBlob(CHAT_ACTIVE_KEY, jc.chatId);
     });
   }
   const jc: JustChatState = chatSess.payload ?? DEFAULT_JUSTCHAT;
@@ -1783,15 +1783,28 @@ function CodeWorkspace({ pageId, onTitle }: {
   }, [isolatedNow, sbox?.available, isolation.enabled, wslStat]);
 
   // Start (or reuse) the llama-server for the chosen model; return its port.
-  async function ensureServer(id: string): Promise<number | null> {
+  //
+  // Takes the CALLER's signal rather than reading abortRef: this runs BEFORE
+  // the turn installs its controller, so abortRef still held the PREVIOUS
+  // run's — an already-aborted one made the wait exit instantly, and a live
+  // one made Stop unreachable for the whole 60 s load. Every await is raced
+  // against the signal so Stop lands the moment it's pressed.
+  async function ensureServer(id: string, signal?: AbortSignal): Promise<number | null> {
     const s = await invoke<ServerStatus>("server_status").catch(() => null);
     if (s && s.running && s.model_id === id && s.port) return s.port;
     setStatus(`Starting ${id}…`);
-    await invoke("server_start", { modelId: id, ctx: getServerCtx() });
-    for (let i = 0; i < 120 && !abortRef.current?.signal.aborted; i++) {
-      const st = await invoke<ServerStatus>("server_status").catch(() => null);
+    // An abort propagates out as an AbortError rather than becoming a null
+    // port: callers turn "no port" into a red "engine didn't come up" bubble,
+    // which is a lie when the user simply pressed Stop. Their existing
+    // isAbortError/`err.name === "AbortError"` branches already unwind quietly.
+    await abortable(invoke("server_start", { modelId: id, ctx: getServerCtx() }), signal);
+    for (let i = 0; i < 120; i++) {
+      const st = await abortable(invoke<ServerStatus>("server_status"), signal).catch((e) => {
+        if (isAbortError(e)) throw e;
+        return null;
+      });
       if (st && st.running && st.port) return st.port;
-      await new Promise((r) => setTimeout(r, 500));
+      await sleepAbortable(500, signal);
     }
     return null;
   }
@@ -2055,6 +2068,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     // tools, and the system prompt forbids edits/state-changing commands.
     const chatOnly = agentMode === "chat";
     const roTools = ["read_file", "list_dir", "grep", "glob", "web_search", "web_fetch"];
+    // Keep unrestricted explicit across the Tauri boundary. `undefined` is
+    // unrestricted for local tools, but isolated subscription CLIs need the
+    // `all` sentinel to receive the unjailed host-browser relay.
+    const runtimeTools = chatOnly ? roTools : ["all"];
     // Project rules ride every turn — the same directives the agentic team
     // follows (empty string when the scope has none yet).
     // Shared agent-browser awareness: refresh (cheap window probe) so the coder
@@ -2067,18 +2084,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(modelId);
+      const port = await ensureServer(modelId, signal);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
-        allowedTools: chatOnly ? roTools : undefined,
+        allowedTools: runtimeTools,
         getSteer: drainSteer,
       });
     }
-    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
+    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, runtimeTools, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
   // Second-agent turn: same backend as the primary chat, but streams into the
@@ -2102,17 +2119,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
     showSecondaryMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(secModel);
+      const port = await ensureServer(secModel, signal);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
         userContent: enrichedUser, temperature: 0.3,
         signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
+        allowedTools: ["all"],
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, undefined, undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -2526,7 +2544,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
       setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
-        const port = await ensureServer(modelId);
+        const port = await ensureServer(modelId, ctrl.signal);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
         await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);

@@ -61,10 +61,10 @@ const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
 
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
-/// a 28px tab strip over a 68px identity/nav row. The nav row is 30px taller
-/// than a plain toolbar so it can carry the open site's real logo at a size the
-/// user recognises at a glance (user spec 2026-07-28) — keep in step with
-/// browser-chrome.html's #navrow.
+/// a 58px identity strip (30px taller than a plain tab bar) that carries the
+/// open site's real logo at a size the user recognises at a glance, over a
+/// 38px nav toolbar with back/reload/URL (user spec 2026-07-29) — keep in
+/// step with browser-chrome.html's #tabsrow.
 const CHROME_H: f64 = 96.0;
 
 /// X where parked (inactive) tab webviews live. Tauri has no cross-platform
@@ -103,12 +103,27 @@ fn tab_label(id: u64) -> String {
     format!("{CONTENT_LABEL}-{id}")
 }
 
+/// True when `id` is the active tab. **NEVER BLOCKS.**
+///
+/// This is reached from `attach_tab`'s `on_page_load` — a NATIVE WebView2 /
+/// WKWebView / WebKitGTK callback that runs ON THE UI THREAD. Waiting here for a
+/// Rust worker that holds TABS deadlocks the event thread and freezes every OwLLM
+/// window (observed live on v0.9.64: main thread parked in
+/// `Mutex::lock_contended` inside `browser::attach_tab::{closure#2}`, under a
+/// WebView2 `WebResourceRequested` handler — the app hung the moment a project
+/// opened the agent browser).
+///
+/// Both call sites only gate a COSMETIC chrome-bar refresh, so on contention we
+/// answer `false` and let the next title/`sync_tabs` event repaint — the same
+/// trade `capture_reply` already makes for REPLIES. A stale URL bar for one load
+/// is invisible; a frozen app is not.
 fn is_active_tab(id: u64) -> bool {
-    TABS.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map(|t| t.active == id)
-        .unwrap_or(false)
+    let active_is = |t: &Option<Tabs>| t.as_ref().map(|t| t.active == id).unwrap_or(false);
+    match TABS.try_lock() {
+        Ok(guard) => active_is(&guard),
+        Err(TryLockError::Poisoned(p)) => active_is(&p.into_inner()),
+        Err(TryLockError::WouldBlock) => false,
+    }
 }
 
 fn active_tab_id() -> Option<u64> {
@@ -420,6 +435,14 @@ const BRIDGE_JS: &str = r##"
     var st = getComputedStyle(el);
     return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
   }
+  function scrollableRegion(el, axis) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    var st = getComputedStyle(el);
+    if (axis !== "x" && el.scrollHeight > el.clientHeight + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowY)) return true;
+    return axis !== "y" && el.scrollWidth > el.clientWidth + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowX);
+  }
   var SEL = "a,button,input,select,textarea,[role=button],[role=link]," +
             "[role=checkbox],[role=radio],[role=tab],[role=menuitem]," +
             "[role=option],[contenteditable=true],[onclick]";
@@ -441,8 +464,33 @@ const BRIDGE_JS: &str = r##"
   function reindex() {
     var els = [];
     var primary = document.querySelectorAll(SEL);
-    for (var i = 0; i < primary.length && els.length < 150; i++) {
+    // Reserve a few indexes for scroll regions. Virtualized chat/mail/contact
+    // lists often expose no useful control beyond the items currently mounted.
+    for (var i = 0; i < primary.length && els.length < 140; i++) {
       if (visible(primary[i])) els.push(primary[i]);
+    }
+    var scrollCandidates = [];
+    for (var si = 0; si < els.length; si++) {
+      for (var parent = els[si].parentElement; parent; parent = parent.parentElement) {
+        if (scrollableRegion(parent) && scrollCandidates.indexOf(parent) === -1) {
+          scrollCandidates.push(parent);
+        }
+      }
+    }
+    var regions = document.querySelectorAll("main,section,div,ul,ol,[role=list],[role=grid],[role=feed],[role=log]");
+    for (var sr = 0; sr < regions.length && sr < 5000; sr++) {
+      if (visible(regions[sr]) && scrollableRegion(regions[sr]) &&
+          scrollCandidates.indexOf(regions[sr]) === -1) scrollCandidates.push(regions[sr]);
+    }
+    // Prefer the innermost regions: scrolling a chat list is useful; scrolling
+    // its full-page wrapper usually is not.
+    scrollCandidates.sort(function (a, b) {
+      if (a.contains(b)) return 1;
+      if (b.contains(a)) return -1;
+      return 0;
+    });
+    for (var sc = 0; sc < scrollCandidates.length && els.length < 150; sc++) {
+      if (els.indexOf(scrollCandidates[sc]) === -1) els.push(scrollCandidates[sc]);
     }
     if (els.length < 150) {
       var extra = document.querySelectorAll("div,span,li");
@@ -460,6 +508,11 @@ const BRIDGE_JS: &str = r##"
                el.getAttribute("name") || el.value || el.innerText || el.textContent || "").trim();
     txt = txt.replace(/\s+/g, " ").slice(0, 80);
     var extra = tag === "input" ? ("[" + (el.getAttribute("type") || "text") + "]") : "";
+    if (scrollableRegion(el)) {
+      var axes = (scrollableRegion(el, "x") ? "x" : "") + (scrollableRegion(el, "y") ? "y" : "");
+      extra += "[scrollable-" + axes + " " + Math.round(el.scrollLeft) + "," +
+               Math.round(el.scrollTop) + "]";
+    }
     return "#" + tag + extra + (txt ? " " + txt : "");
   }
   function snapshot() {
@@ -471,6 +524,64 @@ const BRIDGE_JS: &str = r##"
   }
   function elAt(i) { var e = (window.__owllmEls || [])[i]; if (!e) throw new Error("no element at index " + i); return e; }
   function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+  function textInputEvent(el, type, text, cancelable) {
+    var event;
+    try {
+      event = new InputEvent(type, {
+        bubbles: true, cancelable: !!cancelable, composed: true,
+        inputType: "insertText", data: text
+      });
+    } catch (e) {
+      event = new Event(type, { bubbles: true, cancelable: !!cancelable, composed: true });
+    }
+    return el.dispatchEvent(event);
+  }
+  function setNativeTextValue(el, text) {
+    var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, "value");
+    if (setter && setter.set) setter.set.call(el, text); else el.value = text;
+    textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function replaceEditableText(el, text) {
+    var selection = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    var emitted = false;
+    var mark = function () { emitted = true; };
+    el.addEventListener("input", mark, { once: true });
+    var inserted = false;
+    try { inserted = document.execCommand("insertText", false, text); } catch (e) {}
+    if (!inserted) {
+      range.deleteContents();
+      range.insertNode(document.createTextNode(text));
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    if (!emitted) textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function nearestScrollable(el, axis) {
+    for (var node = el; node; node = node.parentElement) {
+      if (scrollableRegion(node, axis)) return node;
+    }
+    return null;
+  }
+  function bestScrollable(axis) {
+    var active = nearestScrollable(document.activeElement, axis);
+    if (active) return active;
+    var els = window.__owllmEls || reindex();
+    var best = null, area = -1;
+    for (var i = 0; i < els.length; i++) {
+      if (!visible(els[i]) || !scrollableRegion(els[i], axis)) continue;
+      var r = els[i].getBoundingClientRect();
+      if (r.width * r.height > area) { best = els[i]; area = r.width * r.height; }
+    }
+    return best || document.scrollingElement || document.documentElement;
+  }
   // A bare el.click() dispatches ONLY a 'click' event — it skips the hover and
   // pointer/mouse-down events a real cursor emits. Menus that open on hover or
   // pointerdown (React/Radix/Headless language switchers, custom dropdowns)
@@ -520,10 +631,46 @@ const BRIDGE_JS: &str = r##"
         }
         case "fill": {
           var f = elAt(p.index); f.focus();
-          if (f.isContentEditable) { f.textContent = p.text; }
-          else { f.value = p.text; }
-          fire(f, "input"); fire(f, "change");
+          if (f.isContentEditable) replaceEditableText(f, String(p.text == null ? "" : p.text));
+          else if (f.tagName === "INPUT" || f.tagName === "TEXTAREA") {
+            setNativeTextValue(f, String(p.text == null ? "" : p.text));
+          } else {
+            throw new Error("element at index " + p.index + " is not a text field");
+          }
           return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
+        }
+        case "scroll": {
+          var direction = /^(up|down|left|right)$/.test(p.direction) ? p.direction : "down";
+          var axis = direction === "left" || direction === "right" ? "x" : "y";
+          var target = null;
+          if (p.index !== undefined && p.index !== null) {
+            var indexed = elAt(p.index);
+            target = scrollableRegion(indexed, axis) ? indexed : nearestScrollable(indexed, axis);
+            if (!target) throw new Error("no " + axis + "-scrollable region at or above index " + p.index);
+          } else {
+            target = bestScrollable(axis);
+          }
+          var viewport = axis === "x" ? target.clientWidth : target.clientHeight;
+          var amount = Number(p.amount);
+          if (!isFinite(amount) || amount <= 0) amount = Math.max(120, Math.round(viewport * 0.8));
+          amount = Math.min(5000, Math.max(20, amount));
+          if (direction === "up" || direction === "left") amount = -amount;
+          var before = axis === "x" ? target.scrollLeft : target.scrollTop;
+          if (target.scrollBy) {
+            target.scrollBy(axis === "x" ? { left: amount, behavior: "auto" } : { top: amount, behavior: "auto" });
+          } else if (axis === "x") {
+            target.scrollLeft += amount;
+          } else {
+            target.scrollTop += amount;
+          }
+          return setTimeout(function () {
+            var after = axis === "x" ? target.scrollLeft : target.scrollTop;
+            var maximum = axis === "x"
+              ? Math.max(0, target.scrollWidth - target.clientWidth)
+              : Math.max(0, target.scrollHeight - target.clientHeight);
+            report(reqId, "scrolled " + direction + " from " + Math.round(before) + " to " +
+              Math.round(after) + " of " + Math.round(maximum) + "\n\n" + snapshot());
+          }, 250);
         }
         case "fill_device_code": {
           // GitHub's Device Flow gives OWLLM the short code before the page is
@@ -1025,8 +1172,18 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
 // ---------------------------------------------------------------------------
 
 /// Project whose session the live tab set belongs to. `None` = tabs opened
-/// outside any project (agent one-offs), which are deliberately not persisted.
+/// outside any project — the personal agent's desk, an agent one-off, the
+/// browser tools. Those are the user's logged-in pages too, so they persist to
+/// the reserved file below instead of being thrown away.
 static SESSION_OWNER: Mutex<Option<String>> = Mutex::new(None);
+
+/// Session file for tabs that belong to no project. The leading `_` cannot
+/// collide with a project's file: `session_file_stem` trims those off.
+const PERSONAL_SESSION_STEM: &str = "_personal";
+
+/// How many closed pages stay reopenable. Deep enough to undo a wrong ✕ or a
+/// whole row of them, short enough that the file stays a few KB.
+const CLOSED_HISTORY_MAX: usize = 25;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BrowserSession {
@@ -1040,6 +1197,10 @@ pub struct BrowserSession {
     /// does not resurrect a window they had put away on purpose.
     #[serde(default)]
     pub open: bool,
+    /// Recently closed pages, oldest first. Closing a tab rewrites `tabs`
+    /// without it, so without this the page is gone the instant it is closed.
+    #[serde(default)]
+    pub closed: Vec<String>,
 }
 
 /// Project ids come from our own database, but the session file name is still
@@ -1058,8 +1219,7 @@ fn session_file_stem(project_id: &str) -> String {
     stem.trim_matches('_').chars().take(120).collect()
 }
 
-fn session_path(project_id: &str) -> Option<std::path::PathBuf> {
-    let stem = session_file_stem(project_id);
+fn session_path(stem: &str) -> Option<std::path::PathBuf> {
     if stem.is_empty() {
         return None;
     }
@@ -1068,15 +1228,27 @@ fn session_path(project_id: &str) -> Option<std::path::PathBuf> {
     Some(dir.join(format!("{stem}.json")))
 }
 
-fn read_session(project_id: &str) -> BrowserSession {
-    session_path(project_id)
+/// File the tabs on screen belong to. Falls back to the personal desk, so
+/// there is no state in which the browser forgets what was open.
+fn live_session_stem() -> String {
+    SESSION_OWNER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_deref()
+        .map(session_file_stem)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| PERSONAL_SESSION_STEM.to_string())
+}
+
+fn read_session(stem: &str) -> BrowserSession {
+    session_path(stem)
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<BrowserSession>(&raw).ok())
         .unwrap_or_default()
 }
 
-fn write_session(project_id: &str, session: &BrowserSession) {
-    if let (Some(path), Ok(raw)) = (session_path(project_id), serde_json::to_string(session)) {
+fn write_session(stem: &str, session: &BrowserSession) {
+    if let (Some(path), Ok(raw)) = (session_path(stem), serde_json::to_string(session)) {
         let _ = std::fs::write(path, raw);
     }
 }
@@ -1084,55 +1256,65 @@ fn write_session(project_id: &str, session: &BrowserSession) {
 /// Mirror the live tab set into the owning project's session file. Called
 /// wherever the strip changes (open/close/activate/title, i.e. navigation).
 fn persist_session(app: &tauri::AppHandle) {
-    let Some(owner) = SESSION_OWNER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    else {
-        return;
-    };
+    let stem = live_session_stem();
     let live = list_tabs(app);
-    let tabs: Vec<String> = live
+    // Blank/loading tabs are dropped, so the remembered index MUST be counted
+    // over the kept tabs. Taking it from the unfiltered list shifted it by one
+    // per dropped tab and then fell back to 0 — restoring onto the first page
+    // instead of the one that was in front.
+    let kept: Vec<&BrowserTabInfo> = live
         .iter()
-        .map(|tab| tab.url.clone())
-        .filter(|url| !url.is_empty() && url != "about:blank")
+        .filter(|tab| !tab.url.is_empty() && tab.url != "about:blank")
         .collect();
-    if tabs.is_empty() {
+    if kept.is_empty() {
         // A window being destroyed reports no tabs. Keeping the previous
         // session is the whole point: an accidental close must be undoable.
         return;
     }
-    let active = live
-        .iter()
-        .position(|tab| tab.active)
-        .filter(|index| *index < tabs.len())
-        .unwrap_or(0);
+    let tabs: Vec<String> = kept.iter().map(|tab| tab.url.clone()).collect();
+    let active = kept.iter().position(|tab| tab.active).unwrap_or(0);
+    // The reopen history outlives the strip: this runs on every tab mutation,
+    // so rebuilding the record from scratch would erase it on the very next
+    // navigation after a close.
+    let closed = read_session(&stem).closed;
     write_session(
-        &owner,
+        &stem,
         &BrowserSession {
             tabs,
             active,
             open: true,
+            closed,
         },
     );
+}
+
+/// Remember a page the user just closed so it can be reopened. Called before
+/// the strip is rewritten without it.
+fn remember_closed_tab(url: &str) {
+    if url.is_empty() || url == "about:blank" {
+        return;
+    }
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
+    session.closed.retain(|seen| seen != url);
+    session.closed.push(url.to_string());
+    let overflow = session.closed.len().saturating_sub(CLOSED_HISTORY_MAX);
+    if overflow > 0 {
+        session.closed.drain(..overflow);
+    }
+    write_session(&stem, &session);
 }
 
 /// The user put the browser away on purpose (✕ / browser_stop / last tab
 /// closed). Keep the pages, but do not reopen the window by itself next boot.
 fn mark_session_closed() {
-    let Some(owner) = SESSION_OWNER
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-    else {
-        return;
-    };
-    let mut session = read_session(&owner);
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
     if session.tabs.is_empty() {
         return;
     }
     session.open = false;
-    write_session(&owner, &session);
+    write_session(&stem, &session);
 }
 
 /// Push the strip to the chrome bar and mirror it to disk. Every tab mutation
@@ -1164,7 +1346,7 @@ pub fn browser_session_bind(app: tauri::AppHandle, project_id: String) -> Result
     Ok(json!({
         "busy": owned_by_other,
         "live": has_tabs && !owned_by_other,
-        "session": read_session(&id),
+        "session": read_session(&session_file_stem(&id)),
     })
     .to_string())
 }
@@ -1430,6 +1612,14 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
                 std::thread::spawn(move || close_tab(&app, id));
             }
         }
+        "tabreopen" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = browser_reopen_closed(app) {
+                    eprintln!("[browser] reopen closed tab: {e}");
+                }
+            });
+        }
         _ => {}
     }
 }
@@ -1636,6 +1826,7 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
         return Err("browser has no tab session".to_string());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
     #[cfg(target_os = "linux")]
     if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
         return Ok(id);
@@ -1740,6 +1931,13 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
     let target_window = app
         .get_window(BROWSER_LABEL)
         .or_else(|| app.get_window(&tab_label(id)));
+    // Read the page BEFORE the strip loses it, and outside the TABS lock —
+    // list_tabs takes that same lock.
+    let closing_url = list_tabs(app)
+        .into_iter()
+        .find(|tab| tab.id == id)
+        .map(|tab| tab.url)
+        .unwrap_or_default();
     let next = {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         let Some(tabs) = guard.as_mut() else { return };
@@ -1770,6 +1968,9 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         tabs.active = next;
         next
     };
+    // Closing the last tab keeps the whole set in `tabs` (it is persisted
+    // above, before teardown), so only a mid-strip ✕ needs the undo record.
+    remember_closed_tab(&closing_url);
     if app.get_webview(CHROME_LABEL).is_some() {
         if let Some(wv) = app.get_webview(&tab_label(id)) {
             let _ = wv.close();
@@ -1841,6 +2042,13 @@ fn push_tabs(app: &tauri::AppHandle) {
                 json!({
                     "id": id,
                     "title": tabs.titles.get(id).cloned().unwrap_or_default(),
+                    // The strip draws every page's own brand mark, open or not,
+                    // so each pill needs its url — not just the active one's.
+                    "url": app
+                        .get_webview(&tab_label(*id))
+                        .and_then(|wv| wv.url().ok())
+                        .map(|url| url.to_string())
+                        .unwrap_or_default(),
                     "active": *id == tabs.active,
                 })
             })
@@ -2234,6 +2442,35 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
 /// such as "Get a token" must return immediately even when the destination is
 /// a slow login page. Agent browser tools continue to use `browser_cmd`, which
 /// waits for the document because they need to interact with its contents.
+fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
+    let has_param = |name: &str| {
+        url.query_pairs()
+            .any(|(key, value)| key == name && !value.trim().is_empty())
+    };
+    match (url.host_str(), url.path()) {
+        (Some("claude.ai"), "/oauth/authorize") => {
+            let missing = ["client_id", "redirect_uri", "code_challenge"]
+                .into_iter()
+                .filter(|name| !has_param(name))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "incomplete Claude authorization URL (missing {}); waiting for the CLI to print the complete URL",
+                    missing.join(", ")
+                ));
+            }
+        }
+        (Some("www.kimi.com"), "/code/authorize_device") if !has_param("user_code") => {
+            return Err(
+                "incomplete Kimi authorization URL (missing user_code); waiting for the CLI to print the complete URL"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -2245,6 +2482,7 @@ fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) urls can open in the OwLLM browser".to_string());
     }
+    validate_provider_auth_url(&parsed)?;
     Ok(parsed)
 }
 
@@ -2292,7 +2530,9 @@ fn parse_navigation_url(raw_url: &str) -> Result<tauri::Url, String> {
     } else {
         format!("https://{value}")
     };
-    full.parse().map_err(|e| format!("bad url {full:?}: {e}"))
+    let parsed = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
+    Ok(parsed)
 }
 
 #[tauri::command(async)]
@@ -2334,6 +2574,52 @@ pub fn browser_open_tab(
         json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
             .to_string(),
     )
+}
+
+/// Reopen the page that was closed last — the ↺ button and Ctrl+Shift+T.
+#[tauri::command(async)]
+pub fn browser_reopen_closed(app: tauri::AppHandle) -> Result<String, String> {
+    let stem = live_session_stem();
+    let mut session = read_session(&stem);
+    let Some(url) = session.closed.pop() else {
+        return Err("no recently closed page to reopen".to_string());
+    };
+    // Take it off the record first: a page that fails to reopen must not sit at
+    // the head of the history and swallow every later press.
+    write_session(&stem, &session);
+    browser_open_tab(app, url, Some(true))
+}
+
+/// Reopen every page this browser had open. Tabs that belong to no project
+/// have no project screen to restore them from, so this is the only way back
+/// to a desk of logged-in apps after the window was closed.
+#[tauri::command(async)]
+pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
+    let stem = live_session_stem();
+    let session = read_session(&stem);
+    if session.tabs.is_empty() {
+        return Err("no saved browser pages to reopen".to_string());
+    }
+    let already: std::collections::HashSet<String> =
+        list_tabs(&app).into_iter().map(|tab| tab.url).collect();
+    let mut reopened = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (index, url) in session.tabs.iter().enumerate() {
+        if already.contains(url) {
+            continue;
+        }
+        // One dead page must not cost the user the rest of the desk.
+        match browser_open_tab(app.clone(), url.clone(), Some(index == session.active)) {
+            Ok(_) => reopened += 1,
+            Err(e) => failed.push(format!("{url}: {e}")),
+        }
+    }
+    Ok(json!({
+        "reopened": reopened,
+        "tabs": session.tabs.len(),
+        "failed": failed,
+    })
+    .to_string())
 }
 
 #[tauri::command(async)]
@@ -2769,6 +3055,39 @@ mod tests {
             assert!(
                 parse_web_url(bad).is_err(),
                 "{bad:?} must not open as web content"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_provider_authorization_urls_never_reach_the_browser() {
+        let claude_prefix = "https://claude.ai/oauth/authorize?code=true&client_id=owllm";
+        let claude_complete = concat!(
+            "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
+            "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
+            "&code_challenge=pkce"
+        );
+        let kimi_prefix = "https://www.kimi.com/code/authorize_device?user_cod";
+        let kimi_complete = "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
+
+        for incomplete in [claude_prefix, kimi_prefix] {
+            assert!(
+                parse_web_url(incomplete).is_err(),
+                "{incomplete} must not open through the global web-link route"
+            );
+            assert!(
+                parse_navigation_url(incomplete).is_err(),
+                "{incomplete} must not open through browser navigation"
+            );
+        }
+        for complete in [claude_complete, kimi_complete] {
+            assert!(
+                parse_web_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
+            );
+            assert!(
+                parse_navigation_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
             );
         }
     }

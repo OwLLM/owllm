@@ -83,6 +83,24 @@ fs.writeFileSync(
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText,
 );
+// vaultSync reads/writes hot blobs (keys that deliberately never touch
+// localStorage). Back the stub with a real map and take the prefix list from
+// the REAL stateMirror source, so this stub cannot drift from the app.
+const HOT_PREFIXES = [
+  ...(read(path.join(SRC, "runtime", "stateMirror.ts"))
+    .split("export const HOT_BLOB_PREFIXES")[1] ?? "").split("]")[0].matchAll(/"([^"]+)"/g),
+].map((m) => m[1]);
+fs.writeFileSync(
+  path.join(runtimeDir, "stateMirror.js"),
+  `const P = ${JSON.stringify(HOT_PREFIXES)};\n` +
+    "const m = new Map();\n" +
+    "module.exports = {\n" +
+    "  hotBlobKeys: () => [...m.keys()],\n" +
+    "  readHotBlob: (k) => (m.has(k) ? m.get(k) : null),\n" +
+    "  writeHotBlob: (k, v) => { m.set(k, String(v)); },\n" +
+    "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n" +
+    "};\n",
+);
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
 
 function storage() {

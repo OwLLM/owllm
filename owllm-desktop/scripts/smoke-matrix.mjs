@@ -111,18 +111,24 @@ function runStatic() {
 function runHarnesses() {
   console.log("\nH) Layer-1 harnesses (control-flow verifiers)");
   const dir = path.join(APP, "ui/src/pages/agentic");
-  const tsc = path.join(APP, "node_modules/typescript/lib/typescript.js");
-  if (!fs.existsSync(tsc)) {
-    record("H", "all *.verify.run.mjs", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
-    return;
-  }
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".verify.run.mjs")).sort()) {
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".verify.run.mjs")).sort();
+  const dependencyFree = new Set(["organizationProfile.verify.run.mjs"]);
+  const runHarness = (f) => {
     const t0 = Date.now();
     const r = spawnSync(process.execPath, [path.join(dir, f)], { encoding: "utf8", timeout: 120_000 });
     const ok = r.status === 0;
     const tail = ((r.stdout || "") + (r.stderr || "")).trim().split(/\r?\n/).slice(-1)[0] || "";
     record("H", f, ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);
+  };
+
+  for (const f of files.filter((f) => dependencyFree.has(f))) runHarness(f);
+
+  const tsc = path.join(APP, "node_modules/typescript/lib/typescript.js");
+  if (!fs.existsSync(tsc)) {
+    record("H", "TypeScript-dependent *.verify.run.mjs", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
+    return;
   }
+  for (const f of files.filter((f) => !dependencyFree.has(f))) runHarness(f);
 }
 
 // ---------------------------------------- T: undefined-identifier sweep ----

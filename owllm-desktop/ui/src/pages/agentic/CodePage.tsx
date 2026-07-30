@@ -23,6 +23,7 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { requiresManagedLocalServer } from "./peerCatalogue";
 import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
@@ -2084,8 +2085,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(modelId, signal);
-      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      const managedHere = requiresManagedLocalServer(modelId, provider);
+      const port = managedHere ? await ensureServer(modelId, signal) : 0;
+      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
@@ -2119,8 +2121,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
     showSecondaryMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(secModel, signal);
-      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      const managedHere = requiresManagedLocalServer(secModel, provider);
+      const port = managedHere ? await ensureServer(secModel, signal) : 0;
+      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
         userContent: enrichedUser, temperature: 0.3,
@@ -2544,8 +2547,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
       setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
-        const port = await ensureServer(modelId, ctrl.signal);
-        if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+        const managedHere = requiresManagedLocalServer(modelId, provider);
+        const port = managedHere ? await ensureServer(modelId, ctrl.signal) : 0;
+        if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
         await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       } else {

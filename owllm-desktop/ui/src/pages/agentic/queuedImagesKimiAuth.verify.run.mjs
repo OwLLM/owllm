@@ -66,6 +66,13 @@ try {
     firstCompleteAuthUrl('visit https://www "\r\n') === null
       && firstCompleteAuthUrl("visit http://localhost:8080/auth \r\n")
         === "http://localhost:8080/auth");
+  check("ordinary banner links cannot consume the one automatic auth-tab open",
+    firstCompleteAuthUrl(
+      "Learn more: https://support.claude.com/en/articles/promotion \r\n"
+        + "Authorize: https://claude.ai/oauth/authorize?client_id=owllm \r\n",
+    ) === "https://claude.ai/oauth/authorize?client_id=owllm");
+  check("a support link alone is never treated as an authorization URL",
+    firstCompleteAuthUrl("Help: https://support.claude.com/en \r\n") === null);
   check("a complete URL is never glued onto the next log line",
     firstCompleteAuthUrl('{"url":"https://example.com/auth?code=ok"}\r\nnext-line-token\r\n')
       === "https://example.com/auth?code=ok");

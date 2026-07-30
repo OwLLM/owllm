@@ -215,12 +215,14 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude: bare REPL — auto-type /login once it boots.
-///   * codex/kimi/grok: dedicated device-login command; PtyTerminal opens the
+///   * claude/codex/kimi/grok: dedicated login command; PtyTerminal opens the
 ///     emitted verification URL in OwLLM's browser.
 ///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
-  claude_cli: { cli: "claude", args: [], send: "/login\r" },
+  // A bare Claude REPL prints ordinary support/promotion URLs in its banner
+  // before it is ready for `/login`. Use the dedicated auth command so the
+  // terminal starts directly in the subscription OAuth flow.
+  claude_cli: { cli: "claude", args: ["auth", "login", "--claudeai"] },
   // Device-code auth avoids localhost callbacks and system-browser launches.
   // PtyTerminal opens the emitted URL in OwLLM's persistent browser instead.
   codex_cli:  { cli: "codex",  args: ["login", "--device-auth"] },
@@ -1205,7 +1207,7 @@ export default function AccountsPage() {
         }
       }
       const hint: Record<string, string> = {
-        claude_cli: "auto-running /login — complete the browser sign-in.",
+        claude_cli: "starting subscription sign-in — complete it in the browser.",
         codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
         kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",

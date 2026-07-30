@@ -71,6 +71,11 @@ check(
     && browser.includes('case "auth_complete"')
     && browser.includes("Authentication completed successfully"),
 );
+check(
+  "Claude reconnect starts the dedicated subscription auth flow",
+  accounts.includes('claude_cli: { cli: "claude", args: ["auth", "login", "--claudeai"] }')
+    && !accounts.includes('claude_cli: { cli: "claude", args: [], send: "/login\\r" }'),
+);
 
 if (failed) {
   console.error(`accountRecovery: ${failed} check(s) failed`);

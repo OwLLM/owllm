@@ -11,6 +11,21 @@ function hasRoutableHost(url: URL): boolean {
   return /\.[a-z]{2,}$/i.test(host);
 }
 
+// Login CLIs also print ordinary links in banners, release notes, upgrade
+// notices, and errors. Opening the first arbitrary URL is unsafe and, for
+// Claude Code, allowed a promotional support.claude.com link to consume the
+// one automatic browser open before `/login` printed the real OAuth URL.
+// Require an authentication-shaped path or OAuth query before opening it.
+function isAuthenticationUrl(url: URL): boolean {
+  const path = url.pathname.toLowerCase();
+  const authPath = /(?:^|\/)(?:oauth2?|cai)(?:\/|$)/.test(path)
+    || /(?:^|\/)(?:auth|authorize|authorization|device|login)(?:\/|$)/.test(path)
+    || path === KIMI_DEVICE_PATH;
+  const authQuery = ["client_id", "code_challenge", "redirect_uri", "response_type", "user_code"]
+    .some((key) => Boolean(url.searchParams.get(key)?.trim()));
+  return authPath || authQuery;
+}
+
 function isCompleteAuthUrl(raw: string): boolean {
   let url: URL;
   try {
@@ -22,7 +37,7 @@ function isCompleteAuthUrl(raw: string): boolean {
   if (url.origin === KIMI_DEVICE_ORIGIN && url.pathname === KIMI_DEVICE_PATH) {
     return Boolean(url.searchParams.get("user_code")?.trim());
   }
-  return true;
+  return isAuthenticationUrl(url);
 }
 
 const MAX_WRAPPED_LINES = 8;

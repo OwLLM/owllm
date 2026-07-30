@@ -52,6 +52,7 @@ import { isolationBadge } from "../agentic/isolationBadge";
 import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, type Attachment, type HistoryItem } from "../agentic/dispatch";
+import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
@@ -704,7 +705,8 @@ export default function ChatPage() {
     // with the model picker, which offers subscription + API models.
     const wantedProvider = providerFor(wantedModelId, availableModels);
     const isLocalProvider = wantedProvider === "local" || wantedProvider === "tuned";
-    if (wantedModelId && !isLocalProvider) {
+    const managedHere = requiresManagedLocalServer(wantedModelId, wantedProvider);
+    if (wantedModelId && (!isLocalProvider || !managedHere)) {
       const priorC = colMsgs(col.id);
       const historyC: HistoryItem[] = priorC
         .filter((m) => m.role === "user" || m.role === "assistant")

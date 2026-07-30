@@ -106,6 +106,7 @@ import {
   projectWorkspaceBlock,
   providerFor as providerForShared,
 } from "./dispatch";
+import { requiresManagedLocalServer } from "./peerCatalogue";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
@@ -10403,6 +10404,7 @@ export function AgentsPage({
     const orchKeyForModel = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? "orchestrator") : "orchestrator";
     const supModelId = modelFor(orchKeyForModel);
     const supProvider = providerFor(supModelId);
+    const supNeedsManagedServer = requiresManagedLocalServer(supModelId, supProvider);
 
     // Echo the user message into the orchestrator's buffer too so the
     // right-pane Reply tab reads as a conversation thread, not just
@@ -10419,7 +10421,7 @@ export function AgentsPage({
     // automatically when the user sends a message; no manual Server-
     // tab dance". Cloud models (claude-*, gpt-*) skip this block;
     // their dispatch hits api.anthropic.com / api.openai.com.
-    if (supProvider === "local") {
+    if (supNeedsManagedServer) {
       const alreadyOk =
         serverState.running &&
         serverState.model_id === supModelId &&
@@ -10457,7 +10459,7 @@ export function AgentsPage({
     // ensureLocalServer call above. Pull a fresh status so the port
     // we hand to streamChatCompletion is the just-started server's
     // port, not whatever was set when this handler started.
-    const freshServerState = supProvider === "local"
+    const freshServerState = supNeedsManagedServer
       ? await invoke<ServerStatus>("server_status").catch(() => serverState)
       : serverState;
     console.log("[onSupSend] about to dispatch", {
@@ -10954,7 +10956,7 @@ export function AgentsPage({
     || "").trim();
   const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
   const dockNeedsLoad =
-    dockProvider === "local" &&
+    requiresManagedLocalServer(dockModelId, dockProvider) &&
     dockModelId.length > 0 &&
     !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
   const dockLoadModel = async () => {
@@ -11136,19 +11138,20 @@ export function AgentsPage({
     const orchModelId = effectiveModelFor(runtimeOrch);
     // "tuned" models live in LLM/fine_tuned/ and are served by the
     // same llama-server, so they need the local server up too.
-    const isLocallyServed = (p: string) => p === "local" || p === "tuned";
-    const needsLocal = isLocallyServed(providerFor(orchModelId))
-      || runtimeTeam.agents.some(a => isLocallyServed(providerFor(effectiveModelFor(a))));
+    const isManagedLocalModel = (id: string) =>
+      requiresManagedLocalServer(id, providerFor(id));
+    const needsLocal = isManagedLocalModel(orchModelId)
+      || runtimeTeam.agents.some(a => isManagedLocalModel(effectiveModelFor(a)));
     if (needsLocal) {
       // Decide which model the local server should be running. The
       // orchestrator's model wins; if it's not local we look for any
       // locally-served agent in the team. A blank model means "we
       // can't infer which weights to load" — that's user error.
       const localCandidates: string[] = [];
-      if (isLocallyServed(providerFor(orchModelId))) localCandidates.push(orchModelId);
+      if (isManagedLocalModel(orchModelId)) localCandidates.push(orchModelId);
       for (const a of runtimeTeam.agents) {
         const id = effectiveModelFor(a);
-        if (id && isLocallyServed(providerFor(id))) localCandidates.push(id);
+        if (id && isManagedLocalModel(id)) localCandidates.push(id);
       }
       // Fallback chain so Send always works when local is needed:
       //   1. Explicit pick (per-agent / team-default / orchestrator).
@@ -11157,11 +11160,12 @@ export function AgentsPage({
       //   3. First servable local/tuned model in the registry — auto-
       //      pick so a fresh team with no model_id assigned still runs.
       let wantedLocal = localCandidates[0]?.trim() || "";
-      if (!wantedLocal && serverState.model_id && isLocallyServed(providerFor(serverState.model_id))) {
+      if (!wantedLocal && serverState.model_id && isManagedLocalModel(serverState.model_id)) {
         wantedLocal = serverState.model_id;
       }
       if (!wantedLocal) {
-        const fallback = models.find(m => isLocallyServed(m.provider) && m.port != null);
+        const fallback = models.find(m =>
+          requiresManagedLocalServer(m.model_id, m.provider) && m.port != null);
         if (fallback) wantedLocal = fallback.model_id;
       }
       if (!wantedLocal) {

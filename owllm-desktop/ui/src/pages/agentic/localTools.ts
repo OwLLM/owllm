@@ -281,7 +281,7 @@ export async function refreshBrowserState(): Promise<void> {
     "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
     "read them, and click/fill/select to complete tasks and forms. These tools are ALREADY in your " +
     "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_tabs, browser_tab_select, browser_tab_close, browser_navigate, " +
-    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
+    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_scroll, browser_select, " +
     "browser_press, browser_device — OR the same names prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
     "Look in your tools for any name containing 'browser_' and invoke it. IF (and only if) you are the Claude " +
     "Code CLI and don't see them, they may be deferred — surface them with ToolSearch query 'browser'. On Codex " +
@@ -289,7 +289,9 @@ export async function refreshBrowserState(): Promise<void> {
     "already callable, so just call them. DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
     "browser_open returns a stable tab ID; pass tab_id to later actions so the user's active tab is never hijacked. " +
-    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see.";
+    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see. " +
+    "For chat, mail, contacts, and other long histories, use the site's search first; use browser_scroll on an indexed " +
+    "scrollable region as the fallback, snapshot after each move, and stop only when found or the reported position no longer changes.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
     if (st && st.running) {
@@ -1528,11 +1530,26 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_fill",
     aliases: ["fill", "type_text", "browser_type", "fill_input"],
     description:
-      "Type text into the input/textarea element at the given index from the latest " +
-      "browser_snapshot. Snapshot first to get the index.",
+      "Type text into the input, textarea, or contenteditable element at the given " +
+      "index from the latest browser_snapshot. Emits the events required by controlled " +
+      "React/Vue web apps. Snapshot first to get the index.",
     args: [
       { name: "index", required: true, description: "Input element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
       { name: "text", required: true, description: "The text to type into the field.", aliases: ["value", "content", "input", "str"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
+    ],
+  },
+  {
+    name: "browser_scroll",
+    aliases: ["scroll", "scroll_page", "scroll_list", "scroll_history"],
+    description:
+      "Scroll a virtualized list, message history, mail list, or page. Pass an element " +
+      "index to scroll that region (or its scrollable ancestor); omit it to use the " +
+      "focused or largest visible scroll region. The result includes a fresh snapshot.",
+    args: [
+      { name: "direction", required: false, description: "up, down, left, or right (default: down).", aliases: ["dir"] },
+      { name: "amount", required: false, description: "CSS pixels to scroll (default: about 80% of the region).", aliases: ["pixels", "distance", "px"] },
+      { name: "index", required: false, description: "Scrollable region or child element index from browser_snapshot.", aliases: ["idx", "i", "element"] },
       { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
     ],
   },
@@ -2193,6 +2210,18 @@ async function executeToolCallInner(
       }
       case "browser_fill": {
         const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text, tab_id: call.args.tab_id ?? null } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_scroll": {
+        const result = await invoke<string>("browser_cmd", {
+          action: "scroll",
+          params: {
+            direction: call.args.direction ?? "down",
+            amount: call.args.amount == null ? null : Number(call.args.amount),
+            index: call.args.index == null ? null : Number(call.args.index),
+            tab_id: call.args.tab_id ?? null,
+          },
+        });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_press": {

@@ -20,6 +20,7 @@ tool_allowlist:
   - browser_click
   - browser_fill
   - browser_press
+  - browser_scroll
   - browser_select
   - browser_get_text
   - browser_back
@@ -55,7 +56,12 @@ system_prompt: |
     3. browser_click / browser_fill / browser_select / browser_press to interact,
        then browser_snapshot AGAIN to see the result. browser_get_text for the
        readable page text.
-    4. Report what you actually observed — real text, real element labels, the
+    4. For mail, chat, contacts, and other long or virtualized histories, use the
+       app's search field first. If the item/history is not mounted yet, use
+       browser_scroll on the indexed scrollable list (or omit index for the
+       focused/largest region), snapshot again, and repeat until found or the
+       reported scroll position stops changing.
+    5. Report what you actually observed — real text, real element labels, the
        real outcome. Never invent page content you did not read from a snapshot.
 
   The browser window is SHARED with the user, but tabs are independently addressable:

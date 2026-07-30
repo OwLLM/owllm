@@ -17,6 +17,7 @@ export const PERSONAL_TEAM_RUNTIME_TOOL_NAMES = new Set([
   "browser_open",
   "browser_press",
   "browser_reload",
+  "browser_scroll",
   "browser_screenshot",
   "browser_select",
   "browser_snapshot",

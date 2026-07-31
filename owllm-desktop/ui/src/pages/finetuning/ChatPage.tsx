@@ -222,7 +222,7 @@ function statusLabel(status?: ChatMsg["status"]) {
   return "Info";
 }
 
-function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: boolean, isLast: boolean) {
+function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: boolean, isLast: boolean, workspace?: string) {
   const isUser = m.role === "user";
   const sender = isUser ? "You" : m.role === "assistant" ? `Model ${colId}` : "System";
   const accent = isUser ? "#7aa2ff" : LABEL_TINT[colId];
@@ -257,6 +257,7 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
         content={m.content}
         thinking={m.thinking}
         ts={m.ts}
+        workspace={workspace}
       />
     </div>
   );
@@ -1637,7 +1638,7 @@ export default function ChatPage() {
                             ? "Selected — server will start when you pick model A."
                             : "Pick a model above to start a server."}
                     </div>
-                  ) : colMsgs(col.id).map((m, i) => renderChatMessage(m, i, col.id, colBusy(col.id), i === colMsgs(col.id).length - 1) || (
+                  ) : colMsgs(col.id).map((m, i) => renderChatMessage(m, i, col.id, colBusy(col.id), i === colMsgs(col.id).length - 1, scratchDir || undefined) || (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, letterSpacing: 0.5,

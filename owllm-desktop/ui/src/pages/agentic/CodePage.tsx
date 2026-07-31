@@ -2865,7 +2865,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               {chatMsgs.map((m, i) => {
                 const isUser = m.role === "user";
                 return (
-                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
+                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} workspace={chatScratchRef.current || undefined} />
                 );
               })}
             </div>
@@ -3601,6 +3601,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                   thinking={m.thinking}
                   ts={m.ts}
                   images={m.images}
+                  workspace={workspace || undefined}
                 />
                 {canForward && (
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
@@ -3683,6 +3684,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       thinking={m.thinking}
                       ts={m.ts}
                       images={m.images}
+                      workspace={workspace || undefined}
                     />
                     {canForwardToPrimary && (
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>

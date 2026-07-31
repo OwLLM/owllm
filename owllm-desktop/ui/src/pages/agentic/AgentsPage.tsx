@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
+import { safeMarkdownUrlTransform } from "../../components/documentLinks";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
@@ -2581,6 +2582,7 @@ function AgentChatTile({
                 content={m.text}
                 ts={m.ts}
                 images={m.images}
+                workspace={projectCwd || undefined}
               />
             );
           })
@@ -4961,6 +4963,7 @@ function MarkdownBody({ text }: { text: string }) {
     <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeMarkdownUrlTransform}
         components={{
           // Inline `code` → small monospace pill; fenced ```code``` →
           // panel with optional language label across the top edge.
@@ -5014,7 +5017,7 @@ function MarkdownBody({ text }: { text: string }) {
 // sender + generating/done indicator + timestamp, markdown when finished,
 // plain pre-wrap while streaming. `isStreaming` is the live in-flight
 // reply (passed by the caller from supSendBusy && last entry).
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false) {
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false, workspace?: string) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
   const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
@@ -5036,6 +5039,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         content={m.text}
         ts={m.ts}
         images={m.images}
+        workspace={workspace}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -5079,7 +5083,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
 // tool-result → expandable ToolEventCard (terminal-styled for shell), and
 // a normal reply → ChatBubble. Uses the SAME shared components as ChatPage
 // (no fork). `isStreaming` marks the live in-flight reply.
-function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false) {
+function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false, workspace?: string) {
   if (m.kind === "thinking") {
     return <div key={`u-${m.seq ?? i}`}><ThinkingBlock text={m.text} /></div>;
   }
@@ -5122,7 +5126,7 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
     );
   }
   // dispatch directives + plain replies → normal chat bubble.
-  return renderReplyEntry(m, i, "", orchName, isStreaming);
+  return renderReplyEntry(m, i, "", orchName, isStreaming, workspace);
 }
 
 // (renderThoughtEntry removed — the Thought / Tool / Full Chat tabs now all go
@@ -5550,6 +5554,7 @@ function OrchestratorPane({
   selectedAgent, activeAgent,
   team, isSuperUser,
   projectId, directives, onDirectivesChanged,
+  projectCwd,
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
   needsLoad, loadingModel, onLoadModel,
@@ -5566,6 +5571,7 @@ function OrchestratorPane({
   isSuperUser: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   /// Super-User chat — feeds the User Input sub-tab's HISTORY view
@@ -6003,7 +6009,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={thoughtWin} noun="reasoning entries" />
-            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName))}
+            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
@@ -6016,7 +6022,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={toolsWin} noun="tool calls" />
-            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName))}
+            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
@@ -6034,7 +6040,7 @@ function OrchestratorPane({
               // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
               // Absolute index preserved so the streaming flag still targets the
               // real last entry after the window slice.
-              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1)
+              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1, projectCwd)
             )}
           </>)}
         </div>
@@ -6103,6 +6109,7 @@ function RightColumnTabs(props: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
@@ -6271,6 +6278,7 @@ function RightColumnTabs(props: {
           team={props.team}
           isSuperUser={tab === "super"}
           projectId={props.projectId}
+          projectCwd={props.projectCwd}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
           supChat={props.supChat}
@@ -13944,6 +13952,7 @@ export function AgentsPage({
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
             projectId={selectedProjectId}
+            projectCwd={runCwd || undefined}
             models={models}
             accountsStatus={accountsStatus}
             serverState={serverState}

@@ -1188,7 +1188,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Create a NEW file or fully rewrite an existing one. Parent dirs are " +
       "created automatically. Use this when writing fresh code / configs / " +
-      "READMEs that don't exist yet.",
+      "READMEs that don't exist yet. When the user asks you to prepare a " +
+      "document, save it in the workspace and include a Markdown link such as " +
+      "[Open report](./report.md) in the final answer; OWLLM can preview, edit, " +
+      "and download that link.",
     args: [
       { name: "path", required: true, description: "Absolute or project-relative file path.", aliases: ["file", "filename", "file_path", "filepath"] },
       { name: "content", required: true, description: "The full file contents to write.", aliases: ["contents", "text", "data", "body"] },

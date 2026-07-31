@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
+import { safeMarkdownUrlTransform } from "../../components/documentLinks";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
@@ -22,6 +23,7 @@ import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
+import CreationLaunchpad from "./CreationLaunchpad";
 import {
   environmentPromptBlock,
   parseProjectEnvironment,
@@ -2585,6 +2587,7 @@ function AgentChatTile({
                 content={m.text}
                 ts={m.ts}
                 images={m.images}
+                workspace={projectCwd || undefined}
               />
             );
           })
@@ -4965,6 +4968,7 @@ function MarkdownBody({ text }: { text: string }) {
     <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeMarkdownUrlTransform}
         components={{
           // Inline `code` → small monospace pill; fenced ```code``` →
           // panel with optional language label across the top edge.
@@ -5018,7 +5022,7 @@ function MarkdownBody({ text }: { text: string }) {
 // sender + generating/done indicator + timestamp, markdown when finished,
 // plain pre-wrap while streaming. `isStreaming` is the live in-flight
 // reply (passed by the caller from supSendBusy && last entry).
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false) {
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false, workspace?: string) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
   const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
@@ -5040,6 +5044,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         content={m.text}
         ts={m.ts}
         images={m.images}
+        workspace={workspace}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -5083,7 +5088,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
 // tool-result → expandable ToolEventCard (terminal-styled for shell), and
 // a normal reply → ChatBubble. Uses the SAME shared components as ChatPage
 // (no fork). `isStreaming` marks the live in-flight reply.
-function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false) {
+function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false, workspace?: string) {
   if (m.kind === "thinking") {
     return <div key={`u-${m.seq ?? i}`}><ThinkingBlock text={m.text} /></div>;
   }
@@ -5126,7 +5131,7 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
     );
   }
   // dispatch directives + plain replies → normal chat bubble.
-  return renderReplyEntry(m, i, "", orchName, isStreaming);
+  return renderReplyEntry(m, i, "", orchName, isStreaming, workspace);
 }
 
 // (renderThoughtEntry removed — the Thought / Tool / Full Chat tabs now all go
@@ -5554,6 +5559,7 @@ function OrchestratorPane({
   selectedAgent, activeAgent,
   team, isSuperUser,
   projectId, directives, onDirectivesChanged,
+  projectCwd,
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
   needsLoad, loadingModel, onLoadModel,
@@ -5570,6 +5576,7 @@ function OrchestratorPane({
   isSuperUser: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   /// Super-User chat — feeds the User Input sub-tab's HISTORY view
@@ -6007,7 +6014,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={thoughtWin} noun="reasoning entries" />
-            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName))}
+            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
@@ -6020,7 +6027,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={toolsWin} noun="tool calls" />
-            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName))}
+            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
@@ -6038,7 +6045,7 @@ function OrchestratorPane({
               // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
               // Absolute index preserved so the streaming flag still targets the
               // real last entry after the window slice.
-              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1)
+              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1, projectCwd)
             )}
           </>)}
         </div>
@@ -6107,6 +6114,7 @@ function RightColumnTabs(props: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
@@ -6275,6 +6283,7 @@ function RightColumnTabs(props: {
           team={props.team}
           isSuperUser={tab === "super"}
           projectId={props.projectId}
+          projectCwd={props.projectCwd}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
           supChat={props.supChat}
@@ -9148,6 +9157,18 @@ export function AgentsPage({
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
   const [projectHubOpen, setProjectHubOpen] = useState(false);
+  const [hubPrompt, setHubPrompt] = useState(() => {
+    try {
+      const value = sessionStorage.getItem("owllm:agentic-launch-intent") ?? "";
+      sessionStorage.removeItem("owllm:agentic-launch-intent");
+      return value;
+    } catch {
+      return "";
+    }
+  });
+  const [hubKind, setHubKind] = useState<"web" | "research" | "assistant">("web");
+  const [newProjectIntent, setNewProjectIntent] = useState("");
+  const [newProjectKind, setNewProjectKind] = useState("");
   const [projectMaterializing, setProjectMaterializing] = useState(false);
   const [projectMaterializeError, setProjectMaterializeError] = useState("");
   const [browserReopenBusy, setBrowserReopenBusy] = useState(false);
@@ -9199,7 +9220,18 @@ export function AgentsPage({
       setProjectMaterializing(false);
     }
   };
-  const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
+  const onNewProject = () => {
+    setNewProjectIntent("");
+    setNewProjectKind("");
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
+  const createFromLaunchpad = () => {
+    setNewProjectIntent(hubPrompt.trim());
+    setNewProjectKind(hubKind);
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
   const onProjectCreated = async (
     row: ProjectRow,
     kickoff: {
@@ -13611,6 +13643,8 @@ export function AgentsPage({
           resolvedTeamLabel={activeTeamTemplate?.display ?? null}
           onResetTeam={resetTeamToTemplate}
           defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          initialIntent={newProjectIntent}
+          initialKindKey={newProjectKind}
           existingNames={existingProjectNames}
           onCreated={onProjectCreated}
           project={selectedProject}
@@ -13628,24 +13662,47 @@ export function AgentsPage({
           onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
         />
         <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
-          <div style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 280 }}>
-              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.6, textTransform: "uppercase" }}>
-                Agentic project command center
-              </div>
-              <h1 style={{ margin: "7px 0 5px", color: "var(--fg-strong)", fontSize: "clamp(27px,4vw,44px)", lineHeight: 1.05 }}>
-                GitHub carries the project. This PC carries its folder.
-              </h1>
-              <div style={{ color: "var(--fg-muted)", maxWidth: 760, lineHeight: 1.6, fontSize: 13.5 }}>
-                Chats, team memory and project rules can follow your account. An absolute folder never does.
-                Projects from another computer stay ghosted until their repository is cloned locally.
+          <CreationLaunchpad
+            eyebrow="Agentic creation space"
+            title={<>Turn an idea into a <em>working outcome.</em></>}
+            subtitle="Tell OWLLM what success looks like. It will prepare a focused team, a durable workspace, and the right starting workflow."
+            prompt={hubPrompt}
+            placeholder={
+              hubKind === "research"
+                ? "What should the team investigate, compare, or explain?"
+                : hubKind === "assistant"
+                  ? "What should your assistant organize, remember, or handle?"
+                  : "Describe the product, website, or software outcome you want…"
+            }
+            submitLabel="Prepare project"
+            selectedMode={hubKind}
+            onModeChange={(mode) => setHubKind(mode as "web" | "research" | "assistant")}
+            onPromptChange={setHubPrompt}
+            onSubmit={createFromLaunchpad}
+            modes={[
+              { id: "web", icon: "◇", label: "Build a product", detail: "Website, app, software or a new digital product", badge: "Popular" },
+              { id: "research", icon: "⌕", label: "Research", detail: "A sourced investigation with specialist review" },
+              { id: "assistant", icon: "✦", label: "Personal assistant", detail: "A lasting workspace for plans, drafts and follow-up" },
+            ]}
+            actions={[
+              { icon: "⌁", label: "Custom project", detail: "See every project recipe and team", onClick: onNewProject },
+              { icon: "⌘", label: "Coding", detail: "Open the focused Coding workspace", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "code" } })) },
+              { icon: "◫", label: "Teams", detail: "Browse and customize agent teams", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "studio" } })) },
+            ]}
+            status={<span>Local-first · private by default · any connected model</span>}
+          />
+
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 850 }}>Continue a project</div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 11.5, marginTop: 3 }}>
+                Local projects open immediately. Synced projects can be cloned onto this computer.
               </div>
             </div>
             <button onClick={onNewProject} style={{
-              height: 44, padding: "0 18px", border: "none", borderRadius: 12,
-              background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 850, cursor: "pointer",
-              boxShadow: "0 0 26px rgba(var(--accent-rgb),0.22)",
-            }}>+ New GitHub-first project</button>
+              height: 38, padding: "0 15px", border: "1px solid rgba(var(--accent-rgb),0.48)", borderRadius: 10,
+              background: "rgba(var(--accent-rgb),0.11)", color: "var(--accent-ink)", fontWeight: 800, cursor: "pointer",
+            }}>+ New project</button>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
@@ -13742,6 +13799,8 @@ export function AgentsPage({
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        initialIntent={newProjectIntent}
+        initialKindKey={newProjectKind}
         existingNames={existingProjectNames}
         onCreated={onProjectCreated}
         project={selectedProject}
@@ -14015,6 +14074,7 @@ export function AgentsPage({
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
             projectId={selectedProjectId}
+            projectCwd={runCwd || undefined}
             models={models}
             accountsStatus={accountsStatus}
             serverState={serverState}

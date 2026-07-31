@@ -48,7 +48,9 @@ export type PtyTerminalProps = {
   /// banner settles (a real readiness signal, not a blind timer). Leave
   /// unset for one-shot login subcommands (codex login, gemini auth login).
   autoSend?: string;
-  /// Open the first http(s) URL the child prints in the Agent Browser.
+  /// Open the first http(s) URL the child prints in a private Agent Browser
+  /// tab. Provider OAuth must not inherit Gmail/Claude cookies or saved-login
+  /// autofill from the user's ordinary persistent browser tabs.
   /// ONLY for login/device-auth terminals (AccountsPage Connect flows).
   /// Leave unset for general-purpose terminals — any command that prints a
   /// URL (git, npm, curl…) would otherwise hijack the browser.
@@ -130,7 +132,7 @@ export default function PtyTerminal({
       const url = firstCompleteAuthUrl(outputText);
       if (!url) return;
       authUrlOpened = true;
-      invoke<string>("browser_open_tab", { url, activate: true })
+      invoke<string>("browser_open_auth_tab", { url })
         .then((opened) => {
           try {
             const parsed = JSON.parse(opened) as { tab_id?: number };

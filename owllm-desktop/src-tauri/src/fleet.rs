@@ -1153,6 +1153,18 @@ pub async fn fleet_worktree_finalize(
     agent_name: String,
     summary: String,
 ) -> Result<FinalizeOutcome, String> {
+    tokio::task::spawn_blocking(move || {
+        fleet_worktree_finalize_blocking(worktree_path, agent_name, summary)
+    })
+    .await
+    .map_err(|e| format!("worktree finalize task failed: {e}"))?
+}
+
+fn fleet_worktree_finalize_blocking(
+    worktree_path: String,
+    agent_name: String,
+    summary: String,
+) -> Result<FinalizeOutcome, String> {
     let wt = PathBuf::from(&worktree_path);
     if !path_is_dir_native(&wt)? {
         return Ok(FinalizeOutcome::Error {
@@ -1298,15 +1310,28 @@ fn fleet_worktree_merge_blocking(
     // failures or interleaving one page's staged squash with another's.
     let lock = repo_git_lock(&cwd);
     let _merge_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    fleet_worktree_merge_locked(&cwd, &agent_name, &branch)
+}
+
+/// Merge while the caller holds `repo_git_lock(cwd)`.
+///
+/// Keeping the lock outside this helper lets the isolated Sync coordinator
+/// retain exclusive ownership across local integration and remote
+/// reconciliation. The public merge command still takes the same lock above.
+fn fleet_worktree_merge_locked(
+    cwd: &Path,
+    agent_name: &str,
+    branch: &str,
+) -> Result<MergeOutcome, String> {
     // Integrate into the user's CURRENT local branch. Cross-PC reconciliation
     // belongs to the single repo_sync coordinator after local integration.
     // Fetching here with a fast-forward-only policy made a valid isolated run
     // impossible to merge whenever another PC had advanced origin/main.
-    let mut untracked_backup = match prepare_untracked_collisions(&cwd, &branch) {
+    let mut untracked_backup = match prepare_untracked_collisions(cwd, branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
     };
-    let tracked_backup = match prepare_identical_tracked_collisions(&cwd, &branch) {
+    let tracked_backup = match prepare_identical_tracked_collisions(cwd, branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
     };
@@ -1315,32 +1340,32 @@ fn fleet_worktree_merge_blocking(
     // overlapping hunk is how integrated work got dropped (SmartImage ×3, the
     // v0.9.24 seven-file drop). Only app-owned disposable runtime files are
     // auto-resolved; a real source overlap stops with BOTH sides preserved.
-    let (ok, _, err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
+    let (ok, _, err) = git(cwd, &["merge", "--squash", "--no-commit", branch])?;
     if !ok {
-        let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
+        let (_, conflicts, _) = git(cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if conflicts.trim().is_empty() {
-            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Error {
                 message: format!("git merge --squash failed: {}", err.trim()),
             });
         }
-        if let Err(resolve_err) = resolve_app_scratch_conflicts(&cwd, &conflicts) {
-            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+        if let Err(resolve_err) = resolve_app_scratch_conflicts(cwd, &conflicts) {
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Error {
                 message: resolve_err,
             });
         }
-        let (_, remaining, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
+        let (_, remaining, _) = git(cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         let files = user_conflict_files(&remaining);
         if !files.is_empty() {
             // Page branch keeps its commits; project checkout returns to HEAD.
             // The dropped backups restore any preserved files on this return.
-            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Conflict { files });
         }
-        let (_, unresolved, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
+        let (_, unresolved, _) = git(cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if !unresolved.trim().is_empty() {
-            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Error {
                 message: format!(
                     "merge conflicts remained unresolved after runtime-file cleanup: {}",
@@ -1349,26 +1374,26 @@ fn fleet_worktree_merge_blocking(
             });
         }
     }
-    drop_staged_app_scratch(&cwd)?;
+    drop_staged_app_scratch(cwd)?;
     if let Some(backup) = untracked_backup.as_mut() {
         backup.restore_preserved()?;
     }
     // If `merge --squash` succeeded but staged nothing, the agent's
     // branch is a fast-forward of HEAD (no new commits to apply).
-    let (_, staged, _) = git(&cwd, &["diff", "--cached", "--name-only"])?;
+    let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     if staged.trim().is_empty() {
         return Ok(MergeOutcome::NoChanges);
     }
     let msg = format!("[merge:{}] integrate parallel dispatch", agent_name);
-    let (ok, out, err) = git(&cwd, &["commit", "-m", &msg])?;
+    let (ok, out, err) = git(cwd, &["commit", "-m", &msg])?;
     if !ok {
         return Ok(MergeOutcome::Error {
             message: git_failure_message("git commit (merge) failed", &out, &err),
         });
     }
-    let (_, sha, _) = git(&cwd, &["rev-parse", "HEAD"])?;
+    let (_, sha, _) = git(cwd, &["rev-parse", "HEAD"])?;
     let commit_sha = sha.trim().to_string();
-    let (_, show, _) = git(&cwd, &["show", "--name-only", "--format=", &commit_sha])?;
+    let (_, show, _) = git(cwd, &["show", "--name-only", "--format=", &commit_sha])?;
     let files_changed = show.lines().filter(|l| !l.trim().is_empty()).count() as u32;
     if let Some(backup) = untracked_backup {
         backup.discard();

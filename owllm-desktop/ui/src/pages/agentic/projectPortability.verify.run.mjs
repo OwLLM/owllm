@@ -41,8 +41,10 @@ check(portable.projectOriginLabel({ created_device_name: "FARNOTEBOOK001" }) ===
   "the creator PC is shown explicitly");
 
 const code = read(path.join(HERE, "CodePage.tsx"));
-check(code.includes('data-ui="CodingProjectHub"') && code.includes("Portable coding command center"),
-  "Coding uses a full-page managed-project hub");
+check(code.includes('data-ui="CodingProjectHub"') &&
+      code.includes("<CreationLaunchpad") &&
+      code.includes("What will you"),
+  "Coding uses a full-page visual launchpad with the managed-project hub");
 check(code.includes('data-ui="CodingProjectColumns"') &&
       code.includes('gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)"') &&
       code.includes("gridColumn: 1") && code.includes("gridColumn: 2"),

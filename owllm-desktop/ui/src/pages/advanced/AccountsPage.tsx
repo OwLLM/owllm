@@ -1219,7 +1219,7 @@ export default function AccountsPage() {
         }
       }
       const hint: Record<string, string> = {
-        claude_cli: "starting subscription sign-in — complete it in the browser.",
+        claude_cli: "a private sign-in tab opens without your saved Gmail or Claude session — choose the account that owns the subscription.",
         codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
         kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",

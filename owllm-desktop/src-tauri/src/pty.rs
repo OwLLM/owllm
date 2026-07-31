@@ -172,8 +172,8 @@ pub fn pty_spawn(
         // OwLLM's temporary AppImage mount instead of its own installation.
         cmd.env_remove(key);
     }
-    // The UI captures login URLs from PTY output and opens them in OwLLM's
-    // persistent browser. Give Python's webbrowser module (Kimi) a real
+    // The UI captures login URLs from PTY output and opens them in an isolated
+    // OwLLM auth tab. Give Python's webbrowser module (Kimi) a real
     // successful no-op. `%s` is essential on Windows: without it Python treats
     // the whole spaced value as an executable name, fails to spawn it, then
     // falls through to the user's external default browser.

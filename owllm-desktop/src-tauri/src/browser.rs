@@ -33,7 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock, TryLockError};
@@ -74,12 +74,14 @@ const CHROME_H: f64 = 96.0;
 const PARK_X: f64 = -20000.0;
 
 /// Open tabs of the framed browser window, strip order + the active id.
-/// Each tab is its own content webview; they all share the same profile
-/// data dir, so cookies/logins span tabs like a normal browser.
+/// Each tab is its own content webview. Ordinary tabs share the persistent
+/// profile; provider-auth tab ids are tracked separately and stay private.
 struct Tabs {
     order: Vec<u64>,
     active: u64,
     titles: HashMap<u64, String>,
+    /// OAuth tabs must not inherit or persist ordinary browser credentials.
+    private_tabs: HashSet<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -866,6 +868,13 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+fn private_auth_data_dir(id: u64) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("owllm-provider-auth")
+        .join(format!("{}-{id}", std::process::id()))
+}
+
 /// Enable WebView2 password autosave + general autofill on an agent-browser
 /// webview. WebView2 disables both by default (unlike a normal Chrome/Edge
 /// profile), so a login typed here would never trigger a "Save password?"
@@ -909,7 +918,11 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_configure_browser_webview(pw: tauri::webview::PlatformWebview, requested_url: String) {
+fn linux_configure_browser_webview(
+    pw: tauri::webview::PlatformWebview,
+    requested_url: String,
+    private_session: bool,
+) {
     use std::cell::Cell;
     use std::rc::Rc;
     use webkit2gtk::{WebContextExt, WebViewExt};
@@ -923,7 +936,9 @@ fn linux_configure_browser_webview(pw: tauri::webview::PlatformWebview, requeste
         #[allow(deprecated)]
         context.set_process_model(webkit2gtk::ProcessModel::MultipleSecondaryProcesses);
     }
-    linux_enable_web_credentials(&pw);
+    if !private_session {
+        linux_enable_web_credentials(&pw);
+    }
 
     // A browser-page failure is recoverable and must remain local to that tab.
     // Retry once for a transient WebKit/network-process failure; if the same
@@ -995,8 +1010,23 @@ fn resume_browser(app: &tauri::AppHandle, navigate_to: Option<tauri::Url>) -> Re
     Ok(())
 }
 
+fn resume_normal_browser(app: &tauri::AppHandle, url: tauri::Url) -> Result<u64, String> {
+    let old_id = active_tab_id();
+    if old_id.is_some_and(is_private_tab) {
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        let id = new_tab(app, url.as_str(), true, false)?;
+        if let Some(old_id) = old_id.filter(|old_id| *old_id != id) {
+            close_tab(app, old_id);
+        }
+        Ok(id)
+    } else {
+        resume_browser(app, Some(url))?;
+        active_tab_id().ok_or_else(|| "browser has no reusable tab".to_string())
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn retire_linux_tab(app: &tauri::AppHandle, id: u64) {
+fn retire_linux_tab(app: &tauri::AppHandle, id: u64, private_session: bool) {
     if let Some(webview) = app.get_webview(&tab_label(id)) {
         if let Ok(blank) = "about:blank".parse() {
             let _ = webview.navigate(blank);
@@ -1004,6 +1034,9 @@ fn retire_linux_tab(app: &tauri::AppHandle, id: u64) {
     }
     if let Some(window) = app.get_window(&tab_label(id)) {
         let _ = window.hide();
+    }
+    if private_session {
+        return;
     }
     let mut retired = RETIRED_LINUX_TABS.lock().unwrap_or_else(|p| p.into_inner());
     if !retired.contains(&id) {
@@ -1029,14 +1062,15 @@ fn suspend_linux_browser(app: &tauri::AppHandle) -> Result<(), String> {
             .iter()
             .copied()
             .filter(|id| *id != active)
+            .map(|id| (id, tabs.private_tabs.contains(&id)))
             .collect::<Vec<_>>();
         tabs.order.clear();
         tabs.order.push(active);
         tabs.titles.clear();
         (active, inactive)
     };
-    for id in inactive {
-        retire_linux_tab(app, id);
+    for (id, private_session) in inactive {
+        retire_linux_tab(app, id, private_session);
     }
     let blank = "about:blank"
         .parse()
@@ -1224,19 +1258,26 @@ fn persist_session(app: &tauri::AppHandle) {
         return;
     };
     let live = list_tabs(app);
-    let tabs: Vec<String> = live
+    let (private_tabs, active_id) = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|tabs| (tabs.private_tabs.clone(), tabs.active))
+        .unwrap_or_default();
+    let persistent_tabs: Vec<&BrowserTabInfo> = live
         .iter()
-        .map(|tab| tab.url.clone())
-        .filter(|url| !url.is_empty() && url != "about:blank")
+        .filter(|tab| !private_tabs.contains(&tab.id))
+        .filter(|tab| !tab.url.is_empty() && tab.url != "about:blank")
         .collect();
+    let tabs: Vec<String> = persistent_tabs.iter().map(|tab| tab.url.clone()).collect();
     if tabs.is_empty() {
         // A window being destroyed reports no tabs. Keeping the previous
         // session is the whole point: an accidental close must be undoable.
         return;
     }
-    let active = live
+    let active = persistent_tabs
         .iter()
-        .position(|tab| tab.active)
+        .position(|tab| tab.id == active_id)
         .filter(|index| *index < tabs.len())
         .unwrap_or(0);
     write_session(
@@ -1347,6 +1388,7 @@ enum BrowserUiEvent {
     OpenTab {
         url: String,
         activate: bool,
+        private_session: bool,
     },
     /// Linux title-bar close requests are intercepted before WebKitGTK can
     /// destroy the native window. The worker applies normal tab-close
@@ -1369,7 +1411,7 @@ struct BrowserUiBatch {
     push_tabs: bool,
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
-    open_tabs: Vec<(String, bool)>,
+    open_tabs: Vec<(String, bool, bool)>,
     legacy_close_requested: Vec<u64>,
     legacy_destroyed: Vec<u64>,
 }
@@ -1395,7 +1437,11 @@ impl BrowserUiBatch {
             BrowserUiEvent::AutofillPage { id, url } => {
                 self.autofills.insert(id, url);
             }
-            BrowserUiEvent::OpenTab { url, activate } => self.open_tabs.push((url, activate)),
+            BrowserUiEvent::OpenTab {
+                url,
+                activate,
+                private_session,
+            } => self.open_tabs.push((url, activate, private_session)),
             BrowserUiEvent::LegacyTabCloseRequested { id } => self.legacy_close_requested.push(id),
             BrowserUiEvent::LegacyTabDestroyed { id } => self.legacy_destroyed.push(id),
         }
@@ -1454,8 +1500,8 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                 }
             }
         }
-        for (url, activate) in batch.open_tabs {
-            if let Err(e) = new_tab(&app, &url, activate) {
+        for (url, activate, private_session) in batch.open_tabs {
+            if let Err(e) = new_tab(&app, &url, activate, private_session) {
                 eprintln!("[browser] requested tab failed: {e}");
             }
         }
@@ -1545,7 +1591,7 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
         "tabnew" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                if let Err(e) = new_tab(&app, "about:blank", true) {
+                if let Err(e) = new_tab(&app, "about:blank", true, false) {
                     eprintln!("[browser] new tab failed: {e}");
                 }
             });
@@ -1597,14 +1643,15 @@ fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
 }
 
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
-/// under the chrome bar; inactive ones are parked offscreen. All tabs share
-/// the same profile data dir, so logins/cookies span tabs.
+/// under the chrome bar; inactive ones are parked offscreen. Ordinary tabs
+/// share the persistent profile; provider-auth tabs get a private profile.
 fn attach_tab(
     app: &tauri::AppHandle,
     win: &Window,
     url: tauri::Url,
     id: u64,
     active: bool,
+    private_session: bool,
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
@@ -1623,6 +1670,7 @@ fn attach_tab(
                 BrowserUiEvent::OpenTab {
                     url: url.to_string(),
                     activate: true,
+                    private_session,
                 },
             );
             NewWindowResponse::Deny
@@ -1634,7 +1682,7 @@ fn attach_tab(
             // Typed-login capture rides the EVT channel from BRIDGE_JS. The
             // vault write is queued — no I/O on the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
-                if action == "cred" {
+                if !private_session && action == "cred" {
                     queue_browser_ui(
                         &wv.app_handle().clone(),
                         BrowserUiEvent::TypedLogin { data },
@@ -1662,7 +1710,7 @@ fn attach_tab(
             }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let url = payload.url().to_string();
-                if url.starts_with("http") {
+                if !private_session && url.starts_with("http") {
                     queue_browser_ui(
                         &wv.app_handle().clone(),
                         BrowserUiEvent::AutofillPage { id, url },
@@ -1670,6 +1718,9 @@ fn attach_tab(
                 }
             }
         });
+    if private_session {
+        content = content.incognito(true);
+    }
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
     }
@@ -1677,9 +1728,15 @@ fn attach_tab(
     // The builder method is only present on Windows/Linux; macOS WKWebView uses
     // the app's default per-app store (logins still persist there).
     #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        content = content.data_directory(dir);
+    {
+        if private_session {
+            let dir = private_auth_data_dir(id);
+            let _ = std::fs::create_dir_all(&dir);
+            content = content.data_directory(dir);
+        } else if let Some(dir) = browser_data_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            content = content.data_directory(dir);
+        }
     }
     let scale = win.scale_factor().unwrap_or(1.0);
     let ls = win
@@ -1695,11 +1752,11 @@ fn attach_tab(
         )
         .map_err(|e| format!("page webview: {e}"))?;
     #[cfg(windows)]
-    {
+    if !private_session {
         let _ = _webview.with_webview(win_enable_web_credentials);
     }
     #[cfg(target_os = "linux")]
-    {
+    if !private_session {
         let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
     }
     Ok(())
@@ -1729,6 +1786,7 @@ fn reuse_retired_linux_tab(
         let previous = tabs.active;
         tabs.order.push(id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         if activate {
             tabs.active = id;
         }
@@ -1743,6 +1801,7 @@ fn reuse_retired_linux_tab(
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
             tabs.order.retain(|tab| *tab != id);
+            tabs.private_tabs.remove(&id);
             tabs.active = previous_active;
         }
         RETIRED_LINUX_TABS
@@ -1761,7 +1820,12 @@ fn reuse_retired_linux_tab(
     Ok(Some(id))
 }
 
-fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, String> {
+fn new_tab(
+    app: &tauri::AppHandle,
+    url: &str,
+    activate: bool,
+    private_session: bool,
+) -> Result<u64, String> {
     let framed = app.get_webview(CHROME_LABEL).is_some();
     let win = framed.then(|| get_window(app)).flatten();
     if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
@@ -1770,8 +1834,10 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
     validate_provider_auth_url(&parsed)?;
     #[cfg(target_os = "linux")]
-    if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
-        return Ok(id);
+    if !private_session {
+        if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
+            return Ok(id);
+        }
     }
     let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
     let mut previous_active = None;
@@ -1780,21 +1846,25 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
         if let Some(tabs) = guard.as_mut() {
             previous_active = Some(tabs.active);
             tabs.order.push(id);
+            if private_session {
+                tabs.private_tabs.insert(id);
+            }
             if activate {
                 tabs.active = id;
             }
         }
     }
     let attached = if let Some(win) = win.as_ref() {
-        attach_tab(app, win, parsed, id, activate)
+        attach_tab(app, win, parsed, id, activate, private_session)
     } else {
-        attach_legacy_tab(app, parsed, id, activate)
+        attach_legacy_tab(app, parsed, id, activate, private_session)
     };
     if let Err(error) = attached {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
             tabs.order.retain(|tab| *tab != id);
             tabs.titles.remove(&id);
+            tabs.private_tabs.remove(&id);
             if tabs.active == id {
                 if let Some(previous) = previous_active {
                     tabs.active = previous;
@@ -1873,12 +1943,13 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
     let target_window = app
         .get_window(BROWSER_LABEL)
         .or_else(|| app.get_window(&tab_label(id)));
-    let next = {
+    let (next, _private_session) = {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         let Some(tabs) = guard.as_mut() else { return };
         if !tabs.order.contains(&id) {
             return;
         }
+        let private_session = tabs.private_tabs.contains(&id);
         let Some(next) = next_active_after_close(&tabs.order, id, tabs.active) else {
             drop(guard);
             // Closing the last tab is a deliberate "put the browser away": keep
@@ -1900,8 +1971,9 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         };
         tabs.order.retain(|t| *t != id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         tabs.active = next;
-        next
+        (next, private_session)
     };
     if app.get_webview(CHROME_LABEL).is_some() {
         if let Some(wv) = app.get_webview(&tab_label(id)) {
@@ -1909,7 +1981,7 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         }
     } else {
         #[cfg(target_os = "linux")]
-        retire_linux_tab(app, id);
+        retire_linux_tab(app, id, _private_session);
         #[cfg(not(target_os = "linux"))]
         if let Some(window) = app.get_window(&tab_label(id)) {
             let _ = window.destroy();
@@ -1927,6 +1999,7 @@ fn on_legacy_tab_closed(app: &tauri::AppHandle, id: u64) {
         }
         tabs.order.retain(|tab| *tab != id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         if tabs.order.is_empty() {
             *guard = None;
             return;
@@ -2037,7 +2110,11 @@ pub fn browser_ensure() -> Result<String, String> {
 /// below it, so no stock OS title bar and nothing ever overlays site content.
 /// If the multi-webview build fails on some platform/engine, fall back to the
 /// decorated top-level-WebView tab shape so agent browsing never breaks.
-fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_window(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     // Linux/WebKitGTK — notably the Jetson/Tegra GL stack — mislays stacked child
     // webviews (the chrome bar ends up floating mid-window over a blank strip) and
     // SIGBUSes the WebKitWebProcess when they are resized, taking the whole app
@@ -2047,18 +2124,18 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     // Linux; keep the OwLLM-chrome framed shape on Windows/macOS where it works.
     #[cfg(target_os = "linux")]
     {
-        build_legacy(app, url)
+        build_legacy(app, url, private_session)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        match build_framed(app, url.clone()) {
+        match build_framed(app, url.clone(), private_session) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("[browser] app-styled window failed ({e}); using the decorated fallback");
                 if let Some(w) = get_window(app) {
                     let _ = w.destroy();
                 }
-                build_legacy(app, url)
+                build_legacy(app, url, private_session)
             }
         }
     }
@@ -2068,7 +2145,11 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 /// Windows/macOS only — build_window() routes Linux to build_legacy() because
 /// stacked child webviews are broken on WebKitGTK/Jetson (see build_window).
 #[cfg_attr(target_os = "linux", allow(dead_code))]
-fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_framed(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     // Start the dispatcher before adding child webviews so even their very
     // first load/title callback performs only a cheap channel send.
     let _ = browser_ui_sender(app);
@@ -2128,8 +2209,13 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         order: vec![first],
         active: first,
         titles: HashMap::new(),
+        private_tabs: if private_session {
+            HashSet::from([first])
+        } else {
+            HashSet::new()
+        },
     });
-    attach_tab(app, &win, url, first, true)?;
+    attach_tab(app, &win, url, first, true, private_session)?;
 
     // Keep the children glued to the window on resize/maximize, and drop the
     // tab state when the window goes away (✕, browser_stop, device rebuild).
@@ -2192,14 +2278,23 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
 }
 
 /// Safe decorated top-level-WebView tab shape used by Linux/WebKitGTK.
-fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_legacy(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     let first = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
     *TABS.lock().unwrap_or_else(|p| p.into_inner()) = Some(Tabs {
         order: vec![first],
         active: first,
         titles: HashMap::new(),
+        private_tabs: if private_session {
+            HashSet::from([first])
+        } else {
+            HashSet::new()
+        },
     });
-    if let Err(error) = attach_legacy_tab(app, url, first, true) {
+    if let Err(error) = attach_legacy_tab(app, url, first, true, private_session) {
         *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
         return Err(error);
     }
@@ -2215,6 +2310,7 @@ fn attach_legacy_tab(
     url: tauri::Url,
     id: u64,
     active: bool,
+    private_session: bool,
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
@@ -2243,6 +2339,7 @@ fn attach_legacy_tab(
                 BrowserUiEvent::OpenTab {
                     url: url.to_string(),
                     activate: true,
+                    private_session,
                 },
             );
             NewWindowResponse::Deny
@@ -2251,7 +2348,7 @@ fn attach_legacy_tab(
             // Typed-login capture works in this shape too (same EVT channel);
             // the vault write is queued off the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
-                if action == "cred" {
+                if !private_session && action == "cred" {
                     queue_browser_ui(
                         &win.app_handle().clone(),
                         BrowserUiEvent::TypedLogin { data },
@@ -2271,7 +2368,7 @@ fn attach_legacy_tab(
             // Vault autofill works in this top-level-window shape too.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let url = payload.url().to_string();
-                if url.starts_with("http") {
+                if !private_session && url.starts_with("http") {
                     queue_browser_ui(
                         &win.app_handle().clone(),
                         BrowserUiEvent::AutofillPage { id, url },
@@ -2284,6 +2381,9 @@ fn attach_legacy_tab(
         .decorations(true)
         .resizable(true)
         .visible(active);
+    if private_session {
+        builder = builder.incognito(true);
+    }
     if let Some(ua) = dev.ua {
         builder = builder.user_agent(ua);
     }
@@ -2294,21 +2394,28 @@ fn attach_legacy_tab(
         builder = builder.position(x, y);
     }
     #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        builder = builder.data_directory(dir);
+    {
+        if private_session {
+            let dir = private_auth_data_dir(id);
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        } else if let Some(dir) = browser_data_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        }
     }
     let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
     #[cfg(windows)]
-    {
+    if !private_session {
         let _ = _ww.with_webview(win_enable_web_credentials);
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = _ww
-            .with_webview(move |platform| linux_configure_browser_webview(platform, requested_url));
+        let _ = _ww.with_webview(move |platform| {
+            linux_configure_browser_webview(platform, requested_url, private_session)
+        });
     }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);
@@ -2347,7 +2454,14 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         if browser_is_suspended() {
-            resume_browser(app, None)?;
+            if active_tab_id().is_some_and(is_private_tab) {
+                let blank = "about:blank"
+                    .parse()
+                    .map_err(|e| format!("bad start url: {e}"))?;
+                resume_normal_browser(app, blank)?;
+            } else {
+                resume_browser(app, None)?;
+            }
             return Ok("browser started".to_string());
         }
         return Ok("browser already running".to_string());
@@ -2355,7 +2469,7 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
-    build_window(app, start_url)?;
+    build_window(app, start_url, false)?;
     BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())
 }
@@ -2396,6 +2510,13 @@ fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
     Ok(())
 }
 
+fn is_private_tab(id: u64) -> bool {
+    TABS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .is_some_and(|tabs| tabs.private_tabs.contains(&id))
+}
+
 fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -2417,14 +2538,13 @@ pub(crate) fn open_web_url(app: &tauri::AppHandle, raw_url: &str) -> Result<Stri
 
     let _operation = lock_browser_operation();
     let tab_id = if browser_is_suspended() && get_window(app).is_some() {
-        resume_browser(app, Some(parsed))?;
-        active_tab_id()
+        Some(resume_normal_browser(app, parsed)?)
     } else if get_window(app).is_none() {
-        build_window(app, parsed)?;
+        build_window(app, parsed, false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id()
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-        Some(new_tab(app, parsed.as_str(), true)?)
+        Some(new_tab(app, parsed.as_str(), true, false)?)
     } else {
         content_webview(app)
             .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
@@ -2478,14 +2598,13 @@ pub fn browser_open_tab(
     let parsed = parse_navigation_url(&url)?;
     let activate = activate.unwrap_or(false);
     let id = if browser_is_suspended() && get_window(&app).is_some() {
-        resume_browser(&app, Some(parsed))?;
-        active_tab_id().unwrap_or(0)
+        resume_normal_browser(&app, parsed)?
     } else if get_window(&app).is_none() {
-        build_window(&app, parsed)?;
+        build_window(&app, parsed, false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id().unwrap_or(0)
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-        new_tab(&app, parsed.as_str(), activate)?
+        new_tab(&app, parsed.as_str(), activate, false)?
     } else {
         // Compatibility fallback for a browser window created by an older
         // single-page build. New framed and Linux-safe sessions both own TABS.
@@ -2499,6 +2618,39 @@ pub fn browser_open_tab(
         json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
             .to_string(),
     )
+}
+
+/// Open a provider authorization page without the persistent browser profile.
+///
+/// Subscription OAuth must never inherit the account used by Gmail, Calendar,
+/// Claude Web, or another ordinary browser tab. It also must not invoke the
+/// saved-login vault: the user needs a real account chooser so they can select
+/// the identity that owns the subscription.
+#[tauri::command(async)]
+pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    let parsed = parse_navigation_url(&url)?;
+    let id = if browser_is_suspended() && get_window(&app).is_some() {
+        let old_id = active_tab_id();
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        let id = new_tab(&app, parsed.as_str(), true, true)?;
+        if let Some(old_id) = old_id.filter(|old_id| *old_id != id) {
+            close_tab(&app, old_id);
+        }
+        id
+    } else if get_window(&app).is_none() {
+        build_window(&app, parsed, true)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        active_tab_id().unwrap_or(0)
+    } else {
+        new_tab(&app, parsed.as_str(), true, true)?
+    };
+    if let Some(win) = get_window(&app) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true }).to_string())
 }
 
 #[tauri::command(async)]
@@ -2635,14 +2787,14 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
             back_to
         };
         let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
-        build_window(&app, parsed)?;
+        build_window(&app, parsed, false)?;
         for tab in tabs_before.iter().filter(|tab| !tab.active) {
             let restore_url = if tab.url.is_empty() {
                 "about:blank"
             } else {
                 &tab.url
             };
-            if let Err(error) = new_tab(&app, restore_url, false) {
+            if let Err(error) = new_tab(&app, restore_url, false, false) {
                 eprintln!(
                     "[browser] could not restore tab {} after device switch: {error}",
                     tab.id
@@ -3093,19 +3245,21 @@ mod tests {
         batch.absorb(BrowserUiEvent::OpenTab {
             url: "https://one.example/".to_string(),
             activate: true,
+            private_session: true,
         });
         batch.absorb(BrowserUiEvent::OpenTab {
             url: "https://two.example/".to_string(),
             activate: false,
+            private_session: false,
         });
         assert_eq!(batch.open_tabs.len(), 2);
         assert_eq!(
             batch.open_tabs[0],
-            ("https://one.example/".to_string(), true)
+            ("https://one.example/".to_string(), true, true)
         );
         assert_eq!(
             batch.open_tabs[1],
-            ("https://two.example/".to_string(), false)
+            ("https://two.example/".to_string(), false, false)
         );
     }
 

@@ -57,6 +57,11 @@ export type ProjectSettingsDialogProps = {
   resolvedTeamLabel?: string | null;
   // NEW mode
   defaultTeamName?: string | null;
+  /// Optional launchpad seed. The first request becomes the editable project
+  /// description instead of making the user type it again.
+  initialIntent?: string;
+  /// Optional visual recipe selected before the dialog opens.
+  initialKindKey?: string;
   /// Names of the projects that already exist — the automatic "<kind> N" name
   /// numbers off these so it never collides with one the user already has.
   existingNames?: readonly string[];
@@ -158,7 +163,8 @@ const NO_EXISTING_NAMES: readonly string[] = [];
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
   const {
     open, mode, onClose, teams, pickedTeamId, onPickTeam, onResetTeam,
-    resolvedTeamLabel, defaultTeamName, existingNames = NO_EXISTING_NAMES, onCreated,
+    resolvedTeamLabel, defaultTeamName, initialIntent = "", initialKindKey = "",
+    existingNames = NO_EXISTING_NAMES, onCreated,
     project, location, effectiveCwd, onChangeLocation,
     trustWrites, onToggleTrustWrites, fullAccess, onToggleFullAccess,
     bridgeOn, isolationRequested, onAfterRename, onAfterDelete,
@@ -243,7 +249,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     if (!open) return;
     setErr(null); setActMsg(null); setActBusy(null); setConfirmDelete(false);
     if (mode === "new") {
-      setName(""); setDescription(""); setNewLocation(""); setNewTrust(false);
+      setName(""); setDescription(initialIntent.trim()); setNewLocation(""); setNewTrust(false);
       locationTouched.current = false;
       nameTouched.current = false;
       setCreateGithubRepo(true);
@@ -259,7 +265,17 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       if (preset) {
         setTeamId(preset.id); setKindKey("custom"); setStep("form"); setShowAdvanced(true);
       } else {
-        setTeamId(teams[0]?.id ?? ""); setKindKey(""); setStep("kind"); setShowAdvanced(false);
+        const requestedKind = PROJECT_KINDS.find(k => k.key === initialKindKey);
+        const requestedTeam = requestedKind ? kindTeam(requestedKind, teams) : null;
+        if (requestedKind && requestedTeam) {
+          setTeamId(requestedTeam.id);
+          setKindKey(requestedKind.key);
+          setStep("form");
+          setShowAdvanced(false);
+          setDescription(initialIntent.trim() || requestedKind.descSeed);
+        } else {
+          setTeamId(teams[0]?.id ?? ""); setKindKey(""); setStep("kind"); setShowAdvanced(false);
+        }
       }
       setEnvironmentServices([]);
       setCustomServiceLabel("");
@@ -663,7 +679,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                       onClick={() => {
                         setKindKey(k.key);
                         if (t) setTeamId(t.id);
-                        setDescription(k.descSeed);
+                        setDescription(initialIntent.trim() || k.descSeed);
                         setEnvironmentServices([]);
                         setCustomServiceLabel("");
                         setCustomServiceUrl("");

@@ -37,6 +37,7 @@ import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import TeamMemoryModal, { fmtAgo } from "./TeamMemoryModal";
+import CreationLaunchpad from "./CreationLaunchpad";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -420,6 +421,16 @@ type JustChatState = { chats: ChatThread[]; chatId: string; draft: string; busy:
 const CHAT_SID = "code:justchat";
 const CHAT_ACTIVE_KEY = "owllm:code:chats:active";
 const DEFAULT_JUSTCHAT: JustChatState = { chats: [], chatId: "", draft: "", busy: false };
+
+function launchProjectName(intent: string): string {
+  const words = intent
+    .trim()
+    .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5);
+  return words.join(" ").slice(0, 48);
+}
 // The in-flight stream's abort handle — module-level (like the session) so
 // Stop still works after the component remounts mid-stream.
 let justChatAbort: AbortController | null = null;
@@ -703,6 +714,19 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
+  const [launchPrompt, setLaunchPrompt] = useState(() => {
+    try {
+      const value = sessionStorage.getItem("owllm:code-launch-intent") ?? "";
+      sessionStorage.removeItem("owllm:code-launch-intent");
+      return value;
+    } catch {
+      return "";
+    }
+  });
+  const [launchMode, setLaunchMode] = useState<"project" | "chat" | "team">("project");
+  // A creation prompt survives the folder/project dialog and becomes the first
+  // editable Coding draft after the private worktree is ready.
+  const pendingProjectPromptRef = useRef("");
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
@@ -1694,8 +1718,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // one yourself"; now it's a choice right in the onboarding.
   const [npCreateRepo, setNpCreateRepo] = useState(false);
 
-  const openNewProject = () => {
-    setNpName("");
+  const openNewProject = (intent = "") => {
+    pendingProjectPromptRef.current = intent.trim();
+    setNpName(launchProjectName(intent));
     setNpFolder("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(!!gh?.connected);
@@ -1728,14 +1753,20 @@ function CodeWorkspace({ pageId, onTitle }: {
         const p = await sandboxCreateProject(npName.trim() || "project");
         createdPath = p.path;
         setNpOpen(false);
-        openWorkspace(p.path);
       } else if (npFolder.trim()) {
         createdPath = npFolder.trim();
         setNpOpen(false);
-        openWorkspace(npFolder.trim());
       } else {
         setNpBusy(false);
         return;
+      }
+      const opening = openWorkspace(createdPath);
+      const pendingPrompt = pendingProjectPromptRef.current;
+      if (pendingPrompt) {
+        void opening.then(() => {
+          setDraft(pendingPrompt);
+          pendingProjectPromptRef.current = "";
+        });
       }
       // Opt-in GitHub repo creation — after the workspace exists, so a repo
       // failure never blocks the project itself. Best-effort with a loud
@@ -2474,6 +2505,21 @@ function CodeWorkspace({ pageId, onTitle }: {
   // thread) this always opens an empty one — the card lists the recent threads
   // right below it, so resuming is a click away and "New" can mean new.
   const startNewChat = () => { newChat(); setChatMode(true); };
+  const submitLaunchPrompt = () => {
+    const intent = launchPrompt.trim();
+    if (launchMode === "chat") {
+      newChat();
+      if (intent) setChatDraft(intent);
+      setChatMode(true);
+      return;
+    }
+    if (launchMode === "team") {
+      try { sessionStorage.setItem("owllm:agentic-launch-intent", intent); } catch { /* private mode */ }
+      window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "agents" } }));
+      return;
+    }
+    openNewProject(intent);
+  };
   const sendChat = async () => {
     const text = chatDraft.trim();
     const attachments = chatAttachments;
@@ -2877,14 +2923,42 @@ function CodeWorkspace({ pageId, onTitle }: {
     return (
       <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
         <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
-          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
-            <div>
-              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
-              <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
-              <div style={{ fontSize: 13.5, color: "var(--fg-muted)", marginTop: 5, lineHeight: 1.5 }}>
-                GitHub is the project identity. Each computer creates its own local clone; OwLLM never reuses another PC's absolute folder.
-              </div>
-            </div>
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 24, padding: "22px clamp(16px,3vw,36px) 36px" }}>
+            <CreationLaunchpad
+              eyebrow="Your private AI workspace"
+              title={<>What will you <em>make today?</em></>}
+              subtitle="Describe the outcome in plain language. Start a real coding project, open a lightweight conversation, or bring in a full team of specialist agents."
+              prompt={launchPrompt}
+              placeholder={
+                launchMode === "chat"
+                  ? "Ask a question, explore an idea, or think something through…"
+                  : launchMode === "team"
+                    ? "Describe the outcome you want the agent team to deliver…"
+                    : "Describe the app, website, tool, or change you want to build…"
+              }
+              submitLabel={
+                launchMode === "chat" ? "Start chat"
+                  : launchMode === "team" ? "Set up team"
+                    : "Create project"
+              }
+              selectedMode={launchMode}
+              onModeChange={(mode) => setLaunchMode(mode as "project" | "chat" | "team")}
+              onPromptChange={setLaunchPrompt}
+              onSubmit={submitLaunchPrompt}
+              modes={[
+                { id: "project", icon: "◇", label: "Build with Code", detail: "A private project workspace with files, tools and Git", badge: "Recommended" },
+                { id: "chat", icon: "◌", label: "Just chat", detail: "Fast conversation with memory, no folder required" },
+                { id: "team", icon: "✦", label: "Agent team", detail: "Orchestrate specialists for a larger outcome" },
+              ]}
+              actions={[
+                { icon: "⌁", label: "Local folder", detail: "Open an existing folder on this computer", onClick: () => { void pickWorkspace(); } },
+                { icon: "⌂", label: "GitHub", detail: "Connect or review your portable project setup", onClick: openSyncOnboarding },
+                { icon: "↺", label: "Recent chat", detail: "Resume your latest conversation", onClick: startChat },
+              ]}
+              status={
+                <span>{gh?.connected ? `GitHub ready · @${gh.login}` : "Local-first · GitHub optional"}</span>
+              }
+            />
 
             <div data-ui="GitHubConnectionStatus" style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: `1px solid ${gh?.connected ? "rgba(77,224,155,.58)" : "rgba(255,105,120,.58)"}`, background: gh?.connected ? "linear-gradient(120deg,rgba(77,224,155,.15),var(--bg-card))" : "linear-gradient(120deg,rgba(255,105,120,.13),var(--bg-card))", boxShadow: gh?.connected ? "0 0 34px rgba(77,224,155,.10)" : "0 0 34px rgba(255,105,120,.08)" }}>
               <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: gh?.connected ? "#4de09b" : "#ff6978", boxShadow: gh?.connected ? "0 0 14px rgba(77,224,155,.9)" : "0 0 14px rgba(255,105,120,.8)" }} />
@@ -2942,7 +3016,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       task, chatting is the daily one. */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
                     {([
-                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: () => openNewProject() },
                       { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
                     ]).map((a) => (
                       <button key={a.label} onClick={a.onClick}

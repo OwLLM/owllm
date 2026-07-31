@@ -22,6 +22,7 @@ import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
+import CreationLaunchpad from "./CreationLaunchpad";
 import {
   environmentPromptBlock,
   parseProjectEnvironment,
@@ -9137,6 +9138,18 @@ export function AgentsPage({
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
   const [projectHubOpen, setProjectHubOpen] = useState(false);
+  const [hubPrompt, setHubPrompt] = useState(() => {
+    try {
+      const value = sessionStorage.getItem("owllm:agentic-launch-intent") ?? "";
+      sessionStorage.removeItem("owllm:agentic-launch-intent");
+      return value;
+    } catch {
+      return "";
+    }
+  });
+  const [hubKind, setHubKind] = useState<"web" | "research" | "assistant">("web");
+  const [newProjectIntent, setNewProjectIntent] = useState("");
+  const [newProjectKind, setNewProjectKind] = useState("");
   const [projectMaterializing, setProjectMaterializing] = useState(false);
   const [projectMaterializeError, setProjectMaterializeError] = useState("");
   // Browser-session restore bookkeeping: which projects this page has already
@@ -9187,7 +9200,18 @@ export function AgentsPage({
       setProjectMaterializing(false);
     }
   };
-  const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
+  const onNewProject = () => {
+    setNewProjectIntent("");
+    setNewProjectKind("");
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
+  const createFromLaunchpad = () => {
+    setNewProjectIntent(hubPrompt.trim());
+    setNewProjectKind(hubKind);
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
   const onProjectCreated = async (
     row: ProjectRow,
     kickoff: {
@@ -13502,6 +13526,8 @@ export function AgentsPage({
           resolvedTeamLabel={activeTeamTemplate?.display ?? null}
           onResetTeam={resetTeamToTemplate}
           defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          initialIntent={newProjectIntent}
+          initialKindKey={newProjectKind}
           existingNames={existingProjectNames}
           onCreated={onProjectCreated}
           project={selectedProject}
@@ -13518,24 +13544,47 @@ export function AgentsPage({
           onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
         />
         <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
-          <div style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 280 }}>
-              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.6, textTransform: "uppercase" }}>
-                Agentic project command center
-              </div>
-              <h1 style={{ margin: "7px 0 5px", color: "var(--fg-strong)", fontSize: "clamp(27px,4vw,44px)", lineHeight: 1.05 }}>
-                GitHub carries the project. This PC carries its folder.
-              </h1>
-              <div style={{ color: "var(--fg-muted)", maxWidth: 760, lineHeight: 1.6, fontSize: 13.5 }}>
-                Chats, team memory and project rules can follow your account. An absolute folder never does.
-                Projects from another computer stay ghosted until their repository is cloned locally.
+          <CreationLaunchpad
+            eyebrow="Agentic creation space"
+            title={<>Turn an idea into a <em>working outcome.</em></>}
+            subtitle="Tell OWLLM what success looks like. It will prepare a focused team, a durable workspace, and the right starting workflow."
+            prompt={hubPrompt}
+            placeholder={
+              hubKind === "research"
+                ? "What should the team investigate, compare, or explain?"
+                : hubKind === "assistant"
+                  ? "What should your assistant organize, remember, or handle?"
+                  : "Describe the product, website, or software outcome you want…"
+            }
+            submitLabel="Prepare project"
+            selectedMode={hubKind}
+            onModeChange={(mode) => setHubKind(mode as "web" | "research" | "assistant")}
+            onPromptChange={setHubPrompt}
+            onSubmit={createFromLaunchpad}
+            modes={[
+              { id: "web", icon: "◇", label: "Build a product", detail: "Website, app, software or a new digital product", badge: "Popular" },
+              { id: "research", icon: "⌕", label: "Research", detail: "A sourced investigation with specialist review" },
+              { id: "assistant", icon: "✦", label: "Personal assistant", detail: "A lasting workspace for plans, drafts and follow-up" },
+            ]}
+            actions={[
+              { icon: "⌁", label: "Custom project", detail: "See every project recipe and team", onClick: onNewProject },
+              { icon: "⌘", label: "Coding", detail: "Open the focused Coding workspace", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "code" } })) },
+              { icon: "◫", label: "Teams", detail: "Browse and customize agent teams", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "studio" } })) },
+            ]}
+            status={<span>Local-first · private by default · any connected model</span>}
+          />
+
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 850 }}>Continue a project</div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 11.5, marginTop: 3 }}>
+                Local projects open immediately. Synced projects can be cloned onto this computer.
               </div>
             </div>
             <button onClick={onNewProject} style={{
-              height: 44, padding: "0 18px", border: "none", borderRadius: 12,
-              background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 850, cursor: "pointer",
-              boxShadow: "0 0 26px rgba(var(--accent-rgb),0.22)",
-            }}>+ New GitHub-first project</button>
+              height: 38, padding: "0 15px", border: "1px solid rgba(var(--accent-rgb),0.48)", borderRadius: 10,
+              background: "rgba(var(--accent-rgb),0.11)", color: "var(--accent-ink)", fontWeight: 800, cursor: "pointer",
+            }}>+ New project</button>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
@@ -13632,6 +13681,8 @@ export function AgentsPage({
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        initialIntent={newProjectIntent}
+        initialKindKey={newProjectKind}
         existingNames={existingProjectNames}
         onCreated={onProjectCreated}
         project={selectedProject}

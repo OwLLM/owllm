@@ -1,7 +1,9 @@
 const KIMI_DEVICE_ORIGIN = "https://www.kimi.com";
 const KIMI_DEVICE_PATH = "/code/authorize_device";
-const CLAUDE_AUTH_ORIGIN = "https://claude.ai";
-const CLAUDE_AUTH_PATH = "/oauth/authorize";
+const CLAUDE_AUTH_ENDPOINTS = new Set([
+  "https://claude.ai/oauth/authorize",
+  "https://claude.com/cai/oauth/authorize",
+]);
 
 // A PTY hard-wrap can split a URL anywhere, including inside its host, and
 // `https://www` still parses as a valid URL. Require a host that can actually
@@ -45,14 +47,14 @@ function isCompleteAuthUrl(raw: string): boolean {
   // rejects the request with "Missing redirect_uri parameter". Do not accept
   // a Claude authorization prefix until the parameters required to bind the
   // callback and PKCE exchange have arrived.
-  if (url.origin === CLAUDE_AUTH_ORIGIN && url.pathname === CLAUDE_AUTH_PATH) {
+  if (CLAUDE_AUTH_ENDPOINTS.has(`${url.origin}${url.pathname}`)) {
     return ["client_id", "redirect_uri", "code_challenge"]
       .every((key) => Boolean(url.searchParams.get(key)?.trim()));
   }
   return isAuthenticationUrl(url);
 }
 
-const MAX_WRAPPED_LINES = 8;
+const MAX_WRAPPED_LINES = 32;
 
 // ConPTY inserts a real CRLF when a CLI line reaches the terminal width, so any
 // provider's login URL can arrive split — `user_cod\r\ne=ABCD-1234` or

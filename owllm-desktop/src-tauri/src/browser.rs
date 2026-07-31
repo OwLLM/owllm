@@ -2565,7 +2565,8 @@ fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
             .any(|(key, value)| key == name && !value.trim().is_empty())
     };
     match (url.host_str(), url.path()) {
-        (Some("claude.ai"), "/oauth/authorize") => {
+        (Some("claude.ai"), "/oauth/authorize")
+        | (Some("claude.com"), "/cai/oauth/authorize") => {
             let missing = ["client_id", "redirect_uri", "code_challenge"]
                 .into_iter()
                 .filter(|name| !has_param(name))
@@ -2584,6 +2585,25 @@ fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
             );
         }
         _ => {}
+    }
+    if matches!(url.host_str(), Some("claude.ai") | Some("claude.com"))
+        && url.path() == "/login"
+    {
+        if let Some((_, return_to)) = url
+            .query_pairs()
+            .find(|(key, value)| key == "returnTo" && !value.trim().is_empty())
+        {
+            let nested = url
+                .join(&return_to)
+                .map_err(|error| format!("invalid Claude login returnTo URL: {error}"))?;
+            if matches!(
+                (nested.host_str(), nested.path()),
+                (Some("claude.ai"), "/oauth/authorize")
+                    | (Some("claude.com"), "/cai/oauth/authorize")
+            ) {
+                validate_provider_auth_url(&nested)?;
+            }
+        }
     }
     Ok(())
 }
@@ -3222,10 +3242,28 @@ mod tests {
             "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
             "&code_challenge=pkce"
         );
+        let current_claude_prefix =
+            "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
+        let current_claude_complete = concat!(
+            "https://claude.com/cai/oauth/authorize?code=true&client_id=",
+            "9d1c250a-e61b-44fe-93d9-2f5e",
+            "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback",
+            "&code_challenge=pkce"
+        );
+        let nested_claude_prefix = concat!(
+            "https://claude.com/login?selectAccount=true&returnTo=",
+            "%2Fcai%2Foauth%2Fauthorize%3Fcode%3Dtrue%26client_id%3D",
+            "9d1c250a-e61b-44"
+        );
         let kimi_prefix = "https://www.kimi.com/code/authorize_device?user_cod";
         let kimi_complete = "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
 
-        for incomplete in [claude_prefix, kimi_prefix] {
+        for incomplete in [
+            claude_prefix,
+            current_claude_prefix,
+            nested_claude_prefix,
+            kimi_prefix,
+        ] {
             assert!(
                 parse_web_url(incomplete).is_err(),
                 "{incomplete} must not open through the global web-link route"
@@ -3235,7 +3273,7 @@ mod tests {
                 "{incomplete} must not open through browser navigation"
             );
         }
-        for complete in [claude_complete, kimi_complete] {
+        for complete in [claude_complete, current_claude_complete, kimi_complete] {
             assert!(
                 parse_web_url(complete).is_ok(),
                 "{complete} is a complete provider authorization URL"

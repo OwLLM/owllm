@@ -5,8 +5,8 @@ import { useEffect, useRef, useState } from "react";
 /// broadcasts (agentic streamLocalChat AND the fine-tuning chat) — and clears
 /// ~1.5s after generation stops. tok/s reflects the user's own hardware, which
 /// is the meaningful number; cloud generation (network-bound) isn't metered.
-///   • variant "header"   — compact inline span, parked in the header status
-///     block next to the API-key line (the user's chosen home for it).
+///   • variant "header"   — compact inline span in the header's live server
+///     status line.
 ///   • variant "floating" — fixed pill bottom-right (legacy global badge).
 export default function GenSpeedBadge({ variant = "floating" }: { variant?: "header" | "floating" }) {
   const [tps, setTps] = useState<number | null>(null);

@@ -46,7 +46,7 @@ function memStore() {
 }
 
 // --- 1. FPS options + clamp bounds -----------------------------------------
-check(prefs.DEFAULT_FPS === 30, "default FPS is 30 (unchanged prior behaviour)");
+check(prefs.DEFAULT_FPS === 15, "default FPS is a compact but readable 15");
 check(prefs.FPS_OPTIONS.includes(5) && prefs.FPS_OPTIONS.includes(60),
   "FPS options include a low 5 (small files) and a high 60");
 for (const opt of prefs.FPS_OPTIONS) {
@@ -88,7 +88,33 @@ check(prefs.bitrateForFps(30) < prefs.bitrateForFps(60),
 check(prefs.bitrateForFps(5) >= 300_000,
   "the bitrate has a sane floor so low-FPS video stays watchable");
 
-// --- 6. Source pins ---------------------------------------------------------
+// --- 6. Seekable format + resolution-aware quality -------------------------
+check(typeof prefs.chooseRecorderFormat === "function",
+  "the recorder exposes a testable format selector");
+if (typeof prefs.chooseRecorderFormat === "function") {
+  const mp4 = prefs.chooseRecorderFormat((mime) => mime === "video/mp4;codecs=avc1.42E01E");
+  check(mp4.extension === "mp4" && mp4.mimeType.includes("avc1"),
+    "H.264 MP4 is preferred when the runtime supports it");
+  const webm = prefs.chooseRecorderFormat((mime) => mime === "video/webm;codecs=vp9");
+  check(webm.extension === "webm" && webm.mimeType.includes("vp9"),
+    "VP9 WebM remains a cross-platform fallback");
+}
+check(typeof prefs.bitrateForCapture === "function",
+  "the recorder exposes a resolution-aware bitrate calculator");
+if (typeof prefs.bitrateForCapture === "function") {
+  check(
+    prefs.bitrateForCapture(30, 3840, 2160, "video/mp4") >
+      prefs.bitrateForCapture(30, 1280, 720, "video/mp4"),
+    "higher-resolution capture receives enough bitrate to keep text sharp",
+  );
+  check(
+    prefs.bitrateForCapture(10, 1920, 1080, "video/mp4") <
+      prefs.bitrateForCapture(30, 1920, 1080, "video/mp4"),
+    "lower FPS still produces a smaller long recording at the same resolution",
+  );
+}
+
+// --- 7. Source pins ---------------------------------------------------------
 const rec = readSrc("tutorial/TutorialRecorder.tsx");
 check(rec.includes('from "./tutorialRecorderPrefs"'),
   "the recorder imports the pure prefs module");
@@ -96,8 +122,19 @@ check(rec.includes('requestDisplayStream("screen", fps)'),
   "the chosen FPS is passed to getDisplayMedia");
 check(rec.includes("canvas.captureStream(fps)"),
   "the crop pipeline captures at the chosen FPS (not a hardcoded 30)");
-check(rec.includes("videoBitsPerSecond: bitrateForFps(fps)"),
-  "the MediaRecorder caps its bitrate to the chosen FPS");
+check(rec.includes("chooseRecorderFormat(MediaRecorder.isTypeSupported)") &&
+  rec.includes("videoBitsPerSecond: bitrateForCapture("),
+  "the MediaRecorder uses the preferred container and resolution-aware bitrate");
+check(rec.includes("recorder.mimeType") && rec.includes("format.extension"),
+  "the downloaded file type and extension follow the recorder actually created");
+check(rec.includes('data-ui="TutorialRecorderFormat"') &&
+  rec.includes("preferredFormat?.label"),
+  "the recorder panel identifies the format selected by this runtime");
+check(rec.includes('contentHint = "detail"'),
+  "screen capture tells the encoder to preserve text and UI detail");
+const cursorSize = rec.match(/const TUTORIAL_CURSOR =[\s\S]*?width='(\d+)' height='(\d+)'/);
+check(Boolean(cursorSize) && Number(cursorSize[1]) <= 26 && Number(cursorSize[2]) <= 30,
+  "the recording cursor is a compact custom pointer, not the oversized hand");
 check(rec.includes('from "../runtime/runActivity"') &&
   rec.includes("subscribeRunActivity") && rec.includes("isRunActive"),
   "the recorder subscribes to the app-wide run-activity signal");

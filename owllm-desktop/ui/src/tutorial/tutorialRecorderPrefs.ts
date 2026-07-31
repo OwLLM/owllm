@@ -7,10 +7,42 @@
 export const RECORDER_FPS_KEY = "owllm:tutorial-recorder:fps";
 export const RECORDER_AUTOSTOP_KEY = "owllm:tutorial-recorder:autostop-after-job";
 
-// Selectable frame rates. Lower = smaller files for long sessions; 30 keeps the
-// previous default so existing behaviour is unchanged when nothing is stored.
+// Selectable frame rates. 15 fps keeps tutorials readable while halving the
+// default frame count; users can still select 30/60 for motion-heavy captures.
 export const FPS_OPTIONS = [5, 10, 15, 24, 30, 60] as const;
-export const DEFAULT_FPS = 30;
+export const DEFAULT_FPS = 15;
+
+export type RecorderFormat = {
+  mimeType: string;
+  extension: "mp4" | "webm";
+  label: string;
+};
+
+// H.264 MP4 is the first choice because normal desktop/browser players can
+// index, seek, scrub, and edit it reliably. Not every WebView ships an H.264
+// encoder, so keep efficient WebM codecs as capability-tested fallbacks.
+export const RECORDER_FORMATS: readonly RecorderFormat[] = [
+  { mimeType: "video/mp4;codecs=avc1.640028", extension: "mp4", label: "H.264 MP4" },
+  { mimeType: "video/mp4;codecs=avc1.42E01E", extension: "mp4", label: "H.264 MP4" },
+  { mimeType: "video/mp4;codecs=avc1", extension: "mp4", label: "H.264 MP4" },
+  { mimeType: "video/mp4", extension: "mp4", label: "MP4" },
+  { mimeType: "video/webm;codecs=vp9", extension: "webm", label: "VP9 WebM" },
+  { mimeType: "video/webm;codecs=vp8", extension: "webm", label: "VP8 WebM" },
+  { mimeType: "video/webm", extension: "webm", label: "WebM" },
+] as const;
+
+export function chooseRecorderFormat(isTypeSupported: (mimeType: string) => boolean): RecorderFormat {
+  for (const format of RECORDER_FORMATS) {
+    try {
+      if (isTypeSupported(format.mimeType)) return format;
+    } catch {
+      // A partial WebView implementation can throw instead of returning false.
+    }
+  }
+  // An empty MIME asks MediaRecorder to choose its native format. WebM is the
+  // conservative filename fallback; the recorder's actual MIME wins on save.
+  return { mimeType: "", extension: "webm", label: "Native video" };
+}
 
 // How long after a job ends before the recorder stops itself.
 export const AUTO_STOP_DELAY_MS = 3000;
@@ -72,6 +104,23 @@ export function saveAutoStop(value: boolean, store: Store | null | undefined): v
 export function bitrateForFps(fps: number): number {
   const perFps = 120_000;
   return Math.max(300_000, Math.min(8_000_000, Math.round(clampFps(fps) * perFps)));
+}
+
+// Preserve UI/text detail without spending a fixed number of bits on every
+// resolution. Screen video compresses efficiently, especially with VP9; scale
+// with pixels and FPS, retain a floor for legible low-FPS captures, and cap the
+// result so a 4K display cannot unexpectedly fill the drive.
+export function bitrateForCapture(
+  fps: number,
+  width: number | undefined,
+  height: number | undefined,
+  mimeType: string,
+): number {
+  const safeWidth = Number.isFinite(width) && Number(width) > 0 ? Number(width) : 1920;
+  const safeHeight = Number.isFinite(height) && Number(height) > 0 ? Number(height) : 1080;
+  const bitsPerPixelFrame = mimeType.includes("vp9") ? 0.055 : 0.075;
+  const calculated = safeWidth * safeHeight * clampFps(fps) * bitsPerPixelFrame;
+  return Math.max(750_000, Math.min(8_000_000, Math.round(calculated)));
 }
 
 /// True the instant a run goes from active → inactive: the edge that means "the

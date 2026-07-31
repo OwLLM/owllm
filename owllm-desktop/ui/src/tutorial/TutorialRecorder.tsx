@@ -5,7 +5,8 @@ import {
   AUTO_STOP_DELAY_MS,
   DEFAULT_FPS,
   FPS_OPTIONS,
-  bitrateForFps,
+  bitrateForCapture,
+  chooseRecorderFormat,
   jobJustEnded,
   readAutoStop,
   readFps,
@@ -24,8 +25,8 @@ function recorderIsActive(state: RecorderState): boolean {
 type CaptureMode = "window" | "screen";
 
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
-const HAND_CURSOR =
-  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='46' viewBox='0 0 42 46'%3E%3Cpath d='M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z' fill='%23ffe0a8' stroke='%23271407' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8M13.8 27.8v5.6' stroke='%239f6430' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E\") 10 8, pointer";
+const TUTORIAL_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='30' viewBox='0 0 24 30'%3E%3Cpath d='M3 2.5 20.2 17h-7.7l4.4 8.2-4.3 2.3-4.3-8.2-5.3 5.1Z' fill='%23081120' stroke='%237ce7ff' stroke-width='1.8' stroke-linejoin='round'/%3E%3Cpath d='m5.7 6.6 9.6 8.1h-4.9l2.9 5.5' fill='none' stroke='%23ffffff' stroke-opacity='.72' stroke-width='1.15' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") 3 3, pointer";
 
 // The full app rectangle (content window + the frame that's drawn in the
 // separate, larger overlay window around it) plus the monitor it's on, in
@@ -205,6 +206,8 @@ async function requestDisplayStream(mode: CaptureMode, fps: number): Promise<Med
   const preferred = {
     video: {
       frameRate: fps,
+      width: { max: 1920 },
+      height: { max: 1080 },
       cursor: "always",
       displaySurface: mode === "screen" ? "monitor" : "window",
     },
@@ -214,12 +217,18 @@ async function requestDisplayStream(mode: CaptureMode, fps: number): Promise<Med
     surfaceSwitching: "exclude",
   };
   try {
-    return await media.getDisplayMedia(preferred);
+    const stream = await media.getDisplayMedia(preferred);
+    const track = stream.getVideoTracks()[0];
+    if (track) track.contentHint = "detail";
+    return stream;
   } catch (err) {
     if (err instanceof DOMException && err.name === "NotAllowedError") {
       throw err;
     }
-    return media.getDisplayMedia({ video: { frameRate: fps }, audio: false });
+    const stream = await media.getDisplayMedia({ video: { frameRate: fps }, audio: false });
+    const track = stream.getVideoTracks()[0];
+    if (track) track.contentHint = "detail";
+    return stream;
   }
 }
 
@@ -340,7 +349,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     const cursorClass = "owllm-tutorial-recording";
     const style = document.createElement("style");
     style.dataset.owllmTutorialCursor = "1";
-    style.textContent = `html.${cursorClass}, html.${cursorClass} * { cursor: ${HAND_CURSOR} !important; }`;
+    style.textContent = `html.${cursorClass}, html.${cursorClass} * { cursor: ${TUTORIAL_CURSOR} !important; }`;
     document.head.appendChild(style);
     document.documentElement.classList.add(cursorClass);
     const onClick = (e: MouseEvent) => {
@@ -373,6 +382,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       && Boolean(navigator.mediaDevices?.getDisplayMedia)
       && typeof MediaRecorder !== "undefined"
   ), []);
+  const preferredFormat = useMemo(() => (
+    canRecord ? chooseRecorderFormat(MediaRecorder.isTypeSupported) : null
+  ), [canRecord]);
 
   const stopStreams = () => {
     streamRef.current?.getTracks().forEach(track => track.stop());
@@ -428,29 +440,64 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         setStatus("Recording the chosen window as-is. For the OWLLM frame, stop and re-record, choosing “Entire Screen”. Ctrl+Shift+R to stop.");
       }
 
-      const recorder = new MediaRecorder(recordStream, {
-        mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-          ? "video/webm;codecs=vp9"
-          : "video/webm",
-        // Cap the bitrate to the chosen FPS — MediaRecorder otherwise targets a
-        // fixed bitrate regardless of frame rate, so a low FPS alone would NOT
-        // shrink the file (the drive-filling problem).
-        videoBitsPerSecond: bitrateForFps(fps),
-      });
+      let format = chooseRecorderFormat(MediaRecorder.isTypeSupported);
+      const videoTrack = recordStream.getVideoTracks()[0];
+      if (videoTrack) videoTrack.contentHint = "detail";
+      const settings = videoTrack?.getSettings();
+      const recorderOptions: MediaRecorderOptions & { videoKeyFrameIntervalDuration?: number } = {
+        // Size the budget for the actual frame instead of starving a 4K source
+        // with the same bitrate as 720p. The capture request is capped at 1080p
+        // for a sharp, compact tutorial rather than a blurry oversized file.
+        videoBitsPerSecond: bitrateForCapture(
+          fps,
+          settings?.width,
+          settings?.height,
+          format.mimeType,
+        ),
+        // Frequent keyframes make scrubbing responsive in players/editors.
+        videoKeyFrameIntervalDuration: 2000,
+      };
+      if (format.mimeType) recorderOptions.mimeType = format.mimeType;
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(recordStream, recorderOptions);
+      } catch (err) {
+        // Some WebViews advertise an OS H.264 encoder that still refuses the
+        // current stream profile. Fall back to WebM instead of losing Record.
+        if (!format.mimeType.includes("mp4")) throw err;
+        format = chooseRecorderFormat((mimeType) => (
+          !mimeType.includes("mp4") && MediaRecorder.isTypeSupported(mimeType)
+        ));
+        recorderOptions.videoBitsPerSecond = bitrateForCapture(
+          fps,
+          settings?.width,
+          settings?.height,
+          format.mimeType,
+        );
+        if (format.mimeType) recorderOptions.mimeType = format.mimeType;
+        else delete recorderOptions.mimeType;
+        recorder = new MediaRecorder(recordStream, recorderOptions);
+      }
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = e => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = () => {
         const durationMs = performance.now() - startedAtRef.current - pausedTotalRef.current;
-        const video = new Blob(chunksRef.current, { type: "video/webm" });
+        const outputMimeType = recorder.mimeType || format.mimeType || "video/webm";
+        const extension = outputMimeType.includes("mp4") ? "mp4" : format.extension;
+        const video = new Blob(chunksRef.current, { type: outputMimeType });
         const track = new Blob([JSON.stringify({
           createdAt: new Date().toISOString(),
           durationMs: Math.round(durationMs),
+          format: outputMimeType,
+          width: settings?.width ?? null,
+          height: settings?.height ?? null,
+          fps,
           clicks: clickTrackRef.current,
         }, null, 2)], { type: "application/json" });
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        downloadBlob(video, `owllm-tutorial-${stamp}.webm`);
+        downloadBlob(video, `owllm-tutorial-${stamp}.${extension}`);
         downloadBlob(track, `owllm-tutorial-${stamp}-clicks.json`);
         cropHandleRef.current?.stop();
         cropHandleRef.current = null;
@@ -460,7 +507,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         }
         stopStreams();
         setState("idle");
-        setStatus("Saved video and click track.");
+        setStatus(`Saved ${format.label} video and click track.`);
       };
       // Stop if the user ends the share from the browser/OS chrome.
       screenStream.getVideoTracks()[0]?.addEventListener("ended", () => stop());
@@ -583,6 +630,20 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         </label>
         <div style={{ fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 8, lineHeight: 1.35 }}>
           In the share dialog, choose <b>Entire Screen</b> (not Window). Off = record the whole screen.
+        </div>
+        <div
+          data-ui="TutorialRecorderFormat"
+          style={{
+            marginBottom: 8, padding: "6px 9px", borderRadius: 6,
+            border: "1px solid rgba(var(--accent-rgb),0.3)",
+            background: "rgba(var(--accent-rgb),0.06)",
+            color: "var(--fg-muted)", fontSize: 10.5,
+          }}
+        >
+          <b style={{ color: "var(--fg-strong)" }}>{preferredFormat?.label ?? "Native video"}</b>
+          {preferredFormat?.extension === "mp4"
+            ? " · seekable · editor-friendly · 1080p max"
+            : " · compatible WebM fallback · 1080p max"}
         </div>
         <label
           style={{

@@ -87,6 +87,23 @@ try {
     ) === claudeComplete);
   check("Claude OAuth opens only after callback and PKCE parameters arrive",
     firstCompleteAuthUrl(`Authorize: ${claudeComplete} \r\n`) === claudeComplete);
+  const currentClaudePrefix = "https://claude.com/cai/oauth/authorize?code=true"
+    + "&client_id=9d1c250a-e61b-44";
+  const currentClaudeComplete = `${currentClaudePrefix}fe-93d9-2f5e`
+    + "&response_type=code"
+    + "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback"
+    + "&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference"
+    + "&code_challenge=pkce&code_challenge_method=S256&state=state";
+  check("current Claude /cai OAuth prefix cannot open with a partial client_id",
+    firstCompleteAuthUrl(`Authorize: ${currentClaudePrefix} \r\n`) === null);
+  check("current Claude /cai OAuth is reassembled before opening",
+    firstCompleteAuthUrl(
+      `Authorize: ${currentClaudePrefix}\r\n`
+        + "fe-93d9-2f5e&response_type=code\r\n"
+        + "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback\r\n"
+        + "&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference\r\n"
+        + "&code_challenge=pkce&code_challenge_method=S256&state=state \r\n",
+    ) === currentClaudeComplete);
   check("a support link alone is never treated as an authorization URL",
     firstCompleteAuthUrl("Help: https://support.claude.com/en \r\n") === null);
   check("a complete URL is never glued onto the next log line",
@@ -108,6 +125,7 @@ try {
   );
   check("native browser boundary rejects incomplete Claude and Kimi authorization URLs",
     nativeAuthGuard.includes('Some("claude.ai"), "/oauth/authorize"')
+      && nativeAuthGuard.includes('Some("claude.com"), "/cai/oauth/authorize"')
       && nativeAuthGuard.includes('"client_id", "redirect_uri", "code_challenge"')
       && nativeAuthGuard.includes('Some("www.kimi.com"), "/code/authorize_device"')
       && nativeAuthGuard.includes('!has_param("user_code")'));

@@ -1415,12 +1415,15 @@ fn fleet_worktree_merge_locked(
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum WorktreeSyncOutcome {
     Synced {
+        #[serde(rename = "pageSha")]
         page_sha: String,
+        #[serde(rename = "projectSha")]
         project_sha: String,
         remote: bool,
         detail: String,
     },
     NoChanges {
+        #[serde(rename = "projectSha")]
         project_sha: String,
         remote: bool,
         detail: String,

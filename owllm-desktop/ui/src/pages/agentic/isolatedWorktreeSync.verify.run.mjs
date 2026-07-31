@@ -32,6 +32,9 @@ check(fleet.includes("pub async fn fleet_worktree_sync"),
   "one backend command owns the isolated Sync transaction");
 check(lib.includes("fleet::fleet_worktree_sync"),
   "the isolated Sync command is registered with Tauri");
+check((fleet.match(/#\[serde\(rename = "projectSha"\)\]/g) ?? []).length === 2 &&
+      fleet.includes('#[serde(rename = "pageSha")]'),
+  "the native result serializes commit fields with the camelCase names consumed by the UI");
 
 const syncStart = fleet.indexOf("pub async fn fleet_worktree_sync");
 const syncBody = syncStart >= 0 ? fleet.slice(syncStart, syncStart + 7000) : "";
@@ -57,6 +60,8 @@ const isolatedAction = mergeStart >= 0 && publishStart > mergeStart
   : "";
 check(isolatedAction.includes('invoke<WtSync>("fleet_worktree_sync"'),
   "the isolated rail calls the single backend Sync command");
+check(isolatedAction.includes('typeof sync.projectSha !== "string"'),
+  "the UI reports a malformed native result instead of crashing while formatting it");
 check(!isolatedAction.includes('"fleet_worktree_finalize"') &&
       !isolatedAction.includes('"fleet_worktree_merge"'),
   "the UI cannot split isolated commit and merge into separate IPC operations");
@@ -66,7 +71,7 @@ check(cards.includes('{loading ? "⏳" : "⇅"} Sync'),
   "isolated and direct pages present the same Sync action");
 
 if (process.exitCode) {
-  console.error(`\n${passed}/13 isolated worktree Sync checks passed.`);
+  console.error(`\n${passed}/15 isolated worktree Sync checks passed.`);
   process.exit(process.exitCode);
 }
-console.log(`\n${passed}/13 isolated worktree Sync checks passed.`);
+console.log(`\n${passed}/15 isolated worktree Sync checks passed.`);

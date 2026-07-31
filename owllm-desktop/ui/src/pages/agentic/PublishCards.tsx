@@ -351,8 +351,13 @@ export default function PublishCards({
       const sync = await invoke<WtSync>("fleet_worktree_sync", {
         worktreePath: gitDir, projectCwd: projectRoot, agentName: "code", branch,
       });
-      if (sync.status === "synced") return `Synced page and project at ${sync.projectSha.slice(0, 8)}. ${sync.detail}`;
-      if (sync.status === "noChanges") return `Already synchronized at ${sync.projectSha.slice(0, 8)}. ${sync.detail}`;
+      if (sync.status === "synced" || sync.status === "noChanges") {
+        if (typeof sync.projectSha !== "string" || !sync.projectSha) {
+          throw new Error("Sync completed but returned no project commit. Restart OWLLM and try Sync again.");
+        }
+        const prefix = sync.status === "synced" ? "Synced page and project" : "Already synchronized";
+        return `${prefix} at ${sync.projectSha.slice(0, 8)}. ${sync.detail}`;
+      }
       if (sync.status === "conflict") throw new Error(
         `Real overlapping edits — nothing was auto-dropped. Both sides are preserved ` +
         `(the page branch keeps its commits). Resolve these files, then Sync again:\n` +

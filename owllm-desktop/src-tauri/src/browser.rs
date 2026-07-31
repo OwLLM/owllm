@@ -789,12 +789,14 @@ const BRIDGE_JS: &str = r##"
     for (var i = 0; i < pws.length; i++) if (pws[i].value) { pw = pws[i]; break; }
     if (!pw) return null;
     var user = "";
+    try { user = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
     var ins = document.querySelectorAll("input");
     for (var j = 0; j < ins.length; j++) {
       if (ins[j] === pw) break;
       var ty = (ins[j].type || "text").toLowerCase();
       if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) user = ins[j].value;
     }
+    try { if (user) sessionStorage.setItem("__owllmLoginUser", user); } catch (e) {}
     return { origin: location.origin, username: user, password: pw.value };
   }
   function reportCred() {
@@ -815,7 +817,13 @@ const BRIDGE_JS: &str = r##"
   // tab-hide — the report itself dedupes via credSent.
   document.addEventListener("input", function (e) {
     var t = e.target;
-    if (t && t.tagName === "INPUT") { var c = grabCred(); if (c) window.__owllmProv = c; }
+    if (t && t.tagName === "INPUT") {
+      var ty = (t.type || "text").toLowerCase();
+      if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
+        try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e) {}
+      }
+      var c = grabCred(); if (c) window.__owllmProv = c;
+    }
   }, true);
   document.addEventListener("click", function (e) {
     var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
@@ -1139,6 +1147,27 @@ fn content_webview_for_tab(app: &tauri::AppHandle, tab_id: Option<u64>) -> Optio
     }
     app.get_webview(CONTENT_LABEL)
         .or_else(|| app.get_webview(BROWSER_LABEL))
+}
+
+pub(crate) fn browser_tab_url(app: &tauri::AppHandle, tab_id: u64) -> Result<String, String> {
+    let webview = content_webview_for_tab(app, Some(tab_id))
+        .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
+    webview
+        .url()
+        .map(|url| url.to_string())
+        .map_err(|e| format!("could not read browser tab {tab_id} URL: {e}"))
+}
+
+pub(crate) fn eval_browser_tab(
+    app: &tauri::AppHandle,
+    tab_id: u64,
+    script: &str,
+) -> Result<(), String> {
+    let webview = content_webview_for_tab(app, Some(tab_id))
+        .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
+    webview
+        .eval(script)
+        .map_err(|e| format!("could not autofill browser tab {tab_id}: {e}"))
 }
 
 fn content_webview(app: &tauri::AppHandle) -> Option<Webview> {
@@ -1743,7 +1772,7 @@ fn attach_tab(
             // Typed-login capture rides the EVT channel from BRIDGE_JS. The
             // vault write is queued — no I/O on the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
-                if !private_session && action == "cred" {
+                if action == "cred" {
                     queue_browser_ui(
                         &wv.app_handle().clone(),
                         BrowserUiEvent::TypedLogin { data },
@@ -2426,7 +2455,7 @@ fn attach_legacy_tab(
             // Typed-login capture works in this shape too (same EVT channel);
             // the vault write is queued off the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
-                if !private_session && action == "cred" {
+                if action == "cred" {
                     queue_browser_ui(
                         &win.app_handle().clone(),
                         BrowserUiEvent::TypedLogin { data },
@@ -2567,7 +2596,7 @@ fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
     match (url.host_str(), url.path()) {
         (Some("claude.ai"), "/oauth/authorize")
         | (Some("claude.com"), "/cai/oauth/authorize") => {
-            let missing = ["client_id", "redirect_uri", "code_challenge"]
+            let missing = ["client_id", "redirect_uri", "code_challenge", "state"]
                 .into_iter()
                 .filter(|name| !has_param(name))
                 .collect::<Vec<_>>();
@@ -2767,9 +2796,9 @@ pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
 /// Open a provider authorization page without the persistent browser profile.
 ///
 /// Subscription OAuth must never inherit the account used by Gmail, Calendar,
-/// Claude Web, or another ordinary browser tab. It also must not invoke the
-/// saved-login vault: the user needs a real account chooser so they can select
-/// the identity that owns the subscription.
+/// Claude Web, or another ordinary browser tab. The user may explicitly select
+/// one identity from the encrypted local vault, but no ordinary browser cookie
+/// or implicit first-account autofill is allowed into this flow.
 #[tauri::command(async)]
 pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let _operation = lock_browser_operation();
@@ -3240,7 +3269,7 @@ mod tests {
         let claude_complete = concat!(
             "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
             "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
-            "&code_challenge=pkce"
+            "&code_challenge=pkce&state=state"
         );
         let current_claude_prefix =
             "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
@@ -3248,6 +3277,11 @@ mod tests {
             "https://claude.com/cai/oauth/authorize?code=true&client_id=",
             "9d1c250a-e61b-44fe-93d9-2f5e",
             "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback",
+            "&code_challenge=pkce&state=state"
+        );
+        let missing_state = concat!(
+            "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
+            "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
             "&code_challenge=pkce"
         );
         let nested_claude_prefix = concat!(
@@ -3261,6 +3295,7 @@ mod tests {
         for incomplete in [
             claude_prefix,
             current_claude_prefix,
+            missing_state,
             nested_claude_prefix,
             kimi_prefix,
         ] {

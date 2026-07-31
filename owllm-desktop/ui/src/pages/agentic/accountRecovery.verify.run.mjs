@@ -12,6 +12,7 @@ const APP = path.resolve(UI, "..");
 const read = (relative) => fs.readFileSync(path.join(APP, relative), "utf8");
 const healthSource = read("ui/src/pages/advanced/accountHealth.ts");
 const browser = read("src-tauri/src/browser.rs");
+const browserVault = read("src-tauri/src/browser_vault.rs");
 const onboarding = read("ui/src/pages/core/AccountSyncModal.tsx");
 const accounts = read("ui/src/pages/advanced/AccountsPage.tsx");
 const pty = read("ui/src/pages/advanced/PtyTerminal.tsx");
@@ -88,8 +89,11 @@ check(
     && !pty.includes('invoke<string>("browser_open_tab", { url, activate: true })'),
 );
 check(
-  "private provider sign-in never reads, saves, or persists web credentials",
-  browser.includes("if !private_session && action == \"cred\"")
+  "private provider sign-in saves typed credentials only in the encrypted vault",
+  browser.includes("if action == \"cred\"")
+    && browserVault.includes("browser_vault_autofill_tab")
+    && browserVault.includes("autofill_eval_for_user")
+    && browser.includes("__owllmLoginUser")
     && browser.includes("if !private_session && url.starts_with(\"http\")")
     && browser.includes(".filter(|tab| !private_tabs.contains(&tab.id))"),
 );

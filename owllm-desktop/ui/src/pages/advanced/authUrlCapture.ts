@@ -48,7 +48,7 @@ function isCompleteAuthUrl(raw: string): boolean {
   // a Claude authorization prefix until the parameters required to bind the
   // callback and PKCE exchange have arrived.
   if (CLAUDE_AUTH_ENDPOINTS.has(`${url.origin}${url.pathname}`)) {
-    return ["client_id", "redirect_uri", "code_challenge"]
+    return ["client_id", "redirect_uri", "code_challenge", "state"]
       .every((key) => Boolean(url.searchParams.get(key)?.trim()));
   }
   return isAuthenticationUrl(url);

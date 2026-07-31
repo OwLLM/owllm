@@ -263,6 +263,8 @@ type AccountsStatus = {
   grok_cli_installed: boolean;
 };
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
+type SavedLoginMeta = { origin: string; username: string; note: string; ts: number };
+const CLAUDE_ACCOUNT_KEY = "owllm:accounts:claude-login";
 
 // -----------------------------------------------------------------------
 // Route + provider model
@@ -576,12 +578,16 @@ function ApiKeyDialog({
 // One route row inside a provider container.
 // -----------------------------------------------------------------------
 function RouteRow({
-  provider, route, state, hostLabel, onConnect, onInstall, onDisconnect, onTest,
+  provider, route, state, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
+  onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   route: RouteSpec;
   state: CardState;
   hostLabel: string;
+  claudeAccounts: SavedLoginMeta[];
+  selectedClaudeAccount: string;
+  onSelectClaudeAccount: (username: string) => void;
   onConnect: () => void;
   onInstall: () => void;
   onDisconnect: () => void;
@@ -641,6 +647,25 @@ function RouteRow({
       <div style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: 17 }}>
         {statusText}
       </div>
+      {route.backend === "claude_cli" && (
+        <div style={{ marginLeft: 17, display: "flex", alignItems: "center", gap: 7 }}>
+          <label htmlFor="claude-saved-account" style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>Saved account</label>
+          <select
+            id="claude-saved-account"
+            value={selectedClaudeAccount}
+            onChange={(event) => onSelectClaudeAccount(event.target.value)}
+            style={{ flex: 1, minWidth: 0, height: 26, padding: "0 7px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 11 }}
+            title="Choose which encrypted local Claude login to autofill"
+          >
+            <option value="">Choose in Claude / remember after sign-in</option>
+            {claudeAccounts.map((account) => (
+              <option key={`${account.origin}:${account.username}`} value={account.username}>
+                {account.username} · {account.origin.replace(/^https?:\/\//, "")}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {state.testText && (
         <div style={{
           fontSize: 11, marginLeft: 17, wordBreak: "break-word",
@@ -718,12 +743,16 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, highlighted, hostLabel, onConnect, onInstall, onDisconnect, onTest,
+  provider, cards, highlighted, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
+  onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   cards: Record<string, CardState>;
   highlighted?: boolean;
   hostLabel: string;
+  claudeAccounts: SavedLoginMeta[];
+  selectedClaudeAccount: string;
+  onSelectClaudeAccount: (username: string) => void;
   onConnect: (route: RouteSpec) => void;
   onInstall: (route: RouteSpec) => void;
   onDisconnect: (route: RouteSpec) => void;
@@ -762,6 +791,9 @@ function ProviderCard({
             route={route}
             state={cards[route.key] ?? initialCardState}
             hostLabel={hostLabel}
+            claudeAccounts={claudeAccounts}
+            selectedClaudeAccount={selectedClaudeAccount}
+            onSelectClaudeAccount={onSelectClaudeAccount}
             onConnect={() => onConnect(route)}
             onInstall={() => onInstall(route)}
             onDisconnect={() => onDisconnect(route)}
@@ -1022,6 +1054,10 @@ export default function AccountsPage() {
   const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
   const [railTab, setRailTab] = useState<RailTab>("log");
   const [hostOs, setHostOs] = useState("");
+  const [savedClaudeAccounts, setSavedClaudeAccounts] = useState<SavedLoginMeta[]>([]);
+  const [selectedClaudeAccount, setSelectedClaudeAccount] = useState(() => {
+    try { return localStorage.getItem(CLAUDE_ACCOUNT_KEY) ?? ""; } catch { return ""; }
+  });
   const autoHealthProbedBackends = useRef(new Set<string>());
   const authTabs = useRef<Record<string, number>>({});
   const terminalOutput = useRef<Record<string, string>>({});
@@ -1034,6 +1070,29 @@ export default function AccountsPage() {
       : hostOs === "linux"
         ? "Linux"
         : "Host";
+
+  useEffect(() => {
+    let dead = false;
+    void invoke<SavedLoginMeta[]>("browser_vault_list")
+      .then((all) => {
+        if (dead) return;
+        const claude = all
+          .filter((entry) => /(?:claude\.ai|claude\.com|anthropic\.com)$/i.test(entry.origin.replace(/^https?:\/\//, "")))
+          .sort((a, b) => a.username.localeCompare(b.username) || a.origin.localeCompare(b.origin));
+        setSavedClaudeAccounts(claude);
+        setSelectedClaudeAccount((current) => claude.some((entry) => entry.username === current) ? current : "");
+      })
+      .catch(() => { /* the vault is optional until the first saved login */ });
+    return () => { dead = true; };
+  }, []);
+
+  const chooseClaudeAccount = (username: string) => {
+    setSelectedClaudeAccount(username);
+    try {
+      if (username) localStorage.setItem(CLAUDE_ACCOUNT_KEY, username);
+      else localStorage.removeItem(CLAUDE_ACCOUNT_KEY);
+    } catch { /* localStorage can be unavailable in a locked-down WebView */ }
+  };
 
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
@@ -1244,6 +1303,13 @@ export default function AccountsPage() {
 
   function handleAuthTabOpened(backend: string, tabId: number) {
     authTabs.current[backend] = tabId;
+    if (backend === "claude_cli" && selectedClaudeAccount) {
+      invoke<string>("browser_vault_autofill_tab", {
+        tabId,
+        username: selectedClaudeAccount,
+      }).then((message) => logInfo(backend, `✓ ${message}.`))
+        .catch((error) => logInfo(backend, `[saved login] ${String(error)} — choose or enter the account in Claude; it will be remembered securely.`));
+    }
   }
 
   function handleTerminalOutput(backend: string, text: string) {
@@ -1527,6 +1593,9 @@ export default function AccountsPage() {
               cards={cards}
               highlighted={onboardingProvider === provider.key}
               hostLabel={hostLabel}
+              claudeAccounts={savedClaudeAccounts}
+              selectedClaudeAccount={selectedClaudeAccount}
+              onSelectClaudeAccount={chooseClaudeAccount}
               onConnect={(r) => {
                 void handleConnect(
                   r,

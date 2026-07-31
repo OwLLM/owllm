@@ -72,21 +72,24 @@ try {
     firstCompleteAuthUrl(
       "Learn more: https://support.claude.com/en/articles/promotion \r\n"
         + "Authorize: https://claude.ai/oauth/authorize?client_id=owllm"
-        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n",
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state \r\n",
     ) === "https://claude.ai/oauth/authorize?client_id=owllm"
-      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce");
+      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state");
   const claudePrefix = "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
   const claudeComplete = `${claudePrefix}`
-    + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce";
+    + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state";
   check("wrapped Claude OAuth prefix without redirect_uri is never opened",
     firstCompleteAuthUrl(`Authorize: ${claudePrefix} \r\n`) === null);
   check("hard-wrapped Claude OAuth is reassembled instead of opening its prefix",
     firstCompleteAuthUrl(
       `Authorize: ${claudePrefix}\r\n`
-        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n",
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state \r\n",
     ) === claudeComplete);
   check("Claude OAuth opens only after callback and PKCE parameters arrive",
     firstCompleteAuthUrl(`Authorize: ${claudeComplete} \r\n`) === claudeComplete);
+  check("Claude OAuth without state is never opened",
+    firstCompleteAuthUrl(`Authorize: ${claudePrefix}`
+      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n") === null);
   const currentClaudePrefix = "https://claude.com/cai/oauth/authorize?code=true"
     + "&client_id=9d1c250a-e61b-44";
   const currentClaudeComplete = `${currentClaudePrefix}fe-93d9-2f5e`
@@ -126,7 +129,7 @@ try {
   check("native browser boundary rejects incomplete Claude and Kimi authorization URLs",
     nativeAuthGuard.includes('Some("claude.ai"), "/oauth/authorize"')
       && nativeAuthGuard.includes('Some("claude.com"), "/cai/oauth/authorize"')
-      && nativeAuthGuard.includes('"client_id", "redirect_uri", "code_challenge"')
+      && nativeAuthGuard.includes('"client_id", "redirect_uri", "code_challenge", "state"')
       && nativeAuthGuard.includes('Some("www.kimi.com"), "/code/authorize_device"')
       && nativeAuthGuard.includes('!has_param("user_code")'));
   const nativeOpenRoute = browser.slice(

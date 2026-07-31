@@ -554,6 +554,7 @@ pub fn run() {
             browser_vault::browser_vault_add,
             browser_vault::browser_vault_delete,
             browser_vault::browser_vault_autofill,
+            browser_vault::browser_vault_autofill_tab,
             browser_import::browser_import_scan,
             browser_import::browser_import_run,
             browser_import::browser_import_csv,

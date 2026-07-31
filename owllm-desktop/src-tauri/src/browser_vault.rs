@@ -148,6 +148,30 @@ pub fn find_for_origin<'a>(creds: &'a [BrowserCred], page_origin: &str) -> Optio
     None
 }
 
+/// Resolve one exact saved identity for an origin. Provider login pages can
+/// have many saved accounts; never silently choose a different username when
+/// the user explicitly selected one.
+pub fn find_for_origin_user<'a>(
+    creds: &'a [BrowserCred],
+    page_origin: &str,
+    username: &str,
+) -> Option<&'a BrowserCred> {
+    let norm = normalize_origin(page_origin);
+    let host = url::Url::parse(&norm)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
+    let username = username.trim();
+    creds.iter().find(|c| {
+        c.username == username
+            && (c.origin == norm
+                || (host.is_some()
+                    && url::Url::parse(&c.origin)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_string))
+                        == host))
+    })
+}
+
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -247,6 +271,38 @@ pub fn autofill_eval_for(page_url: &str) -> Option<String> {
         serde_json::to_string(&c.username).ok()?,
         serde_json::to_string(&c.password).ok()?
     ))
+}
+
+/// Build an autofill script for a user-selected account. The password is
+/// inserted only into the page's private Rust-owned WebView; it is never
+/// returned to React or logged.
+pub fn autofill_eval_for_user(page_url: &str, username: &str) -> Option<String> {
+    if !page_url.starts_with("http") {
+        return None;
+    }
+    let creds = load();
+    let c = find_for_origin_user(&creds, page_url, username)?;
+    Some(format!(
+        "try{{window.__owllmAutofill&&window.__owllmAutofill({},{})}}catch(e){{}}",
+        serde_json::to_string(&c.username).ok()?,
+        serde_json::to_string(&c.password).ok()?
+    ))
+}
+
+/// Arm the selected saved login in a provider's private authentication tab.
+/// Cookies remain isolated while the credential is read from the encrypted
+/// per-user vault and injected only into that tab.
+#[tauri::command(async)]
+pub fn browser_vault_autofill_tab(
+    app: tauri::AppHandle,
+    tab_id: u64,
+    username: String,
+) -> Result<String, String> {
+    let page_url = crate::browser::browser_tab_url(&app, tab_id)?;
+    let script = autofill_eval_for_user(&page_url, &username)
+        .ok_or_else(|| format!("no saved login for {}", username.trim()))?;
+    crate::browser::eval_browser_tab(&app, tab_id, &script)?;
+    Ok(format!("armed saved login for {}", username.trim()))
 }
 
 /// Save a batch of imported creds. Used by browser_import.

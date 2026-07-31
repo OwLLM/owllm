@@ -44,6 +44,12 @@ type WtMerge =
   | { status: "noChanges" }
   | { status: "error"; message: string };
 
+type WtSync =
+  | { status: "synced"; pageSha: string; projectSha: string; remote: boolean; detail: string }
+  | { status: "noChanges"; projectSha: string; remote: boolean; detail: string }
+  | { status: "conflict"; files: string[] }
+  | { status: "error"; message: string };
+
 // v1 was ONE GLOBAL blob — editing publish settings on any project silently
 // applied them to every project AND permanently stopped the committed Project
 // Card from seeding this surface anywhere. v2 keys by project so settings can't
@@ -340,22 +346,18 @@ export default function PublishCards({
   // plain three-way merge instead of dead-ending on "not a fast-forward".
   const doPush = () => run("Syncing with origin", () => invoke("repo_push", { repoDir: pushDir }));
 
-  const doMerge = () => run(isolated ? "Merging worktree" : `Syncing with ${mergeTarget}`, async () => {
+  const doMerge = () => run(isolated ? "Syncing page" : `Syncing with ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
-      const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
-        worktreePath: gitDir, agentName: "code", summary: "Code page session",
+      const sync = await invoke<WtSync>("fleet_worktree_sync", {
+        worktreePath: gitDir, projectCwd: projectRoot, agentName: "code", branch,
       });
-      if (fin.status === "error") throw new Error(`commit failed: ${fin.message}`);
-      const mg = await invoke<WtMerge>("fleet_worktree_merge", {
-        projectCwd: projectRoot, agentName: "code", branch,
-      });
-      if (mg.status === "merged") return `Merged ${mg.filesChanged} file(s) into ${projectRoot.replace(/^.*[\\/]/, "")}`;
-      if (mg.status === "noChanges") return "Nothing new to merge — already up to date.";
-      if (mg.status === "conflict") throw new Error(
+      if (sync.status === "synced") return `Synced page and project at ${sync.projectSha.slice(0, 8)}. ${sync.detail}`;
+      if (sync.status === "noChanges") return `Already synchronized at ${sync.projectSha.slice(0, 8)}. ${sync.detail}`;
+      if (sync.status === "conflict") throw new Error(
         `Real overlapping edits — nothing was auto-dropped. Both sides are preserved ` +
-        `(the page branch keeps its commits). Resolve these files, then merge again:\n` +
-        mg.files.map((f) => `  - ${f}`).join("\n"));
-      throw new Error(mg.message);
+        `(the page branch keeps its commits). Resolve these files, then Sync again:\n` +
+        sync.files.map((f) => `  - ${f}`).join("\n"));
+      throw new Error(sync.message);
     }
     return invoke<string>("repo_sync", { repoDir: gitDir, target: mergeTarget });
   });
@@ -413,9 +415,9 @@ export default function PublishCards({
   const hasPublishScript = ready?.find((c) => c.id === "script")?.ok ?? false;
 
   const showCommit = isRepo;
-  const showPush = isRepo && hasRemote;
-  // Isolated pages merge worktree→project locally (fleet_worktree_merge) — no
-  // remote involved, so a project without origin must still get its Merge.
+  const showPush = isRepo && !isolated && hasRemote;
+  // Isolated pages use one backend-owned Sync transaction that integrates the
+  // worktree and reconciles origin while the canonical lock is held.
   const showMerge = isRepo && ((isolated && !!projectRoot && !!branch) || hasRemote);
   const showPublish = isRepo && hasPublishScript;
   // Dirtiness is NOT a hard block here — the authoritative check lives in the
@@ -617,11 +619,11 @@ export default function PublishCards({
                 onClick={doMerge}
                 disabled={disabled || loading}
                 title={isolated
-                  ? `Merge this page's worktree back into ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
+                  ? `Synchronize this page with ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
                   : `Synchronize with origin/${mergeTarget}: pushes when ahead, fast-forwards when behind, and safely merges diverged histories — never force-pushes, never drops either side`}
                 style={{ ...chipBtn, flex: 1, color: "#7ff0c5" }}
               >
-                {loading ? "⏳" : isolated ? "⤴" : "⇅"} {isolated ? "Merge" : "Sync"}
+                {loading ? "⏳" : "⇅"} Sync
               </button>
             )}
           </div>

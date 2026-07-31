@@ -73,7 +73,7 @@ const openWebUrlNative = browser.slice(
   browser.indexOf("pub(crate) fn open_web_url"),
   browser.indexOf("fn parse_navigation_url"),
 );
-check(openWebUrlNative.includes("new_tab(app, parsed.as_str(), true)")
+check(/new_tab\(app, parsed\.as_str\(\), true(?:, false)?\)/.test(openWebUrlNative)
   && openWebUrlNative.includes("win.show()")
   && openWebUrlNative.includes("win.unminimize()")
   && openWebUrlNative.includes("win.set_focus()"),

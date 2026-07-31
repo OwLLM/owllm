@@ -1406,6 +1406,138 @@ fn fleet_worktree_merge_locked(
         files_changed,
     })
 }
+
+// ------------------------------------------------------------------
+// 5. ISOLATED SYNC - finalize, integrate, reconcile, and refresh as one unit
+// ------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorktreeSyncOutcome {
+    Synced {
+        page_sha: String,
+        project_sha: String,
+        remote: bool,
+        detail: String,
+    },
+    NoChanges {
+        project_sha: String,
+        remote: bool,
+        detail: String,
+    },
+    Conflict { files: Vec<String> },
+    Error { message: String },
+}
+
+#[tauri::command]
+pub async fn fleet_worktree_sync(
+    worktree_path: String,
+    project_cwd: String,
+    agent_name: String,
+    branch: String,
+) -> Result<WorktreeSyncOutcome, String> {
+    tokio::task::spawn_blocking(move || {
+        fleet_worktree_sync_blocking(worktree_path, project_cwd, agent_name, branch)
+    })
+    .await
+    .map_err(|e| format!("isolated Sync task failed: {e}"))?
+}
+
+fn fleet_worktree_sync_blocking(
+    worktree_path: String,
+    project_cwd: String,
+    agent_name: String,
+    branch: String,
+) -> Result<WorktreeSyncOutcome, String> {
+    let project = PathBuf::from(&project_cwd);
+    let worktree = PathBuf::from(&worktree_path);
+    if !path_is_dir_native(&project)? {
+        return Ok(WorktreeSyncOutcome::Error {
+            message: format!("project_cwd does not exist: {project_cwd}"),
+        });
+    }
+    if !path_is_dir_native(&worktree)? {
+        return Ok(WorktreeSyncOutcome::Error {
+            message: format!("worktree does not exist: {worktree_path}"),
+        });
+    }
+    if !is_git_repo(&project)? || !is_git_repo(&worktree)? {
+        return Ok(WorktreeSyncOutcome::Error {
+            message: "project and page worktree must both be Git repositories".to_string(),
+        });
+    }
+
+    // The canonical lock spans finalization, local integration, remote
+    // reconciliation, page refresh, and final verification.
+    let lock = repo_git_lock(&project);
+    let _sync_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let finalized = fleet_worktree_finalize_blocking(
+        worktree_path,
+        agent_name,
+        "Code page Sync".to_string(),
+    )?;
+    match finalized {
+        FinalizeOutcome::Error { message } => return Ok(WorktreeSyncOutcome::Error { message }),
+        FinalizeOutcome::Committed { .. } | FinalizeOutcome::NoChanges => {}
+    }
+
+    let merged = fleet_worktree_merge_locked(&project, "code", &branch)?;
+    if let MergeOutcome::Conflict { files } = &merged {
+        return Ok(WorktreeSyncOutcome::Conflict { files: files.clone() });
+    }
+    if let MergeOutcome::Error { message } = &merged {
+        return Ok(WorktreeSyncOutcome::Error { message: message.clone() });
+    }
+
+    let (has_origin, _, _) = git(&project, &["remote", "get-url", "origin"])?;
+    let target = git(&project, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .and_then(|(_, out, _)| {
+            let branch = out.trim().to_string();
+            (!branch.is_empty()).then_some(branch)
+        })
+        .unwrap_or_else(|| "main".to_string());
+    let detail = if has_origin {
+        crate::sync_core::sync_repo(&project, &target, None)
+            .map_err(|e| format!("remote reconciliation failed: {e:?}"))?
+            .detail
+    } else {
+        "No origin configured; synchronized locally.".to_string()
+    };
+
+    let (_, project_sha, _) = git(&project, &["rev-parse", "HEAD"])?;
+    let project_sha = project_sha.trim().to_string();
+    let (reset_ok, _, reset_err) = git(&worktree, &["reset", "--hard", &project_sha])?;
+    if !reset_ok {
+        return Ok(WorktreeSyncOutcome::Error {
+            message: format!("page worktree refresh failed: {}", reset_err.trim()),
+        });
+    }
+    let (_, page_sha, _) = git(&worktree, &["rev-parse", "HEAD"])?;
+    let page_sha = page_sha.trim().to_string();
+    if page_sha.trim() != project_sha {
+        return Ok(WorktreeSyncOutcome::Error {
+            message: format!("Sync verification failed: page {page_sha} != project {project_sha}"),
+        });
+    }
+
+    let no_changes = matches!(merged, MergeOutcome::NoChanges);
+    if no_changes {
+        Ok(WorktreeSyncOutcome::NoChanges {
+            project_sha,
+            remote: has_origin,
+            detail,
+        })
+    } else {
+        Ok(WorktreeSyncOutcome::Synced {
+            page_sha,
+            project_sha,
+            remote: has_origin,
+            detail,
+        })
+    }
+}
+
 // ------------------------------------------------------------------
 // 5. REMOVE — drop the worktree (and its branch) once we're done
 // ------------------------------------------------------------------

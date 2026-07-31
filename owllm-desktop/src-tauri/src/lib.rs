@@ -580,6 +580,7 @@ pub fn run() {
             fleet::fleet_worktree_finalize,
             fleet::fleet_worktree_diff,
             fleet::fleet_worktree_merge,
+            fleet::fleet_worktree_sync,
             fleet::fleet_worktree_remove,
             fleet::fleet_cleanup_orphans,
             fleet::fleet_repo_init,

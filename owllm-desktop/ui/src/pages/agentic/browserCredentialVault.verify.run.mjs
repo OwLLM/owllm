@@ -22,6 +22,7 @@ const read = (f) => fs.readFileSync(path.join(SRC, f), "utf8");
 const browser = read("browser.rs");
 const vault = read("browser_vault.rs");
 const crypt = read("crypt.rs");
+const accounts = fs.readFileSync(path.join(HERE, "../advanced/AccountsPage.tsx"), "utf8");
 
 let checks = 0;
 function must(cond, what) {
@@ -54,6 +55,10 @@ must(/addEventListener\("input"/.test(bridge), "input listener (provisional trac
 must(/addEventListener\("click"/.test(bridge), "submit-click capture trigger missing");
 must(/e\.key === "Enter"/.test(bridge), "Enter-key capture trigger missing");
 must(/visibilitychange/.test(bridge), "tab-hide capture trigger missing");
+must(bridge.includes("scheduleCredReport") && /setTimeout\([^]*?reportCred\(\)[^]*?700\)/.test(bridge),
+  "typed credentials are not persisted before fast OAuth navigation destroys the form");
+must(bridge.includes("__owllmLoginUser"), "multi-step login does not retain the non-secret username");
+must(browser.includes('if action == "cred"'), "private provider login credentials are not captured for encrypted saving");
 
 // ---- 3. automatic autofill -------------------------------------------------
 must(bridge.includes("window.__owllmAutofill = function"), "injected __owllmAutofill missing");
@@ -67,6 +72,12 @@ must(/BrowserUiEvent::AutofillPage \{ id, url \} => \{\s*self\.autofills\.insert
   "AutofillPage not absorbed into the UI batch");
 must(/autofill_eval_for\(&url\)/.test(browser) && /content_webview_for_tab\(&app, Some\(id\)\)/.test(browser),
   "worker does not resolve the tab and inject the vault autofill");
+must(vault.includes("find_for_origin_user") && vault.includes("browser_vault_autofill_tab")
+  && vault.includes("autofill_eval_for_user"),
+  "selected multi-account provider autofill is missing");
+must(accounts.includes("Saved account") && accounts.includes("browser_vault_autofill_tab")
+  && accounts.includes("selectedClaudeAccount"),
+  "Accounts page does not expose the selected Claude identity");
 
 // Fired from BOTH creation paths, gated to finished http(s) loads, and only
 // ever via the enqueue-only channel (native callbacks must not touch the vault).

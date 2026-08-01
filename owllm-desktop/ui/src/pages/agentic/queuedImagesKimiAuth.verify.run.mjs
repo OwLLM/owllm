@@ -11,7 +11,9 @@ const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 const agents = read(path.join(HERE, "AgentsPage.tsx"));
 const capture = read(path.join(UI, "pages/advanced/authUrlCapture.ts"));
 const terminal = read(path.join(UI, "pages/advanced/PtyTerminal.tsx"));
+const accounts = read(path.join(UI, "pages/advanced/AccountsPage.tsx"));
 const pty = read(path.join(ROOT, "src-tauri/src/pty.rs"));
+const browser = read(path.join(ROOT, "src-tauri/src/browser.rs"));
 
 let passed = 0;
 function check(name, condition) {
@@ -66,6 +68,47 @@ try {
     firstCompleteAuthUrl('visit https://www "\r\n') === null
       && firstCompleteAuthUrl("visit http://localhost:8080/auth \r\n")
         === "http://localhost:8080/auth");
+  check("ordinary banner links cannot consume the one automatic auth-tab open",
+    firstCompleteAuthUrl(
+      "Learn more: https://support.claude.com/en/articles/promotion \r\n"
+        + "Authorize: https://claude.ai/oauth/authorize?client_id=owllm"
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state \r\n",
+    ) === "https://claude.ai/oauth/authorize?client_id=owllm"
+      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state");
+  const claudePrefix = "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
+  const claudeComplete = `${claudePrefix}`
+    + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state";
+  check("wrapped Claude OAuth prefix without redirect_uri is never opened",
+    firstCompleteAuthUrl(`Authorize: ${claudePrefix} \r\n`) === null);
+  check("hard-wrapped Claude OAuth is reassembled instead of opening its prefix",
+    firstCompleteAuthUrl(
+      `Authorize: ${claudePrefix}\r\n`
+        + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce&state=state \r\n",
+    ) === claudeComplete);
+  check("Claude OAuth opens only after callback and PKCE parameters arrive",
+    firstCompleteAuthUrl(`Authorize: ${claudeComplete} \r\n`) === claudeComplete);
+  check("Claude OAuth without state is never opened",
+    firstCompleteAuthUrl(`Authorize: ${claudePrefix}`
+      + "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback&code_challenge=pkce \r\n") === null);
+  const currentClaudePrefix = "https://claude.com/cai/oauth/authorize?code=true"
+    + "&client_id=9d1c250a-e61b-44";
+  const currentClaudeComplete = `${currentClaudePrefix}fe-93d9-2f5e`
+    + "&response_type=code"
+    + "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback"
+    + "&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference"
+    + "&code_challenge=pkce&code_challenge_method=S256&state=state";
+  check("current Claude /cai OAuth prefix cannot open with a partial client_id",
+    firstCompleteAuthUrl(`Authorize: ${currentClaudePrefix} \r\n`) === null);
+  check("current Claude /cai OAuth is reassembled before opening",
+    firstCompleteAuthUrl(
+      `Authorize: ${currentClaudePrefix}\r\n`
+        + "fe-93d9-2f5e&response_type=code\r\n"
+        + "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback\r\n"
+        + "&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference\r\n"
+        + "&code_challenge=pkce&code_challenge_method=S256&state=state \r\n",
+    ) === currentClaudeComplete);
+  check("a support link alone is never treated as an authorization URL",
+    firstCompleteAuthUrl("Help: https://support.claude.com/en \r\n") === null);
   check("a complete URL is never glued onto the next log line",
     firstCompleteAuthUrl('{"url":"https://example.com/auth?code=ok"}\r\nnext-line-token\r\n')
       === "https://example.com/auth?code=ok");
@@ -76,6 +119,35 @@ try {
   check("PTY terminal uses only the complete-URL extractor",
     terminal.includes('import { firstCompleteAuthUrl } from "./authUrlCapture"')
       && terminal.includes("const url = firstCompleteAuthUrl(outputText);"));
+  check("Claude reconnect never deletes the last credential before OAuth succeeds",
+    accounts.includes('if (route.backend === "kimi_cli")')
+      && accounts.includes("Keeping the existing ${provider.name} credential until the replacement sign-in succeeds."));
+  const nativeAuthGuard = browser.slice(
+    browser.indexOf("fn validate_provider_auth_url"),
+    browser.indexOf("fn parse_web_url"),
+  );
+  check("native browser boundary rejects incomplete Claude and Kimi authorization URLs",
+    nativeAuthGuard.includes('Some("claude.ai"), "/oauth/authorize"')
+      && nativeAuthGuard.includes('Some("claude.com"), "/cai/oauth/authorize"')
+      && nativeAuthGuard.includes('"client_id", "redirect_uri", "code_challenge", "state"')
+      && nativeAuthGuard.includes('Some("www.kimi.com"), "/code/authorize_device"')
+      && nativeAuthGuard.includes('!has_param("user_code")'));
+  const nativeOpenRoute = browser.slice(
+    browser.indexOf("fn parse_web_url"),
+    browser.indexOf("pub(crate) fn open_web_url"),
+  );
+  const nativeNavigationRoute = browser.slice(
+    browser.indexOf("fn parse_navigation_url"),
+    browser.indexOf("#[tauri::command(async)]\\npub fn browser_open_url"),
+  );
+  const nativeTabRoute = browser.slice(
+    browser.indexOf("fn new_tab"),
+    browser.indexOf("fn on_tab_title"),
+  );
+  check("every native browser-opening route applies the provider authorization guard",
+    nativeOpenRoute.includes("validate_provider_auth_url(&parsed)?")
+      && nativeNavigationRoute.includes("validate_provider_auth_url(&parsed)?")
+      && nativeTabRoute.includes("validate_provider_auth_url(&parsed)?"));
   check("Windows Kimi browser suppression is a valid Python webbrowser template",
     pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0 %s")')
       && !pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0");'));

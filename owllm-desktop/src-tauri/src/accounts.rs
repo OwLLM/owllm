@@ -1901,6 +1901,23 @@ async fn probe_cli_subscription(
     let combined = format!("{stdout}\n{stderr}");
     let lower = combined.to_ascii_lowercase();
 
+    // A rejected long-window provider limit is not an authentication failure
+    // and cannot recover by reconnecting or retrying seconds later. Collapse
+    // the raw stream event into one stable result for Accounts and preflight.
+    if lower.contains("weekly limit")
+        || lower.contains("usage limit")
+        || lower.contains("quota exceeded")
+        || lower.contains("insufficient_quota")
+        || (lower.contains("rate_limit_event") && lower.contains("\"status\":\"rejected\""))
+    {
+        return (
+            false,
+            format!(
+                "{name} usage limit reached (provider-side). Wait for its reset or choose another model."
+            ),
+        );
+    }
+
     if name == "Kimi" && kimi_output_auth_failed(&combined) {
         mark_kimi_reauth_required();
         return (

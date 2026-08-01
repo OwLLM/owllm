@@ -738,13 +738,13 @@ function ModeBar({
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       position: "relative", zIndex: 50,
-      // Geometry is constant across idle/running: border-box height equals
-      // the old 80px content + 20px padding, and the 2px aura border is
-      // always present (transparent when idle) so a run starting never
-      // shifts the layout below.
-      height: 100, boxSizing: "border-box",
+      // Geometry is constant across idle/running. The compact 88px height
+      // keeps the requested 7px top / 1px bottom padding, and the 2px aura
+      // border is always present (transparent when idle) so a run starting
+      // never shifts the layout below.
+      height: 88, boxSizing: "border-box",
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
-      alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
+      alignItems: "center", padding: "7px 18px 1px 20px", gap: 16,
       // Language changes text, never the physical header/control order.
       direction: "ltr",
       // Header surface — now uses --bg-header so the accent picker
@@ -1287,9 +1287,6 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
     : vram.gpus
         .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
         .join("   ");
-  // API key label echoes the local-only convention from the Qt app
-  // (server_page.py:1093). Real per-user keys land alongside the
-  // Accounts page wiring.
   return (
     <div
       data-ui="SysInfoBlock"
@@ -1312,10 +1309,6 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
     >
       <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
-      </div>
-      <div data-ui="HeaderApiKeyLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        <span style={{ marginRight: 4 }}>🔑</span>
-        API key: owllm-local
         <GenSpeedBadge variant="header" />
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1885,13 +1878,14 @@ export default function AppShell() {
       if (key === "server") { setServerModalOpen(true); return; }
       if (SETTINGS_NAV_KEYS.has(key)) { setSettingsModalKey(key); return; }
       if (key === "signing") { setSigningModalOpen(true); return; }
-      // Find which module owns this page key so we can light up the
-      // matching ModeBar toggle alongside the SubTabs row.
-      for (const m of ALL_MODULES) {
-        if (m.pages.some(p => p.key === key) && m.id !== "core" && m.id !== "advanced") {
-          if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") setMode(m.id);
-          break;
-        }
+      // Find which module owns this page key so the ModeBar and SubTabs stay
+      // in the same workspace. Core pages must clear an active mode too;
+      // otherwise a navigate-to-Home event leaves `mode=finetuning` with
+      // `activeKey=home`, so the header and page content disagree.
+      const owner = ALL_MODULES.find(m => m.pages.some(p => p.key === key));
+      if (owner?.id === "core") setMode("home");
+      else if (owner?.id === "finetuning" || owner?.id === "agentic" || owner?.id === "gamify") {
+        setMode(owner.id);
       }
       setActiveKey(key);
     };

@@ -45,7 +45,12 @@ const mod = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
 );
 
-const { DEVICE_PREFIX, encodeDeviceModel, parseDeviceModel } = mod;
+const {
+  DEVICE_PREFIX,
+  encodeDeviceModel,
+  parseDeviceModel,
+  requiresManagedLocalServer,
+} = mod;
 
 // --- round-trip ---------------------------------------------------------
 const id = encodeDeviceModel("dev-abc123", "qwen3-coder-30b.Q4_K_M.gguf");
@@ -69,6 +74,12 @@ for (const other of ["", "sub/claude-opus-4-7", "api/gpt-5", "auto/cheapest", "l
 }
 check(parseDeviceModel("device/dev-1") === null, "a device id with no model is rejected");
 check(parseDeviceModel("device/dev-1/") === null, "a trailing separator with no model is rejected");
+check(requiresManagedLocalServer("local.gguf", "local"),
+  "a local GGUF requires this PC's managed server");
+check(requiresManagedLocalServer("tuned.gguf", "tuned"),
+  "a tuned GGUF requires this PC's managed server");
+check(!requiresManagedLocalServer(id, "local"),
+  "a paired-device model does not start this PC's managed server");
 
 // --- the dispatch seam --------------------------------------------------
 const dispatch = fs.readFileSync(path.join(HERE, "dispatch.ts"), "utf8");
@@ -89,5 +100,29 @@ check(/"local", "tuned", "remote",/.test(picker),
   "the PAIRED DEVICES section is ordered with the other llama-server models");
 check(picker.includes("for (const peer of getPeerCatalogue())"),
   "buildEntries lists every paired device's models");
+
+const codePage = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+check(codePage.includes("requiresManagedLocalServer(modelId, provider)"),
+  "Code chat distinguishes a paired route from a model managed on this PC");
+check(codePage.includes("requiresManagedLocalServer(secModel, provider)"),
+  "the secondary Code agent distinguishes a paired route from a local model");
+
+const agentsPage = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+check(agentsPage.includes("requiresManagedLocalServer(supModelId, supProvider)"),
+  "Solo chat does not pre-start paired-device model ids locally");
+check(agentsPage.includes("requiresManagedLocalServer(dockModelId, dockProvider)"),
+  "the team Load control does not offer a local load for paired-device models");
+
+const playground = fs.readFileSync(path.join(HERE, "../finetuning/ChatPage.tsx"), "utf8");
+check(playground.includes("(!isLocalProvider || !managedHere)"),
+  "the chat playground sends paired models through shared remote dispatch");
+
+const datasetBuilder = fs.readFileSync(path.join(HERE, "../finetuning/DatasetBuilderPage.tsx"), "utf8");
+check(datasetBuilder.includes("!requiresManagedLocalServer(modelId, provider)"),
+  "dataset generation does not pre-start paired-device model ids locally");
+
+const watcher = fs.readFileSync(path.join(HERE, "../../support/WatcherDrawer.tsx"), "utf8");
+check(watcher.includes("!requiresManagedLocalServer(pickedModel, prov)"),
+  "Watcher preserves an explicitly selected paired-device route");
 
 console.log(`\nall ${passed} peer-catalogue checks passed`);

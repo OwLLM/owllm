@@ -59,10 +59,17 @@ import { DEVICE_PREFIX, parseDeviceModel, peerNameFor } from "./peerCatalogue";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
+import { isProviderUsageLimit } from "../advanced/accountHealth";
 // Deterministic routing — shared with the desktop path so BOTH dispatch loops
 // route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
 // this module, so this is a type-only cycle at runtime — safe.
-import { classifyGoal, bestAgentForGoal, agentDomain, roleCanWrite } from "./teamConfig";
+import {
+  classifyGoal,
+  bestAgentForGoal,
+  agentDomain,
+  normalizeRoleToolAllowlist,
+  roleCanWrite,
+} from "./teamConfig";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1127,9 +1134,7 @@ export function rolesFromBackend(rows: AgentRoleBackend[]): Map<string, RoleData
       systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
       canDispatch: d.can_dispatch === true,
       defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-      toolAllowlist: Array.isArray(d.tool_allowlist)
-        ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-        : undefined,
+      toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
       skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
         .filter((s: unknown): s is string => typeof s === "string"),
     });
@@ -1694,6 +1699,9 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
       // until the backoff died — the "inconsistent logouts, worst with Kimi".
       try {
         const probe = await invoke<{ ok: boolean; detail: string }>("accounts_test_probe_live", { backend });
+        if (!probe.ok && isProviderUsageLimit(probe.detail)) {
+          throw new CliPreflightError(probe.detail);
+        }
         // A revoked Kimi refresh grant is not a cold-token race: repeating the
         // same CLI call can never repair it. Stop before the real job and give
         // the user the one action that can recover the account.
@@ -1701,6 +1709,7 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
           throw new Error(kimiReconnectMessage(probe.detail));
         }
       } catch (error: any) {
+        if (error instanceof CliPreflightError) throw error;
         if (backend === "kimi_cli" && isCliReauthRequired(error?.message ?? String(error))) throw error;
         // Other warm-up failures are best-effort: the real call below still
         // carries the provider's most precise error and normal retry policy.
@@ -1765,6 +1774,7 @@ export function isTransientNetError(msg: string): boolean {
   // "timed out" (two words) is what wait_cli_child's kill emits — without it a
   // 20-min CLI timeout was UNCLASSIFIED and killed the whole run instead of
   // retrying like every other transient failure.
+  if (isProviderUsageLimit(msg)) return false;
   return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|timed out|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 
@@ -2890,8 +2900,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    const toolImages = results.flatMap((result) => result.image ? [result.image] : []);
     liveMessages.push({ role: "assistant", content: lastReply });
-    liveMessages.push({ role: "user", content: parts.join("\n\n") });
+    liveMessages.push({ role: "user", content: openaiUserContent(parts.join("\n\n"), toolImages) });
     // Mid-run steering: the user typed something WHILE this agent was in its
     // tool loop — inject it right here, between tool rounds, so the very next
     // model turn sees it (the VS Code behavior). Rides its own user message
@@ -3050,8 +3061,9 @@ export async function streamOpenAiApiWithTools(args: {
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    const toolImages = results.flatMap((result) => result.image ? [result.image] : []);
     liveMessages.push({ role: "assistant", content: lastReply });
-    liveMessages.push({ role: "user", content: parts.join("\n\n") });
+    liveMessages.push({ role: "user", content: openaiUserContent(parts.join("\n\n"), toolImages) });
   }
   if (!answeredWithoutTools && openaiTools.length > 0) {
     if (args.signal.aborted) throw new DOMException("aborted", "AbortError");

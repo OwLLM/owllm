@@ -16,6 +16,7 @@ import { redactForReport } from "./redact";
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
 // parallel model list (P0-8 Slice 5).
 import ModelPicker, { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
+import { requiresManagedLocalServer } from "../pages/agentic/peerCatalogue";
 import { getSetting, setSetting, subscribeSettings, scope, SettingKey } from "../state/pageSettings";
 import {
   streamLocalChat,
@@ -402,6 +403,9 @@ export default function WatcherDrawer({
       const entry = entries.find((e) => e.id === pickedModel);
       const label = entry?.label ?? pickedModel;
       if (prov === "local" || prov === "tuned") {
+        if (!requiresManagedLocalServer(pickedModel, prov)) {
+          return { kind: "local", modelId: pickedModel, port: 0, label };
+        }
         if (server?.running && server.model_id) {
           return { kind: "local", modelId: server.model_id, port: server.port ?? 0, label: `${server.model_id} (local)` };
         }

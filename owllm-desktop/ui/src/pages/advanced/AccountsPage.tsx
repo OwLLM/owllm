@@ -215,12 +215,14 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude: bare REPL — auto-type /login once it boots.
-///   * codex/kimi/grok: dedicated device-login command; PtyTerminal opens the
+///   * claude/codex/kimi/grok: dedicated login command; PtyTerminal opens the
 ///     emitted verification URL in OwLLM's browser.
 ///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
-  claude_cli: { cli: "claude", args: [], send: "/login\r" },
+  // A bare Claude REPL prints ordinary support/promotion URLs in its banner
+  // before it is ready for `/login`. Use the dedicated auth command so the
+  // terminal starts directly in the subscription OAuth flow.
+  claude_cli: { cli: "claude", args: ["auth", "login", "--claudeai"] },
   // Device-code auth avoids localhost callbacks and system-browser launches.
   // PtyTerminal opens the emitted URL in OwLLM's persistent browser instead.
   codex_cli:  { cli: "codex",  args: ["login", "--device-auth"] },
@@ -261,6 +263,8 @@ type AccountsStatus = {
   grok_cli_installed: boolean;
 };
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
+type SavedLoginMeta = { origin: string; username: string; note: string; ts: number };
+const CLAUDE_ACCOUNT_KEY = "owllm:accounts:claude-login";
 
 // -----------------------------------------------------------------------
 // Route + provider model
@@ -574,12 +578,16 @@ function ApiKeyDialog({
 // One route row inside a provider container.
 // -----------------------------------------------------------------------
 function RouteRow({
-  provider, route, state, hostLabel, onConnect, onInstall, onDisconnect, onTest,
+  provider, route, state, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
+  onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   route: RouteSpec;
   state: CardState;
   hostLabel: string;
+  claudeAccounts: SavedLoginMeta[];
+  selectedClaudeAccount: string;
+  onSelectClaudeAccount: (username: string) => void;
   onConnect: () => void;
   onInstall: () => void;
   onDisconnect: () => void;
@@ -639,6 +647,25 @@ function RouteRow({
       <div style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: 17 }}>
         {statusText}
       </div>
+      {route.backend === "claude_cli" && (
+        <div style={{ marginLeft: 17, display: "flex", alignItems: "center", gap: 7 }}>
+          <label htmlFor="claude-saved-account" style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>Saved account</label>
+          <select
+            id="claude-saved-account"
+            value={selectedClaudeAccount}
+            onChange={(event) => onSelectClaudeAccount(event.target.value)}
+            style={{ flex: 1, minWidth: 0, height: 26, padding: "0 7px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 11 }}
+            title="Choose which encrypted local Claude login to autofill"
+          >
+            <option value="">Choose in Claude / remember after sign-in</option>
+            {claudeAccounts.map((account) => (
+              <option key={`${account.origin}:${account.username}`} value={account.username}>
+                {account.username} · {account.origin.replace(/^https?:\/\//, "")}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {state.testText && (
         <div style={{
           fontSize: 11, marginLeft: 17, wordBreak: "break-word",
@@ -716,12 +743,16 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, highlighted, hostLabel, onConnect, onInstall, onDisconnect, onTest,
+  provider, cards, highlighted, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
+  onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   cards: Record<string, CardState>;
   highlighted?: boolean;
   hostLabel: string;
+  claudeAccounts: SavedLoginMeta[];
+  selectedClaudeAccount: string;
+  onSelectClaudeAccount: (username: string) => void;
   onConnect: (route: RouteSpec) => void;
   onInstall: (route: RouteSpec) => void;
   onDisconnect: (route: RouteSpec) => void;
@@ -760,6 +791,9 @@ function ProviderCard({
             route={route}
             state={cards[route.key] ?? initialCardState}
             hostLabel={hostLabel}
+            claudeAccounts={claudeAccounts}
+            selectedClaudeAccount={selectedClaudeAccount}
+            onSelectClaudeAccount={onSelectClaudeAccount}
             onConnect={() => onConnect(route)}
             onInstall={() => onInstall(route)}
             onDisconnect={() => onDisconnect(route)}
@@ -858,6 +892,7 @@ function RightRail({
               args={activeTerm.args}
               autoSend={activeTerm.send}
               autoOpenAuthUrls
+              visible={tab === "terminal"}
               onOutputText={(text) => onTerminalOutput(activeTerm.backend, text)}
               onAuthTabOpened={(tabId) => onAuthTabOpened(activeTerm.backend, tabId)}
             />
@@ -1020,6 +1055,10 @@ export default function AccountsPage() {
   const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
   const [railTab, setRailTab] = useState<RailTab>("log");
   const [hostOs, setHostOs] = useState("");
+  const [savedClaudeAccounts, setSavedClaudeAccounts] = useState<SavedLoginMeta[]>([]);
+  const [selectedClaudeAccount, setSelectedClaudeAccount] = useState(() => {
+    try { return localStorage.getItem(CLAUDE_ACCOUNT_KEY) ?? ""; } catch { return ""; }
+  });
   const autoHealthProbedBackends = useRef(new Set<string>());
   const authTabs = useRef<Record<string, number>>({});
   const terminalOutput = useRef<Record<string, string>>({});
@@ -1032,6 +1071,29 @@ export default function AccountsPage() {
       : hostOs === "linux"
         ? "Linux"
         : "Host";
+
+  useEffect(() => {
+    let dead = false;
+    void invoke<SavedLoginMeta[]>("browser_vault_list")
+      .then((all) => {
+        if (dead) return;
+        const claude = all
+          .filter((entry) => /(?:claude\.ai|claude\.com|anthropic\.com)$/i.test(entry.origin.replace(/^https?:\/\//, "")))
+          .sort((a, b) => a.username.localeCompare(b.username) || a.origin.localeCompare(b.origin));
+        setSavedClaudeAccounts(claude);
+        setSelectedClaudeAccount((current) => claude.some((entry) => entry.username === current) ? current : "");
+      })
+      .catch(() => { /* the vault is optional until the first saved login */ });
+    return () => { dead = true; };
+  }, []);
+
+  const chooseClaudeAccount = (username: string) => {
+    setSelectedClaudeAccount(username);
+    try {
+      if (username) localStorage.setItem(CLAUDE_ACCOUNT_KEY, username);
+      else localStorage.removeItem(CLAUDE_ACCOUNT_KEY);
+    } catch { /* localStorage can be unavailable in a locked-down WebView */ }
+  };
 
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
@@ -1189,23 +1251,35 @@ export default function AccountsPage() {
         return;
       }
       if (resetStaleLogin) {
-        try {
-          await invoke<string>("subscription_cli_logout", { backend: route.backend });
-          setCardState(route.key, {
-            connected: false,
-            reauthRequired: false,
-            remediation: null,
-            testText: "",
-            testOk: null,
-          });
-          logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
-        } catch (e: any) {
-          logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
-          return;
+        // Dedicated login commands can replace a stale token transactionally.
+        // Keep the old Claude/Codex/Gemini credential until that replacement
+        // succeeds: deleting it first turns any browser/OAuth failure into a
+        // logout and was the reason Claude credentials disappeared here.
+        //
+        // Kimi is the exception: its CLI resumes a broken session instead of
+        // entering device auth, so its established recovery path still needs
+        // the local credential removed before login.
+        if (route.backend === "kimi_cli") {
+          try {
+            await invoke<string>("subscription_cli_logout", { backend: route.backend });
+            setCardState(route.key, {
+              connected: false,
+              reauthRequired: false,
+              remediation: null,
+              testText: "",
+              testOk: null,
+            });
+            logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
+          } catch (e: any) {
+            logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
+            return;
+          }
+        } else {
+          logInfo(route.backend, `Keeping the existing ${provider.name} credential until the replacement sign-in succeeds.`);
         }
       }
       const hint: Record<string, string> = {
-        claude_cli: "auto-running /login — complete the browser sign-in.",
+        claude_cli: "a private sign-in tab opens without your saved Gmail or Claude session — choose the account that owns the subscription.",
         codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
         kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
@@ -1230,6 +1304,13 @@ export default function AccountsPage() {
 
   function handleAuthTabOpened(backend: string, tabId: number) {
     authTabs.current[backend] = tabId;
+    if (backend === "claude_cli" && selectedClaudeAccount) {
+      invoke<string>("browser_vault_autofill_tab", {
+        tabId,
+        username: selectedClaudeAccount,
+      }).then((message) => logInfo(backend, `✓ ${message}.`))
+        .catch((error) => logInfo(backend, `[saved login] ${String(error)} — choose or enter the account in Claude; it will be remembered securely.`));
+    }
   }
 
   function handleTerminalOutput(backend: string, text: string) {
@@ -1513,6 +1594,9 @@ export default function AccountsPage() {
               cards={cards}
               highlighted={onboardingProvider === provider.key}
               hostLabel={hostLabel}
+              claudeAccounts={savedClaudeAccounts}
+              selectedClaudeAccount={selectedClaudeAccount}
+              onSelectClaudeAccount={chooseClaudeAccount}
               onConnect={(r) => {
                 void handleConnect(
                   r,

@@ -12,6 +12,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import MarkdownLink from "./MarkdownLink";
+import { safeMarkdownUrlTransform } from "./documentLinks";
 import { readAppLanguage } from "../localization";
 
 // Resolve any image reference (markdown `![](…)` src OR an attachment) into a
@@ -99,11 +100,12 @@ export function fmtTime(ts?: number): string {
 // render headings, tables, bold, lists, and code blocks like a real chat
 // client instead of a wall of plain text. Used only for FINISHED
 // messages — the streaming one stays plain pre-wrap to preserve selection.
-export function ChatMarkdown({ text }: { text: string }) {
+export function ChatMarkdown({ text, workspace }: { text: string; workspace?: string }) {
   return (
     <div className="md-body" data-no-localize dir="auto" style={{ fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeMarkdownUrlTransform}
         components={{
           code({ className, children, ...props }: any) {
             const isBlock = /language-/.test(className || "") || (typeof children === "string" && children.includes("\n"));
@@ -123,7 +125,7 @@ export function ChatMarkdown({ text }: { text: string }) {
           ul: (p) => <ul style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
           ol: (p) => <ol style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
           li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
-          a: MarkdownLink,
+          a: (props) => <MarkdownLink {...props} workspace={workspace} />,
           img: (p: any) => <SmartImage src={p.src} alt={p.alt} />,
           blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "6px 0", padding: "2px 0 2px 10px", color: "var(--fg-muted)" }} {...(p as any)} />,
           table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
@@ -317,6 +319,8 @@ export type ChatBubbleProps = {
   /// clickable thumbnails under the body. Store this array ON the message so
   /// its identity is stable and memo keeps skipping unchanged bubbles.
   images?: { src: string; alt?: string }[];
+  /// Workspace used to resolve relative document links emitted by an agent.
+  workspace?: string;
 };
 
 // memo: a chat surface re-renders on EVERY keystroke in its composer (the draft
@@ -324,7 +328,7 @@ export type ChatBubbleProps = {
 // re-parse their markdown each keystroke → multi-second input lag, brutal over
 // remote desktop. All props are primitives, so memo's shallow compare lets an
 // unchanged bubble skip entirely; only the streaming/edited one re-renders.
-export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts, images }: ChatBubbleProps) {
+export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts, images, workspace }: ChatBubbleProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -359,7 +363,7 @@ export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isU
         cursor: "text",
       }} data-no-localize dir="auto">
         {!isUser && !isStreaming && content
-          ? <ChatMarkdown text={content} />
+          ? <ChatMarkdown text={content} workspace={workspace} />
           : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55, fontSize: "var(--chat-font-size, 13px)" }}>
               {content}{isStreaming ? <span className="owl-cursor">▍</span> : null}
             </span>}

@@ -329,7 +329,7 @@ function displayForId(id: string, entries: ModelPickerEntry[]): string {
 
 export default function ModelPicker({
   value, onChange, models, status, placeholder, disabled, fallbackLabel,
-  localOnly, placement = "auto",
+  localOnly, placement = "auto", compactTrigger, compactTitle,
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -346,6 +346,10 @@ export default function ModelPicker({
   /// Composer toolbars sit at the bottom of the page and need a deterministic
   /// drop-up. Other surfaces keep the adaptive behaviour.
   placement?: "auto" | "top" | "bottom";
+  /// Optional compact trigger used by cards that already display the model
+  /// identity as a logo. The popover remains this shared picker unchanged.
+  compactTrigger?: React.ReactNode;
+  compactTitle?: string;
 }) {
   const [open, setOpen] = useState(false);
   // Sections start COLLAPSED (lab name + count only) so the popover stays
@@ -467,21 +471,22 @@ export default function ModelPicker({
         type="button"
         disabled={disabled}
         onClick={togglePopover}
-        title={triggerLabel}
+        title={compactTitle || triggerLabel}
         style={{
-          width: "100%", height: 30, padding: "0 10px",
+          width: "100%", height: 30, padding: compactTrigger ? 0 : "0 10px",
           background: "var(--bg-input)", color: "var(--fg-strong)",
           border: "1px solid var(--border)", borderRadius: 8,
           fontSize: 12, textAlign: "left",
           cursor: disabled ? "not-allowed" : "pointer",
-          display: "flex", alignItems: "center", gap: 6,
+          display: "flex", alignItems: "center", justifyContent: compactTrigger ? "center" : undefined, gap: 6,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}
       >
-        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {compactTrigger}
+        {!compactTrigger && <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {triggerLabel}
-        </span>
-        <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>▾</span>
+        </span>}
+        {!compactTrigger && <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>▾</span>}
       </button>
       {open && !disabled && rect && (
         <div ref={popRef} style={popStyle}>

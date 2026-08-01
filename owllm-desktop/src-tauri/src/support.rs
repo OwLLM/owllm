@@ -56,65 +56,65 @@ pub struct WindowCapture {
 /// DIB, works even when partially occluded). Linux: GDK pixbuf readback of
 /// our own GTK window (works on X11 and, for the app's own surface, on
 /// Wayland — no portal round-trip needed because we never touch other
-/// windows). macOS returns an explicit error the UI surfaces as the
-/// documented fallback message. NEVER captures other windows or monitors.
+/// windows). macOS uses the system screenshot service scoped to our NSWindow.
+/// NEVER captures other windows or monitors.
 #[tauri::command]
 pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCapture, String> {
     let main = app
-        .get_webview_window("main")
+        .get_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
+    let (png, w, h) = tokio::task::spawn_blocking(move || capture_window_png(&main))
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+    use base64::Engine as _;
+    Ok(WindowCapture {
+        png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+        width: w,
+        height: h,
+        not_captured: "the decorative frame chrome around the window (a separate overlay layer); other windows and monitors are never captured".to_string(),
+    })
+}
+
+/// Capture one OWLLM-owned window as PNG bytes without touching any other
+/// application or monitor. Shared by Watcher and the agent browser so both
+/// surfaces use one platform implementation.
+pub(crate) fn capture_window_png(win: &tauri::Window) -> Result<(Vec<u8>, u32, u32), String> {
     #[cfg(windows)]
     {
-        let hwnd = main.hwnd().map_err(|e| format!("hwnd: {e}"))?.0 as isize;
-        // GDI is thread-safe enough for this one-shot, but keep it off the
-        // async executor — PrintWindow can take tens of ms.
-        let (raw, w, h) = tokio::task::spawn_blocking(move || capture_hwnd_rgba(hwnd))
-            .await
-            .map_err(|e| format!("join: {e}"))??;
-        let png = encode_png(&raw, w, h)?;
-        use base64::Engine as _;
-        Ok(WindowCapture {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(png),
-            width: w,
-            height: h,
-            not_captured: "the decorative frame chrome around the window (a separate overlay layer); other windows and monitors are never captured".to_string(),
-        })
+        let hwnd = win.hwnd().map_err(|e| format!("hwnd: {e}"))?.0 as isize;
+        let (raw, w, h) = capture_hwnd_rgba(hwnd)?;
+        return Ok((encode_png(&raw, w, h)?, w, h));
     }
     #[cfg(target_os = "linux")]
     {
-        // GTK/GDK are main-thread-only; hop over and hand the PNG back.
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(Vec<u8>, u32, u32), String>>();
-        let win = main.clone();
-        main.run_on_main_thread(move || {
-            let _ = tx.send(capture_gtk_window_png(&win));
+        // GTK/GDK are main-thread-only. Schedule the readback and wait from the
+        // caller's worker thread; the Tauri event loop remains free to paint.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let window = win.clone();
+        win.run_on_main_thread(move || {
+            let _ = tx.send(capture_gtk_window_png(&window));
         })
         .map_err(|e| format!("main thread: {e}"))?;
-        let (png, w, h) = tokio::task::spawn_blocking(move || {
-            rx.recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|_| "capture timed out".to_string())?
-        })
-        .await
-        .map_err(|e| format!("join: {e}"))??;
-        use base64::Engine as _;
-        Ok(WindowCapture {
-            png_base64: base64::engine::general_purpose::STANDARD.encode(png),
-            width: w,
-            height: h,
-            not_captured: "other windows and monitors are never captured".to_string(),
-        })
+        return rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "capture timed out".to_string())?;
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = main;
-        Err("App-window capture isn't implemented on this platform yet — attach a regular OS screenshot instead.".to_string())
+        return capture_macos_window_png(win);
     }
+    #[allow(unreachable_code)]
+    Err(format!(
+        "window capture is not implemented on {}",
+        std::env::consts::OS
+    ))
 }
 
 /// GDK readback of our own window → PNG bytes (+ pixel size). Must run on
 /// the GTK main thread. Returns an honest error when the compositor gives
 /// us nothing (e.g. the window is unmapped) instead of a black image.
 #[cfg(target_os = "linux")]
-fn capture_gtk_window_png(win: &tauri::WebviewWindow) -> Result<(Vec<u8>, u32, u32), String> {
+fn capture_gtk_window_png(win: &tauri::Window) -> Result<(Vec<u8>, u32, u32), String> {
     use gtk::prelude::*;
     let gtk_win = win.gtk_window().map_err(|e| format!("gtk window: {e}"))?;
     let gdk_win = gtk_win
@@ -130,6 +130,68 @@ fn capture_gtk_window_png(win: &tauri::WebviewWindow) -> Result<(Vec<u8>, u32, u
         .save_to_bufferv("png", &[])
         .map_err(|e| format!("png encode: {e}"))?;
     Ok((png, pixbuf.width() as u32, pixbuf.height() as u32))
+}
+
+/// Capture a single NSWindow through macOS' built-in screenshot utility. The
+/// `-l` window id keeps the capture scoped to OWLLM even when another app sits
+/// above it; there is deliberately no screen-sized fallback.
+#[cfg(target_os = "macos")]
+fn capture_macos_window_png(win: &tauri::Window) -> Result<(Vec<u8>, u32, u32), String> {
+    use std::ffi::{c_char, c_void};
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void) -> isize;
+    }
+
+    let ns_window = win.ns_window().map_err(|e| format!("NSWindow: {e}"))? as *mut c_void;
+    let window_number = unsafe {
+        let selector = sel_registerName(b"windowNumber\0".as_ptr().cast());
+        objc_msgSend(ns_window, selector)
+    };
+    if window_number <= 0 {
+        return Err("macOS returned no window id for this OWLLM window".into());
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "owllm-window-capture-{}-{}.png",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let output = std::process::Command::new("/usr/sbin/screencapture")
+        .arg("-x")
+        .arg("-o")
+        .arg("-l")
+        .arg(window_number.to_string())
+        .arg(&path)
+        .output()
+        .map_err(|e| format!("start macOS window capture: {e}"))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!(
+            "macOS window capture failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let png = std::fs::read(&path).map_err(|e| format!("read captured PNG: {e}"));
+    let _ = std::fs::remove_file(&path);
+    let png = png?;
+    let (w, h) = png_dimensions(&png)?;
+    Ok((png, w, h))
+}
+
+pub(crate) fn png_dimensions(png: &[u8]) -> Result<(u32, u32), String> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if png.len() < 24 || &png[..8] != PNG_SIGNATURE || &png[12..16] != b"IHDR" {
+        return Err("capture did not produce a valid PNG".into());
+    }
+    let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    if width == 0 || height == 0 {
+        return Err("capture produced an empty PNG".into());
+    }
+    Ok((width, height))
 }
 
 /// PrintWindow → 32-bit DIB → tightly-packed RGBA bytes (top-down).
@@ -305,11 +367,10 @@ fn capture_virtual_screen_rgba() -> Result<(Vec<u8>, u32, u32), String> {
     }
 }
 
-/// Capture the whole screen as PNG bytes (+ pixel size), for the remote-devices
-/// Screenshot command. Windows captures the full virtual desktop from any
-/// thread. Other platforms return an honest, actionable error rather than a
-/// black frame — a headless server (the typical non-Windows target here) has
-/// nothing to capture, and cross-platform capture will land as a follow-up.
+/// Capture the desktop as PNG bytes (+ pixel size), for agent and remote-device
+/// screenshot commands. Windows captures the full virtual desktop, macOS the
+/// primary display (subject to Screen Recording permission), and Linux uses the
+/// XDG screenshot portal so Wayland compositors can enforce user consent.
 #[cfg(windows)]
 pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
     let (raw, w, h) = tokio::task::spawn_blocking(capture_virtual_screen_rgba)
@@ -319,10 +380,67 @@ pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> 
     Ok((png, w, h))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
+    tokio::task::spawn_blocking(|| {
+        let path = std::env::temp_dir().join(format!(
+            "owllm-screen-capture-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let output = std::process::Command::new("/usr/sbin/screencapture")
+            .arg("-x")
+            .arg("-D")
+            .arg("1")
+            .arg(&path)
+            .output()
+            .map_err(|e| format!("start macOS screen capture: {e}"))?;
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&path);
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                "macOS screen capture failed; allow Screen Recording for OWLLM in System Settings > Privacy & Security".to_string()
+            } else {
+                format!("macOS screen capture failed: {detail}")
+            });
+        }
+        let png = std::fs::read(&path).map_err(|e| format!("read captured PNG: {e}"));
+        let _ = std::fs::remove_file(&path);
+        let png = png?;
+        let (w, h) = png_dimensions(&png)?;
+        Ok((png, w, h))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
+    let response = ashpd::desktop::screenshot::Screenshot::request()
+        .interactive(false)
+        .modal(false)
+        .send()
+        .await
+        .map_err(|e| format!("request Linux screen capture: {e}"))?
+        .response()
+        .map_err(|e| format!("Linux screen capture was cancelled or denied: {e}"))?;
+    let path = response.uri().to_file_path().map_err(|_| {
+        format!(
+            "Linux screenshot portal returned a non-file URI: {}",
+            response.uri()
+        )
+    })?;
+    let png = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("read Linux portal screenshot {}: {e}", path.display()))?;
+    let (w, h) = png_dimensions(&png)?;
+    Ok((png, w, h))
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
     Err(format!(
-        "remote screen capture currently supports Windows targets only (this device is {}).",
+        "screen capture is not implemented on {}",
         std::env::consts::OS
     ))
 }
@@ -348,6 +466,32 @@ pub(crate) fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String>
 /// the optional screenshot into %USERPROFILE%\OwLLM\bug-reports\<stamp>\
 /// and returns that folder. The caller has already shown the user the
 /// exact redacted contents (preview-before-anything is mandatory).
+#[cfg(test)]
+mod capture_tests {
+    #[test]
+    fn png_dimensions_rejects_non_png_input() {
+        assert!(super::png_dimensions(b"not a png").is_err());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_virtual_desktop_capture_produces_a_real_png() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        };
+
+        let (png, width, height) = super::capture_screen_png()
+            .await
+            .expect("Windows virtual desktop capture should succeed");
+        assert!(width > 0 && height > 0);
+        assert_eq!(width, unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }
+            as u32);
+        assert_eq!(height, unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }
+            as u32);
+        assert_eq!(super::png_dimensions(&png), Ok((width, height)));
+    }
+}
+
 #[tauri::command]
 pub async fn support_export_report(
     report_json: String,

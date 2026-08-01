@@ -80,6 +80,25 @@ pin("old page-level second-agent row is removed",
 pin("second agent remains openable from inside the primary chat header",
   codePageSrc.includes("+ 2nd agent")
   && codePageSrc.includes('onClick={() => setSecondaryOpen(true)}'));
+pin("both project-agent composers reuse one attachment parser and picker",
+  codePageSrc.includes("const addProjectComposerFiles = async")
+  && codePageSrc.includes("void addProjectComposerFiles(files, setCodeAttachments)")
+  && codePageSrc.includes("void addProjectComposerFiles(files, setSecondaryAttachments)")
+  && codePageSrc.includes('renderAttachmentPicker("primary"')
+  && codePageSrc.includes('renderAttachmentPicker("secondary"'));
+pin("second agent accepts attachment-only sends and clears only its own tray",
+  codePageSrc.includes("const attachments = fromComposer ? secondaryAttachments : []")
+  && codePageSrc.includes("if (!text && attachments.length === 0) return")
+  && codePageSrc.includes("setSecondaryAttachments([])"));
+pin("second-agent documents and images use the same model payload path as the first",
+  codePageSrc.includes("opts?: { withEvents?: boolean; attachments?: Attachment[] }")
+  && codePageSrc.includes("enrichSecondaryCodePromptWithMemory(appendDocumentAttachmentText(user, attachments))")
+  && codePageSrc.includes("userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser")
+  && codePageSrc.includes('["all"], imgs.length ? imgs : undefined'));
+pin("second-agent history retains document context and image thumbnails",
+  codePageSrc.includes("context: appendDocumentAttachmentText(text, attachments)")
+  && codePageSrc.includes("images: images.length ? attachmentThumbs(images) : undefined")
+  && codePageSrc.includes("m.context || m.content"));
 if (pinFailures > 0) {
   throw new Error(`FAILED: ${pinFailures} source pin(s) failed.`);
 }

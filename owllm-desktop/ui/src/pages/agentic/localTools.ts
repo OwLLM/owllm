@@ -290,15 +290,18 @@ export async function refreshBrowserState(): Promise<void> {
     "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
     "read them, and click/fill/select to complete tasks and forms. These tools are ALREADY in your " +
     "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_tabs, browser_tab_select, browser_tab_close, browser_navigate, " +
-    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
-    "browser_press, browser_device — OR the same names prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
+    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_scroll, browser_select, " +
+    "browser_press, browser_device, browser_screenshot (viewport, full-page, or desktop PNG), browser_upload_file (attach a local file) — OR the same names " +
+    "prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
     "Look in your tools for any name containing 'browser_' and invoke it. If your runtime exposes a tool-schema " +
     "discovery tool, use it to search for 'browser'; if no such discovery tool exists, do not hunt for one — call " +
     "the mcp__owllm__browser_* tools directly. Never infer your model/provider identity from this fallback guidance. " +
     "DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
     "browser_open returns a stable tab ID; pass tab_id to later actions so the user's active tab is never hijacked. " +
-    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see.";
+    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see. " +
+    "For chat, mail, contacts, and other long histories, use the site's search first; use browser_scroll on an indexed " +
+    "scrollable region as the fallback, snapshot after each move, and stop only when found or the reported position no longer changes.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
     if (st && st.running) {
@@ -1200,7 +1203,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Create a NEW file or fully rewrite an existing one. Parent dirs are " +
       "created automatically. Use this when writing fresh code / configs / " +
-      "READMEs that don't exist yet.",
+      "READMEs that don't exist yet. When the user asks you to prepare a " +
+      "document, save it in the workspace and include a Markdown link such as " +
+      "[Open report](./report.md) in the final answer; OWLLM can preview, edit, " +
+      "and download that link.",
     args: [
       { name: "path", required: true, description: "Absolute or project-relative file path.", aliases: ["file", "filename", "file_path", "filepath"] },
       { name: "content", required: true, description: "The full file contents to write.", aliases: ["contents", "text", "data", "body"] },
@@ -1580,11 +1586,26 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_fill",
     aliases: ["fill", "type_text", "browser_type", "fill_input"],
     description:
-      "Type text into the input/textarea element at the given index from the latest " +
-      "browser_snapshot. Snapshot first to get the index.",
+      "Type text into the input, textarea, or contenteditable element at the given " +
+      "index from the latest browser_snapshot. Emits the events required by controlled " +
+      "React/Vue web apps. Snapshot first to get the index.",
     args: [
       { name: "index", required: true, description: "Input element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
       { name: "text", required: true, description: "The text to type into the field.", aliases: ["value", "content", "input", "str"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
+    ],
+  },
+  {
+    name: "browser_scroll",
+    aliases: ["scroll", "scroll_page", "scroll_list", "scroll_history"],
+    description:
+      "Scroll a virtualized list, message history, mail list, or page. Pass an element " +
+      "index to scroll that region (or its scrollable ancestor); omit it to use the " +
+      "focused or largest visible scroll region. The result includes a fresh snapshot.",
+    args: [
+      { name: "direction", required: false, description: "up, down, left, or right (default: down).", aliases: ["dir"] },
+      { name: "amount", required: false, description: "CSS pixels to scroll (default: about 80% of the region).", aliases: ["pixels", "distance", "px"] },
+      { name: "index", required: false, description: "Scrollable region or child element index from browser_snapshot.", aliases: ["idx", "i", "element"] },
       { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
     ],
   },
@@ -1615,10 +1636,27 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_screenshot",
     aliases: ["browser_capture", "capture_page", "page_screenshot"],
     description:
-      "Report the current page (URL + title + load state) of the persistent browser. " +
-      "The browser is a visible window; use browser_snapshot for the element list and " +
-      "browser_get_text to read page content.",
-    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
+      "Capture a real PNG and return its absolute saved path plus pixels for vision. scope=viewport " +
+      "captures the visible shared browser window; full_page captures the entire web document without " +
+      "scrolling or switching tabs where the platform supports it; desktop captures the screen/virtual " +
+      "desktop (Linux Wayland may show its required system consent dialog).",
+    args: [
+      { name: "scope", required: false, description: "viewport (default), full_page, or desktop.", aliases: ["mode", "capture_scope"] },
+      { name: "tab_id", required: false, description: "Target browser tab ID for viewport/full_page; omit to use the active tab.", aliases: ["tab", "id"] },
+    ],
+  },
+  {
+    name: "browser_upload_file",
+    aliases: ["browser_attach_file", "attach_file", "upload_to_page"],
+    description:
+      "Attach a local file (up to 25 MiB) to a file input in the shared browser without opening " +
+      "an OS file picker. Click the site's attachment control first when needed, snapshot, then " +
+      "pass its index. Works with web mail and messaging sites; verify the attachment before sending.",
+    args: [
+      { name: "path", required: true, description: "Absolute or project-relative path of the local file to attach.", aliases: ["file", "file_path", "local_path"] },
+      { name: "index", required: false, description: "Attachment control/file-input index from browser_snapshot. Omit only when the page has one file input.", aliases: ["idx", "i", "element"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
+    ],
   },
   {
     name: "browser_get_text",
@@ -1839,6 +1877,10 @@ export function validateCall(call: ToolCall): ValidationResult {
 export type ToolExecResult = {
   ok: boolean;
   output: string;
+  /// Optional pixels produced by a capture tool. The OpenAI-compatible local
+  /// and API loops attach these to the next turn; CLI agents use `output`'s
+  /// saved path with their native image-view tool.
+  image?: { kind: "image"; mime: string; data_b64: string; filename: string };
 };
 
 /// Execute one tool call against the Rust agent_tools commands. Returns
@@ -2281,6 +2323,18 @@ async function executeToolCallInner(
         const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
+      case "browser_scroll": {
+        const result = await invoke<string>("browser_cmd", {
+          action: "scroll",
+          params: {
+            direction: call.args.direction ?? "down",
+            amount: call.args.amount == null ? null : Number(call.args.amount),
+            index: call.args.index == null ? null : Number(call.args.index),
+            tab_id: call.args.tab_id ?? null,
+          },
+        });
+        return { ok: true, output: truncate(result, 8000) };
+      }
       case "browser_press": {
         const result = await invoke<string>("browser_cmd", { action: "press", params: { key: call.args.key, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
@@ -2290,7 +2344,31 @@ async function executeToolCallInner(
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_screenshot": {
-        const result = await invoke<string>("browser_cmd", { action: "screenshot", params: { tab_id: call.args.tab_id ?? null } });
+        const scope = String(call.args.scope ?? "viewport").trim().toLowerCase() || "viewport";
+        const result = await invoke<string>("browser_cmd", {
+          action: "screenshot",
+          params: { scope, tab_id: call.args.tab_id ?? null },
+        });
+        const capture = JSON.parse(result) as { path?: string; width?: number; height?: number; scope?: string; tab_id?: number };
+        if (!capture.path) return { ok: false, output: "browser_screenshot returned no saved path" };
+        const data_b64 = await invoke<string>("browser_read_capture", { path: capture.path });
+        const filename = capture.path.split(/[\\/]/).pop() || "browser-screenshot.png";
+        return {
+          ok: true,
+          output: `screenshot saved: ${capture.path} (${capture.width ?? "?"}x${capture.height ?? "?"}, scope ${capture.scope ?? scope}${capture.tab_id == null ? "" : `, tab ${capture.tab_id}`})`,
+          image: { kind: "image", mime: "image/png", data_b64, filename },
+        };
+      }
+      case "browser_upload_file": {
+        const result = await invoke<string>("browser_cmd", {
+          action: "upload_file",
+          params: {
+            path: call.args.path,
+            cwd: cwd ?? null,
+            index: call.args.index == null ? null : Number(call.args.index),
+            tab_id: call.args.tab_id ?? null,
+          },
+        });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_get_text": {

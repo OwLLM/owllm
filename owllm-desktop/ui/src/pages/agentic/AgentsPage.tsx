@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
+import { safeMarkdownUrlTransform } from "../../components/documentLinks";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
@@ -22,6 +23,7 @@ import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
+import CreationLaunchpad from "./CreationLaunchpad";
 import {
   environmentPromptBlock,
   parseProjectEnvironment,
@@ -110,6 +112,7 @@ import {
   isAbortError,
   sleepAbortable,
 } from "./dispatch";
+import { requiresManagedLocalServer } from "./peerCatalogue";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
@@ -124,7 +127,7 @@ import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish,
-  soloGeneralistForTeam } from "./teamConfig";
+  normalizeRoleToolAllowlist, soloGeneralistForTeam } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -1684,7 +1687,8 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
+  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, onPickAgentModel,
+  models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
   perAgentSkills, projectCwd, labelOverrides,
 }: {
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
@@ -1711,6 +1715,12 @@ function AgentChatGrid({
   modelFor: (agentName: string) => string;
   /// Map a resolved model id → provider string, for the header chip tint.
   providerFor: (modelId: string) => string;
+  /// Reuse the shared model picker from the small logo trigger on every card.
+  onPickAgentModel: (agentName: string, modelId: string) => void;
+  models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  criticEnabled: boolean;
+  onToggleCritic: () => void;
   /// Per-agent working-time map (name → cumulative timing), for the card clocks.
   agentTiming?: Map<string, AgentTiming>;
 }) {
@@ -1826,6 +1836,13 @@ function AgentChatGrid({
             accent={accent}
             onClick={() => onSelectAgent(a.name)}
             onOpenEditor={() => onOpenEditor(a.name)}
+            onPickModel={(id) => onPickAgentModel(a.name, id)}
+            models={models}
+            accountsStatus={accountsStatus}
+            isCritic={a.name === CRITIC_AGENT_NAME}
+            criticEnabled={criticEnabled}
+            onToggleCritic={onToggleCritic}
+            modelId={resolvedModel}
             modelLabel={modelLabel}
             modelTint={modelTint}
             modelTitle={modelTitle}
@@ -2331,7 +2348,8 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
 function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick, onOpenEditor,
-  modelLabel, modelTint, modelTitle,
+  onPickModel, models, accountsStatus, isCritic, criticEnabled, onToggleCritic,
+  modelId, modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
   timing, skills, isPublisher, isBrowser, projectCwd, label,
 }: {
@@ -2371,11 +2389,18 @@ function AgentChatTile({
   /// prompt). Suppressed while the user is mid text-selection in the tile.
   onOpenEditor: () => void;
   /// Short model name shown as a logo-chip on the right of the header.
+  modelId: string;
   modelLabel: string;
   /// Provider brand colour for the model chip.
   modelTint: string;
   /// Full model short-name for the chip tooltip (chip shows the lab label).
   modelTitle: string;
+  onPickModel: (modelId: string) => void;
+  models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  isCritic: boolean;
+  criticEnabled: boolean;
+  onToggleCritic: () => void;
   ringPx: number;
   outerPx: number;
   alphaA: number;
@@ -2468,6 +2493,25 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
+        {isCritic && (
+          <button
+            type="button"
+            aria-pressed={criticEnabled}
+            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
+            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
+            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
+            onKeyDown={(e) => e.stopPropagation()}
+            style={{
+              width: 24, height: 22, padding: 0, flexShrink: 0,
+              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
+              borderRadius: 6,
+              background: criticEnabled ? "rgba(255,184,76,0.18)" : "rgba(0,0,0,0.25)",
+              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+              cursor: "pointer", fontSize: 13, lineHeight: 1,
+              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
+            }}
+          >✦</button>
+        )}
         {/* The NAME is the editor handle: clicking it opens the per-agent
             model/colour/prompt popup. The clickable element is an inline-block
             sized to the name GLYPHS (not the full-width header row), so the
@@ -2491,22 +2535,34 @@ function AgentChatTile({
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
-        {modelLabel && (() => {
+        {(() => {
           const Logo = LAB_LOGO[modelLabel];
           return (
-            <span
-              title={`Model: ${modelTitle || modelLabel}`}
-              style={{
-                display: "inline-flex", alignItems: "center",
-                fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
-                color: modelTint,
-                background: "rgba(0,0,0,0.30)",
-                border: `1px solid ${modelTint}66`,
-                borderRadius: 4, padding: "1px 6px",
-                maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >{Logo ? <Logo size={21} color={modelTint} /> : modelLabel}</span>
+            <div
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              style={{ width: 30, height: 30, flexShrink: 0 }}
+            >
+              <ModelPicker
+                value={modelId}
+                onChange={onPickModel}
+                models={models}
+                status={accountsStatus}
+                fallbackLabel={modelLabel || "(pick a model)"}
+                compactTitle={`Model: ${modelTitle || modelLabel || "pick a model"}`}
+                compactTrigger={
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      width: 24, height: 24, fontSize: 9, fontWeight: 800,
+                      color: modelTint, background: "rgba(0,0,0,0.30)",
+                      border: `1px solid ${modelTint}66`, borderRadius: 5,
+                    }}
+                  >{Logo ? <Logo size={19} color={modelTint} /> : (modelLabel || "◌")}</span>
+                }
+              />
+            </div>
           );
         })()}
         {/* Per-agent working time — to the RIGHT of the name. Green while this
@@ -2584,6 +2640,7 @@ function AgentChatTile({
                 content={m.text}
                 ts={m.ts}
                 images={m.images}
+                workspace={projectCwd || undefined}
               />
             );
           })
@@ -4964,6 +5021,7 @@ function MarkdownBody({ text }: { text: string }) {
     <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeMarkdownUrlTransform}
         components={{
           // Inline `code` → small monospace pill; fenced ```code``` →
           // panel with optional language label across the top edge.
@@ -5017,7 +5075,7 @@ function MarkdownBody({ text }: { text: string }) {
 // sender + generating/done indicator + timestamp, markdown when finished,
 // plain pre-wrap while streaming. `isStreaming` is the live in-flight
 // reply (passed by the caller from supSendBusy && last entry).
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false) {
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false, workspace?: string) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
   const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
@@ -5039,6 +5097,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         content={m.text}
         ts={m.ts}
         images={m.images}
+        workspace={workspace}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -5082,7 +5141,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
 // tool-result → expandable ToolEventCard (terminal-styled for shell), and
 // a normal reply → ChatBubble. Uses the SAME shared components as ChatPage
 // (no fork). `isStreaming` marks the live in-flight reply.
-function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false) {
+function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false, workspace?: string) {
   if (m.kind === "thinking") {
     return <div key={`u-${m.seq ?? i}`}><ThinkingBlock text={m.text} /></div>;
   }
@@ -5125,7 +5184,7 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
     );
   }
   // dispatch directives + plain replies → normal chat bubble.
-  return renderReplyEntry(m, i, "", orchName, isStreaming);
+  return renderReplyEntry(m, i, "", orchName, isStreaming, workspace);
 }
 
 // (renderThoughtEntry removed — the Thought / Tool / Full Chat tabs now all go
@@ -5553,6 +5612,7 @@ function OrchestratorPane({
   selectedAgent, activeAgent,
   team, isSuperUser,
   projectId, directives, onDirectivesChanged,
+  projectCwd,
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
   needsLoad, loadingModel, onLoadModel,
@@ -5569,6 +5629,7 @@ function OrchestratorPane({
   isSuperUser: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   /// Super-User chat — feeds the User Input sub-tab's HISTORY view
@@ -6006,7 +6067,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={thoughtWin} noun="reasoning entries" />
-            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName))}
+            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
@@ -6019,7 +6080,7 @@ function OrchestratorPane({
             </div>
           ) : (<>
             <EarlierBanner state={toolsWin} noun="tool calls" />
-            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName))}
+            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName, false, projectCwd))}
           </>)}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
@@ -6037,7 +6098,7 @@ function OrchestratorPane({
               // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
               // Absolute index preserved so the streaming flag still targets the
               // real last entry after the window slice.
-              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1)
+              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1, projectCwd)
             )}
           </>)}
         </div>
@@ -6106,6 +6167,7 @@ function RightColumnTabs(props: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   projectId: string;
+  projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
@@ -6274,6 +6336,7 @@ function RightColumnTabs(props: {
           team={props.team}
           isSuperUser={tab === "super"}
           projectId={props.projectId}
+          projectCwd={props.projectCwd}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
           supChat={props.supChat}
@@ -9017,6 +9080,27 @@ export function AgentsPage({
   // agent_projects.director_mode. (Was briefly split into a 2nd critic_super_user
   // toggle in v0.5.86; merged back here in v0.5.87 — they meant the same thing.)
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
+  // The Critical Thinker remains enabled by default, but each project can
+  // turn it off from its own card without changing Director Mode or other
+  // projects. This is a UI preference, not secret/provider state.
+  const criticEnabledKey = selectedProjectId
+    ? `owllm:agents:critic-enabled:${selectedProjectId}`
+    : "";
+  const [criticEnabled, setCriticEnabledState] = useState<boolean>(true);
+  useEffect(() => {
+    if (!criticEnabledKey) { setCriticEnabledState(true); return; }
+    try { setCriticEnabledState(localStorage.getItem(criticEnabledKey) !== "0"); }
+    catch { setCriticEnabledState(true); }
+  }, [criticEnabledKey]);
+  const setCriticEnabled = (v: boolean | ((prev: boolean) => boolean)) => {
+    setCriticEnabledState(prev => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      if (criticEnabledKey) {
+        try { localStorage.setItem(criticEnabledKey, next ? "1" : "0"); } catch { /* best effort */ }
+      }
+      return next;
+    });
+  };
   // Parallel dispatch (Stage 1): when ON the orchestrator is told to fan out
   // INDEPENDENT tasks in one reply (Phase 2b already runs them concurrently).
   // Per-project UI preference in localStorage (no DB/Rust needed). Default OFF
@@ -9147,6 +9231,18 @@ export function AgentsPage({
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
   const [projectHubOpen, setProjectHubOpen] = useState(false);
+  const [hubPrompt, setHubPrompt] = useState(() => {
+    try {
+      const value = sessionStorage.getItem("owllm:agentic-launch-intent") ?? "";
+      sessionStorage.removeItem("owllm:agentic-launch-intent");
+      return value;
+    } catch {
+      return "";
+    }
+  });
+  const [hubKind, setHubKind] = useState<"web" | "research" | "assistant">("web");
+  const [newProjectIntent, setNewProjectIntent] = useState("");
+  const [newProjectKind, setNewProjectKind] = useState("");
   const [projectMaterializing, setProjectMaterializing] = useState(false);
   const [projectMaterializeError, setProjectMaterializeError] = useState("");
   const [browserReopenBusy, setBrowserReopenBusy] = useState(false);
@@ -9198,7 +9294,18 @@ export function AgentsPage({
       setProjectMaterializing(false);
     }
   };
-  const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
+  const onNewProject = () => {
+    setNewProjectIntent("");
+    setNewProjectKind("");
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
+  const createFromLaunchpad = () => {
+    setNewProjectIntent(hubPrompt.trim());
+    setNewProjectKind(hubKind);
+    setSettingsMode("new");
+    setNewProjOpen(true);
+  };
   const onProjectCreated = async (
     row: ProjectRow,
     kickoff: {
@@ -9413,9 +9520,7 @@ export function AgentsPage({
         systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
         canDispatch: d.can_dispatch === true,
         defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-        toolAllowlist: Array.isArray(d.tool_allowlist)
-          ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-          : undefined,
+        toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
         skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
           .filter((s: unknown): s is string => typeof s === "string"),
       });
@@ -9470,9 +9575,7 @@ export function AgentsPage({
           systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
           canDispatch: d.can_dispatch === true,
           defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
-          toolAllowlist: Array.isArray(d.tool_allowlist)
-            ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
-            : undefined,
+          toolAllowlist: normalizeRoleToolAllowlist(d.tool_allowlist),
           skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
             .filter((s: unknown): s is string => typeof s === "string"),
         });
@@ -10430,6 +10533,7 @@ export function AgentsPage({
     const orchKeyForModel = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? "orchestrator") : "orchestrator";
     const supModelId = modelFor(orchKeyForModel);
     const supProvider = providerFor(supModelId);
+    const supNeedsManagedServer = requiresManagedLocalServer(supModelId, supProvider);
 
     // Echo the user message into the orchestrator's buffer too so the
     // right-pane Reply tab reads as a conversation thread, not just
@@ -10446,7 +10550,7 @@ export function AgentsPage({
     // automatically when the user sends a message; no manual Server-
     // tab dance". Cloud models (claude-*, gpt-*) skip this block;
     // their dispatch hits api.anthropic.com / api.openai.com.
-    if (supProvider === "local") {
+    if (supNeedsManagedServer) {
       const alreadyOk =
         serverState.running &&
         serverState.model_id === supModelId &&
@@ -10487,7 +10591,7 @@ export function AgentsPage({
     // ensureLocalServer call above. Pull a fresh status so the port
     // we hand to streamChatCompletion is the just-started server's
     // port, not whatever was set when this handler started.
-    const freshServerState = supProvider === "local"
+    const freshServerState = supNeedsManagedServer
       ? await invoke<ServerStatus>("server_status").catch(() => serverState)
       : serverState;
     console.log("[onSupSend] about to dispatch", {
@@ -11005,7 +11109,7 @@ export function AgentsPage({
     || "").trim();
   const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
   const dockNeedsLoad =
-    dockProvider === "local" &&
+    requiresManagedLocalServer(dockModelId, dockProvider) &&
     dockModelId.length > 0 &&
     !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
   const dockLoadModel = async () => {
@@ -11227,19 +11331,20 @@ export function AgentsPage({
     const orchModelId = effectiveModelFor(runtimeOrch);
     // "tuned" models live in LLM/fine_tuned/ and are served by the
     // same llama-server, so they need the local server up too.
-    const isLocallyServed = (p: string) => p === "local" || p === "tuned";
-    const needsLocal = isLocallyServed(providerFor(orchModelId))
-      || runtimeTeam.agents.some(a => isLocallyServed(providerFor(effectiveModelFor(a))));
+    const isManagedLocalModel = (id: string) =>
+      requiresManagedLocalServer(id, providerFor(id));
+    const needsLocal = isManagedLocalModel(orchModelId)
+      || runtimeTeam.agents.some(a => isManagedLocalModel(effectiveModelFor(a)));
     if (needsLocal) {
       // Decide which model the local server should be running. The
       // orchestrator's model wins; if it's not local we look for any
       // locally-served agent in the team. A blank model means "we
       // can't infer which weights to load" — that's user error.
       const localCandidates: string[] = [];
-      if (isLocallyServed(providerFor(orchModelId))) localCandidates.push(orchModelId);
+      if (isManagedLocalModel(orchModelId)) localCandidates.push(orchModelId);
       for (const a of runtimeTeam.agents) {
         const id = effectiveModelFor(a);
-        if (id && isLocallyServed(providerFor(id))) localCandidates.push(id);
+        if (id && isManagedLocalModel(id)) localCandidates.push(id);
       }
       // Fallback chain so Send always works when local is needed:
       //   1. Explicit pick (per-agent / team-default / orchestrator).
@@ -11248,11 +11353,12 @@ export function AgentsPage({
       //   3. First servable local/tuned model in the registry — auto-
       //      pick so a fresh team with no model_id assigned still runs.
       let wantedLocal = localCandidates[0]?.trim() || "";
-      if (!wantedLocal && serverState.model_id && isLocallyServed(providerFor(serverState.model_id))) {
+      if (!wantedLocal && serverState.model_id && isManagedLocalModel(serverState.model_id)) {
         wantedLocal = serverState.model_id;
       }
       if (!wantedLocal) {
-        const fallback = models.find(m => isLocallyServed(m.provider) && m.port != null);
+        const fallback = models.find(m =>
+          requiresManagedLocalServer(m.model_id, m.provider) && m.port != null);
         if (fallback) wantedLocal = fallback.model_id;
       }
       if (!wantedLocal) {
@@ -11720,7 +11826,7 @@ export function AgentsPage({
         // NOT auto-publish — we surface the ask and stop, so nothing ships past a real
         // user gate. Otherwise the work ships as usual. -----
         let needsUserDecision = false;
-        if (sText && !isAuthError(sText) && !ctrl.signal.aborted && canDelegateTo(coder, CRITIC_AGENT_NAME)) {
+        if (criticEnabled && sText && !isAuthError(sText) && !ctrl.signal.aborted && canDelegateTo(coder, CRITIC_AGENT_NAME)) {
           const CRITIC_NAME = CRITIC_AGENT_NAME;
           addActive(CRITIC_NAME);
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
@@ -11965,7 +12071,7 @@ export function AgentsPage({
       let criticWasConsulted = false;
       {
         const { question, cleaned } = extractUserInputRequest(orchReply);
-        if (question && canDelegateTo(orch, CRITIC_AGENT_NAME)) {
+        if (criticEnabled && question && canDelegateTo(orch, CRITIC_AGENT_NAME)) {
           criticWasConsulted = true;
           appendThought(orch.name, {
             role: "dispatch", color: "#ff9ad9",
@@ -12040,7 +12146,7 @@ export function AgentsPage({
       //     it gets up to 3 rounds to gate the plan and the orchestrator is told to
       //     satisfy it. Still hard-capped so it can't loop forever.
       // Director mode forces a review even if the orchestrator never says "critic".
-      if (!criticWasConsulted && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+      if (criticEnabled && !criticWasConsulted && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
           (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_PRE_ROUNDS = directorMode ? 3 : 2;
@@ -12860,7 +12966,7 @@ export function AgentsPage({
       // STRICTLY NON-BLOCKING in both: a refusal, a satisfied verdict, or any
       // error ships the current answer as-is. The critic can improve the output,
       // never withhold it.
-      if (canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+      if (criticEnabled && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
           (directorMode || needsCriticalThinkerReview(`${text}\n${finalReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_POST_ROUNDS = directorMode ? 2 : 1;
@@ -13611,6 +13717,8 @@ export function AgentsPage({
           resolvedTeamLabel={activeTeamTemplate?.display ?? null}
           onResetTeam={resetTeamToTemplate}
           defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          initialIntent={newProjectIntent}
+          initialKindKey={newProjectKind}
           existingNames={existingProjectNames}
           onCreated={onProjectCreated}
           project={selectedProject}
@@ -13628,24 +13736,47 @@ export function AgentsPage({
           onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
         />
         <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
-          <div style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 280 }}>
-              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.6, textTransform: "uppercase" }}>
-                Agentic project command center
-              </div>
-              <h1 style={{ margin: "7px 0 5px", color: "var(--fg-strong)", fontSize: "clamp(27px,4vw,44px)", lineHeight: 1.05 }}>
-                GitHub carries the project. This PC carries its folder.
-              </h1>
-              <div style={{ color: "var(--fg-muted)", maxWidth: 760, lineHeight: 1.6, fontSize: 13.5 }}>
-                Chats, team memory and project rules can follow your account. An absolute folder never does.
-                Projects from another computer stay ghosted until their repository is cloned locally.
+          <CreationLaunchpad
+            eyebrow="Agentic creation space"
+            title={<>Turn an idea into a <em>working outcome.</em></>}
+            subtitle="Tell OWLLM what success looks like. It will prepare a focused team, a durable workspace, and the right starting workflow."
+            prompt={hubPrompt}
+            placeholder={
+              hubKind === "research"
+                ? "What should the team investigate, compare, or explain?"
+                : hubKind === "assistant"
+                  ? "What should your assistant organize, remember, or handle?"
+                  : "Describe the product, website, or software outcome you want…"
+            }
+            submitLabel="Prepare project"
+            selectedMode={hubKind}
+            onModeChange={(mode) => setHubKind(mode as "web" | "research" | "assistant")}
+            onPromptChange={setHubPrompt}
+            onSubmit={createFromLaunchpad}
+            modes={[
+              { id: "web", icon: "◇", label: "Build a product", detail: "Website, app, software or a new digital product", badge: "Popular" },
+              { id: "research", icon: "⌕", label: "Research", detail: "A sourced investigation with specialist review" },
+              { id: "assistant", icon: "✦", label: "Personal assistant", detail: "A lasting workspace for plans, drafts and follow-up" },
+            ]}
+            actions={[
+              { icon: "⌁", label: "Custom project", detail: "See every project recipe and team", onClick: onNewProject },
+              { icon: "⌘", label: "Coding", detail: "Open the focused Coding workspace", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "code" } })) },
+              { icon: "◫", label: "Teams", detail: "Browse and customize agent teams", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "studio" } })) },
+            ]}
+            status={<span>Local-first · private by default · any connected model</span>}
+          />
+
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 850 }}>Continue a project</div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 11.5, marginTop: 3 }}>
+                Local projects open immediately. Synced projects can be cloned onto this computer.
               </div>
             </div>
             <button onClick={onNewProject} style={{
-              height: 44, padding: "0 18px", border: "none", borderRadius: 12,
-              background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 850, cursor: "pointer",
-              boxShadow: "0 0 26px rgba(var(--accent-rgb),0.22)",
-            }}>+ New GitHub-first project</button>
+              height: 38, padding: "0 15px", border: "1px solid rgba(var(--accent-rgb),0.48)", borderRadius: 10,
+              background: "rgba(var(--accent-rgb),0.11)", color: "var(--accent-ink)", fontWeight: 800, cursor: "pointer",
+            }}>+ New project</button>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
@@ -13742,6 +13873,8 @@ export function AgentsPage({
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        initialIntent={newProjectIntent}
+        initialKindKey={newProjectKind}
         existingNames={existingProjectNames}
         onCreated={onProjectCreated}
         project={selectedProject}
@@ -14015,6 +14148,7 @@ export function AgentsPage({
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
             projectId={selectedProjectId}
+            projectCwd={runCwd || undefined}
             models={models}
             accountsStatus={accountsStatus}
             serverState={serverState}
@@ -14132,6 +14266,11 @@ export function AgentsPage({
                 onOpenEditor={(name) => setEditingAgent(name)}
                 modelFor={modelFor}
                 providerFor={providerFor}
+                onPickAgentModel={onPickAgentModel}
+                models={models}
+                accountsStatus={accountsStatus}
+                criticEnabled={criticEnabled}
+                onToggleCritic={() => setCriticEnabled(v => !v)}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
                 projectCwd={publisherCwd}

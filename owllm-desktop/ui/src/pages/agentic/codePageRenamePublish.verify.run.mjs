@@ -73,8 +73,8 @@ anchor("PublishCards.tsx", cards, "Push tooltip explains the merged-project dest
   "Sync the merged project checkout");
 anchor("PublishCards.tsx", cards, "Commit keeps its hover explanation",
   "Commit all changes in this workspace");
-anchor("PublishCards.tsx", cards, "Merge keeps its hover explanation",
-  "Merge this page's worktree back into");
+anchor("PublishCards.tsx", cards, "Sync keeps its hover explanation",
+  "Synchronize this page with");
 anchor("PublishCards.tsx", cards, "Publish keeps its hover explanation",
   "Readiness check running");
 anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",

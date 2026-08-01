@@ -17,6 +17,22 @@ import type { Team, Edge, AgentSpec, RoleData } from "./dispatch";
 
 export type RoleKind = "orchestrator" | "critic" | "specialist";
 
+/// Normalize the backend's YAML-shaped tool allowlist into the runtime contract.
+/// Most roles use a YAML list, while unrestricted roles use the supported
+/// shorthand `tool_allowlist: all`, which arrives from Rust as a string.
+/// Dropping that scalar to `undefined` loses the explicit sentinel before it
+/// reaches subscription CLIs, so isolated Solo/Operator runs never receive the
+/// host browser relay.
+export function normalizeRoleToolAllowlist(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    return value.filter((tool): tool is string => typeof tool === "string");
+  }
+  if (typeof value === "string" && value.trim().toLowerCase() === "all") {
+    return ["all"];
+  }
+  return undefined;
+}
+
 export type TeamNormalizeReport<T extends Team = Team> = {
   /// The normalized team — safe to run / save. Preserves the caller's exact
   /// team type (AgentsPage's Team carries extra fields like visibility), since

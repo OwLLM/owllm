@@ -34,7 +34,7 @@ const {
   classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite, coderLane, goalLane,
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
   toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
-  soloGeneralistForTeam, SOLO_GENERALIST_BASE,
+  soloGeneralistForTeam, normalizeRoleToolAllowlist, SOLO_GENERALIST_BASE,
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
@@ -119,6 +119,27 @@ for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
 section("2a) Solo generalist (all tools, every team)");
 check("solo_generalist role is installed", roleByBase.has(SOLO_GENERALIST_BASE));
 check("solo_generalist role is unrestricted", roleByBase.get(SOLO_GENERALIST_BASE)?.toolAllowlist?.includes("all") === true);
+check(
+  "production role payload preserves scalar tool_allowlist: all as an explicit sentinel",
+  JSON.stringify(normalizeRoleToolAllowlist("all")) === JSON.stringify(["all"])
+    && JSON.stringify(normalizeRoleToolAllowlist(["read_file", "shell"])) === JSON.stringify(["read_file", "shell"]),
+);
+const roleLoaderPageSource = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+const roleLoaderDispatchSource = fs.readFileSync(path.join(HERE, "dispatch.ts"), "utf8");
+check(
+  "desktop and bridge runtime role loaders use the production allowlist normalizer",
+  (roleLoaderPageSource.match(/normalizeRoleToolAllowlist\(d\.tool_allowlist\)/g) || []).length === 2
+    && roleLoaderDispatchSource.includes("normalizeRoleToolAllowlist(d.tool_allowlist)"),
+);
+const codePageSource = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+check(
+  "unrestricted Code-page CLI turns carry the explicit all-tools relay sentinel",
+  codePageSource.includes('const runtimeTools = chatOnly ? roTools : ["all"];')
+    && codePageSource.includes("allowedTools: runtimeTools")
+    && codePageSource.includes("dThought, runtimeTools,")
+    && codePageSource.includes('allowedTools: ["all"]')
+    && codePageSource.includes('onSecondaryThought, ["all"],'),
+);
 for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   const data = JSON.parse(fs.readFileSync(path.join(teamsDir, tf), "utf8"));
   const solo = soloGeneralistForTeam({ agents: data.agents || [] });

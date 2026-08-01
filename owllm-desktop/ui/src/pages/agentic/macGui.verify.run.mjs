@@ -42,6 +42,13 @@ check("macOS overlay is a click-through child of the main app window",
   overlay.includes("let builder = builder.parent(main)?")
     && overlay.includes('#[cfg(any(target_os = "windows", target_os = "macos"))]')
     && overlay.includes("overlay.set_ignore_cursor_events(true)"));
+check("macOS reasserts the visible child frame above the main window",
+  overlay.includes("fn show_overlay_above_main(")
+    && overlay.includes("addChildWindow:")
+    && overlay.includes("ordered: NS_WINDOW_ABOVE")
+    && overlay.includes("NS_WINDOW_ABOVE")
+    && /overlay\.show\(\)\?;[\s\S]{0,220}order_macos_overlay_above_main\(main, overlay\)\?/.test(overlay)
+    && (overlay.match(/show_overlay_above_main\(/g) || []).length >= 3);
 check("macOS Retina overlay geometry scales its transparent margins",
   overlay.includes("fn geometry_scale(scale_factor: f64) -> f64")
     && overlay.includes("main.scale_factor()")

@@ -363,7 +363,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
       const screenStream = await requestDisplayStream(appOnly ? "window" : "screen", fps);
       streamRef.current = screenStream;
-      const videoTrack = screenStream.getVideoTracks()[0] as MediaStreamVideoTrack | undefined;
+      const videoTrack = screenStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error("The selected surface returned no video track.");
       const settings = videoTrack.getSettings();
       const surface = settings.displaySurface;

@@ -3632,6 +3632,18 @@ fn capture_browser_window(
     save_browser_capture(app, &png, width, height, "viewport", active, req)
 }
 
+/// Capture only the main OWLLM application window. This is intentionally
+/// separate from the shared browser viewport and desktop scopes: UI text must
+/// occupy the PNG at native pixels instead of being a small rectangle inside
+/// a full desktop/browser capture.
+fn capture_app(app: &tauri::AppHandle, req: u64) -> Result<String, String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main OWLLM window is unavailable".to_string())?;
+    let (png, width, height) = crate::support::capture_window_png(&window)?;
+    save_browser_capture(app, &png, width, height, "app", None, req)
+}
+
 fn capture_browser_full_page(
     app: &tauri::AppHandle,
     webview: &Webview,
@@ -3705,8 +3717,12 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         .unwrap_or("viewport")
         .trim()
         .to_ascii_lowercase();
-    if action == "screenshot" && screenshot_scope == "desktop" {
-        return capture_desktop(&app, None, req);
+    if action == "screenshot" {
+        match screenshot_scope.as_str() {
+            "desktop" => return capture_desktop(&app, None, req),
+            "app" | "application" | "owllm" => return capture_app(&app, req),
+            _ => {}
+        }
     }
     if get_window(&app).is_none() || browser_is_suspended() {
         browser_start_inner(&app)?;
@@ -3746,6 +3762,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         }
         "screenshot" => match screenshot_scope.as_str() {
             "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
+            "app" | "application" | "owllm" => capture_app(&app, req),
             "full_page" | "full-page" | "page" => {
                 capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
             }

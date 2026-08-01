@@ -1638,10 +1638,12 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Capture a real PNG and return its absolute saved path plus pixels for vision. scope=viewport " +
       "captures the visible shared browser window; full_page captures the entire web document without " +
-      "scrolling or switching tabs where the platform supports it; desktop captures the screen/virtual " +
-      "desktop (Linux Wayland may show its required system consent dialog).",
+      "scrolling or switching tabs where the platform supports it; app captures only the native OWLLM " +
+      "application window at its native pixels; desktop captures the screen/virtual desktop (Linux " +
+      "Wayland may show its required system consent dialog). For a UI screenshot to send in WhatsApp, " +
+      "use scope=app and attach the PNG as a Document when readable original pixels matter.",
     args: [
-      { name: "scope", required: false, description: "viewport (default), full_page, or desktop.", aliases: ["mode", "capture_scope"] },
+      { name: "scope", required: false, description: "viewport (default), full_page, app, or desktop.", aliases: ["mode", "capture_scope"] },
       { name: "tab_id", required: false, description: "Target browser tab ID for viewport/full_page; omit to use the active tab.", aliases: ["tab", "id"] },
     ],
   },

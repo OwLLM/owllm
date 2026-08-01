@@ -45,7 +45,7 @@ check("capture scopes are explicit and reject ambiguous values",
   browser.includes('"full_page" | "full-page" | "page"') &&
   browser.includes('unknown screenshot scope') &&
   local.includes('scope=viewport') &&
-  gateway.includes('["viewport", "full_page", "desktop"]'));
+  gateway.includes('["viewport", "full_page", "app", "desktop"]'));
 check("desktop scope bypasses browser startup and uses the shared native capture",
   browser.indexOf('screenshot_scope == "desktop"') < browser.indexOf('browser_start_inner(&app)?') &&
   browser.includes('block_on(crate::support::capture_screen_png())'));
@@ -114,9 +114,9 @@ check("negative control catches an unbounded upload",
   !browser.replace("meta.len() > MAX_BROWSER_UPLOAD_BYTES", "false")
     .includes("meta.len() > MAX_BROWSER_UPLOAD_BYTES"));
 check("negative control catches desktop capture silently falling back to viewport",
-  browser.includes('return capture_desktop(&app, None, req);') &&
-  !browser.replace('return capture_desktop(&app, None, req);', 'return capture_browser_window(&app, None, req);')
-    .includes('return capture_desktop(&app, None, req);'));
+  browser.includes('"desktop" => return capture_desktop(&app, None, req)') &&
+  !browser.replace('"desktop" => return capture_desktop(&app, None, req)', '"desktop" => return capture_browser_window(&app, None, req)')
+    .includes('"desktop" => return capture_desktop(&app, None, req)'));
 check("negative control catches removal of macOS full-page capture",
   !browser.replace("render_macos_pdf(&pdf, metrics)", 'Err("macOS full-page unavailable".into())')
     .includes("render_macos_pdf(&pdf, metrics)"));

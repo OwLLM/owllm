@@ -195,6 +195,14 @@ jobs:
           fs.writeFileSync("dist/latest.json", JSON.stringify(manifest, null, 2) + "\n");
           NODE
 
+      - name: Preserve signed macOS release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: owllm-macos-${{ inputs.tag }}
+          path: owllm-desktop/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Publish Mac assets and manifest
         working-directory: owllm-desktop
         env:

@@ -112,6 +112,7 @@ const TRIPWIRES = [
   ["../.github/workflows/mac-release-repair.yml", /const manifest = \{[\s\S]{0,240}version: process\.env\.VERSION[\s\S]{0,400}"darwin-aarch64"/, "macOS-only release path generates its updater manifest without a pre-existing cross-platform manifest"],
   ["../.github/workflows/mac-release-repair.yml", /macos-arm64:[\s\S]{0,80}runs-on: macos-latest/, "macOS-only releases use an available hosted Apple Silicon runner"],
   ["../.github/workflows/mac-release-repair.yml", /Preserve signed macOS release files[\s\S]{0,240}actions\/upload-artifact@v4[\s\S]*Publish Mac assets and manifest/, "signed macOS files survive a public-repository credential failure"],
+  ["../.github/workflows/mac-release-repair.yml", /Restore Apple Silicon Rust build cache[\s\S]{0,180}shared-key: tauri-aarch64-apple-darwin/, "macOS-only releases reuse the existing Apple Silicon build cache"],
 ];
 
 function runStatic() {

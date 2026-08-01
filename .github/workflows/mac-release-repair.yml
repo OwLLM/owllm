@@ -38,6 +38,12 @@ jobs:
           command -v cmake
           command -v gh || brew install gh
 
+      - name: Restore Apple Silicon Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owllm-desktop/src-tauri
+          shared-key: tauri-aarch64-apple-darwin
+
       - name: Import Developer ID certificate
         shell: bash
         env:

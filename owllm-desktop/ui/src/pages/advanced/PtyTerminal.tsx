@@ -18,7 +18,7 @@
 // Uint8Array since v4; xterm.onData gives us strings (we encode them
 // with TextEncoder before forwarding).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -72,8 +72,6 @@ export default function PtyTerminal({
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef<string | null>(null);
   const pendingInputRef = useRef<string[]>([]);
-  const manualInputRef = useRef<HTMLInputElement | null>(null);
-  const [manualInput, setManualInput] = useState("");
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
   const autoSendRef = useRef(autoSend);
@@ -93,13 +91,6 @@ export default function PtyTerminal({
       sessionId: sid,
       data: Array.from(new TextEncoder().encode(data)),
     }).catch(() => {});
-  };
-
-  const submitManualInput = () => {
-    const value = manualInput.trim();
-    if (!value) return;
-    ptyWrite(`${value}\r`);
-    setManualInput("");
   };
 
   useEffect(() => {
@@ -277,44 +268,17 @@ export default function PtyTerminal({
   }, [visible]);
 
   return (
-    <div style={{ width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column", background: "#0c0f14" }}>
-      <div
-        ref={hostRef}
-        onClick={() => termRef.current?.focus()}
-        style={{
-          width: "100%", flex: 1, minHeight: 0,
-          background: "#0c0f14",
-          padding: 6,
-          boxSizing: "border-box",
-          outline: "none",
-        }}
-        aria-label="Interactive provider terminal"
-      />
-      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderTop: "1px solid rgba(255,255,255,0.08)", background: "#11151d" }}>
-        <span style={{ color: "var(--fg-muted)", fontSize: 11, whiteSpace: "nowrap" }}>Auth code</span>
-        <input
-          ref={manualInputRef}
-          value={manualInput}
-          onChange={(event) => setManualInput(event.target.value)}
-          onPaste={(event) => {
-            const text = event.clipboardData.getData("text");
-            if (!text) return;
-            event.preventDefault();
-            setManualInput(text);
-          }}
-          onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); submitManualInput(); } }}
-          placeholder="Paste or type code, then Enter"
-          aria-label="Paste or type authentication code"
-          spellCheck={false}
-          style={{ flex: 1, minWidth: 0, border: "1px solid rgba(127,184,255,0.35)", borderRadius: 5, background: "#0c0f14", color: "#e7ebf3", padding: "5px 7px", font: "12px ui-monospace, Menlo, Consolas, monospace" }}
-        />
-        <button
-          type="button"
-          onClick={submitManualInput}
-          disabled={!manualInput.trim()}
-          style={{ border: "1px solid rgba(127,184,255,0.45)", borderRadius: 5, background: manualInput.trim() ? "rgba(127,184,255,0.18)" : "transparent", color: manualInput.trim() ? "#cfe2ff" : "#5f6878", padding: "5px 9px", fontSize: 11, fontWeight: 700, cursor: manualInput.trim() ? "pointer" : "default" }}
-        >Send</button>
-      </div>
-    </div>
+    <div
+      ref={hostRef}
+      onClick={() => termRef.current?.focus()}
+      style={{
+        width: "100%", height: "100%",
+        background: "#0c0f14",
+        padding: 6,
+        boxSizing: "border-box",
+        outline: "none",
+      }}
+      aria-label="Interactive provider terminal"
+    />
   );
 }

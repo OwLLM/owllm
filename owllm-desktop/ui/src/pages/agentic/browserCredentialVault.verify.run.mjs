@@ -55,6 +55,8 @@ must(/addEventListener\("input"/.test(bridge), "input listener (provisional trac
 must(/addEventListener\("click"/.test(bridge), "submit-click capture trigger missing");
 must(/e\.key === "Enter"/.test(bridge), "Enter-key capture trigger missing");
 must(/visibilitychange/.test(bridge), "tab-hide capture trigger missing");
+must(bridge.includes("scheduleCredReport") && /setTimeout\([^]*?reportCred\(\)[^]*?700\)/.test(bridge),
+  "typed credentials are not persisted before fast OAuth navigation destroys the form");
 must(bridge.includes("__owllmLoginUser"), "multi-step login does not retain the non-secret username");
 must(browser.includes('if action == "cred"'), "private provider login credentials are not captured for encrypted saving");
 

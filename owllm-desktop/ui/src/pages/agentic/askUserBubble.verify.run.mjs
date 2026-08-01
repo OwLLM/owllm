@@ -27,8 +27,8 @@ fs.mkdirSync(AGENTIC, { recursive: true });
 fs.mkdirSync(UTILS, { recursive: true });
 fs.mkdirSync(ADVANCED, { recursive: true });
 
-function transpile(file, outDir, outName) {
-  const code = fs.readFileSync(path.join(HERE, file), "utf8");
+function transpile(file, outDir, outName, sourceDir = HERE) {
+  const code = fs.readFileSync(path.join(sourceDir, file), "utf8");
   const js = ts.transpileModule(code, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
@@ -39,6 +39,7 @@ transpile("askUserBubble.verify.ts", AGENTIC, "verify.js");
 // Real (not stubbed): dispatch's model routing calls these peer-id helpers on
 // EVERY model id, so a stub would silently change which branch is taken.
 transpile("peerCatalogue.ts", AGENTIC, "peerCatalogue.js");
+transpile("accountHealth.ts", ADVANCED, "accountHealth.js", path.join(HERE, "../advanced"));
 
 // Heavy imports of dispatch.ts that the pure helpers under test never call.
 const STUB = "module.exports = new Proxy({}, { get: () => () => {} });";

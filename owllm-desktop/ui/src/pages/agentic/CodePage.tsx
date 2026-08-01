@@ -23,6 +23,7 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { requiresManagedLocalServer } from "./peerCatalogue";
 import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
@@ -37,6 +38,7 @@ import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import TeamMemoryModal, { fmtAgo } from "./TeamMemoryModal";
+import CreationLaunchpad from "./CreationLaunchpad";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -422,6 +424,16 @@ type JustChatState = { chats: ChatThread[]; chatId: string; draft: string; busy:
 const CHAT_SID = "code:justchat";
 const CHAT_ACTIVE_KEY = "owllm:code:chats:active";
 const DEFAULT_JUSTCHAT: JustChatState = { chats: [], chatId: "", draft: "", busy: false };
+
+function launchProjectName(intent: string): string {
+  const words = intent
+    .trim()
+    .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5);
+  return words.join(" ").slice(0, 48);
+}
 // The in-flight stream's abort handle — module-level (like the session) so
 // Stop still works after the component remounts mid-stream.
 let justChatAbort: AbortController | null = null;
@@ -702,11 +714,26 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
+  const [launchPrompt, setLaunchPrompt] = useState(() => {
+    try {
+      const value = sessionStorage.getItem("owllm:code-launch-intent") ?? "";
+      sessionStorage.removeItem("owllm:code-launch-intent");
+      return value;
+    } catch {
+      return "";
+    }
+  });
+  const [launchMode, setLaunchMode] = useState<"project" | "chat" | "team">("project");
+  // A creation prompt survives the folder/project dialog and becomes the first
+  // editable Coding draft after the private worktree is ready.
+  const pendingProjectPromptRef = useRef("");
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
+  const [secondaryAttachments, setSecondaryAttachments] = useState<Attachment[]>([]);
+  const secondaryFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
   const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1693,8 +1720,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // one yourself"; now it's a choice right in the onboarding.
   const [npCreateRepo, setNpCreateRepo] = useState(false);
 
-  const openNewProject = () => {
-    setNpName("");
+  const openNewProject = (intent = "") => {
+    pendingProjectPromptRef.current = intent.trim();
+    setNpName(launchProjectName(intent));
     setNpFolder("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(!!gh?.connected);
@@ -1727,14 +1755,20 @@ function CodeWorkspace({ pageId, onTitle }: {
         const p = await sandboxCreateProject(npName.trim() || "project");
         createdPath = p.path;
         setNpOpen(false);
-        openWorkspace(p.path);
       } else if (npFolder.trim()) {
         createdPath = npFolder.trim();
         setNpOpen(false);
-        openWorkspace(npFolder.trim());
       } else {
         setNpBusy(false);
         return;
+      }
+      const opening = openWorkspace(createdPath);
+      const pendingPrompt = pendingProjectPromptRef.current;
+      if (pendingPrompt) {
+        void opening.then(() => {
+          setDraft(pendingPrompt);
+          pendingProjectPromptRef.current = "";
+        });
       }
       // Opt-in GitHub repo creation — after the workspace exists, so a repo
       // failure never blocks the project itself. Best-effort with a loud
@@ -2084,8 +2118,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(modelId, signal);
-      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      const managedHere = requiresManagedLocalServer(modelId, provider);
+      const port = managedHere ? await ensureServer(modelId, signal) : 0;
+      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
@@ -2105,32 +2140,35 @@ function CodeWorkspace({ pageId, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
-    opts?: { withEvents?: boolean },
+    opts?: { withEvents?: boolean; attachments?: Attachment[] },
   ): Promise<string> => {
     // The second agent runs its OWN model (falling back to the primary's when
     // it hasn't picked one), independent of the primary chat.
     const secModel = secondaryModelEffective;
     const provider = providerFor(secModel, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
+    const attachments = opts?.attachments ?? [];
+    const imgs = imageAttachments(attachments);
     await refreshBrowserState();
     const browserLine = getBrowserStateLine();
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "");
-    const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
+    const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     showSecondaryMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(secModel, signal);
-      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      const managedHere = requiresManagedLocalServer(secModel, provider);
+      const port = managedHere ? await ensureServer(secModel, signal) : 0;
+      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
-        userContent: enrichedUser, temperature: 0.3,
+        userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
         signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
         allowedTools: ["all"],
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], imgs.length ? imgs : undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -2328,7 +2366,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   const sendSecondary = async (textOverride?: string) => {
     const fromComposer = textOverride === undefined;
     const text = (textOverride ?? secondaryDraft).trim();
-    if (!text) return;
+    const attachments = fromComposer ? secondaryAttachments : [];
+    const images = imageAttachments(attachments);
+    if (!text && attachments.length === 0) return;
     if (secondaryBusy) {
       // No steer queue on the second pane (yet) — say so instead of dropping.
       setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏸ Second agent is mid-turn — this message was not delivered. Wait or press Stop, then resend.", ts: Date.now() }]);
@@ -2336,7 +2376,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
-    if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
     setSecondaryBusy(true);
@@ -2345,13 +2385,21 @@ function CodeWorkspace({ pageId, onTitle }: {
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
-    setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
+    const documentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
+    setSecondaryMessages((m) => [...m, {
+      role: "user",
+      content: visibleText,
+      context: appendDocumentAttachmentText(text, attachments),
+      images: images.length ? attachmentThumbs(images) : undefined,
+      ts: Date.now(),
+    }]);
     setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
     let aborted = false;
     let replyText = "";
     try {
       setStatus("Second agent working…");
-      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2399,12 +2447,63 @@ function CodeWorkspace({ pageId, onTitle }: {
     >Terminal</button>
   );
 
+  // Both project agents use this one attachment path. Parsing, accepted file
+  // types, previews, paste/drop behavior, and model payloads must stay in sync.
+  const addProjectComposerFiles = async (
+    files: FileList | File[],
+    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
+  ) => {
+    for (const file of Array.from(files)) {
+      try {
+        const attachment = await fileToChatAttachment(file);
+        setAttachments((current) => [...current, attachment]);
+      } catch (e: any) {
+        setStatus(String(e?.message ?? e));
+      }
+    }
+  };
+  const addCodeFiles = (files: FileList | File[]) => {
+    void addProjectComposerFiles(files, setCodeAttachments);
+  };
+  const addSecondaryFiles = (files: FileList | File[]) => {
+    void addProjectComposerFiles(files, setSecondaryAttachments);
+  };
+  const renderAttachmentTray = (
+    attachments: Attachment[],
+    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
+  ) => attachments.length > 0 && (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {attachments.map((attachment, i) => (
+        <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+          {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
+          <button onClick={() => setAttachments((current) => current.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+        </div>
+      ))}
+    </div>
+  );
+  const renderAttachmentPicker = (
+    owner: "primary" | "secondary",
+    inputRef: { current: HTMLInputElement | null },
+    addFiles: (files: FileList | File[]) => void,
+  ) => (
+    <>
+      <input data-ui={`Code${owner === "primary" ? "Primary" : "Secondary"}AttachmentInput`} ref={inputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
+             onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
+      <button onClick={() => inputRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+    </>
+  );
+
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div data-ui="CodeSecondaryComposer" style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}>
+    <div
+      data-ui="CodeSecondaryComposer"
+      onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) e.preventDefault(); }}
+      onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
+      style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}
+    >
       <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
         <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
         <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
@@ -2420,11 +2519,14 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
         {renderTerminalButton("secondary")}
       </div>
+      {renderAttachmentTray(secondaryAttachments, setSecondaryAttachments)}
       <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
+        {renderAttachmentPicker("secondary", secondaryFileRef, addSecondaryFiles)}
         <textarea
           ref={secondaryDraftRef}
           value={secondaryDraft}
           onChange={(e) => setSecondaryDraft(e.target.value)}
+          onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
           placeholder="Message the second agent… (same workspace, its own conversation & model)"
           rows={2}
@@ -2440,9 +2542,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         ) : (
           <button
             onClick={() => { void sendSecondary(); }}
-            disabled={!secondaryDraft.trim()}
+            disabled={!secondaryDraft.trim() && secondaryAttachments.length === 0}
             title="Send to the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: (secondaryDraft.trim() || secondaryAttachments.length) ? 1 : 0.5 }}
           >Send</button>
         )}
       </div>
@@ -2489,6 +2591,21 @@ function CodeWorkspace({ pageId, onTitle }: {
   // thread) this always opens an empty one — the card lists the recent threads
   // right below it, so resuming is a click away and "New" can mean new.
   const startNewChat = () => { newChat(); setChatMode(true); };
+  const submitLaunchPrompt = () => {
+    const intent = launchPrompt.trim();
+    if (launchMode === "chat") {
+      newChat();
+      if (intent) setChatDraft(intent);
+      setChatMode(true);
+      return;
+    }
+    if (launchMode === "team") {
+      try { sessionStorage.setItem("owllm:agentic-launch-intent", intent); } catch { /* private mode */ }
+      window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "agents" } }));
+      return;
+    }
+    openNewProject(intent);
+  };
   const sendChat = async () => {
     const text = chatDraft.trim();
     const attachments = chatAttachments;
@@ -2544,8 +2661,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
       setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
-        const port = await ensureServer(modelId, ctrl.signal);
-        if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+        const managedHere = requiresManagedLocalServer(modelId, provider);
+        const port = managedHere ? await ensureServer(modelId, ctrl.signal) : 0;
+        if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
         await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       } else {
@@ -2737,14 +2855,6 @@ function CodeWorkspace({ pageId, onTitle }: {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
     if (activeAbs) dropTab(activeAbs);
   };
-  // Project-composer attachments — mirror addChatFiles (just-chat box).
-  const addCodeFiles = async (files: FileList | File[]) => {
-    for (const f of Array.from(files)) {
-      try { const a = await fileToChatAttachment(f); setCodeAttachments((x) => [...x, a]); }
-      catch (e: any) { setStatus(String(e?.message ?? e)); }
-    }
-  };
-
   const wsShort = (projectRoot || workspace) ? (projectRoot || workspace)!.replace(/^.*[\\/]/, "") : "No folder";
 
   // ---- Just-chat mode (no folder): the everyday-chat surface --------------
@@ -2833,7 +2943,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               {chatMsgs.map((m, i) => {
                 const isUser = m.role === "user";
                 return (
-                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
+                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} workspace={chatScratchRef.current || undefined} />
                 );
               })}
             </div>
@@ -2891,14 +3001,42 @@ function CodeWorkspace({ pageId, onTitle }: {
     return (
       <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
         <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
-          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
-            <div>
-              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
-              <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
-              <div style={{ fontSize: 13.5, color: "var(--fg-muted)", marginTop: 5, lineHeight: 1.5 }}>
-                GitHub is the project identity. Each computer creates its own local clone; OwLLM never reuses another PC's absolute folder.
-              </div>
-            </div>
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 24, padding: "22px clamp(16px,3vw,36px) 36px" }}>
+            <CreationLaunchpad
+              eyebrow="Your private AI workspace"
+              title={<>What will you <em>make today?</em></>}
+              subtitle="Describe the outcome in plain language. Start a real coding project, open a lightweight conversation, or bring in a full team of specialist agents."
+              prompt={launchPrompt}
+              placeholder={
+                launchMode === "chat"
+                  ? "Ask a question, explore an idea, or think something through…"
+                  : launchMode === "team"
+                    ? "Describe the outcome you want the agent team to deliver…"
+                    : "Describe the app, website, tool, or change you want to build…"
+              }
+              submitLabel={
+                launchMode === "chat" ? "Start chat"
+                  : launchMode === "team" ? "Set up team"
+                    : "Create project"
+              }
+              selectedMode={launchMode}
+              onModeChange={(mode) => setLaunchMode(mode as "project" | "chat" | "team")}
+              onPromptChange={setLaunchPrompt}
+              onSubmit={submitLaunchPrompt}
+              modes={[
+                { id: "project", icon: "◇", label: "Build with Code", detail: "A private project workspace with files, tools and Git", badge: "Recommended" },
+                { id: "chat", icon: "◌", label: "Just chat", detail: "Fast conversation with memory, no folder required" },
+                { id: "team", icon: "✦", label: "Agent team", detail: "Orchestrate specialists for a larger outcome" },
+              ]}
+              actions={[
+                { icon: "⌁", label: "Local folder", detail: "Open an existing folder on this computer", onClick: () => { void pickWorkspace(); } },
+                { icon: "⌂", label: "GitHub", detail: "Connect or review your portable project setup", onClick: openSyncOnboarding },
+                { icon: "↺", label: "Recent chat", detail: "Resume your latest conversation", onClick: startChat },
+              ]}
+              status={
+                <span>{gh?.connected ? `GitHub ready · @${gh.login}` : "Local-first · GitHub optional"}</span>
+              }
+            />
 
             <div data-ui="GitHubConnectionStatus" style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: `1px solid ${gh?.connected ? "rgba(77,224,155,.58)" : "rgba(255,105,120,.58)"}`, background: gh?.connected ? "linear-gradient(120deg,rgba(77,224,155,.15),var(--bg-card))" : "linear-gradient(120deg,rgba(255,105,120,.13),var(--bg-card))", boxShadow: gh?.connected ? "0 0 34px rgba(77,224,155,.10)" : "0 0 34px rgba(255,105,120,.08)" }}>
               <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: gh?.connected ? "#4de09b" : "#ff6978", boxShadow: gh?.connected ? "0 0 14px rgba(77,224,155,.9)" : "0 0 14px rgba(255,105,120,.8)" }} />
@@ -2956,7 +3094,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       task, chatting is the daily one. */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
                     {([
-                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: () => openNewProject() },
                       { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
                     ]).map((a) => (
                       <button key={a.label} onClick={a.onClick}
@@ -3541,6 +3679,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                   thinking={m.thinking}
                   ts={m.ts}
                   images={m.images}
+                  workspace={workspace || undefined}
                 />
                 {canForward && (
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
@@ -3623,6 +3762,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       thinking={m.thinking}
                       ts={m.ts}
                       images={m.images}
+                      workspace={workspace || undefined}
                     />
                     {canForwardToPrimary && (
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
@@ -3709,20 +3849,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
           {renderTerminalButton("primary")}
         </div>
-        {codeAttachments.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {codeAttachments.map((attachment, i) => (
-              <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-                {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
-                <button onClick={() => setCodeAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
+        {renderAttachmentTray(codeAttachments, setCodeAttachments)}
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <input ref={codeFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
-                 onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button onClick={() => codeFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          {renderAttachmentPicker("primary", codeFileRef, addCodeFiles)}
           <textarea
             ref={codeDraftRef}
             value={draft}

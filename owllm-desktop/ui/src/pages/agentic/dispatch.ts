@@ -2894,8 +2894,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    const toolImages = results.flatMap((result) => result.image ? [result.image] : []);
     liveMessages.push({ role: "assistant", content: lastReply });
-    liveMessages.push({ role: "user", content: parts.join("\n\n") });
+    liveMessages.push({ role: "user", content: openaiUserContent(parts.join("\n\n"), toolImages) });
     // Mid-run steering: the user typed something WHILE this agent was in its
     // tool loop — inject it right here, between tool rounds, so the very next
     // model turn sees it (the VS Code behavior). Rides its own user message
@@ -3054,8 +3055,9 @@ export async function streamOpenAiApiWithTools(args: {
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    const toolImages = results.flatMap((result) => result.image ? [result.image] : []);
     liveMessages.push({ role: "assistant", content: lastReply });
-    liveMessages.push({ role: "user", content: parts.join("\n\n") });
+    liveMessages.push({ role: "user", content: openaiUserContent(parts.join("\n\n"), toolImages) });
   }
   if (!answeredWithoutTools && openaiTools.length > 0) {
     if (args.signal.aborted) throw new DOMException("aborted", "AbortError");

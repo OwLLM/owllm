@@ -3,7 +3,7 @@ name = "owllm-desktop"
 # Kept in sync with tauri.conf.json "version" (the release source of truth).
 # User-visible version strings read crate::APP_VERSION (parsed from the conf),
 # so this only affects exe/crate metadata.
-version = "0.9.74"
+version = "0.9.81"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["Far island Corporation Ltd."]
 publish = false
@@ -205,6 +205,12 @@ iroh = "1"
 # this adds a direct path to it, not a new library in the tree.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+# Wayland deliberately forbids silent cross-application screen reads. The
+# desktop-screenshot tool therefore uses the standard XDG portal on Linux;
+# compositors may show their native consent UI.
+ashpd = { version = "0.11.1", default-features = false }
+# WebKitGTK returns a Cairo surface for full-document snapshots.
+cairo-rs = { version = "0.18", features = ["png"] }
 # WebKitGTK settings access for the agent browser: persistent credential
 # storage (HTTP-auth logins -> the user's libsecret store) is disabled by
 # default, same as WebView2's password autosave. Flipped per-webview in
@@ -212,6 +218,22 @@ gtk = "0.18"
 # already resolve (webkit2gtk 2.0.2 in Cargo.lock), so this only adds a direct
 # path to types already in the tree, not a new library.
 webkit2gtk = { version = "2.0", features = ["v2_30"] }
+
+# WKWebView's snapshot API is viewport-only. Full-document capture on macOS
+# therefore asks WebKit for a single-page PDF of the document, then renders
+# that PDF into the same bounded PNG format used by Windows and Linux. Keep the
+# bindings on the same objc2 family and versions Tauri/Wry use.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-core-foundation = { version = "0.3.2", features = ["objc2"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSError"] }
+objc2-web-kit = { version = "0.3.2", features = [
+    "block2",
+    "objc2-core-foundation",
+    "WKPDFConfiguration",
+    "WKWebView",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -241,7 +263,9 @@ windows-sys = { version = "0.59", features = [
 # the agent browser is never offered for saving and never re-filled on return —
 # the profile dir persists cookies/sessions but not saved credentials. We flip
 # IsPasswordAutosaveEnabled / IsGeneralAutofillEnabled on each agent-browser
-# webview via with_webview() (browser.rs::win_enable_web_credentials). Versions
+# webview via with_webview() (browser.rs::win_enable_web_credentials). The same
+# binding provides a non-scrolling full-document screenshot through WebView2's
+# DevTools protocol. Versions
 # match what tauri 2.11 already resolves (webview2-com 0.38 / windows 0.57), so
 # this adds a direct path to types already in the tree, not a new library.
 webview2-com = "0.38"

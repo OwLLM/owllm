@@ -33,7 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock, TryLockError};
@@ -74,12 +74,14 @@ const CHROME_H: f64 = 96.0;
 const PARK_X: f64 = -20000.0;
 
 /// Open tabs of the framed browser window, strip order + the active id.
-/// Each tab is its own content webview; they all share the same profile
-/// data dir, so cookies/logins span tabs like a normal browser.
+/// Each tab is its own content webview. Ordinary tabs share the persistent
+/// profile; provider-auth tab ids are tracked separately and stay private.
 struct Tabs {
     order: Vec<u64>,
     active: u64,
     titles: HashMap<u64, String>,
+    /// OAuth tabs must not inherit or persist ordinary browser credentials.
+    private_tabs: HashSet<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -435,6 +437,14 @@ const BRIDGE_JS: &str = r##"
     var st = getComputedStyle(el);
     return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
   }
+  function scrollableRegion(el, axis) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    var st = getComputedStyle(el);
+    if (axis !== "x" && el.scrollHeight > el.clientHeight + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowY)) return true;
+    return axis !== "y" && el.scrollWidth > el.clientWidth + 2 &&
+        /^(auto|scroll|overlay)$/.test(st.overflowX);
+  }
   var SEL = "a,button,input,select,textarea,[role=button],[role=link]," +
             "[role=checkbox],[role=radio],[role=tab],[role=menuitem]," +
             "[role=option],[contenteditable=true],[onclick]";
@@ -456,8 +466,33 @@ const BRIDGE_JS: &str = r##"
   function reindex() {
     var els = [];
     var primary = document.querySelectorAll(SEL);
-    for (var i = 0; i < primary.length && els.length < 150; i++) {
+    // Reserve a few indexes for scroll regions. Virtualized chat/mail/contact
+    // lists often expose no useful control beyond the items currently mounted.
+    for (var i = 0; i < primary.length && els.length < 140; i++) {
       if (visible(primary[i])) els.push(primary[i]);
+    }
+    var scrollCandidates = [];
+    for (var si = 0; si < els.length; si++) {
+      for (var parent = els[si].parentElement; parent; parent = parent.parentElement) {
+        if (scrollableRegion(parent) && scrollCandidates.indexOf(parent) === -1) {
+          scrollCandidates.push(parent);
+        }
+      }
+    }
+    var regions = document.querySelectorAll("main,section,div,ul,ol,[role=list],[role=grid],[role=feed],[role=log]");
+    for (var sr = 0; sr < regions.length && sr < 5000; sr++) {
+      if (visible(regions[sr]) && scrollableRegion(regions[sr]) &&
+          scrollCandidates.indexOf(regions[sr]) === -1) scrollCandidates.push(regions[sr]);
+    }
+    // Prefer the innermost regions: scrolling a chat list is useful; scrolling
+    // its full-page wrapper usually is not.
+    scrollCandidates.sort(function (a, b) {
+      if (a.contains(b)) return 1;
+      if (b.contains(a)) return -1;
+      return 0;
+    });
+    for (var sc = 0; sc < scrollCandidates.length && els.length < 150; sc++) {
+      if (els.indexOf(scrollCandidates[sc]) === -1) els.push(scrollCandidates[sc]);
     }
     if (els.length < 150) {
       var extra = document.querySelectorAll("div,span,li");
@@ -475,6 +510,11 @@ const BRIDGE_JS: &str = r##"
                el.getAttribute("name") || el.value || el.innerText || el.textContent || "").trim();
     txt = txt.replace(/\s+/g, " ").slice(0, 80);
     var extra = tag === "input" ? ("[" + (el.getAttribute("type") || "text") + "]") : "";
+    if (scrollableRegion(el)) {
+      var axes = (scrollableRegion(el, "x") ? "x" : "") + (scrollableRegion(el, "y") ? "y" : "");
+      extra += "[scrollable-" + axes + " " + Math.round(el.scrollLeft) + "," +
+               Math.round(el.scrollTop) + "]";
+    }
     return "#" + tag + extra + (txt ? " " + txt : "");
   }
   function snapshot() {
@@ -486,6 +526,64 @@ const BRIDGE_JS: &str = r##"
   }
   function elAt(i) { var e = (window.__owllmEls || [])[i]; if (!e) throw new Error("no element at index " + i); return e; }
   function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+  function textInputEvent(el, type, text, cancelable) {
+    var event;
+    try {
+      event = new InputEvent(type, {
+        bubbles: true, cancelable: !!cancelable, composed: true,
+        inputType: "insertText", data: text
+      });
+    } catch (e) {
+      event = new Event(type, { bubbles: true, cancelable: !!cancelable, composed: true });
+    }
+    return el.dispatchEvent(event);
+  }
+  function setNativeTextValue(el, text) {
+    var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, "value");
+    if (setter && setter.set) setter.set.call(el, text); else el.value = text;
+    textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function replaceEditableText(el, text) {
+    var selection = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    var emitted = false;
+    var mark = function () { emitted = true; };
+    el.addEventListener("input", mark, { once: true });
+    var inserted = false;
+    try { inserted = document.execCommand("insertText", false, text); } catch (e) {}
+    if (!inserted) {
+      range.deleteContents();
+      range.insertNode(document.createTextNode(text));
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    if (!emitted) textInputEvent(el, "input", text, false);
+    fire(el, "change");
+  }
+  function nearestScrollable(el, axis) {
+    for (var node = el; node; node = node.parentElement) {
+      if (scrollableRegion(node, axis)) return node;
+    }
+    return null;
+  }
+  function bestScrollable(axis) {
+    var active = nearestScrollable(document.activeElement, axis);
+    if (active) return active;
+    var els = window.__owllmEls || reindex();
+    var best = null, area = -1;
+    for (var i = 0; i < els.length; i++) {
+      if (!visible(els[i]) || !scrollableRegion(els[i], axis)) continue;
+      var r = els[i].getBoundingClientRect();
+      if (r.width * r.height > area) { best = els[i]; area = r.width * r.height; }
+    }
+    return best || document.scrollingElement || document.documentElement;
+  }
   // A bare el.click() dispatches ONLY a 'click' event — it skips the hover and
   // pointer/mouse-down events a real cursor emits. Menus that open on hover or
   // pointerdown (React/Radix/Headless language switchers, custom dropdowns)
@@ -505,6 +603,63 @@ const BRIDGE_JS: &str = r##"
     pt("pointerup"); ms("mouseup");
     try { el.click(); } catch (e) { ms("click"); }
   }
+  // Rust streams a local file into this page as base64 chunks, then this
+  // creates a real FileList on the target input. No OS file picker is opened,
+  // so browser automation never steals the user's keyboard or blocks the GUI.
+  // The Rust side enforces the size cap before any bytes enter the WebView.
+  var uploads = Object.create(null);
+  function fileInputFor(index) {
+    var indexed = index === null || index === undefined ? null : elAt(index);
+    if (indexed && indexed.matches && indexed.matches('input[type=file]')) return indexed;
+    if (indexed && indexed.control && indexed.control.matches && indexed.control.matches('input[type=file]')) return indexed.control;
+    if (indexed && indexed.querySelector) {
+      var nested = indexed.querySelector('input[type=file]');
+      if (nested) return nested;
+    }
+    for (var parent = indexed && indexed.parentElement; parent; parent = parent.parentElement) {
+      var nearby = parent.querySelector && parent.querySelector('input[type=file]');
+      if (nearby) return nearby;
+    }
+    var all = document.querySelectorAll('input[type=file]');
+    if (all.length === 1) return all[0];
+    throw new Error(all.length
+      ? "multiple file inputs found; click the site's attachment control first, snapshot, then pass its index"
+      : "no file input found; click the site's attachment/upload control first");
+  }
+  window.__owllmUploadStart = function (token, index, name, mime) {
+    try {
+      uploads[token] = { input: fileInputFor(index), name: name, mime: mime, chunks: [] };
+    } catch (e) {
+      uploads[token] = { error: String(e && e.message || e), chunks: [] };
+    }
+  };
+  window.__owllmUploadChunk = function (token, chunk) {
+    if (uploads[token] && !uploads[token].error) uploads[token].chunks.push(chunk);
+  };
+  window.__owllmUploadFinish = function (reqId, token) {
+    var upload = uploads[token];
+    delete uploads[token];
+    try {
+      if (!upload) throw new Error("upload session was lost during page navigation");
+      if (upload.error) throw new Error(upload.error);
+      var parts = [];
+      for (var i = 0; i < upload.chunks.length; i++) {
+        var raw = atob(upload.chunks[i]);
+        var bytes = new Uint8Array(raw.length);
+        for (var j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j);
+        parts.push(bytes);
+      }
+      var file = new File(parts, upload.name, { type: upload.mime, lastModified: Date.now() });
+      var transfer = new DataTransfer();
+      transfer.items.add(file);
+      upload.input.files = transfer.files;
+      fire(upload.input, "input");
+      fire(upload.input, "change");
+      report(reqId, "attached " + upload.name + " (" + file.size + " bytes)");
+    } catch (e) {
+      report(reqId, "ERROR: " + String(e && e.message || e));
+    }
+  };
   window.__owllmRun = function (reqId, action, paramsJson) {
     var p = {};
     try { p = paramsJson ? JSON.parse(paramsJson) : {}; } catch (e) {}
@@ -512,6 +667,26 @@ const BRIDGE_JS: &str = r##"
       switch (action) {
         case "info":
           return report(reqId, JSON.stringify({ url: location.href, title: realTitle(), ready: document.readyState }));
+        case "capture_metrics": {
+          var root = document.documentElement;
+          var body = document.body;
+          var width = Math.max(
+            root ? root.scrollWidth : 0, root ? root.offsetWidth : 0,
+            body ? body.scrollWidth : 0, body ? body.offsetWidth : 0,
+            window.innerWidth || 0
+          );
+          var height = Math.max(
+            root ? root.scrollHeight : 0, root ? root.offsetHeight : 0,
+            body ? body.scrollHeight : 0, body ? body.offsetHeight : 0,
+            window.innerHeight || 0
+          );
+          return report(reqId, JSON.stringify({
+            width: Math.ceil(width), height: Math.ceil(height),
+            viewport_width: Math.ceil(window.innerWidth || 0),
+            viewport_height: Math.ceil(window.innerHeight || 0),
+            device_scale: Number(window.devicePixelRatio || 1)
+          }));
+        }
         case "await_load":
           if (document.readyState === "complete" || document.readyState === "interactive") {
             return report(reqId, "Loaded: " + location.href + " — " + realTitle());
@@ -535,10 +710,46 @@ const BRIDGE_JS: &str = r##"
         }
         case "fill": {
           var f = elAt(p.index); f.focus();
-          if (f.isContentEditable) { f.textContent = p.text; }
-          else { f.value = p.text; }
-          fire(f, "input"); fire(f, "change");
+          if (f.isContentEditable) replaceEditableText(f, String(p.text == null ? "" : p.text));
+          else if (f.tagName === "INPUT" || f.tagName === "TEXTAREA") {
+            setNativeTextValue(f, String(p.text == null ? "" : p.text));
+          } else {
+            throw new Error("element at index " + p.index + " is not a text field");
+          }
           return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
+        }
+        case "scroll": {
+          var direction = /^(up|down|left|right)$/.test(p.direction) ? p.direction : "down";
+          var axis = direction === "left" || direction === "right" ? "x" : "y";
+          var target = null;
+          if (p.index !== undefined && p.index !== null) {
+            var indexed = elAt(p.index);
+            target = scrollableRegion(indexed, axis) ? indexed : nearestScrollable(indexed, axis);
+            if (!target) throw new Error("no " + axis + "-scrollable region at or above index " + p.index);
+          } else {
+            target = bestScrollable(axis);
+          }
+          var viewport = axis === "x" ? target.clientWidth : target.clientHeight;
+          var amount = Number(p.amount);
+          if (!isFinite(amount) || amount <= 0) amount = Math.max(120, Math.round(viewport * 0.8));
+          amount = Math.min(5000, Math.max(20, amount));
+          if (direction === "up" || direction === "left") amount = -amount;
+          var before = axis === "x" ? target.scrollLeft : target.scrollTop;
+          if (target.scrollBy) {
+            target.scrollBy(axis === "x" ? { left: amount, behavior: "auto" } : { top: amount, behavior: "auto" });
+          } else if (axis === "x") {
+            target.scrollLeft += amount;
+          } else {
+            target.scrollTop += amount;
+          }
+          return setTimeout(function () {
+            var after = axis === "x" ? target.scrollLeft : target.scrollTop;
+            var maximum = axis === "x"
+              ? Math.max(0, target.scrollWidth - target.clientWidth)
+              : Math.max(0, target.scrollHeight - target.clientHeight);
+            report(reqId, "scrolled " + direction + " from " + Math.round(before) + " to " +
+              Math.round(after) + " of " + Math.round(maximum) + "\n\n" + snapshot());
+          }, 250);
         }
         case "fill_device_code": {
           // GitHub's Device Flow gives OWLLM the short code before the page is
@@ -655,12 +866,14 @@ const BRIDGE_JS: &str = r##"
     for (var i = 0; i < pws.length; i++) if (pws[i].value) { pw = pws[i]; break; }
     if (!pw) return null;
     var user = "";
+    try { user = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
     var ins = document.querySelectorAll("input");
     for (var j = 0; j < ins.length; j++) {
       if (ins[j] === pw) break;
       var ty = (ins[j].type || "text").toLowerCase();
       if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) user = ins[j].value;
     }
+    try { if (user) sessionStorage.setItem("__owllmLoginUser", user); } catch (e) {}
     return { origin: location.origin, username: user, password: pw.value };
   }
   function reportCred() {
@@ -681,7 +894,13 @@ const BRIDGE_JS: &str = r##"
   // tab-hide — the report itself dedupes via credSent.
   document.addEventListener("input", function (e) {
     var t = e.target;
-    if (t && t.tagName === "INPUT") { var c = grabCred(); if (c) window.__owllmProv = c; }
+    if (t && t.tagName === "INPUT") {
+      var ty = (t.type || "text").toLowerCase();
+      if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
+        try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e) {}
+      }
+      var c = grabCred(); if (c) window.__owllmProv = c;
+    }
   }, true);
   document.addEventListener("click", function (e) {
     var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
@@ -749,6 +968,13 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+fn private_auth_data_dir(id: u64) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("owllm-provider-auth")
+        .join(format!("{}-{id}", std::process::id()))
+}
+
 /// Enable WebView2 password autosave + general autofill on an agent-browser
 /// webview. WebView2 disables both by default (unlike a normal Chrome/Edge
 /// profile), so a login typed here would never trigger a "Save password?"
@@ -792,7 +1018,11 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_configure_browser_webview(pw: tauri::webview::PlatformWebview, requested_url: String) {
+fn linux_configure_browser_webview(
+    pw: tauri::webview::PlatformWebview,
+    requested_url: String,
+    private_session: bool,
+) {
     use std::cell::Cell;
     use std::rc::Rc;
     use webkit2gtk::{WebContextExt, WebViewExt};
@@ -806,7 +1036,9 @@ fn linux_configure_browser_webview(pw: tauri::webview::PlatformWebview, requeste
         #[allow(deprecated)]
         context.set_process_model(webkit2gtk::ProcessModel::MultipleSecondaryProcesses);
     }
-    linux_enable_web_credentials(&pw);
+    if !private_session {
+        linux_enable_web_credentials(&pw);
+    }
 
     // A browser-page failure is recoverable and must remain local to that tab.
     // Retry once for a transient WebKit/network-process failure; if the same
@@ -878,8 +1110,23 @@ fn resume_browser(app: &tauri::AppHandle, navigate_to: Option<tauri::Url>) -> Re
     Ok(())
 }
 
+fn resume_normal_browser(app: &tauri::AppHandle, url: tauri::Url) -> Result<u64, String> {
+    let old_id = active_tab_id();
+    if old_id.is_some_and(is_private_tab) {
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        let id = new_tab(app, url.as_str(), true, false)?;
+        if let Some(old_id) = old_id.filter(|old_id| *old_id != id) {
+            close_tab(app, old_id);
+        }
+        Ok(id)
+    } else {
+        resume_browser(app, Some(url))?;
+        active_tab_id().ok_or_else(|| "browser has no reusable tab".to_string())
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn retire_linux_tab(app: &tauri::AppHandle, id: u64) {
+fn retire_linux_tab(app: &tauri::AppHandle, id: u64, private_session: bool) {
     if let Some(webview) = app.get_webview(&tab_label(id)) {
         if let Ok(blank) = "about:blank".parse() {
             let _ = webview.navigate(blank);
@@ -887,6 +1134,9 @@ fn retire_linux_tab(app: &tauri::AppHandle, id: u64) {
     }
     if let Some(window) = app.get_window(&tab_label(id)) {
         let _ = window.hide();
+    }
+    if private_session {
+        return;
     }
     let mut retired = RETIRED_LINUX_TABS.lock().unwrap_or_else(|p| p.into_inner());
     if !retired.contains(&id) {
@@ -912,14 +1162,15 @@ fn suspend_linux_browser(app: &tauri::AppHandle) -> Result<(), String> {
             .iter()
             .copied()
             .filter(|id| *id != active)
+            .map(|id| (id, tabs.private_tabs.contains(&id)))
             .collect::<Vec<_>>();
         tabs.order.clear();
         tabs.order.push(active);
         tabs.titles.clear();
         (active, inactive)
     };
-    for id in inactive {
-        retire_linux_tab(app, id);
+    for (id, private_session) in inactive {
+        retire_linux_tab(app, id, private_session);
     }
     let blank = "about:blank"
         .parse()
@@ -973,6 +1224,27 @@ fn content_webview_for_tab(app: &tauri::AppHandle, tab_id: Option<u64>) -> Optio
     }
     app.get_webview(CONTENT_LABEL)
         .or_else(|| app.get_webview(BROWSER_LABEL))
+}
+
+pub(crate) fn browser_tab_url(app: &tauri::AppHandle, tab_id: u64) -> Result<String, String> {
+    let webview = content_webview_for_tab(app, Some(tab_id))
+        .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
+    webview
+        .url()
+        .map(|url| url.to_string())
+        .map_err(|e| format!("could not read browser tab {tab_id} URL: {e}"))
+}
+
+pub(crate) fn eval_browser_tab(
+    app: &tauri::AppHandle,
+    tab_id: u64,
+    script: &str,
+) -> Result<(), String> {
+    let webview = content_webview_for_tab(app, Some(tab_id))
+        .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
+    webview
+        .eval(script)
+        .map_err(|e| format!("could not autofill browser tab {tab_id}: {e}"))
 }
 
 fn content_webview(app: &tauri::AppHandle) -> Option<Webview> {
@@ -1126,12 +1398,18 @@ fn write_session(stem: &str, session: &BrowserSession) {
 fn persist_session(app: &tauri::AppHandle) {
     let stem = live_session_stem();
     let live = list_tabs(app);
-    // Blank/loading tabs are dropped, so the remembered index MUST be counted
-    // over the kept tabs. Taking it from the unfiltered list shifted it by one
-    // per dropped tab and then fell back to 0 — restoring onto the first page
-    // instead of the one that was in front.
+    let (private_tabs, active_id) = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|tabs| (tabs.private_tabs.clone(), tabs.active))
+        .unwrap_or_default();
+    // Private authorization tabs must never be restored into the ordinary
+    // browser session. Blank/loading tabs are also dropped, so the remembered
+    // index is counted over the kept tabs rather than the raw live list.
     let kept: Vec<&BrowserTabInfo> = live
         .iter()
+        .filter(|tab| !private_tabs.contains(&tab.id))
         .filter(|tab| !tab.url.is_empty() && tab.url != "about:blank")
         .collect();
     if kept.is_empty() {
@@ -1140,7 +1418,11 @@ fn persist_session(app: &tauri::AppHandle) {
         return;
     }
     let tabs: Vec<String> = kept.iter().map(|tab| tab.url.clone()).collect();
-    let active = kept.iter().position(|tab| tab.active).unwrap_or(0);
+    let active = kept
+        .iter()
+        .position(|tab| tab.id == active_id)
+        .or_else(|| kept.iter().position(|tab| tab.active))
+        .unwrap_or(0);
     // The reopen history outlives the strip: this runs on every tab mutation,
     // so rebuilding the record from scratch would erase it on the very next
     // navigation after a close.
@@ -1265,6 +1547,7 @@ enum BrowserUiEvent {
     OpenTab {
         url: String,
         activate: bool,
+        private_session: bool,
     },
     /// Linux title-bar close requests are intercepted before WebKitGTK can
     /// destroy the native window. The worker applies normal tab-close
@@ -1287,7 +1570,7 @@ struct BrowserUiBatch {
     push_tabs: bool,
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
-    open_tabs: Vec<(String, bool)>,
+    open_tabs: Vec<(String, bool, bool)>,
     legacy_close_requested: Vec<u64>,
     legacy_destroyed: Vec<u64>,
 }
@@ -1313,7 +1596,11 @@ impl BrowserUiBatch {
             BrowserUiEvent::AutofillPage { id, url } => {
                 self.autofills.insert(id, url);
             }
-            BrowserUiEvent::OpenTab { url, activate } => self.open_tabs.push((url, activate)),
+            BrowserUiEvent::OpenTab {
+                url,
+                activate,
+                private_session,
+            } => self.open_tabs.push((url, activate, private_session)),
             BrowserUiEvent::LegacyTabCloseRequested { id } => self.legacy_close_requested.push(id),
             BrowserUiEvent::LegacyTabDestroyed { id } => self.legacy_destroyed.push(id),
         }
@@ -1372,8 +1659,8 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                 }
             }
         }
-        for (url, activate) in batch.open_tabs {
-            if let Err(e) = new_tab(&app, &url, activate) {
+        for (url, activate, private_session) in batch.open_tabs {
+            if let Err(e) = new_tab(&app, &url, activate, private_session) {
                 eprintln!("[browser] requested tab failed: {e}");
             }
         }
@@ -1463,7 +1750,7 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
         "tabnew" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                if let Err(e) = new_tab(&app, "about:blank", true) {
+                if let Err(e) = new_tab(&app, "about:blank", true, false) {
                     eprintln!("[browser] new tab failed: {e}");
                 }
             });
@@ -1523,14 +1810,15 @@ fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
 }
 
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
-/// under the chrome bar; inactive ones are parked offscreen. All tabs share
-/// the same profile data dir, so logins/cookies span tabs.
+/// under the chrome bar; inactive ones are parked offscreen. Ordinary tabs
+/// share the persistent profile; provider-auth tabs get a private profile.
 fn attach_tab(
     app: &tauri::AppHandle,
     win: &Window,
     url: tauri::Url,
     id: u64,
     active: bool,
+    private_session: bool,
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
@@ -1549,6 +1837,7 @@ fn attach_tab(
                 BrowserUiEvent::OpenTab {
                     url: url.to_string(),
                     activate: true,
+                    private_session,
                 },
             );
             NewWindowResponse::Deny
@@ -1588,7 +1877,7 @@ fn attach_tab(
             }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let url = payload.url().to_string();
-                if url.starts_with("http") {
+                if !private_session && url.starts_with("http") {
                     queue_browser_ui(
                         &wv.app_handle().clone(),
                         BrowserUiEvent::AutofillPage { id, url },
@@ -1596,6 +1885,9 @@ fn attach_tab(
                 }
             }
         });
+    if private_session {
+        content = content.incognito(true);
+    }
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
     }
@@ -1603,9 +1895,15 @@ fn attach_tab(
     // The builder method is only present on Windows/Linux; macOS WKWebView uses
     // the app's default per-app store (logins still persist there).
     #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        content = content.data_directory(dir);
+    {
+        if private_session {
+            let dir = private_auth_data_dir(id);
+            let _ = std::fs::create_dir_all(&dir);
+            content = content.data_directory(dir);
+        } else if let Some(dir) = browser_data_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            content = content.data_directory(dir);
+        }
     }
     let scale = win.scale_factor().unwrap_or(1.0);
     let ls = win
@@ -1621,11 +1919,11 @@ fn attach_tab(
         )
         .map_err(|e| format!("page webview: {e}"))?;
     #[cfg(windows)]
-    {
+    if !private_session {
         let _ = _webview.with_webview(win_enable_web_credentials);
     }
     #[cfg(target_os = "linux")]
-    {
+    if !private_session {
         let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
     }
     Ok(())
@@ -1655,6 +1953,7 @@ fn reuse_retired_linux_tab(
         let previous = tabs.active;
         tabs.order.push(id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         if activate {
             tabs.active = id;
         }
@@ -1669,6 +1968,7 @@ fn reuse_retired_linux_tab(
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
             tabs.order.retain(|tab| *tab != id);
+            tabs.private_tabs.remove(&id);
             tabs.active = previous_active;
         }
         RETIRED_LINUX_TABS
@@ -1687,16 +1987,24 @@ fn reuse_retired_linux_tab(
     Ok(Some(id))
 }
 
-fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, String> {
+fn new_tab(
+    app: &tauri::AppHandle,
+    url: &str,
+    activate: bool,
+    private_session: bool,
+) -> Result<u64, String> {
     let framed = app.get_webview(CHROME_LABEL).is_some();
     let win = framed.then(|| get_window(app)).flatten();
     if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
         return Err("browser has no tab session".to_string());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
     #[cfg(target_os = "linux")]
-    if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
-        return Ok(id);
+    if !private_session {
+        if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
+            return Ok(id);
+        }
     }
     let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
     let mut previous_active = None;
@@ -1705,21 +2013,25 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
         if let Some(tabs) = guard.as_mut() {
             previous_active = Some(tabs.active);
             tabs.order.push(id);
+            if private_session {
+                tabs.private_tabs.insert(id);
+            }
             if activate {
                 tabs.active = id;
             }
         }
     }
     let attached = if let Some(win) = win.as_ref() {
-        attach_tab(app, win, parsed, id, activate)
+        attach_tab(app, win, parsed, id, activate, private_session)
     } else {
-        attach_legacy_tab(app, parsed, id, activate)
+        attach_legacy_tab(app, parsed, id, activate, private_session)
     };
     if let Err(error) = attached {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
             tabs.order.retain(|tab| *tab != id);
             tabs.titles.remove(&id);
+            tabs.private_tabs.remove(&id);
             if tabs.active == id {
                 if let Some(previous) = previous_active {
                     tabs.active = previous;
@@ -1805,12 +2117,13 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         .find(|tab| tab.id == id)
         .map(|tab| tab.url)
         .unwrap_or_default();
-    let next = {
+    let (next, _private_session) = {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         let Some(tabs) = guard.as_mut() else { return };
         if !tabs.order.contains(&id) {
             return;
         }
+        let private_session = tabs.private_tabs.contains(&id);
         let Some(next) = next_active_after_close(&tabs.order, id, tabs.active) else {
             drop(guard);
             // Closing the last tab is a deliberate "put the browser away": keep
@@ -1832,8 +2145,9 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         };
         tabs.order.retain(|t| *t != id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         tabs.active = next;
-        next
+        (next, private_session)
     };
     // Closing the last tab keeps the whole set in `tabs` (it is persisted
     // above, before teardown), so only a mid-strip ✕ needs the undo record.
@@ -1844,7 +2158,7 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         }
     } else {
         #[cfg(target_os = "linux")]
-        retire_linux_tab(app, id);
+        retire_linux_tab(app, id, _private_session);
         #[cfg(not(target_os = "linux"))]
         if let Some(window) = app.get_window(&tab_label(id)) {
             let _ = window.destroy();
@@ -1862,6 +2176,7 @@ fn on_legacy_tab_closed(app: &tauri::AppHandle, id: u64) {
         }
         tabs.order.retain(|tab| *tab != id);
         tabs.titles.remove(&id);
+        tabs.private_tabs.remove(&id);
         if tabs.order.is_empty() {
             *guard = None;
             return;
@@ -1979,7 +2294,11 @@ pub fn browser_ensure() -> Result<String, String> {
 /// below it, so no stock OS title bar and nothing ever overlays site content.
 /// If the multi-webview build fails on some platform/engine, fall back to the
 /// decorated top-level-WebView tab shape so agent browsing never breaks.
-fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_window(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     // Linux/WebKitGTK — notably the Jetson/Tegra GL stack — mislays stacked child
     // webviews (the chrome bar ends up floating mid-window over a blank strip) and
     // SIGBUSes the WebKitWebProcess when they are resized, taking the whole app
@@ -1989,18 +2308,18 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     // Linux; keep the OwLLM-chrome framed shape on Windows/macOS where it works.
     #[cfg(target_os = "linux")]
     {
-        build_legacy(app, url)
+        build_legacy(app, url, private_session)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        match build_framed(app, url.clone()) {
+        match build_framed(app, url.clone(), private_session) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("[browser] app-styled window failed ({e}); using the decorated fallback");
                 if let Some(w) = get_window(app) {
                     let _ = w.destroy();
                 }
-                build_legacy(app, url)
+                build_legacy(app, url, private_session)
             }
         }
     }
@@ -2010,7 +2329,11 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 /// Windows/macOS only — build_window() routes Linux to build_legacy() because
 /// stacked child webviews are broken on WebKitGTK/Jetson (see build_window).
 #[cfg_attr(target_os = "linux", allow(dead_code))]
-fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_framed(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     // Start the dispatcher before adding child webviews so even their very
     // first load/title callback performs only a cheap channel send.
     let _ = browser_ui_sender(app);
@@ -2070,8 +2393,13 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         order: vec![first],
         active: first,
         titles: HashMap::new(),
+        private_tabs: if private_session {
+            HashSet::from([first])
+        } else {
+            HashSet::new()
+        },
     });
-    attach_tab(app, &win, url, first, true)?;
+    attach_tab(app, &win, url, first, true, private_session)?;
 
     // Keep the children glued to the window on resize/maximize, and drop the
     // tab state when the window goes away (✕, browser_stop, device rebuild).
@@ -2134,14 +2462,23 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
 }
 
 /// Safe decorated top-level-WebView tab shape used by Linux/WebKitGTK.
-fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+fn build_legacy(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+    private_session: bool,
+) -> Result<(), String> {
     let first = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
     *TABS.lock().unwrap_or_else(|p| p.into_inner()) = Some(Tabs {
         order: vec![first],
         active: first,
         titles: HashMap::new(),
+        private_tabs: if private_session {
+            HashSet::from([first])
+        } else {
+            HashSet::new()
+        },
     });
-    if let Err(error) = attach_legacy_tab(app, url, first, true) {
+    if let Err(error) = attach_legacy_tab(app, url, first, true, private_session) {
         *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
         return Err(error);
     }
@@ -2157,6 +2494,7 @@ fn attach_legacy_tab(
     url: tauri::Url,
     id: u64,
     active: bool,
+    private_session: bool,
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
@@ -2185,6 +2523,7 @@ fn attach_legacy_tab(
                 BrowserUiEvent::OpenTab {
                     url: url.to_string(),
                     activate: true,
+                    private_session,
                 },
             );
             NewWindowResponse::Deny
@@ -2213,7 +2552,7 @@ fn attach_legacy_tab(
             // Vault autofill works in this top-level-window shape too.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let url = payload.url().to_string();
-                if url.starts_with("http") {
+                if !private_session && url.starts_with("http") {
                     queue_browser_ui(
                         &win.app_handle().clone(),
                         BrowserUiEvent::AutofillPage { id, url },
@@ -2226,6 +2565,9 @@ fn attach_legacy_tab(
         .decorations(true)
         .resizable(true)
         .visible(active);
+    if private_session {
+        builder = builder.incognito(true);
+    }
     if let Some(ua) = dev.ua {
         builder = builder.user_agent(ua);
     }
@@ -2236,21 +2578,28 @@ fn attach_legacy_tab(
         builder = builder.position(x, y);
     }
     #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        builder = builder.data_directory(dir);
+    {
+        if private_session {
+            let dir = private_auth_data_dir(id);
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        } else if let Some(dir) = browser_data_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        }
     }
     let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
     #[cfg(windows)]
-    {
+    if !private_session {
         let _ = _ww.with_webview(win_enable_web_credentials);
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = _ww
-            .with_webview(move |platform| linux_configure_browser_webview(platform, requested_url));
+        let _ = _ww.with_webview(move |platform| {
+            linux_configure_browser_webview(platform, requested_url, private_session)
+        });
     }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);
@@ -2289,7 +2638,14 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         if browser_is_suspended() {
-            resume_browser(app, None)?;
+            if active_tab_id().is_some_and(is_private_tab) {
+                let blank = "about:blank"
+                    .parse()
+                    .map_err(|e| format!("bad start url: {e}"))?;
+                resume_normal_browser(app, blank)?;
+            } else {
+                resume_browser(app, None)?;
+            }
             return Ok("browser started".to_string());
         }
         return Ok("browser already running".to_string());
@@ -2297,7 +2653,7 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
-    build_window(app, start_url)?;
+    build_window(app, start_url, false)?;
     BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())
 }
@@ -2309,6 +2665,62 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
 /// such as "Get a token" must return immediately even when the destination is
 /// a slow login page. Agent browser tools continue to use `browser_cmd`, which
 /// waits for the document because they need to interact with its contents.
+fn validate_provider_auth_url(url: &tauri::Url) -> Result<(), String> {
+    let has_param = |name: &str| {
+        url.query_pairs()
+            .any(|(key, value)| key == name && !value.trim().is_empty())
+    };
+    match (url.host_str(), url.path()) {
+        (Some("claude.ai"), "/oauth/authorize")
+        | (Some("claude.com"), "/cai/oauth/authorize") => {
+            let missing = ["client_id", "redirect_uri", "code_challenge", "state"]
+                .into_iter()
+                .filter(|name| !has_param(name))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "incomplete Claude authorization URL (missing {}); waiting for the CLI to print the complete URL",
+                    missing.join(", ")
+                ));
+            }
+        }
+        (Some("www.kimi.com"), "/code/authorize_device") if !has_param("user_code") => {
+            return Err(
+                "incomplete Kimi authorization URL (missing user_code); waiting for the CLI to print the complete URL"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    if matches!(url.host_str(), Some("claude.ai") | Some("claude.com"))
+        && url.path() == "/login"
+    {
+        if let Some((_, return_to)) = url
+            .query_pairs()
+            .find(|(key, value)| key == "returnTo" && !value.trim().is_empty())
+        {
+            let nested = url
+                .join(&return_to)
+                .map_err(|error| format!("invalid Claude login returnTo URL: {error}"))?;
+            if matches!(
+                (nested.host_str(), nested.path()),
+                (Some("claude.ai"), "/oauth/authorize")
+                    | (Some("claude.com"), "/cai/oauth/authorize")
+            ) {
+                validate_provider_auth_url(&nested)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_private_tab(id: u64) -> bool {
+    TABS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .is_some_and(|tabs| tabs.private_tabs.contains(&id))
+}
+
 fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     let url = raw_url.trim();
     if url.is_empty() {
@@ -2320,6 +2732,7 @@ fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("only http(s) urls can open in the OwLLM browser".to_string());
     }
+    validate_provider_auth_url(&parsed)?;
     Ok(parsed)
 }
 
@@ -2329,14 +2742,13 @@ pub(crate) fn open_web_url(app: &tauri::AppHandle, raw_url: &str) -> Result<Stri
 
     let _operation = lock_browser_operation();
     let tab_id = if browser_is_suspended() && get_window(app).is_some() {
-        resume_browser(app, Some(parsed))?;
-        active_tab_id()
+        Some(resume_normal_browser(app, parsed)?)
     } else if get_window(app).is_none() {
-        build_window(app, parsed)?;
+        build_window(app, parsed, false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id()
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-        Some(new_tab(app, parsed.as_str(), true)?)
+        Some(new_tab(app, parsed.as_str(), true, false)?)
     } else {
         content_webview(app)
             .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
@@ -2367,7 +2779,9 @@ fn parse_navigation_url(raw_url: &str) -> Result<tauri::Url, String> {
     } else {
         format!("https://{value}")
     };
-    full.parse().map_err(|e| format!("bad url {full:?}: {e}"))
+    let parsed = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
+    validate_provider_auth_url(&parsed)?;
+    Ok(parsed)
 }
 
 #[tauri::command(async)]
@@ -2388,14 +2802,13 @@ pub fn browser_open_tab(
     let parsed = parse_navigation_url(&url)?;
     let activate = activate.unwrap_or(false);
     let id = if browser_is_suspended() && get_window(&app).is_some() {
-        resume_browser(&app, Some(parsed))?;
-        active_tab_id().unwrap_or(0)
+        resume_normal_browser(&app, parsed)?
     } else if get_window(&app).is_none() {
-        build_window(&app, parsed)?;
+        build_window(&app, parsed, false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id().unwrap_or(0)
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
-        new_tab(&app, parsed.as_str(), activate)?
+        new_tab(&app, parsed.as_str(), activate, false)?
     } else {
         // Compatibility fallback for a browser window created by an older
         // single-page build. New framed and Linux-safe sessions both own TABS.
@@ -2455,6 +2868,39 @@ pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
         "failed": failed,
     })
     .to_string())
+}
+
+/// Open a provider authorization page without the persistent browser profile.
+///
+/// Subscription OAuth must never inherit the account used by Gmail, Calendar,
+/// Claude Web, or another ordinary browser tab. The user may explicitly select
+/// one identity from the encrypted local vault, but no ordinary browser cookie
+/// or implicit first-account autofill is allowed into this flow.
+#[tauri::command(async)]
+pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    let parsed = parse_navigation_url(&url)?;
+    let id = if browser_is_suspended() && get_window(&app).is_some() {
+        let old_id = active_tab_id();
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        let id = new_tab(&app, parsed.as_str(), true, true)?;
+        if let Some(old_id) = old_id.filter(|old_id| *old_id != id) {
+            close_tab(&app, old_id);
+        }
+        id
+    } else if get_window(&app).is_none() {
+        build_window(&app, parsed, true)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        active_tab_id().unwrap_or(0)
+    } else {
+        new_tab(&app, parsed.as_str(), true, true)?
+    };
+    if let Some(win) = get_window(&app) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true }).to_string())
 }
 
 #[tauri::command(async)]
@@ -2591,14 +3037,14 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
             back_to
         };
         let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
-        build_window(&app, parsed)?;
+        build_window(&app, parsed, false)?;
         for tab in tabs_before.iter().filter(|tab| !tab.active) {
             let restore_url = if tab.url.is_empty() {
                 "about:blank"
             } else {
                 &tab.url
             };
-            if let Err(error) = new_tab(&app, restore_url, false) {
+            if let Err(error) = new_tab(&app, restore_url, false, false) {
                 eprintln!(
                     "[browser] could not restore tab {} after device switch: {error}",
                     tab.id
@@ -2624,6 +3070,617 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
     }
 }
 
+const MAX_BROWSER_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES: usize = 96 * 1024; // divisible by 3: independently-decodable base64
+
+fn arg_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+    })
+}
+
+fn browser_upload_path(params: &Value) -> Result<std::path::PathBuf, String> {
+    let raw = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "browser_upload_file requires a file path".to_string())?;
+    let path = std::path::Path::new(raw);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .ok_or_else(|| "relative upload paths require the project cwd".to_string())?;
+        std::path::Path::new(&crate::agent_tools::host_cwd(cwd)).join(path)
+    };
+    let resolved = resolved
+        .canonicalize()
+        .map_err(|e| format!("cannot open upload file {}: {e}", resolved.display()))?;
+    let meta = resolved
+        .metadata()
+        .map_err(|e| format!("cannot inspect upload file {}: {e}", resolved.display()))?;
+    if !meta.is_file() {
+        return Err(format!("upload path is not a file: {}", resolved.display()));
+    }
+    if meta.len() > MAX_BROWSER_UPLOAD_BYTES {
+        return Err(format!(
+            "browser upload is capped at 25 MiB to keep the shared WebView responsive; {} is {:.1} MiB",
+            resolved.display(),
+            meta.len() as f64 / 1_048_576.0
+        ));
+    }
+    Ok(resolved)
+}
+
+fn browser_upload_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+fn wait_for_direct_reply(
+    win: &Webview,
+    req: u64,
+    action: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let start = Instant::now();
+    loop {
+        if let Some(payload) = take_if_complete(req) {
+            let out = decode_b64(&payload);
+            if let Some(message) = out.strip_prefix("ERROR: ") {
+                return Err(message.to_string());
+            }
+            return Ok(out);
+        }
+        if let Some((total, have)) = reply_progress(req) {
+            if total > 1 {
+                if let Some(k) = (0..total).find(|k| !have.contains(k)) {
+                    let _ = win.eval(&format!(
+                        "try{{window.__owllmEmit&&window.__owllmEmit({req},{k})}}catch(e){{}}"
+                    ));
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "browser action '{action}' timed out — the page may have navigated; snapshot and try again"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn upload_file_to_page(win: &Webview, req: u64, params: &Value) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let path = browser_upload_path(params)?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("read upload file {}: {e}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "upload filename is not valid Unicode".to_string())?;
+    let index = arg_u64(params.get("index"));
+    let token = format!("upload-{req}");
+    let start = format!(
+        "try{{window.__owllmUploadStart&&window.__owllmUploadStart({},{},{},{})}}catch(e){{}}",
+        serde_json::to_string(&token).unwrap(),
+        index.map_or_else(|| "null".to_string(), |index| index.to_string()),
+        serde_json::to_string(name).unwrap(),
+        serde_json::to_string(browser_upload_mime(&path)).unwrap(),
+    );
+    win.eval(&start)
+        .map_err(|e| format!("start browser upload: {e}"))?;
+    for chunk in bytes.chunks(UPLOAD_CHUNK_BYTES) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+        win.eval(&format!(
+            "try{{window.__owllmUploadChunk&&window.__owllmUploadChunk({},{})}}catch(e){{}}",
+            serde_json::to_string(&token).unwrap(),
+            serde_json::to_string(&encoded).unwrap(),
+        ))
+        .map_err(|e| format!("stream browser upload: {e}"))?;
+    }
+    win.eval(&format!(
+        "try{{window.__owllmUploadFinish&&window.__owllmUploadFinish({req},{})}}catch(e){{}}",
+        serde_json::to_string(&token).unwrap(),
+    ))
+    .map_err(|e| format!("finish browser upload: {e}"))?;
+    wait_for_direct_reply(win, req, "upload_file", Duration::from_secs(30))
+}
+
+fn prune_browser_captures(dir: &std::path::Path) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut captures = read
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            entry.path().is_file() && name.starts_with("browser-") && name.ends_with(".png")
+        })
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    captures.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (index, (modified, path)) in captures.into_iter().enumerate() {
+        let expired = modified
+            .elapsed()
+            .map(|age| age > Duration::from_secs(7 * 24 * 60 * 60))
+            .unwrap_or(false);
+        if index >= 50 || expired {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct PageCaptureMetrics {
+    width: u32,
+    height: u32,
+}
+
+const MAX_FULL_PAGE_PIXELS: f64 = 80_000_000.0;
+
+fn full_page_scale(metrics: &PageCaptureMetrics) -> Result<f64, String> {
+    if metrics.width == 0 || metrics.height == 0 {
+        return Err("page reported an empty document".into());
+    }
+    let area = metrics.width as f64 * metrics.height as f64;
+    let scale = (MAX_FULL_PAGE_PIXELS / area).sqrt().min(1.0);
+    if scale < 0.1 {
+        return Err(format!(
+            "page is too large to capture safely ({}x{} CSS pixels)",
+            metrics.width, metrics.height
+        ));
+    }
+    Ok(scale)
+}
+
+fn save_browser_capture(
+    app: &tauri::AppHandle,
+    png: &[u8],
+    width: u32,
+    height: u32,
+    scope: &str,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    crate::support::png_dimensions(png)?;
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("browser capture cache: {e}"))?
+        .join("browser-screenshots");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create browser capture cache {}: {e}", dir.display()))?;
+    prune_browser_captures(&dir);
+    let path = dir.join(format!(
+        "browser-{scope}-{}-{req}.png",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
+    ));
+    let temporary = path.with_extension("png.tmp");
+    std::fs::write(&temporary, png)
+        .map_err(|e| format!("write browser screenshot {}: {e}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "finish browser screenshot {}: {error}",
+            path.display()
+        ));
+    }
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "width": width,
+        "height": height,
+        "scope": scope,
+        "tab_id": tab_id,
+    })
+    .to_string())
+}
+
+#[cfg(windows)]
+fn call_webview2_devtools(webview: &Webview, method: &str, params: &str) -> Result<String, String> {
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
+
+    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    let method = method.to_string();
+    let params = params.to_string();
+    webview
+        .with_webview(move |platform| {
+            let immediate_tx = tx.clone();
+            let result = (|| -> Result<(), String> {
+                let core = unsafe { platform.controller().CoreWebView2() }
+                    .map_err(|e| format!("get WebView2 core: {e}"))?;
+                let callback = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                    move |status, payload| {
+                        let value = status
+                            .map(|_| payload)
+                            .map_err(|e| format!("WebView2 DevTools call failed: {e}"));
+                        let _ = tx.send(value);
+                        Ok(())
+                    },
+                ));
+                let method_wide = CoTaskMemPWSTR::from(method.as_str());
+                let params_wide = CoTaskMemPWSTR::from(params.as_str());
+                unsafe {
+                    core.CallDevToolsProtocolMethod(
+                        *method_wide.as_ref().as_pcwstr(),
+                        *params_wide.as_ref().as_pcwstr(),
+                        &callback,
+                    )
+                }
+                .map_err(|e| format!("start WebView2 DevTools call: {e}"))?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = immediate_tx.send(Err(error));
+            }
+        })
+        .map_err(|e| format!("schedule WebView2 snapshot: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WebView2 full-page screenshot timed out".to_string())?
+}
+
+#[cfg(windows)]
+fn capture_full_page_png(
+    webview: &Webview,
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use base64::Engine as _;
+
+    let scale = full_page_scale(metrics)?;
+    let params = json!({
+        "format": "png",
+        "fromSurface": true,
+        "captureBeyondViewport": true,
+        "clip": {
+            "x": 0,
+            "y": 0,
+            "width": metrics.width,
+            "height": metrics.height,
+            "scale": scale,
+        }
+    })
+    .to_string();
+    let raw = call_webview2_devtools(webview, "Page.captureScreenshot", &params)?;
+    let data = serde_json::from_str::<Value>(&raw)
+        .map_err(|e| format!("parse WebView2 screenshot response: {e}"))?
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "WebView2 screenshot response contained no PNG data".to_string())?
+        .to_string();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("decode WebView2 screenshot: {e}"))?;
+    let (width, height) = crate::support::png_dimensions(&png)?;
+    Ok((png, width, height))
+}
+
+/// Render the one-page PDF returned by WKWebView into a bounded RGBA bitmap.
+/// CoreGraphics is used directly so this remains installer-local and does not
+/// shell out to Preview, `sips`, ImageMagick, or another GUI process.
+#[cfg(target_os = "macos")]
+fn render_macos_pdf(
+    pdf: &[u8],
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use std::ffi::c_void;
+
+    type CFDataRef = *const c_void;
+    type CGColorSpaceRef = *mut c_void;
+    type CGContextRef = *mut c_void;
+    type CGDataProviderRef = *mut c_void;
+    type CGPDFDocumentRef = *mut c_void;
+    type CGPDFPageRef = *mut c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDataCreate(allocator: *const c_void, bytes: *const u8, length: isize) -> CFDataRef;
+        fn CFRelease(value: *const c_void);
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGDataProviderCreateWithCFData(data: CFDataRef) -> CGDataProviderRef;
+        fn CGDataProviderRelease(provider: CGDataProviderRef);
+        fn CGPDFDocumentCreateWithProvider(provider: CGDataProviderRef) -> CGPDFDocumentRef;
+        fn CGPDFDocumentRelease(document: CGPDFDocumentRef);
+        fn CGPDFDocumentGetPage(document: CGPDFDocumentRef, page: usize) -> CGPDFPageRef;
+        fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
+        fn CGColorSpaceRelease(space: CGColorSpaceRef);
+        fn CGBitmapContextCreate(
+            data: *mut c_void,
+            width: usize,
+            height: usize,
+            bits_per_component: usize,
+            bytes_per_row: usize,
+            space: CGColorSpaceRef,
+            bitmap_info: u32,
+        ) -> CGContextRef;
+        fn CGContextRelease(context: CGContextRef);
+        fn CGContextSetRGBFillColor(
+            context: CGContextRef,
+            red: f64,
+            green: f64,
+            blue: f64,
+            alpha: f64,
+        );
+        fn CGContextFillRect(context: CGContextRef, rect: objc2_core_foundation::CGRect);
+        fn CGContextTranslateCTM(context: CGContextRef, tx: f64, ty: f64);
+        fn CGContextScaleCTM(context: CGContextRef, sx: f64, sy: f64);
+        fn CGContextDrawPDFPage(context: CGContextRef, page: CGPDFPageRef);
+    }
+
+    let scale = full_page_scale(metrics)?;
+    let width = ((metrics.width as f64 * scale).round() as u32).max(1);
+    let height = ((metrics.height as f64 * scale).round() as u32).max(1);
+    let stride = width as usize * 4;
+    let mut rgba = vec![0u8; stride * height as usize];
+
+    unsafe {
+        let data = CFDataCreate(std::ptr::null(), pdf.as_ptr(), pdf.len() as isize);
+        if data.is_null() {
+            return Err("CoreFoundation could not read the WebKit PDF".into());
+        }
+        let provider = CGDataProviderCreateWithCFData(data);
+        CFRelease(data);
+        if provider.is_null() {
+            return Err("CoreGraphics could not create a PDF data provider".into());
+        }
+        let document = CGPDFDocumentCreateWithProvider(provider);
+        CGDataProviderRelease(provider);
+        if document.is_null() {
+            return Err("WebKit returned an invalid PDF snapshot".into());
+        }
+        let page = CGPDFDocumentGetPage(document, 1);
+        if page.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("WebKit PDF snapshot contained no page".into());
+        }
+        let color_space = CGColorSpaceCreateDeviceRGB();
+        if color_space.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("CoreGraphics could not create an RGB color space".into());
+        }
+        // kCGImageAlphaPremultipliedLast: RGBA, matching encode_png.
+        let context = CGBitmapContextCreate(
+            rgba.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            stride,
+            color_space,
+            1,
+        );
+        CGColorSpaceRelease(color_space);
+        if context.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("CoreGraphics could not allocate the screenshot bitmap".into());
+        }
+        let target = objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::ZERO,
+            objc2_core_foundation::CGSize::new(width as f64, height as f64),
+        );
+        CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+        CGContextFillRect(context, target);
+        CGContextTranslateCTM(context, 0.0, height as f64);
+        CGContextScaleCTM(context, scale, -scale);
+        CGContextDrawPDFPage(context, page);
+        CGContextRelease(context);
+        CGPDFDocumentRelease(document);
+    }
+
+    let png = crate::support::encode_png(&rgba, width, height)?;
+    Ok((png, width, height))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_full_page_png(
+    webview: &Webview,
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSData, NSError};
+    use objc2_web_kit::{WKPDFConfiguration, WKWebView};
+
+    full_page_scale(metrics)?;
+    let capture_width = metrics.width;
+    let capture_height = metrics.height;
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, String>>();
+    webview
+        .with_webview(move |platform| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                let _ = tx.send(Err(
+                    "WKWebView capture was not scheduled on the main thread".into(),
+                ));
+                return;
+            };
+            let raw = platform.inner().cast::<WKWebView>();
+            let Some(wkwebview) = (unsafe { raw.as_ref() }) else {
+                let _ = tx.send(Err("WKWebView handle was unavailable".into()));
+                return;
+            };
+            let configuration = unsafe { WKPDFConfiguration::new(mtm) };
+            let rect = objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(capture_width as f64, capture_height as f64),
+            );
+            unsafe { configuration.setRect(rect) };
+            let callback = block2::RcBlock::new(move |data: *mut NSData, error: *mut NSError| {
+                let result = if let Some(data) = unsafe { data.as_ref() } {
+                    Ok(data.to_vec())
+                } else if let Some(error) = unsafe { error.as_ref() } {
+                    Err(format!("WKWebView full-page PDF failed: {error:?}"))
+                } else {
+                    Err("WKWebView full-page PDF returned no data".into())
+                };
+                let _ = tx.send(result);
+            });
+            unsafe {
+                wkwebview
+                    .createPDFWithConfiguration_completionHandler(Some(&configuration), &callback)
+            };
+        })
+        .map_err(|e| format!("schedule WKWebView full-page snapshot: {e}"))?;
+    let pdf = rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WKWebView full-page screenshot timed out".to_string())??;
+    render_macos_pdf(&pdf, metrics)
+}
+
+#[cfg(target_os = "linux")]
+fn capture_full_page_png(
+    webview: &Webview,
+    _metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let (tx, rx) = mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+
+            platform.inner().snapshot(
+                SnapshotRegion::FullDocument,
+                SnapshotOptions::NONE,
+                None::<&webkit2gtk::gio::Cancellable>,
+                move |result| {
+                    let result = result
+                        .map_err(|e| format!("WebKitGTK full-page snapshot: {e}"))
+                        .and_then(|surface| {
+                            let mut png = Vec::new();
+                            surface
+                                .write_to_png(&mut png)
+                                .map_err(|e| format!("encode WebKitGTK snapshot: {e}"))?;
+                            let (width, height) = crate::support::png_dimensions(&png)?;
+                            Ok((png, width, height))
+                        });
+                    let _ = tx.send(result);
+                },
+            );
+        })
+        .map_err(|e| format!("schedule WebKitGTK full-page snapshot: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WebKitGTK full-page screenshot timed out".to_string())?
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn capture_full_page_png(
+    _webview: &Webview,
+    _metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    Err("full-page screenshot is not yet implemented by this platform WebView".into())
+}
+
+fn capture_browser_window(
+    app: &tauri::AppHandle,
+    requested_tab: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let active = active_tab_id();
+    if requested_tab.is_some() && requested_tab != active {
+        return Err(format!(
+            "browser screenshot captures the shared visible tab only (active tab is {}); select the requested tab first",
+            active.map_or_else(|| "none".to_string(), |id| id.to_string())
+        ));
+    }
+    let window = get_window(app).ok_or_else(|| "browser window is unavailable".to_string())?;
+    let (png, width, height) = crate::support::capture_window_png(&window)?;
+    save_browser_capture(app, &png, width, height, "viewport", active, req)
+}
+
+fn capture_browser_full_page(
+    app: &tauri::AppHandle,
+    webview: &Webview,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let raw = eval_until_reply(
+        webview,
+        req,
+        "capture_metrics",
+        &json!({}),
+        Duration::from_secs(8),
+    )?;
+    let metrics: PageCaptureMetrics = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse page capture dimensions: {e}"))?;
+    let (png, width, height) = capture_full_page_png(webview, &metrics)?;
+    save_browser_capture(app, &png, width, height, "full-page", tab_id, req)
+}
+
+fn capture_desktop(
+    app: &tauri::AppHandle,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let (png, width, height) = tauri::async_runtime::block_on(crate::support::capture_screen_png())?;
+    save_browser_capture(app, &png, width, height, "desktop", tab_id, req)
+}
+
+/// Read back only PNGs created by `browser_screenshot`. This lets local/API
+/// vision models receive the pixels on their next tool-loop turn without
+/// granting an arbitrary binary-file read over Tauri IPC.
+#[tauri::command(async)]
+pub fn browser_read_capture(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("browser capture cache: {e}"))?
+        .join("browser-screenshots")
+        .canonicalize()
+        .map_err(|e| format!("browser capture cache is unavailable: {e}"))?;
+    let requested = std::path::PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("browser screenshot does not exist: {e}"))?;
+    if !requested.starts_with(&root)
+        || requested.extension().and_then(|ext| ext.to_str()) != Some("png")
+    {
+        return Err("only PNGs created by browser_screenshot can be read".into());
+    }
+    let bytes = std::fs::read(&requested)
+        .map_err(|e| format!("read browser screenshot {}: {e}", requested.display()))?;
+    if bytes.len() > 12 * 1024 * 1024 {
+        return Err("browser screenshot exceeds the 12 MiB vision-input limit".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// Run one action against the live page and return its text reply.
 ///
 /// `navigate` uses the native `webview.navigate()` (robust across origins),
@@ -2632,6 +3689,16 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let _operation = lock_browser_operation();
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
+    let screenshot_scope = params
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("viewport")
+        .trim()
+        .to_ascii_lowercase();
+    if action == "screenshot" && screenshot_scope == "desktop" {
+        return capture_desktop(&app, None, req);
+    }
     if get_window(&app).is_none() || browser_is_suspended() {
         browser_start_inner(&app)?;
     }
@@ -2640,8 +3707,6 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         Some(id) => format!("browser tab {id} does not exist"),
         None => "browser did not start".to_string(),
     })?;
-    let req = REQ.fetch_add(1, Ordering::SeqCst);
-
     match action.as_str() {
         "navigate" | "open" => {
             let url_s = params
@@ -2670,11 +3735,16 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             std::thread::sleep(Duration::from_millis(300));
             eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
-        "screenshot" => {
-            // Native window is visible to the user; return a page summary rather
-            // than pixels (agents act via snapshot). Honest + cheap.
-            eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(8))
-        }
+        "screenshot" => match screenshot_scope.as_str() {
+            "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
+            "full_page" | "full-page" | "page" => {
+                capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
+            }
+            other => Err(format!(
+                "unknown screenshot scope {other:?}; use viewport, full_page, or desktop"
+            )),
+        },
+        "upload_file" => upload_file_to_page(&win, req, &params),
         _ => eval_until_reply(&win, req, &action, &params, Duration::from_secs(12)),
     }
 }
@@ -2895,6 +3965,63 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_provider_authorization_urls_never_reach_the_browser() {
+        let claude_prefix = "https://claude.ai/oauth/authorize?code=true&client_id=owllm";
+        let claude_complete = concat!(
+            "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
+            "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
+            "&code_challenge=pkce&state=state"
+        );
+        let current_claude_prefix =
+            "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44";
+        let current_claude_complete = concat!(
+            "https://claude.com/cai/oauth/authorize?code=true&client_id=",
+            "9d1c250a-e61b-44fe-93d9-2f5e",
+            "&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback",
+            "&code_challenge=pkce&state=state"
+        );
+        let missing_state = concat!(
+            "https://claude.ai/oauth/authorize?code=true&client_id=owllm",
+            "&redirect_uri=https%3A%2F%2Flocalhost%2Fcallback",
+            "&code_challenge=pkce"
+        );
+        let nested_claude_prefix = concat!(
+            "https://claude.com/login?selectAccount=true&returnTo=",
+            "%2Fcai%2Foauth%2Fauthorize%3Fcode%3Dtrue%26client_id%3D",
+            "9d1c250a-e61b-44"
+        );
+        let kimi_prefix = "https://www.kimi.com/code/authorize_device?user_cod";
+        let kimi_complete = "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234";
+
+        for incomplete in [
+            claude_prefix,
+            current_claude_prefix,
+            missing_state,
+            nested_claude_prefix,
+            kimi_prefix,
+        ] {
+            assert!(
+                parse_web_url(incomplete).is_err(),
+                "{incomplete} must not open through the global web-link route"
+            );
+            assert!(
+                parse_navigation_url(incomplete).is_err(),
+                "{incomplete} must not open through browser navigation"
+            );
+        }
+        for complete in [claude_complete, current_claude_complete, kimi_complete] {
+            assert!(
+                parse_web_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
+            );
+            assert!(
+                parse_navigation_url(complete).is_ok(),
+                "{complete} is a complete provider authorization URL"
+            );
+        }
+    }
+
+    #[test]
     fn reply_channel_round_trip() {
         use base64::Engine as _;
         let payload = base64::engine::general_purpose::STANDARD.encode("hello page");
@@ -3016,19 +4143,21 @@ mod tests {
         batch.absorb(BrowserUiEvent::OpenTab {
             url: "https://one.example/".to_string(),
             activate: true,
+            private_session: true,
         });
         batch.absorb(BrowserUiEvent::OpenTab {
             url: "https://two.example/".to_string(),
             activate: false,
+            private_session: false,
         });
         assert_eq!(batch.open_tabs.len(), 2);
         assert_eq!(
             batch.open_tabs[0],
-            ("https://one.example/".to_string(), true)
+            ("https://one.example/".to_string(), true, true)
         );
         assert_eq!(
             batch.open_tabs[1],
-            ("https://two.example/".to_string(), false)
+            ("https://two.example/".to_string(), false, false)
         );
     }
 

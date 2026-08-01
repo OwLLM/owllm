@@ -177,7 +177,7 @@ check("an empty tab set never overwrites a saved session",
 // it over the unfiltered list shifted it by one per dropped blank tab and then
 // fell back to 0 — reopening on the FIRST page instead of the one in front.
 check("the active index is counted over the tabs that are kept",
-  /fn persist_session[\s\S]*?let active = kept\.iter\(\)\.position\(/.test(browserRs));
+  /fn persist_session[\s\S]*?let active = kept[\s\S]*?\.position\(/.test(browserRs));
 check("every live tab set is written only to its resolved project-or-personal session",
   /fn persist_session[\s\S]*?let stem = live_session_stem\(\)[\s\S]*?write_session\(\s*&stem/.test(browserRs));
 check("session file names are sanitised before touching the filesystem",

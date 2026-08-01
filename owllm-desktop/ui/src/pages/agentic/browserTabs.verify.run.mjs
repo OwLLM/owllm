@@ -72,20 +72,20 @@ check(browserRs.includes("const CHROME_H: f64 = 96.0"),
   "chrome bar is two rows (58px identity strip + 38px nav toolbar)");
 check(/fn content_webview_for_tab[\s\S]{0,500}tab_id\.or_else\(active_tab_id\)[\s\S]{0,300}tab_label\(id\)/.test(browserRs),
   "agent commands resolve an explicit tab id before falling back to the active tab");
-check(/pub fn browser_cmd[\s\S]{0,500}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
+check(/pub fn browser_cmd[\s\S]{0,1200}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
   "every DOM action captures its target tab before navigation or evaluation");
 check(browserRs.includes("pub fn browser_list_tabs") &&
       browserRs.includes("pub fn browser_select_tab") &&
       browserRs.includes("pub fn browser_close_tab"),
   "agents can list, select, and close tabs explicitly");
-check(/pub fn browser_open_tab[\s\S]{0,900}new_tab\(&app, parsed\.as_str\(\), activate\)/.test(browserRs),
+check(/pub fn browser_open_tab[\s\S]{0,900}new_tab\(&app, parsed\.as_str\(\), activate, false\)/.test(browserRs),
   "agent browser_open creates a separate addressable tab");
-check(/fn open_web_url[\s\S]{0,800}new_tab\(app, parsed\.as_str\(\), true\)/.test(browserRs),
+check(/fn open_web_url[\s\S]{0,800}new_tab\(app, parsed\.as_str\(\), true, false\)/.test(browserRs),
   "user-facing app links create a new selected tab instead of replacing the active page");
 check(/\.on_new_window\([\s\S]{0,500}BrowserUiEvent::OpenTab[\s\S]{0,200}NewWindowResponse::Deny/.test(browserRs),
   "target=_blank and window.open are captured as managed tabs, not unmanaged popups");
-check(/OpenTab \{[\s\S]{0,150}url: String,[\s\S]{0,100}activate: bool/.test(browserRs) &&
-      /open_tabs: Vec<\(String, bool\)>/.test(browserRs),
+check(/OpenTab \{[\s\S]{0,150}url: String,[\s\S]{0,100}activate: bool[\s\S]{0,100}private_session: bool/.test(browserRs) &&
+      /open_tabs: Vec<\(String, bool, bool\)>/.test(browserRs),
   "simultaneous native new-tab requests remain separate queued operations");
 check(libRs.includes("browser::browser_open_tab") && libRs.includes("browser::browser_list_tabs") &&
       libRs.includes("browser::browser_select_tab") && libRs.includes("browser::browser_close_tab"),

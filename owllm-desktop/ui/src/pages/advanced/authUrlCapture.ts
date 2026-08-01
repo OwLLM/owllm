@@ -1,5 +1,9 @@
 const KIMI_DEVICE_ORIGIN = "https://www.kimi.com";
 const KIMI_DEVICE_PATH = "/code/authorize_device";
+const CLAUDE_AUTH_ENDPOINTS = new Set([
+  "https://claude.ai/oauth/authorize",
+  "https://claude.com/cai/oauth/authorize",
+]);
 
 // A PTY hard-wrap can split a URL anywhere, including inside its host, and
 // `https://www` still parses as a valid URL. Require a host that can actually
@@ -9,6 +13,21 @@ function hasRoutableHost(url: URL): boolean {
   if (host === "localhost" || host.startsWith("[")) return true;
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return true;
   return /\.[a-z]{2,}$/i.test(host);
+}
+
+// Login CLIs also print ordinary links in banners, release notes, upgrade
+// notices, and errors. Opening the first arbitrary URL is unsafe and, for
+// Claude Code, allowed a promotional support.claude.com link to consume the
+// one automatic browser open before `/login` printed the real OAuth URL.
+// Require an authentication-shaped path or OAuth query before opening it.
+function isAuthenticationUrl(url: URL): boolean {
+  const path = url.pathname.toLowerCase();
+  const authPath = /(?:^|\/)(?:oauth2?|cai)(?:\/|$)/.test(path)
+    || /(?:^|\/)(?:auth|authorize|authorization|device|login)(?:\/|$)/.test(path)
+    || path === KIMI_DEVICE_PATH;
+  const authQuery = ["client_id", "code_challenge", "redirect_uri", "response_type", "user_code"]
+    .some((key) => Boolean(url.searchParams.get(key)?.trim()));
+  return authPath || authQuery;
 }
 
 function isCompleteAuthUrl(raw: string): boolean {
@@ -22,10 +41,20 @@ function isCompleteAuthUrl(raw: string): boolean {
   if (url.origin === KIMI_DEVICE_ORIGIN && url.pathname === KIMI_DEVICE_PATH) {
     return Boolean(url.searchParams.get("user_code")?.trim());
   }
-  return true;
+  // Claude Code prints a long PKCE authorization URL. ConPTY commonly wraps
+  // it immediately after client_id; that prefix still parses and its
+  // `/oauth/authorize` path used to make us open it prematurely. Claude then
+  // rejects the request with "Missing redirect_uri parameter". Do not accept
+  // a Claude authorization prefix until the parameters required to bind the
+  // callback and PKCE exchange have arrived.
+  if (CLAUDE_AUTH_ENDPOINTS.has(`${url.origin}${url.pathname}`)) {
+    return ["client_id", "redirect_uri", "code_challenge", "state"]
+      .every((key) => Boolean(url.searchParams.get(key)?.trim()));
+  }
+  return isAuthenticationUrl(url);
 }
 
-const MAX_WRAPPED_LINES = 8;
+const MAX_WRAPPED_LINES = 32;
 
 // ConPTY inserts a real CRLF when a CLI line reaches the terminal width, so any
 // provider's login URL can arrive split — `user_cod\r\ne=ABCD-1234` or

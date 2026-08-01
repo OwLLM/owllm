@@ -20,6 +20,7 @@ import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getServerCtx } from "../core/serverContext";
 import { streamChatCompletion, providerFor, abortable, isAbortError, sleepAbortable, type ModelInfo } from "../agentic/dispatch";
+import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
 import { LogBox } from "../../components/LogBox";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -172,7 +173,7 @@ export default function DatasetBuilderPage() {
     const provider = m?.provider ?? providerFor(modelId, models);
     type S = { running: boolean; port: number | null; model_id: string };
     const status0 = await invoke<S>("server_status");
-    if (!SERVABLE.has(provider)) return status0.port ?? 0;
+    if (!requiresManagedLocalServer(modelId, provider)) return 0;
     if (status0.running && status0.model_id === modelId && status0.port) return status0.port;
     addLog(`Starting local server for ${modelId}…`);
     if (status0.running) {

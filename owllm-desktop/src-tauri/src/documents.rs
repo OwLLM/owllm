@@ -6,10 +6,15 @@
 
 use base64::Engine as _;
 use serde::Serialize;
-use std::io::{Cursor, Read};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 
 const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXTRACTED_CHARS: usize = 240_000;
+const MAX_STUDIO_READ_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STUDIO_EDIT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct DocumentExtraction {
@@ -369,6 +374,454 @@ pub fn extract_document_bytes(
     })
 }
 
+// ---- Document Studio ------------------------------------------------------
+//
+// Chat replies commonly contain links to files an agent just created. A web
+// link opener cannot handle those paths, and `<a download>` cannot read an
+// arbitrary native file from a Tauri WebView. These commands form the shared,
+// offline boundary used by every chat renderer: inspect/preview a document,
+// save an editable text document with stale-write protection, or copy it to a
+// user-selected destination.
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioDocument {
+    pub path: String,
+    pub filename: String,
+    pub extension: String,
+    pub mime: String,
+    pub size: u64,
+    pub kind: String,
+    pub editable: bool,
+    pub text: Option<String>,
+    pub preview_text: Option<String>,
+    pub data_b64: Option<String>,
+    pub version: Option<String>,
+    pub preview_error: Option<String>,
+}
+
+fn studio_text_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "txt"
+            | "text"
+            | "md"
+            | "markdown"
+            | "rst"
+            | "rtf"
+            | "html"
+            | "htm"
+            | "csv"
+            | "tsv"
+            | "json"
+            | "jsonl"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "log"
+            | "ini"
+            | "cfg"
+            | "toml"
+            | "sql"
+            | "tex"
+            | "py"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "css"
+            | "scss"
+            | "sh"
+            | "ps1"
+            | "bat"
+            | "cmd"
+    )
+}
+
+fn studio_office_extension(ext: &str) -> bool {
+    matches!(ext, "doc" | "docx" | "odt" | "pptx" | "xlsx")
+}
+
+fn studio_image_mime(ext: &str) -> Option<&'static str> {
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn studio_kind(ext: &str) -> &'static str {
+    match ext {
+        "md" | "markdown" | "rst" => "markdown",
+        "html" | "htm" => "html",
+        "csv" | "tsv" => "table",
+        "json" | "jsonl" => "json",
+        "pdf" => "pdf",
+        ext if studio_office_extension(ext) || ext == "rtf" => "office",
+        ext if studio_image_mime(ext).is_some() => "image",
+        ext if studio_text_extension(ext) => "text",
+        _ => "binary",
+    }
+}
+
+fn studio_mime(ext: &str) -> String {
+    match ext {
+        "pdf" => "application/pdf",
+        "md" | "markdown" | "rst" => "text/markdown",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "json" | "jsonl" => "application/json",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "rtf" => "application/rtf",
+        ext => studio_image_mime(ext).unwrap_or("text/plain"),
+    }
+    .to_string()
+}
+
+fn version_for(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn decode_link_path(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_matches(|c| c == '<' || c == '>');
+    if trimmed.is_empty() {
+        return Err("document path is empty".into());
+    }
+    if trimmed.to_ascii_lowercase().starts_with("sandbox:") {
+        return Err(
+            "this is a provider-private sandbox link, not a file on this computer. Ask the model to save the document with OWLLM's file tools and link that local path"
+                .into(),
+        );
+    }
+    let mut path = if trimmed.to_ascii_lowercase().starts_with("file://") {
+        let tail = &trimmed[7..];
+        if tail.to_ascii_lowercase().starts_with("localhost/") {
+            tail[10..].to_string()
+        } else if tail.starts_with('/') {
+            tail.to_string()
+        } else if cfg!(windows) && !tail.get(1..2).is_some_and(|c| c == ":") {
+            format!(r"\\{}", tail.replace('/', r"\"))
+        } else {
+            tail.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+    path = urlencoding::decode(&path)
+        .map_err(|e| format!("invalid encoded document path: {e}"))?
+        .into_owned();
+    if cfg!(windows)
+        && path.starts_with('/')
+        && path.as_bytes().get(2).copied() == Some(b':')
+        && path.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic)
+    {
+        path.remove(0);
+    }
+    Ok(path)
+}
+
+fn windows_mnt_path(path: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let normalized = path.replace('\\', "/");
+    let rest = normalized.strip_prefix("/mnt/")?;
+    let (drive, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    let letter = drive.chars().next()?;
+    if drive.len() != 1 || !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(if tail.is_empty() {
+        format!("{}:\\", letter.to_ascii_uppercase())
+    } else {
+        format!(
+            "{}:\\{}",
+            letter.to_ascii_uppercase(),
+            tail.replace('/', r"\")
+        )
+    })
+}
+
+fn resolve_studio_path(raw: &str, cwd: Option<&str>) -> Result<PathBuf, String> {
+    let decoded = decode_link_path(raw)?;
+    let expanded = if decoded == "~" || decoded.starts_with("~/") || decoded.starts_with(r"~\") {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .ok_or_else(|| "cannot expand '~': USERPROFILE/HOME is unavailable".to_string())?;
+        PathBuf::from(home).join(decoded.trim_start_matches(['~', '/', '\\']))
+    } else if let Some(windows) = windows_mnt_path(&decoded) {
+        PathBuf::from(windows)
+    } else {
+        PathBuf::from(decoded)
+    };
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        let root = cwd
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                "this document link is relative, but the chat has no workspace to resolve it from. Ask the model for an absolute file link"
+                    .to_string()
+            })?;
+        Path::new(&crate::agent_tools::host_cwd(root)).join(expanded)
+    };
+    resolved
+        .canonicalize()
+        .map_err(|e| format!("document is unavailable at {}: {e}", resolved.display()))
+}
+
+fn open_studio_document(path: &str, cwd: Option<&str>) -> Result<StudioDocument, String> {
+    let resolved = resolve_studio_path(path, cwd)?;
+    let metadata =
+        fs::metadata(&resolved).map_err(|e| format!("inspect {}: {e}", resolved.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("not a file: {}", resolved.display()));
+    }
+    let filename = resolved
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_string());
+    let extension = extension(&filename);
+    let kind = studio_kind(&extension).to_string();
+    let editable = studio_text_extension(&extension)
+        && extension != "rtf"
+        && metadata.len() <= MAX_STUDIO_EDIT_BYTES as u64;
+    let mut result = StudioDocument {
+        path: resolved.to_string_lossy().into_owned(),
+        filename,
+        extension: extension.clone(),
+        mime: studio_mime(&extension),
+        size: metadata.len(),
+        kind,
+        editable,
+        text: None,
+        preview_text: None,
+        data_b64: None,
+        version: None,
+        preview_error: None,
+    };
+    if metadata.len() > MAX_STUDIO_READ_BYTES {
+        result.preview_error = Some(format!(
+            "preview is limited to {} MB; Download still saves the complete file",
+            MAX_STUDIO_READ_BYTES / 1_048_576
+        ));
+        return Ok(result);
+    }
+    let bytes = fs::read(&resolved).map_err(|e| format!("read {}: {e}", resolved.display()))?;
+    if editable {
+        match decode_utf_text(&bytes) {
+            Ok(text) => {
+                result.version = Some(version_for(&bytes));
+                result.preview_text = Some(text.clone());
+                result.text = Some(text);
+            }
+            Err(error) => {
+                result.editable = false;
+                result.preview_error = Some(error);
+            }
+        }
+    } else if extension == "pdf" || studio_office_extension(&extension) || extension == "rtf" {
+        match extract_document_bytes(&result.filename, &result.mime, &bytes) {
+            Ok(extraction) => result.preview_text = Some(extraction.text),
+            Err(error) => result.preview_error = Some(error),
+        }
+    }
+    if extension == "pdf" || studio_image_mime(&extension).is_some() {
+        result.data_b64 = Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
+    }
+    Ok(result)
+}
+
+fn replace_text_document(
+    path: &Path,
+    content: &[u8],
+    expected_version: Option<&str>,
+) -> Result<String, String> {
+    if content.len() > MAX_STUDIO_EDIT_BYTES {
+        return Err(format!(
+            "edited document is {:.1} MB; the editor limit is {} MB",
+            content.len() as f64 / 1_048_576.0,
+            MAX_STUDIO_EDIT_BYTES / 1_048_576
+        ));
+    }
+    let current =
+        fs::read(path).map_err(|e| format!("read {} before saving: {e}", path.display()))?;
+    if let Some(expected) = expected_version {
+        if version_for(&current) != expected {
+            return Err(
+                "the document changed on disk after it was opened. Reload it before saving so another agent's edits are not overwritten"
+                    .into(),
+            );
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("document has no parent folder: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document");
+    let temp = parent.join(format!(".{name}.owllm-{}.tmp", uuid::Uuid::new_v4()));
+    let backup = parent.join(format!(".{name}.owllm-{}.backup", uuid::Uuid::new_v4()));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("create temporary document: {e}"))?;
+        file.write_all(content)
+            .map_err(|e| format!("write temporary document: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("flush temporary document: {e}"))?;
+        if let Ok(metadata) = fs::metadata(path) {
+            let _ = fs::set_permissions(&temp, metadata.permissions());
+        }
+        fs::rename(path, &backup).map_err(|e| format!("preserve original document: {e}"))?;
+        if let Err(error) = fs::rename(&temp, path) {
+            let restore = fs::rename(&backup, path);
+            return Err(match restore {
+                Ok(()) => format!("replace document: {error}; the original was restored"),
+                Err(restore_error) => format!(
+                    "replace document: {error}; restore the original from {} ({restore_error})",
+                    backup.display()
+                ),
+            });
+        }
+        let _ = fs::remove_file(&backup);
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result?;
+    Ok(version_for(content))
+}
+
+#[tauri::command]
+pub async fn document_open(path: String, cwd: Option<String>) -> Result<StudioDocument, String> {
+    tokio::task::spawn_blocking(move || open_studio_document(&path, cwd.as_deref()))
+        .await
+        .map_err(|e| format!("document preview task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn document_save_text(
+    path: String,
+    content: String,
+    expected_version: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let resolved = resolve_studio_path(&path, None)?;
+        let ext = extension(
+            resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
+        if !studio_text_extension(&ext) || ext == "rtf" {
+            return Err(format!(
+                "{} is not directly editable. Use 'Editable copy' to save its extracted text as Markdown",
+                resolved.display()
+            ));
+        }
+        replace_text_document(&resolved, content.as_bytes(), expected_version.as_deref())
+    })
+    .await
+    .map_err(|e| format!("document save task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn document_copy(
+    source: String,
+    destination: String,
+    overwrite: bool,
+    cwd: Option<String>,
+) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || {
+        let source = resolve_studio_path(&source, cwd.as_deref())?;
+        let destination = PathBuf::from(decode_link_path(&destination)?);
+        if source == destination {
+            return Err("source and destination are the same file".into());
+        }
+        if destination.exists() && !overwrite {
+            return Err(format!(
+                "destination already exists: {}",
+                destination.display()
+            ));
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create destination folder {}: {e}", parent.display()))?;
+        }
+        fs::copy(&source, &destination).map_err(|e| {
+            format!(
+                "copy {} to {}: {e}",
+                source.display(),
+                destination.display()
+            )
+        })
+    })
+    .await
+    .map_err(|e| format!("document copy task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn document_export_text(
+    destination: String,
+    content: String,
+    overwrite: bool,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        if content.len() > MAX_STUDIO_EDIT_BYTES {
+            return Err(format!(
+                "export is {:.1} MB; the editor limit is {} MB",
+                content.len() as f64 / 1_048_576.0,
+                MAX_STUDIO_EDIT_BYTES / 1_048_576
+            ));
+        }
+        let destination = PathBuf::from(decode_link_path(&destination)?);
+        if destination.exists() && !overwrite {
+            return Err(format!(
+                "destination already exists: {}",
+                destination.display()
+            ));
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| "export destination has no parent folder".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create destination folder {}: {e}", parent.display()))?;
+        if destination.exists() {
+            let current = fs::read(&destination)
+                .map_err(|e| format!("read existing destination before replacing: {e}"))?;
+            let current_version = version_for(&current);
+            replace_text_document(&destination, content.as_bytes(), Some(&current_version))?;
+        } else {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(|e| format!("create {}: {e}", destination.display()))?;
+            file.write_all(content.as_bytes())
+                .map_err(|e| format!("write {}: {e}", destination.display()))?;
+            file.sync_all()
+                .map_err(|e| format!("flush {}: {e}", destination.display()))?;
+        }
+        Ok(destination.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("document export task failed: {e}"))?
+}
+
 #[tauri::command]
 pub async fn document_extract(
     filename: String,
@@ -482,5 +935,69 @@ mod tests {
         let err =
             extract_document_bytes("archive.exe", "application/octet-stream", b"MZ").unwrap_err();
         assert!(err.contains("unsupported document type"));
+    }
+
+    #[test]
+    fn studio_opens_relative_documents_and_rejects_stale_saves() {
+        let root = std::env::temp_dir().join(format!(
+            "owllm-document-studio-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let note = root.join("note.md");
+        fs::write(&note, "# Original\n").unwrap();
+
+        let opened =
+            open_studio_document("note.md", Some(root.to_string_lossy().as_ref())).unwrap();
+        assert_eq!(opened.kind, "markdown");
+        assert!(opened.editable);
+        assert_eq!(opened.text.as_deref(), Some("# Original\n"));
+        let version = opened.version.unwrap();
+
+        // An agent changes the same file after the user opens it. Saving the
+        // stale editor must stop instead of erasing the agent's newer work.
+        fs::write(&note, "# Agent changed this\n").unwrap();
+        let stale = replace_text_document(&note, b"# User edit\n", Some(&version)).unwrap_err();
+        assert!(stale.contains("changed on disk"));
+        assert_eq!(fs::read_to_string(&note).unwrap(), "# Agent changed this\n");
+
+        let current = version_for(&fs::read(&note).unwrap());
+        let saved =
+            replace_text_document(&note, b"# User reviewed edit\n", Some(&current)).unwrap();
+        assert_eq!(saved, version_for(b"# User reviewed edit\n"));
+        assert_eq!(fs::read_to_string(&note).unwrap(), "# User reviewed edit\n");
+
+        fs::remove_file(&note).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn studio_previews_office_text_without_making_binary_editable() {
+        let root = std::env::temp_dir().join(format!(
+            "owllm-document-studio-office-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let report = root.join("report.docx");
+        fs::write(
+            &report,
+            zip_with(
+                "word/document.xml",
+                r#"<w:document><w:body><w:p><w:r><w:t>Studio preview</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+        )
+        .unwrap();
+
+        let opened = open_studio_document(report.to_string_lossy().as_ref(), None).unwrap();
+        assert_eq!(opened.kind, "office");
+        assert!(!opened.editable);
+        assert!(opened
+            .preview_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Studio preview"));
+
+        fs::remove_file(&report).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 }

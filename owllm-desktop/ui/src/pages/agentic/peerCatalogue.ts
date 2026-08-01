@@ -117,6 +117,15 @@ export function parseDeviceModel(id: string): { deviceId: string; modelId: strin
   return { deviceId: rest.slice(0, slash), modelId: rest.slice(slash + 1) };
 }
 
+/// "local" is a protocol/provider family, not necessarily a model hosted by
+/// this process. Paired-device models deliberately use the local GGUF dispatch
+/// loop, but their server must be started on the peer over the sealed channel.
+/// Keep this decision shared so no UI surface passes `device/...` to the local
+/// `server_start` command.
+export function requiresManagedLocalServer(modelId: string, provider: string): boolean {
+  return parseDeviceModel(modelId) === null && (provider === "local" || provider === "tuned");
+}
+
 /// Display name of a paired device from the cache, falling back to its id.
 export function peerNameFor(deviceId: string): string {
   return _cache.find(p => p.deviceId === deviceId)?.deviceName || deviceId;

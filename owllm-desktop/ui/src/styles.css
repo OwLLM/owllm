@@ -45,6 +45,360 @@
   -webkit-user-select: auto !important;
 }
 
+/* Shared Coding / Agentic first-run launchpad. The light-grid, aurora and glass
+   composer are CSS-only so they inherit every accent skin and scale without
+   shipping a fixed raster background. */
+.creation-launchpad {
+  position: relative;
+  isolation: isolate;
+  min-height: clamp(430px, 63vh, 610px);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 50% -14%, rgba(var(--accent-rgb), 0.32), transparent 47%),
+    linear-gradient(145deg, color-mix(in srgb, var(--bg-panel) 82%, var(--accent) 18%), var(--bg-panel) 72%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 30px 80px rgba(0, 0, 0, 0.24);
+}
+
+.creation-launchpad__grid {
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(rgba(var(--accent-rgb), 0.23) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--accent-rgb), 0.23) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,.8), transparent 82%);
+}
+
+.creation-launchpad__orb {
+  position: absolute;
+  z-index: -1;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  opacity: 0.28;
+}
+
+.creation-launchpad__orb--one {
+  top: -260px;
+  left: -100px;
+  background: var(--accent);
+}
+
+.creation-launchpad__orb--two {
+  right: -220px;
+  bottom: -270px;
+  background: color-mix(in srgb, var(--accent) 50%, #9878ff);
+}
+
+.creation-launchpad__content {
+  width: min(880px, calc(100% - 42px));
+  padding: 42px 0 34px;
+  text-align: center;
+}
+
+.creation-launchpad__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-ink);
+  font-size: 10.5px;
+  font-weight: 900;
+  letter-spacing: 1.7px;
+  text-transform: uppercase;
+}
+
+.creation-launchpad__spark {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(var(--accent-rgb), 0.48);
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.13);
+  box-shadow: 0 0 22px rgba(var(--accent-rgb), 0.25);
+}
+
+.creation-launchpad__title {
+  margin: 12px 0 8px;
+  color: var(--fg-strong);
+  font-size: clamp(35px, 5vw, 61px);
+  font-weight: 900;
+  letter-spacing: -2.4px;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+.creation-launchpad__title em {
+  color: var(--accent-ink);
+  font-style: normal;
+  text-shadow: 0 0 30px rgba(var(--accent-rgb), 0.28);
+}
+
+.creation-launchpad__subtitle {
+  max-width: 650px;
+  margin: 0 auto;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1.55;
+  text-wrap: balance;
+}
+
+.creation-launchpad__composer {
+  width: min(720px, 100%);
+  margin: 25px auto 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border-strong));
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--bg-input) 91%, transparent);
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.28),
+    0 0 40px rgba(var(--accent-rgb), 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(20px);
+  text-align: left;
+  transition: border-color 160ms, box-shadow 160ms, transform 160ms;
+}
+
+.creation-launchpad__composer:focus-within {
+  border-color: var(--accent);
+  box-shadow:
+    0 25px 70px rgba(0, 0, 0, 0.30),
+    0 0 48px rgba(var(--accent-rgb), 0.19),
+    inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  transform: translateY(-1px);
+}
+
+.creation-launchpad__composer textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  max-height: 190px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  padding: 20px 22px 8px;
+  background: transparent;
+  color: var(--fg-strong);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.creation-launchpad__composer textarea::placeholder {
+  color: var(--fg-subtle);
+}
+
+.creation-launchpad__composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 10px 16px;
+}
+
+.creation-launchpad__mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  font-weight: 750;
+}
+
+.creation-launchpad__enter-hint {
+  flex: 1;
+  color: var(--fg-subtle);
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.creation-launchpad__submit {
+  min-width: 42px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 13px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(var(--accent-rgb), 0.25);
+}
+
+.creation-launchpad__modes {
+  width: min(760px, 100%);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px auto 0;
+}
+
+.creation-launchpad__mode {
+  position: relative;
+  min-width: 0;
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--bg-card) 83%, transparent);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: border-color 150ms, background 150ms, transform 150ms, box-shadow 150ms;
+}
+
+.creation-launchpad__mode:hover {
+  transform: translateY(-2px);
+  border-color: rgba(var(--accent-rgb), 0.48);
+  background: color-mix(in srgb, var(--bg-card) 84%, var(--accent) 16%);
+}
+
+.creation-launchpad__mode.is-active {
+  border-color: rgba(var(--accent-rgb), 0.78);
+  background: rgba(var(--accent-rgb), 0.14);
+  box-shadow: 0 10px 30px rgba(var(--accent-rgb), 0.12), inset 0 1px 0 rgba(255,255,255,.06);
+}
+
+.creation-launchpad__mode-icon {
+  flex: 0 0 auto;
+  width: 39px;
+  height: 39px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(var(--accent-rgb), 0.28);
+  border-radius: 12px;
+  background: rgba(var(--accent-rgb), 0.10);
+  color: var(--accent-ink);
+  font-size: 20px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+}
+
+.creation-launchpad__mode-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.creation-launchpad__mode-copy strong {
+  color: var(--fg-strong);
+  font-size: 12.5px;
+}
+
+.creation-launchpad__mode-copy small {
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.creation-launchpad__badge {
+  position: absolute;
+  top: -7px;
+  right: 9px;
+  border: 1px solid rgba(var(--accent-rgb), 0.50);
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: var(--bg-panel);
+  color: var(--accent-ink);
+  font-size: 8.5px;
+  font-weight: 900;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+
+.creation-launchpad__footer {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 17px;
+  flex-wrap: wrap;
+}
+
+.creation-launchpad__actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.creation-launchpad__start-label {
+  color: var(--fg-subtle);
+  font-size: 11px;
+}
+
+.creation-launchpad__actions button {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 10px;
+  background: rgba(0,0,0,.08);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.creation-launchpad__actions button:hover {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--fg-strong);
+}
+
+.creation-launchpad__status {
+  color: var(--fg-subtle);
+  font-size: 10.5px;
+}
+
+@media (max-width: 720px) {
+  .creation-launchpad {
+    min-height: 0;
+    border-radius: 18px;
+  }
+  .creation-launchpad__content {
+    width: min(100% - 24px, 560px);
+    padding: 30px 0 24px;
+  }
+  .creation-launchpad__title {
+    font-size: clamp(31px, 10vw, 46px);
+    letter-spacing: -1.7px;
+  }
+  .creation-launchpad__modes {
+    grid-template-columns: 1fr;
+  }
+  .creation-launchpad__mode {
+    min-height: 64px;
+  }
+  .creation-launchpad__enter-hint,
+  .creation-launchpad__submit span:first-child {
+    display: none;
+  }
+}
+
 /* Dark theme — the original look. Each token has a "semantic" name
    describing what it's for, not the literal hex; component code reads
    `var(--bg-panel)` not `#0e1117`.
@@ -289,14 +643,12 @@ html[dir="rtl"] input[type="number"] { direction: ltr; text-align: left; }
   grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
 }
 
-/* Keep the image-heavy Home launchers useful on laptop displays. The former
-   1fr tracks expanded each square past 420px on a 14-inch Retina screen,
-   pushing status/setup below the Dock and making the page feel like a zoomed
-   poster. Tracks still shrink with the window, but stop growing at 360px. */
+/* Three equal fluid tracks keep the square Home launchers proportional to the
+   available page width. Do not cap these tracks: the cards must grow as well
+   as shrink when the application window is resized. */
 .home-launcher-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 360px));
-  justify-content: center;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 28px;
 }
 

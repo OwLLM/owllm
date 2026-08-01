@@ -84,6 +84,9 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    # Fresh Linux runners can spend more than 45 minutes in the optimized
+    # Rust/Tauri link. Keep a hard bound, but leave enough time for both Linux
+    # architectures to reach packaging instead of cancelling healthy builds.
     timeout-minutes: 90
     strategy:
       fail-fast: false

@@ -227,6 +227,7 @@ jobs:
           const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
           if (manifest.version !== version) throw new Error("wrong public version");
           if (!manifest.platforms?.["windows-x86_64"]) throw new Error("Windows entry lost");
+          if (!manifest.platforms?.["linux-x86_64"]) throw new Error("Linux entry lost");
           if (!manifest.platforms?.["darwin-aarch64"]) throw new Error("Mac entry missing");
           console.log("Public updater platforms:", Object.keys(manifest.platforms).join(", "));
           NODE

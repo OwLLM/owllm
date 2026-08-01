@@ -269,6 +269,43 @@ fn set_owner_to_main(_overlay: &WebviewWindow, _main: &WebviewWindow) -> tauri::
     Ok(())
 }
 
+/// Show the decorative window and keep it immediately above its main window.
+///
+/// Tao adds the macOS child with `NSWindowAbove` while both windows are still
+/// hidden. Showing `main` later can nevertheless put it in front of that hidden
+/// child (observed in the live v0.9.88 bundle). Re-adding the now-visible child
+/// with the same AppKit ordering is the documented way to reassert the child
+/// order without making it system-wide topmost.
+fn show_overlay_above_main(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
+    overlay.show()?;
+    #[cfg(target_os = "macos")]
+    order_macos_overlay_above_main(main, overlay)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = main;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn order_macos_overlay_above_main(
+    main: &WebviewWindow,
+    overlay: &WebviewWindow,
+) -> tauri::Result<()> {
+    use objc2::{msg_send, runtime::AnyObject};
+
+    const NS_WINDOW_ABOVE: isize = 1;
+
+    let main_window = main.ns_window()? as *mut AnyObject;
+    let overlay_window = overlay.ns_window()? as *mut AnyObject;
+    unsafe {
+        let _: () = msg_send![
+            &*main_window,
+            addChildWindow: &*overlay_window,
+            ordered: NS_WINDOW_ABOVE
+        ];
+    }
+    Ok(())
+}
+
 fn should_map_overlay() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -364,7 +401,9 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     // transparent WebView2 window flashes WHITE over the app. If the 700ms
     // startup wait timed out, the sync loop shows it once mark_ready fires.
     if OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay() {
-        overlay.show()?;
+        if let Some(main_webview) = main.app_handle().get_webview_window("main") {
+            show_overlay_above_main(&main_webview, &overlay)?;
+        }
     }
     Ok(())
 }
@@ -432,9 +471,10 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
         let _ = overlay.hide();
     } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay()
     {
-        // Ready-gated for the same reason as prepare_and_show_for_main:
-        // an unpainted transparent webview shows as a white sheet.
-        let _ = overlay.show();
+        // Ready-gated for the same reason as prepare_and_show_for_main: an
+        // unpainted transparent webview shows as a white sheet. On macOS the
+        // helper also reasserts NSWindowAbove after every remap/restore.
+        let _ = show_overlay_above_main(main, overlay);
     } else if !should_map_overlay() {
         let _ = overlay.hide();
     }

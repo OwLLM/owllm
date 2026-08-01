@@ -339,7 +339,22 @@ jobs:
           # set and makes Tauri run signtool with no cert — that broke v0.7.33).
           # The SimplySign/Certum cert lives only on the host, so CI builds unsigned;
           # signed releases come from the host publish path, which HAS the cert.
-          npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":null}}}'
+          # Tauri downloads platform bundlers (for example WiX on Windows) on
+          # first use. Retry the complete command so a transient CDN reset does
+          # not discard an otherwise successful 20+ minute native build; Cargo
+          # reuses the completed target on subsequent attempts.
+          TAURI_BUILD_MAX_ATTEMPTS=3
+          for attempt in $(seq 1 "$TAURI_BUILD_MAX_ATTEMPTS"); do
+            if npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":null}}}'; then
+              break
+            fi
+            if [ "$attempt" -eq "$TAURI_BUILD_MAX_ATTEMPTS" ]; then
+              echo "Tauri packaging failed after $TAURI_BUILD_MAX_ATTEMPTS attempts" >&2
+              exit 1
+            fi
+            echo "Tauri build attempt $attempt failed; retrying in 15 seconds..." >&2
+            sleep 15
+          done
 
       # ---------------------------------------------------------------
       # Smoke test — launch the built binary and verify it stays alive

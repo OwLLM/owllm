@@ -231,6 +231,32 @@ jobs:
           gh release upload "$TAG" dist/latest.json \
             --repo "$RELEASE_REPO" --clobber
 
+      # A Mac-only publish makes THIS tag "Latest", so the org-profile and repo
+      # README links at releases/latest/download/<stable-name> 404 for every OS
+      # this run did not build — v0.9.89/.90 broke the Windows, AppImage and deb
+      # downloads exactly that way. Mirror publish-release.sh's
+      # carry_forward_assets: copy the newest stable-named installer for each
+      # missing OS onto this tag.
+      - name: Carry forward non-Mac installers
+        working-directory: owllm-desktop
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          have="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name')"
+          tmp="$(mktemp -d)"
+          for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+            printf '%s\n' "$have" | grep -qxF "$name" && continue
+            src="$(gh api "repos/$RELEASE_REPO/releases?per_page=30" \
+              --jq "[.[] | select(.draft|not) | select(.tag_name != \"$TAG\") | select(any(.assets[]; .name == \"$name\"))] | first | .tag_name")"
+            [ -n "$src" ] && [ "$src" != "null" ] || { echo "  no source release for $name"; continue; }
+            gh release download "$src" --repo "$RELEASE_REPO" --pattern "$name" --dir "$tmp"
+            gh release upload "$TAG" "$tmp/$name" --repo "$RELEASE_REPO" --clobber
+            echo "  carried forward $name from $src"
+          done
+          rm -rf "$tmp"
+
       - name: Verify public Mac update path
         shell: bash
         run: |
@@ -250,6 +276,22 @@ jobs:
           curl -fsSI \
             "https://github.com/$RELEASE_REPO/releases/download/$TAG/OwLLM.Desktop_aarch64.app.tar.gz" \
             >/dev/null
+
+      # The exact links the org-profile README and the OwLLM/owllm README
+      # publish. Every one must resolve, or a visitor's download 404s.
+      - name: Verify every advertised download link
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg \
+                      OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+            url="https://github.com/$RELEASE_REPO/releases/latest/download/$name"
+            code="$(curl -s -o /dev/null -w '%{http_code}' -L "$url")"
+            echo "  $name -> HTTP $code"
+            [ "$code" = "200" ] || fail=1
+          done
+          [ "$fail" = 0 ] || { echo "::error::a published download link is broken"; exit 1; }
 
       # Self-hosted runner: undo the search-list edit and destroy the signing
       # keychain even when an earlier step failed. Without this the job leaves

@@ -2120,7 +2120,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (isLocal) {
       const managedHere = requiresManagedLocalServer(modelId, provider);
       const port = managedHere ? await ensureServer(modelId, signal) : 0;
-      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      if (port == null) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
@@ -2158,7 +2158,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (isLocal) {
       const managedHere = requiresManagedLocalServer(secModel, provider);
       const port = managedHere ? await ensureServer(secModel, signal) : 0;
-      if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      if (port == null) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
@@ -2663,7 +2663,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (provider === "local" || provider === "tuned") {
         const managedHere = requiresManagedLocalServer(modelId, provider);
         const port = managedHere ? await ensureServer(modelId, ctrl.signal) : 0;
-        if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+        if (port == null) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
         await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       } else {

@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: [self-hosted, macOS, ARM64, owllm-release]
+    runs-on: macos-latest
     timeout-minutes: 120
     env:
       RELEASE_REPO: OwLLM/owllm

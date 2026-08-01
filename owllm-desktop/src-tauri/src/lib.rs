@@ -394,11 +394,14 @@ pub fn run() {
                     overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
-                        fit_macos_main_window(&dispatch_window);
                         // Main FIRST, overlay second: the frame arriving a
                         // beat late is invisible; the overlay arriving early
                         // (or unpainted) is the startup white flash.
                         let _ = dispatch_window.show();
+                        // macOS constrains an oversized hidden window when it is
+                        // first mapped. Fit after show so that constraint cannot
+                        // overwrite the shared 1400x960 aspect ratio.
+                        fit_macos_main_window(&dispatch_window);
                         let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });

@@ -46,8 +46,8 @@ check("macOS Retina overlay geometry scales its transparent margins",
   overlay.includes("fn geometry_scale(scale_factor: f64) -> f64")
     && overlay.includes("main.scale_factor()")
     && overlay.includes("CONTENT_OFFSET_Y as f64 * scale"));
-check("macOS safe-area fit runs before the main window is shown",
-  rust.indexOf("fit_macos_main_window(&dispatch_window)") < rust.indexOf("let _ = dispatch_window.show()"));
+check("macOS safe-area fit runs after the hidden main window is shown",
+  rust.indexOf("let _ = dispatch_window.show()") < rust.indexOf("fit_macos_main_window(&dispatch_window)"));
 
 for (const row of checks) console.log(`  PASS ${row.name}`);
 console.log(`mac GUI verification: ${checks.length}/${checks.length} passed`);

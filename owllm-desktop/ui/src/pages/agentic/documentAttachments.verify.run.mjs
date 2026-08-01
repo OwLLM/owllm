@@ -56,7 +56,12 @@ try {
   for (const ext of [".pdf", ".txt", ".doc", ".docx", ".rtf", ".odt", ".pptx", ".xlsx"]) {
     check(`picker accepts ${ext}`, dispatch.includes(`"${ext}"`));
   }
-  check("shared picker permits multiple attachments", [agents, coding, tuning].every((source) => /type="file"[\s\S]{0,180}multiple/.test(source)));
+  // The picker itself is now the ONE shared composer's, so "multiple" is
+  // guaranteed for every surface by construction rather than by three copies.
+  const sharedComposer = read(path.join(UI, "components/Composer.tsx"));
+  check("shared picker permits multiple attachments",
+    /type="file"[\s\S]{0,180}multiple/.test(sharedComposer)
+    && [agents, coding, tuning].every((source) => source.includes("attachmentAccept={CHAT_ATTACHMENT_ACCEPT}")));
   check("all chat surfaces show attached document filenames", [agents, coding, tuning].every((source) => source.includes('a.filename') || source.includes('attachment.filename')));
   check("attachment text survives into follow-up chat history", [agents, coding, tuning].every((source) => source.includes("context:") && source.includes(".context ||")));
   check("agentic chat uses the shared parser", agents.includes("fileToChatAttachment(file)"));

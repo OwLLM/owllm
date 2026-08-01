@@ -92,26 +92,33 @@ check(
 
 // ---- 3. one morphing Send/Stop button ------------------------------------
 
+// The single morphing slot now lives in the ONE shared composer, driven by
+// this page's anyBusy; the composer's own gate asserts the slot never splits.
+const sharedComposer = readCode("../../components/Composer.tsx");
 check(
-  /const canSend = !!draft\.trim\(\) \|\| chatAttachments\.length > 0;\s*return anyBusy \?/.test(chat),
+  /busy=\{anyBusy\}/.test(chat) && /onStop=\{stopAll\}/.test(chat)
+    && /busy && onStop \?/.test(sharedComposer),
   "a single slot renders Stop-or-Send from one anyBusy ternary",
 );
 check(
-  /onClick=\{stopAll\}[\s\S]{0,400}?aria-label="Stop generating"/.test(chat),
+  /onStop=\{stopAll\}/.test(chat)
+    && /aria-label=\{stopTitle\}/.test(sharedComposer),
   "the busy branch is a Stop button wired to stopAll",
 );
 check(
-  /onClick=\{sendComposer\}[\s\S]{0,400}?aria-label="Send message"/.test(chat),
+  /onSend=\{sendComposer\}/.test(chat)
+    && /aria-label=\{sendLabel\}/.test(sharedComposer),
   "the idle branch is a Send button wired to sendComposer",
 );
-// Same fixed width on both branches => the control does not jump when it morphs.
-const slotWidths = chat.match(/minWidth: 92,/g) ?? [];
+// One CSS class for both branches => the control does not jump when it morphs.
+const composerCss = readCode("../../styles.css");
 check(
-  slotWidths.length >= 2,
+  /\.owc__send \{[^}]*min-width:/.test(composerCss)
+    && /className="owc__send owc__send--stop"/.test(sharedComposer),
   "Send and Stop share a fixed minWidth so the button never shifts position",
 );
 check(
-  /if \(anyBusy\) \{ e\.preventDefault\(\); stopAll\(\); \}/.test(chat),
+  /if \(e\.key === "Escape" && anyBusy\) \{ e\.preventDefault\(\); stopAll\(\); return; \}/.test(chat),
   "Esc stops an in-flight generation (VS Code parity)",
 );
 

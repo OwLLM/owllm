@@ -459,6 +459,22 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 
 ## Support & UX
 
+- **One shared chat composer** (`components/Composer.tsx` + `.owc-*` in
+  `styles.css`): every chat surface — Agents dock, Code agent 1 / agent 2 /
+  just-chat, fine-tuning chat — renders the same component, the same way
+  `ChatBubble` owns message rendering and `LogBox` owns logs. Before this each
+  page hand-rolled its own textarea, Send/Stop and picker, so capabilities
+  differed per page (only the dock had a mic, only Code had a model picker or
+  Terminal, only fine-tuning had modes and slash commands). The container holds
+  header (status · badge · **model picker top-right** · Terminal slot), trays
+  (image thumbs, document chips, `#` mentions, error/notice), the autosizing
+  textarea with the 🎤 dictation button, and an action bar (attach · slash ·
+  mention · mode segment · capability toggles · hint · draft counter ·
+  Send↔Stop in one fixed slot). Paste and drag-drop both attach; the palette
+  drops up; dictation degrades honestly where the WebView has no
+  SpeechRecognition. Pages pass only the capabilities they actually have, so
+  nothing is faked. Pinned by `sharedComposer.verify.run.mjs`.
+
 - **Bounded stream rendering** (`components/StreamWindow.tsx`, v0.9.60): the run
   views append forever, so rendering every entry grew the DOM monotonically with
   run length until the WebView2 renderer hit its own per-process allocation

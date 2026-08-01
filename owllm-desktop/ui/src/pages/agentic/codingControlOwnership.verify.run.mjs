@@ -17,8 +17,10 @@ const check = (label, ok) => {
   else { failures += 1; console.error(`FAIL ${label}`); }
 };
 
-const primaryToolbar = code.slice(code.indexOf('data-ui="CodePrimaryComposerToolbar"'), code.indexOf("{codeAttachments.length"));
-const secondaryToolbar = code.slice(code.indexOf('data-ui="CodeSecondaryComposerToolbar"'), code.indexOf("<textarea", code.indexOf('data-ui="CodeSecondaryComposerToolbar"')));
+// Both Code composers are now the ONE shared <Composer/> (components/Composer.tsx);
+// the header slot still carries that agent's model picker and Terminal button.
+const primaryToolbar = code.slice(code.indexOf('dataUi="CodePrimaryComposer"'), code.indexOf("attachments={codeAttachments}"));
+const secondaryToolbar = code.slice(code.indexOf('dataUi="CodeSecondaryComposer"'), code.indexOf("attachments={secondaryAttachments}"));
 const publisher = publish.slice(publish.indexOf('data-ui="GitPublisherContainer"'), publish.indexOf("{/* Commit popup"));
 
 check("Project Memory remains visible in the left project rail", code.includes('data-ui="CodeProjectMemory"'));

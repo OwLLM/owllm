@@ -156,10 +156,13 @@ check(notebook.includes('"var(--ok)"') && notebook.includes('"var(--warn)"') && 
   "Notebook status chips consume the semantic ok/warn/error tokens");
 
 const agents = readLF(path.join(SRC, "pages/agentic/AgentsPage.tsx"));
+// The dock's Send/Stop slot is now the ONE shared composer's, so its colours
+// are a themed CSS rule instead of an inline per-page palette.
 const sendBtnAt = agents.indexOf('"Stop the in-flight dispatch"');
 check(sendBtnAt !== -1, "AgentsPage send button located");
-const sendBtn = agents.slice(sendBtnAt, sendBtnAt + 1200);
-check(sendBtn.includes('(draft.trim() || attachments.length ? "var(--accent)"') && sendBtn.includes('"var(--accent-fg)"'),
+const composerCss = readLF(path.join(SRC, "styles.css"));
+const sendBtn = composerCss.slice(composerCss.indexOf(".owc__send {"), composerCss.indexOf(".owc__palette {"));
+check(sendBtn.includes("background: var(--accent);") && sendBtn.includes("color: var(--accent-fg);"),
   "send button ready state consumes accent + accent-fg tokens");
 check(!/#ffd97a|#3cf26b|#ff8c4a|#1a1404|#0a1505|#7d6f4b/i.test(sendBtn),
   "send button carries no hardcoded amber/green/orange state colours");

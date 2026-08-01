@@ -79,14 +79,19 @@ check(agents.includes("var(--chat-font-size, 13px)"),
 const notebook = readSource("pages/agentic/RunNotebook.tsx");
 check((notebook.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
   "RunNotebook step text (active + archived) applies --chat-font-size");
-check((agents.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
-  "AgentsPage user composer input applies --chat-font-size");
-const codePage = readSource("pages/agentic/CodePage.tsx");
-check((codePage.match(/fontSize: "var\(--chat-font-size, 13px\)"|fontSize:"var\(--chat-font-size, 13px\)"/g) || []).length >= 3,
-  "CodePage user input boxes apply --chat-font-size");
-const ftChat = readSource("pages/finetuning/ChatPage.tsx");
-check((ftChat.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
-  "fine-tuning ChatPage composers apply --chat-font-size");
+// Every chat surface now renders the ONE shared composer, so the input font
+// size is a single CSS rule instead of a copy per page. Assert the rule, and
+// that each page really goes through that component.
+const composerCss = readSource("styles.css");
+check(/\.owc__input textarea \{[\s\S]{0,400}?var\(--chat-font-size, 13px\)/.test(composerCss),
+  "the shared composer textarea applies --chat-font-size");
+for (const [label, rel] of [
+  ["AgentsPage user composer input", "pages/agentic/AgentsPage.tsx"],
+  ["CodePage user input boxes", "pages/agentic/CodePage.tsx"],
+  ["fine-tuning ChatPage composers", "pages/finetuning/ChatPage.tsx"],
+]) {
+  check(readSource(rel).includes('from "../../components/Composer"'), `${label} apply --chat-font-size via the shared composer`);
+}
 
 // Icons + Settings control.
 const icons = readSource("components/ActionIcon.tsx");

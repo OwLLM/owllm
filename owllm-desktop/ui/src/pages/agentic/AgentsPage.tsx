@@ -155,6 +155,7 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
+import Composer from "../../components/Composer";
 import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -5314,7 +5315,6 @@ function ChatInputDock({
   // Files for the next team-chat turn. Images retain their bytes; documents are
   // parsed locally and carry extracted text only.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const addDockFiles = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       try {
@@ -5324,12 +5324,6 @@ function ChatInputDock({
         flashNote(String((error as { message?: string })?.message ?? error));
       }
     }
-  };
-  const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    e.preventDefault();
-    void addDockFiles(files);
   };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
@@ -5353,55 +5347,14 @@ function ChatInputDock({
     setPaletteOpen(false);
   };
 
-  // Web Speech API — toggle dictation. Only used on the desktop;
-  // Telegram path uses the bundled whisper.cpp pipeline already.
-  // WebView2 ships SpeechRecognition only when the Edge runtime has
-  // it enabled, which is NOT universal — when it's missing we keep
-  // the button visible but flash a tooltip via dockNote so the user
-  // doesn't think the button is broken.
-  const recogRef = useRef<any>(null);
-  const [recording, setRecording] = useState(false);
+  // Dictation lives in the shared composer (useDictation); when the WebView
+  // has no SpeechRecognition it reports back through onNotice → dockNote, so
+  // the user never sees a silently dead mic button.
   const [dockNote, setDockNote] = useState<string | null>(null);
   const flashNote = (msg: string) => {
     setDockNote(msg);
     setTimeout(() => setDockNote(null), 3500);
   };
-  const toggleMic = () => {
-    if (recording) {
-      try { recogRef.current?.stop?.(); } catch {}
-      setRecording(false);
-      return;
-    }
-    const Ctor = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!Ctor) {
-      flashNote("Mic dictation unavailable in this WebView. Use the Telegram bridge for voice messages.");
-      return;
-    }
-    const rec = new Ctor();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = "en-US";
-    const baseline = draft;
-    rec.onresult = (ev: any) => {
-      let partial = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        partial += ev.results[i][0].transcript;
-      }
-      setDraft((baseline ? baseline.trimEnd() + " " : "") + partial);
-    };
-    rec.onend = () => { setRecording(false); };
-    rec.onerror = (ev: any) => {
-      setRecording(false);
-      flashNote(`Mic error: ${ev?.error ?? "unknown"}`);
-    };
-    try { rec.start(); recogRef.current = rec; setRecording(true); }
-    catch (e) {
-      flashNote(`Mic start failed: ${String(e)}`);
-    }
-  };
-
-  const onAttach = () => fileInputRef.current?.click();
-
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
   // listens for to call .abort() on the active dispatch's
@@ -5453,195 +5406,53 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
-      {showPalette && filteredCmds.length > 0 && (
-        <div data-ui="SlashPalette" style={{
-          position:"absolute", left:12, right:12, bottom:"calc(100% - 4px)",
-          background:"var(--bg-panel)",
-          border:"1px solid var(--border-strong)",
-          borderRadius:10,
-          boxShadow:"0 -8px 30px rgba(0,0,0,0.55)",
-          maxHeight:260, overflowY:"auto",
-          zIndex:30, padding:"6px 0",
-        }}>
-          <div style={{ padding:"4px 12px 6px", fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase" }}>
-            Slash commands
-          </div>
-          {filteredCmds.map(c => (
-            <button
-              key={c.name}
-              type="button"
-              onClick={() => runCommand(c)}
-              style={{
-                display:"flex", alignItems:"baseline", gap:10, width:"100%",
-                padding:"6px 12px", background:"transparent", border:"none",
-                color:"var(--fg)", textAlign:"left", cursor:"pointer", fontSize:12,
-              }}
-              onMouseEnter={ev => { (ev.currentTarget as HTMLElement).style.background = "var(--bg-surface)"; }}
-              onMouseLeave={ev => { (ev.currentTarget as HTMLElement).style.background = "transparent"; }}
-            >
-              <span style={{ fontWeight:700, color:"#ffd97a", fontFamily:"Consolas, monospace" }}>{c.name}</span>
-              <span style={{ color:"var(--fg-muted)", fontSize:11 }}>{c.description}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      <div style={{
-        display:"flex", flexDirection:"column",
-        background:"var(--bg-surface)",
-        border:"1px solid rgba(255,200,80,0.40)",
-        borderRadius:12,
-        overflow:"hidden",
-      }}>
-        {attachments.length > 0 && (
-          <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
-            {attachments.map((a, i) => (
-              <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
-                {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
-                <button onClick={() => setAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
-              </span>
-            ))}
-          </div>
-        )}
-        <div style={{ display:"flex", alignItems:"flex-start", padding:"10px 12px 6px", gap:8 }}>
-          <textarea
-            ref={inputRef}
-            data-ui="UserInputArea"
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onPaste={onDockPaste}
-            onKeyDown={e => {
-              if (e.key === "Escape") { setPaletteOpen(false); return; }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                // While a run is active, Enter QUEUES the message to steer the run
-                // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
-                // route around it here; the ■ button remains the way to stop.
-                if (busy && (draft.trim() || attachments.length)) onSend(attachments);
-                else handleSend();
-              }
-            }}
-            placeholder="Queue another message…"
-            rows={1}
-            style={{
-              flex:1, minWidth:0, minHeight:24, maxHeight:240,
-              padding:0,
-              background:"transparent",
-              color:"var(--fg)",
-              border:"none",
-              fontSize:"var(--chat-font-size, 13px)", lineHeight:1.45,
-              fontFamily:"Segoe UI, sans-serif",
-              resize:"none",
-              outline:"none",
-              overflowY:"auto",
-            }}
-          />
-          <button
-            type="button"
-            onClick={toggleMic}
-            title={recording ? "Stop dictation" : "Start dictation (Web Speech)"}
-            style={{
-              flexShrink:0, width:28, height:28,
-              background: recording ? "rgba(255,140,140,0.20)" : "transparent",
-              border:"none", borderRadius:6,
-              color: recording ? "#ff8c8c" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:16,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >🎤</button>
-        </div>
-        {dockNote && (
-          <div style={{
-            padding:"4px 12px",
-            fontSize:11, color:"#ffd97a",
-            background:"rgba(255,217,122,0.08)",
-            borderTop:"1px solid rgba(255,217,122,0.20)",
-          }}>{dockNote}</div>
-        )}
-        <div style={{
-          display:"flex", alignItems:"center", gap:6,
-          padding:"4px 8px 8px",
-          borderTop:"1px solid rgba(255,255,255,0.04)",
-        }}>
-          <button
-            type="button"
-            onClick={onAttach}
-            title="Attach images or documents"
-            style={{
-              width:28, height:28, background:"transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color:"var(--fg-muted)", cursor:"pointer", fontSize:15,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >+</button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={CHAT_ATTACHMENT_ACCEPT}
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => { if (e.target.files) void addDockFiles(e.target.files); e.target.value = ""; }}
-          />
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(v => !v)}
-            title="Slash commands"
-            style={{
-              width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "var(--accent-ink)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >/</button>
-          <div style={{ flex:1 }} />
-          <button
-            type="button"
-            onClick={onToggleAutoApprove}
-            title={autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval"}
-            style={{
-              height:28, padding:"0 10px",
-              display:"flex", alignItems:"center", gap:6,
-              background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
-              borderRadius:6,
-              color: autoApprove ? "var(--accent-ink)" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:11, fontWeight:600,
-            }}
-          >
-            <span style={{ fontSize:13 }}>⚡</span>
-            <span>Auto mode</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!busy && !loadingModel && !draft.trim() && attachments.length === 0}
-            title={busy
-              ? "Stop the in-flight dispatch"
-              : loadingModel
-                ? "Loading model into VRAM — click sends as soon as ready"
-                : needsLoad
-                  ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
-                  : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
-            style={{
-              width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() || attachments.length ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
-              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() || attachments.length ? "var(--accent-fg)" : "var(--fg-muted)"),
-              border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
-              borderRadius:6,
-              cursor: (busy || loadingModel || draft.trim() || attachments.length) ? "pointer" : "not-allowed",
-              fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
-              display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
-            }}
-          >
-            {busy
-              ? "■"
-              : loadingModel
-                ? <><span>⏳</span><span>Loading</span></>
-                : needsLoad
-                  ? <><span>⚡</span><span>Load</span></>
-                  : "▶"}
-          </button>
-        </div>
-      </div>
+      <Composer
+        dataUi="UserInput"
+        textareaRef={inputRef}
+        value={draft}
+        onChange={setDraft}
+        onSend={handleSend}
+        onStop={handleSend}
+        busy={busy}
+        placeholder="Queue another message…"
+        minHeight={24}
+        maxHeight={240}
+        onKeyDown={e => {
+          if (e.key === "Enter" && !e.shiftKey && busy && (draft.trim() || attachments.length)) {
+            // While a run is active, Enter QUEUES the message to steer the run
+            // (onSend → onSupSend enqueues). The composer's own Enter would hit
+            // Stop instead, so route around it here; ■ remains the way to stop.
+            e.preventDefault();
+            onSend(attachments);
+            setAttachments([]);
+          }
+        }}
+        attachments={attachments}
+        onAttachFiles={(files) => { void addDockFiles(files); }}
+        onRemoveAttachment={(i) => setAttachments(x => x.filter((_, j) => j !== i))}
+        attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+        notice={dockNote ? { kind: "info", text: dockNote } : null}
+        onNotice={flashNote}
+        mic
+        showCounter
+        slashCommands={slashCommands.map(c => ({ name: c.name, hint: c.description, run: () => runCommand(c) }))}
+        toggles={[{
+          key: "auto",
+          label: "⚡ Auto mode",
+          title: autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval",
+          on: autoApprove,
+          onToggle: onToggleAutoApprove,
+        }]}
+        canSend={loadingModel || !!draft.trim() || attachments.length > 0}
+        sendLabel={loadingModel ? "⏳ Loading" : needsLoad ? "⚡ Load" : "▶"}
+        sendTitle={loadingModel
+          ? "Loading model into VRAM — click sends as soon as ready"
+          : needsLoad
+            ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
+            : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
+        stopLabel=""
+        stopTitle="Stop the in-flight dispatch"
+      />
     </div>
   );
 }

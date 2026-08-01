@@ -14,39 +14,30 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans the errand, picks options, hands off to the executor.",
+      "description": "Plans the errand and dispatches the generalist; the user picks the option before anything is booked.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - researcher       : compares options online (price, availability, reviews)\n  - executor         : drives the browser to book / order / submit forms\n  - receipts_archivist: files confirmation emails and receipts to the user's archive\n\nFlow: researcher -> present 2-3 options to user -> wait for pick -> executor -> archivist. Never let the executor act before the user has picked an option."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — researches options online, drives the browser to book / order / submit forms, files receipts\n  - critical_thinker : advisory reviewer — consult it before irreversible transactions\n\nFlow: research options -> present 2-3 to the user -> WAIT for the user's pick -> execute -> archive the receipt. Never let a booking or order proceed before the user has picked an option."
     },
     {
-      "name": "researcher",
-      "base": "researcher",
-      "description": "Compares booking / shopping options online.",
-      "extra_prompt": "Focus: pull 2-3 candidates for the user's request (flight, restaurant, product). Always include price, link, and a one-line tradeoff. Stop and present — do NOT continue to a booking step."
-    },
-    {
-      "name": "executor",
-      "base": "operator",
-      "description": "Drives the browser to complete the chosen booking / order.",
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Errand generalist — compares options, completes the chosen transaction in the browser, and files the receipt.",
       "icon": "owl:owl_operator",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.email.*"],
-      "extra_prompt": "Focus: take the option the user picked and complete the transaction (book, order, RSVP). State the exact action and recipient before each side-effecting tool call. Stop on the payment / confirm step and ask the user to confirm. Never store payment details."
+      "extra_skills": ["research-method"],
+      "extra_prompt": "Profile: concierge errands.\n- Research: pull 2-3 candidates (flight, restaurant, product) with price, link, and a one-line tradeoff. Present them and STOP — never continue to a booking step before the user picks.\n- Execute: complete the chosen transaction. State the exact action and recipient before each side-effecting step. Stop on the payment / confirm step and ask the user to confirm. Never store payment details.\n- Archive: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
     },
     {
-      "name": "receipts_archivist",
-      "base": "documentation",
-      "description": "Files the confirmation email and receipt into the user's archive.",
-      "mcp_allowlist": ["mcp.email.*", "mcp.files.*"],
-      "extra_prompt": "Focus: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
+      "name": "critical_thinker",
+      "base": "critic",
+      "description": "Advisory reviewer — sanity-checks the chosen option and transaction details before the user confirms.",
+      "icon": "owl:owl_critic"
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "researcher" },
-      { "source": "researcher", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "executor" },
-      { "source": "executor", "target": "receipts_archivist" },
-      { "source": "receipts_archivist", "target": "orchestrator" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

@@ -1,6 +1,11 @@
 ---
 name: Code Review
 description: How to review a change for correctness, edge cases, security, and simplicity, and report findings clearly and decisively.
+triggers:
+  - review
+  - critique
+  - audit
+  - findings
 ---
 
 # Code Review

@@ -40,7 +40,7 @@ import { samplingFor } from "./modelProfiles";
 // Per-agent SKILL injection — the SAME builder the desktop path (AgentsPage)
 // uses, so bridge runs (Telegram/WhatsApp/…) get equipped-skill bodies and the
 // .owllm/skills self-load guidance too, not just the mirrored files on disk.
-import { buildAgentSkillBlock } from "./skillRuntime";
+import { buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -4278,10 +4278,21 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
     ...(orch.extraSkills ?? []),
   ];
-  const orchSkillBlock = await buildAgentSkillBlock(
+  // Auto-skill selection (same engine as the desktop paths): merge equipped
+  // skills with skills matched from the goal text, so bridge runs load the
+  // relevant procedure without the model having to discover it.
+  const { block: orchSkillBlock, autoLoaded: orchAutoLoaded } = await buildSoloSkillBlock(
     runtimeSkillIds(orch, orchLegacySkills),
+    goal,
     !!orch.runtimePersonal,
   );
+  if (orchAutoLoaded.length > 0) {
+    hooks.onThought(orch.name, {
+      role: "system",
+      color: "#7fd4ff",
+      text: `📦 Auto-loaded skill(s): ${orchAutoLoaded.join(", ")}`,
+    });
+  }
   const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText, projectCwd, orchSkillBlock);
   const orchModel = effectiveModelFor(orch);
   const orchProvider = providerFor(orchModel, models);

@@ -13,46 +13,30 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans the finance task and routes it to the right specialist.",
+      "description": "Plans the finance task and dispatches the generalist; consults the critic on money-touching actions.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - classifier       : tags transactions (CSV / PDF imports) by category\n  - budget_watcher   : compares spending against the configured budget\n  - tax_lot_tracker  : reconciles brokerage trades into FIFO / specific-ID lots\n  - invoice_writer   : drafts and sends invoices\n\nNever auto-send money. The user must approve every outbound payment or invoice send."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — classifies transactions, watches the budget, reconciles tax lots, drafts invoices\n  - critical_thinker : advisory reviewer — consult it before anything that touches money leaves the door\n\nDispatch the generalist for every execution step; do not split one request into artificial stages. Never auto-send money. The user must approve every outbound payment or invoice send."
     },
     {
-      "name": "classifier",
-      "base": "researcher",
-      "description": "Tags transactions from CSV / PDF imports by category.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
-      "extra_prompt": "Focus: read the imported transactions, assign a category from the user's existing taxonomy (look at past entries first), flag anomalies (amounts > 2 sigma over the rolling mean) for human review."
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Finance generalist — transaction classification, budget reports, tax-lot reconciliation, and approval-gated invoices.",
+      "icon": "owl:owl_operator",
+      "extra_skills": ["research-method"],
+      "extra_prompt": "Profile: personal finance stewardship.\n- Classify: read imported transactions (CSV / PDF), assign a category from the user's existing taxonomy (look at past entries first), flag anomalies (amounts > 2 sigma over the rolling mean) for human review.\n- Budget: compute month-to-date spend per category, compare against the budget, and produce a short report. Lead with categories over budget, end with under-budget categories. No charts; plain text.\n- Tax lots: match buys/sells per ticker into tax lots (FIFO unless the user specifies otherwise). Output realised gain / loss per closed lot. Surface wash-sale candidates separately.\n- Invoices: draft an invoice from a job description (line items, hours, rate). Render to PDF, attach to a draft email, present for approval. Never auto-send."
     },
     {
-      "name": "budget_watcher",
-      "base": "researcher",
-      "description": "Compares spending against the configured budget and flags overruns.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
-      "extra_prompt": "Focus: compute month-to-date spend per category, compare against the budget, and produce a short report. Lead with categories over budget, end with under-budget categories. No charts; plain text."
-    },
-    {
-      "name": "tax_lot_tracker",
-      "base": "researcher",
-      "description": "Reconciles brokerage trades into tax lots.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
-      "extra_prompt": "Focus: match buys/sells per ticker into tax lots (FIFO unless the user specifies otherwise). Output realised gain / loss per closed lot. Surface wash-sale candidates separately."
-    },
-    {
-      "name": "invoice_writer",
-      "base": "documentation",
-      "description": "Drafts and emails invoices. Always approval-gated.",
-      "mcp_allowlist": ["mcp.email.*", "mcp.files.*"],
-      "extra_prompt": "Focus: draft an invoice from a job description (line items, hours, rate). Render to PDF, attach to a draft email, present for approval. Never auto-send."
+      "name": "critical_thinker",
+      "base": "critic",
+      "description": "Advisory reviewer — sanity-checks classifications, lot math, and invoice drafts before the user approves them.",
+      "icon": "owl:owl_critic"
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "classifier" },
-      { "source": "classifier", "target": "budget_watcher" },
-      { "source": "budget_watcher", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "tax_lot_tracker" },
-      { "source": "orchestrator", "target": "invoice_writer" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

@@ -48,10 +48,22 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 
 ## Agentic teams (`ui/src/pages/agentic/`)
 
-- **Orchestrator + specialists**: plan → parallel `@agent` dispatch → integrate.
-  Edges on the canvas are a REAL execution graph (allow-list + handoff).
-  ~20 bundled team templates; 12 role archetypes; Brainstorm assembles a
-  bespoke team from a brief (and can deep-research first, writes BRIEF.md).
+- **One generic team + profiles**: every bundled template is now a PROFILE over
+  the same 3-agent roster — orchestrator (read-only planner) + generalist
+  (`solo_generalist`, all tools, carries the profile's skill seeds + domain
+  rules) + critical_thinker (advisory, ON/OFF toggle on its card). What makes
+  "Chief of Staff" different from "Dev Squad" is data: `required_mcp` /
+  `mcp_pack` (connectors + approval policy), `extra_skills` seeds, and prompt
+  hints (`resources/agents/teams/*.json`; gate: `teamProfiles.verify.run.mjs`).
+  Projects persist `templateId` in graph_json — rosters are identical across
+  profiles, so the id is the template identity. Custom multi-specialist teams
+  (Studio/Brainstorm) still dispatch through the same graph machinery.
+- **Auto-skill selection**: before the first model token, the goal text is
+  matched against installed skills' `triggers:`/keywords and the best 1–2 are
+  injected automatically (Solo, team orchestrator, and bridge paths;
+  `selectRelevantSkillIds`/`buildSoloSkillBlock` in `skillRuntime.ts`, gate:
+  `autoSkillSelection.verify.run.mjs`). Auto-loads are surfaced in the thought
+  log (`📦 Auto-loaded skill(s): …`).
 - **Solo-Loop vs Team**: header toggle; Solo = one coder in an edit→verify→fix
   loop with Critic + Publisher; Team = full orchestration.
 - **Lean prompt profile**: solo and ≤3-agent runs get the trimmed injection
@@ -223,7 +235,8 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   previews, live sites, form filling/testing, cross-device checks. Its team card
   swaps the chat preview for the SAME `BrowserPanel` mounted `inline`
   (`isBrowser` in `AgentsPage.tsx`, mirroring the Publisher's rule-based card),
-  so the card IS the browser remote. Included in the `dev_squad` template.
+  so the card IS the browser remote. Provisioned automatically for Personal
+  Assistant projects (`kindAgents` in `ProjectSettingsDialog.tsx`).
   Card controls fire host-side (the window + gateway are host objects), so they
   work even when the rest of the team is sandboxed.
 - **Reachable by ALL agent kinds**: local + API agents call `browser_*` through

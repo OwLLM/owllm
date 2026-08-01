@@ -42,51 +42,31 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Runs the post through the pipeline: outline -> draft -> edit -> SEO -> publish.",
+      "description": "Runs the piece through outline, draft, edit, SEO gate, and approval-gated publish via the generalist.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - outliner    : produces a section-level outline for a topic\n  - drafter     : writes the full draft from the outline\n  - editor      : tightens prose, fixes structure, kills filler\n  - seo_critic  : reviews titles, meta, headings, internal links\n  - publisher   : pushes to the configured CMS / file location\n\nFlow: outliner -> drafter -> editor -> seo_critic -> publisher. Treat seo_critic as a hard gate; only publish on APPROVE."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — outlines, drafts in the user's voice, edits for clarity, and handles the approval-gated publish\n  - critical_thinker : advisory reviewer — SEO gate on titles, meta, headings, and internal links\n\nDispatch the generalist through the pipeline: outline -> draft -> edit, then send the edited piece to critical_thinker for the SEO review. Treat critical_thinker as a HARD gate: only publish on APPROVE; on REVISE/REJECT, send the notes back to the generalist. Publishing itself stays approval-gated — the generalist must state the destination and slug first and never auto-publish."
     },
     {
-      "name": "outliner",
-      "base": "documentation",
-      "description": "Produces a section-level outline for a topic.",
-      "extra_prompt": "Focus: given a topic + audience + length target, produce a numbered outline with H2 headings and 3-5 bullets per section. State the angle / thesis upfront."
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Content generalist — outline, draft, edit, and approval-gated publishing in one agent.",
+      "icon": "owl:owl_operator",
+      "extra_skills": ["technical-writing"],
+      "extra_prompt": "Profile: content studio.\n- Outline: given a topic + audience + length target, produce a numbered outline with H2 headings and 3-5 bullets per section. State the angle / thesis upfront.\n- Draft: turn the outline into prose in the user's configured voice (read past posts via the files MCP if available). Hit the length target within ±15%. Don't add sections that aren't in the outline.\n- Edit: tighten for clarity and pace. Cut throat-clearing intros, weasel words ('arguably', 'it could be argued'), and any sentence that doesn't add a fact or argument. Keep the user's voice intact — don't reach for corporate-blog-speak.\n- Publish: only after the SEO gate APPROVES. State the destination (file path or CMS URL) and the slug before invoking the side-effecting tool. Never auto-publish."
     },
     {
-      "name": "drafter",
-      "base": "documentation",
-      "description": "Writes the full draft from the outline.",
-      "extra_prompt": "Focus: turn the outline into prose. Write in the user's configured voice (read past posts via the files MCP if available). Hit the length target within ±15%. Don't add sections that aren't in the outline."
-    },
-    {
-      "name": "editor",
-      "base": "documentation",
-      "description": "Tightens prose, fixes structure, kills filler.",
-      "extra_prompt": "Focus: edit for clarity and pace. Cut throat-clearing intros, weasel words ('arguably', 'it could be argued'), and any sentence that doesn't add a fact or argument. Keep the user's voice intact — don't reach for corporate-blog-speak."
-    },
-    {
-      "name": "seo_critic",
+      "name": "critical_thinker",
       "base": "critic",
-      "description": "Reviews titles, meta, headings, internal links.",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
+      "description": "Advisory reviewer — hard SEO gate on titles, meta, heading hierarchy, and internal links before publish.",
+      "icon": "owl:owl_critic",
       "extra_prompt": "Focus: review title and meta for length + clarity (60 char title, 155 char description), heading hierarchy (one H1, descriptive H2s), internal-link opportunities to other posts in the user's archive. Reply APPROVE / REVISE / REJECT."
-    },
-    {
-      "name": "publisher",
-      "base": "operator",
-      "description": "Pushes the approved post to the CMS / output location. Approval-gated.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.browser.*"],
-      "extra_prompt": "Focus: take the editor-approved, SEO-approved draft and publish it. State the destination (file path or CMS URL) and the slug before invoking the side-effecting tool. Never auto-publish."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "outliner" },
-      { "source": "outliner", "target": "drafter" },
-      { "source": "drafter", "target": "editor" },
-      { "source": "editor", "target": "seo_critic" },
-      { "source": "seo_critic", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "publisher" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

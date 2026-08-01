@@ -131,7 +131,7 @@ import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomai
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
-import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
+import { resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -322,6 +322,10 @@ function buildGraphJson(opts: {
   agentSkills: Map<string, string[]>;
   agentToolExtras: Map<string, string[]>;
   previousGraphJson?: string | null;
+  /// Set when the roster is being (re)written FROM a template, so the project
+  /// remembers which template it runs — the generic profile rosters are
+  /// identical across templates, so the id is the only identity that survives.
+  templateId?: string;
 }): string {
   let previous: Record<string, unknown> = {};
   try {
@@ -330,6 +334,7 @@ function buildGraphJson(opts: {
   } catch { /* malformed legacy graph — rebuild the known fields */ }
   return JSON.stringify({
     ...previous,
+    ...(opts.templateId ? { templateId: opts.templateId } : {}),
     edges: opts.edges,
     roster: opts.agents.map(a => ({
       name: a.name,
@@ -408,6 +413,11 @@ type Team = {
   visibility: TeamVisibility;
   workflowRank: number;
   requiredMcp: string[];
+  /// For a project-backed Team ("project:…"): the template id persisted into
+  /// graph_json at creation. The profile conversion gave every bundled team the
+  /// SAME generic roster, so roster-shape matching can no longer tell templates
+  /// apart — the id is the only reliable identity signal.
+  templateId?: string;
 };
 type RoleData = {
   name: string;
@@ -754,9 +764,13 @@ function projectToTeam(p: ProjectRow): Team {
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
   const defaultModelByName = new Map<string, string>();
+  let templateId: string | undefined;
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
+      if (typeof parsed?.templateId === "string" && parsed.templateId.trim()) {
+        templateId = parsed.templateId.trim();
+      }
       if (Array.isArray(parsed?.edges)) {
         edges = parsed.edges
           .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
@@ -799,6 +813,7 @@ function projectToTeam(p: ProjectRow): Team {
     visibility: "custom",
     workflowRank: 999,
     requiredMcp: [],
+    templateId,
     agents,
     edges,
   };
@@ -814,6 +829,14 @@ function projectToTeam(p: ProjectRow): Team {
 function teamTemplateForActive(active: Team | null, teams: Team[]): Team | null {
   if (!active) return null;
   if (!active.id.startsWith("project:")) return active; // already a real template
+  // 0) the template id persisted into graph_json at creation. The profile
+  //    conversion gave every bundled team the SAME generic roster, so the
+  //    roster-shape strategies below can no longer tell converted templates
+  //    apart (they'd all match the alphabetically-first one). The id can.
+  if (active.templateId) {
+    const byId = teams.find(t => t.id === active.templateId || t.name === active.templateId);
+    if (byId) return byId;
+  }
   const projNames = active.agents.map(a => a.name).filter(Boolean);
   if (projNames.length === 0) return null;
   const nameSet = new Set(projNames);
@@ -2493,25 +2516,6 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
-        {isCritic && (
-          <button
-            type="button"
-            aria-pressed={criticEnabled}
-            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
-            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
-            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
-            onKeyDown={(e) => e.stopPropagation()}
-            style={{
-              width: 24, height: 22, padding: 0, flexShrink: 0,
-              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
-              borderRadius: 6,
-              background: criticEnabled ? "rgba(255,184,76,0.18)" : "rgba(0,0,0,0.25)",
-              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
-              cursor: "pointer", fontSize: 13, lineHeight: 1,
-              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
-            }}
-          >✦</button>
-        )}
         {/* The NAME is the editor handle: clicking it opens the per-agent
             model/colour/prompt popup. The clickable element is an inline-block
             sized to the name GLYPHS (not the full-width header row), so the
@@ -2532,6 +2536,38 @@ function AgentChatTile({
             }}
           >{label ?? displayLabel(name)}</span>
         </div>
+        {isCritic && (
+          <button
+            type="button"
+            data-critic-toggle="true"
+            aria-pressed={criticEnabled}
+            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
+            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
+            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
+            onKeyDown={(e) => e.stopPropagation()}
+            style={{
+              width: 50, height: 22, padding: "2px 4px 2px 5px", flexShrink: 0,
+              display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 3,
+              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
+              borderRadius: 999,
+              background: criticEnabled ? "rgba(255,184,76,0.22)" : "rgba(0,0,0,0.30)",
+              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+              cursor: "pointer", fontSize: 9, fontWeight: 800, lineHeight: 1,
+              letterSpacing: 0.3,
+              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
+            }}
+          >
+            <span>{criticEnabled ? "ON" : "OFF"}</span>
+            <span
+              aria-hidden="true"
+              style={{
+                width: 14, height: 14, flexShrink: 0, borderRadius: "50%",
+                background: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+                boxShadow: criticEnabled ? "0 0 5px rgba(255,209,102,0.65)" : "none",
+              }}
+            />
+          </button>
+        )}
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
@@ -4538,10 +4574,15 @@ function GraphCanvas({
   // these to graph_json (they'd just round-trip get filtered out).
   const hasSyntheticCritic = effective.has(CRITIC_AGENT_NAME);
   const baseLive = edges.filter(e => effective.has(e.source) && effective.has(e.target));
+  // The generic profile teams AUTHOR their orchestrator↔critic edges, so only
+  // inject the virtual pair where it isn't already present — otherwise every
+  // converted team drew the same edge twice (one real, one synthetic).
+  const syntheticPair = [
+    { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true },
+    { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true },
+  ].filter(se => !baseLive.some(e => e.source === se.source && e.target === se.target));
   const liveEdges: (Edge & { synthetic?: boolean })[] = hasSyntheticCritic && effective.has(orchName)
-    ? [...baseLive,
-       { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true } as any,
-       { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
+    ? [...baseLive, ...(syntheticPair as any[])]
     : baseLive;
 
   // Click a card to VERIFY its real connections: its incident edges + the
@@ -6979,22 +7020,6 @@ function needsCriticalThinkerReview(text: string): boolean {
   return /\b(critical[\s_]+thinker|critic)\b/i.test(text);
 }
 
-/// A Personal Secretary screenshot-to-message request is an external
-/// operation, not a software-planning goal. Running it through the secretary
-/// orchestrator, triager, responder, and final integration adds several model
-/// turns before the browser can act. Keep this narrow: only a Secretary/Chief
-/// of Staff project and an explicit capture + outbound-message request qualify.
-export function isPersonalSecretaryMediaRequest(
-  text: string,
-  team: Pick<Team, "id" | "name" | "display"> | null | undefined,
-  projectName = "",
-): boolean {
-  const teamLabel = `${team?.id ?? ""} ${team?.name ?? ""} ${team?.display ?? ""} ${projectName}`;
-  const isSecretary = /secretary|chief[\s_-]*of[\s_-]*staff|personal[\s_-]+assistant/i.test(teamLabel);
-  const isCapture = /\b(screen[\s_-]*shot|screenshot|capture)\b/i.test(text);
-  const isOutbound = /\b(send|message|whatsapp|attach|upload|share)\b/i.test(text);
-  return isSecretary && isCapture && isOutbound;
-}
 function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
   const directivesBlock = formatDirectivesBlock(directives);
   return [
@@ -9884,7 +9909,18 @@ export function AgentsPage({
       // fan-out. Per-agent model/voice/skill picks still apply — they're keyed
       // by agent name, which matches. (Names must match for the edges to
       // resolve too; teamTemplateForActive already required a roster match.)
-      if (tmpl && tmpl.agents.length > 0) return { ...proj, agents: tmpl.agents, edges: tmpl.edges };
+      if (tmpl && tmpl.agents.length > 0) {
+        // Keep project agents the template doesn't know about (e.g. the
+        // assistant flow's provisioned `browser` agent) plus their edges —
+        // adopting the template roster verbatim silently dropped them.
+        const tmplNames = new Set(tmpl.agents.map(a => a.name));
+        const extras = proj.agents.filter(a => !tmplNames.has(a.name));
+        const extraEdges = proj.edges.filter(e =>
+          extras.some(x => x.name === e.source || x.name === e.target) &&
+          (tmplNames.has(e.source) || extras.some(x => x.name === e.source)) &&
+          (tmplNames.has(e.target) || extras.some(x => x.name === e.target)));
+        return { ...proj, agents: [...tmpl.agents, ...extras], edges: [...tmpl.edges, ...extraEdges] };
+      }
       return proj;
     }
     return teams[0] ?? null;
@@ -9918,6 +9954,7 @@ export function AgentsPage({
           agentModels: perAgentModel, agentVoices: perAgentVoice,
           agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
           previousGraphJson: selectedProject.graph_json,
+          templateId: tmpl.id,
         }),
       },
     });
@@ -9951,6 +9988,7 @@ export function AgentsPage({
             agentModels: new Map(), agentVoices: new Map(),
             agentSkills: new Map(), agentToolExtras: new Map(),
             previousGraphJson: selectedProject.graph_json,
+            templateId: t.id,
           }),
         },
       });
@@ -10451,11 +10489,6 @@ export function AgentsPage({
       intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
     const directCriticSpec = runtimeTeam.agents.find(agent =>
       agent.name === CRITIC_AGENT_NAME || agent.base === "critic" || agent.base === "critical_thinker");
-    const directExternalAction = isPersonalSecretaryMediaRequest(
-      text,
-      activeTeam,
-      selectedProject?.name ?? "",
-    );
     // Remember this goal so a failed second-agent / forwarded send can offer a
     // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
     // only genuine goals land here.
@@ -10473,7 +10506,7 @@ export function AgentsPage({
     // Otherwise attaching a picture silently diverted the run to the read-only
     // single-assistant orchestrator below, skipping the solo-loop's publish
     // (the "I said publish but it switched to the orchestrator" bug).
-    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0) && !directExternalAction) {
+    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0)) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (soloMode || hasSpecialists) {
@@ -10699,15 +10732,6 @@ export function AgentsPage({
           ? `You are the orchestrator of '${activeTeam.display}'.`
           : "You are the team's orchestrator.",
         "Answer the user concisely.",
-        directExternalAction
-          ? [
-            "FAST EXTERNAL OPERATION: perform this narrow screenshot-and-message request directly.",
-            "Do not plan, delegate, invoke a critic, inspect the project, or run unrelated tools.",
-            "Use browser_screenshot with scope=app to capture only the native OWLLM application window at full pixels.",
-            "When sending a UI screenshot through WhatsApp, attach the PNG as a Document (not Photos & videos) so WhatsApp does not recompress readable text.",
-            "Verify the recipient, attachment filename, and sent confirmation, then report the actual result.",
-          ].join("\n")
-          : "",
         // Tool-use directive. Small local models tend to DESCRIBE their
         // toolbox and say "now let me test them" without ever emitting the
         // structured tool call, so the turn ends with no action taken (the
@@ -11732,10 +11756,18 @@ export function AgentsPage({
           ...(coder.extraSkills ?? []),
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
-        const sBlock = await buildAgentSkillBlock(
+        const { block: sBlock, autoLoaded: sAutoLoaded } = await buildSoloSkillBlock(
           runtimeSkillIds(coder, sIds),
+          text,
           !!coder.runtimePersonal,
         );
+        if (sAutoLoaded.length > 0) {
+          appendThought(coder.name, {
+            role: "system",
+            color: "#7fd4ff",
+            text: `📦 Auto-loaded skill(s): ${sAutoLoaded.join(", ")}`,
+          });
+        }
         // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
         // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
         // Alone, that lock is fatal — it does its slice and hands the rest to agents
@@ -12046,10 +12078,21 @@ export function AgentsPage({
         ...(orch.extraSkills ?? []),
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
-      const orchSkillBlock = await buildAgentSkillBlock(
+      // Auto-skill selection (same engine as the Solo path): merge the
+      // orchestrator's equipped skills with skills matched from the goal text,
+      // so a relevant procedure loads without the model having to discover it.
+      const { block: orchSkillBlock, autoLoaded: orchAutoLoaded } = await buildSoloSkillBlock(
         runtimeSkillIds(orch, orchSkillIds),
+        text,
         !!orch.runtimePersonal,
       );
+      if (orchAutoLoaded.length > 0) {
+        appendThought(orch.name, {
+          role: "system",
+          color: "#7fd4ff",
+          text: `📦 Auto-loaded skill(s): ${orchAutoLoaded.join(", ")}`,
+        });
+      }
       const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = effectiveModelFor(orch);

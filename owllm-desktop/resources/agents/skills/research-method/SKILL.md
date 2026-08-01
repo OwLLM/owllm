@@ -1,6 +1,13 @@
 ---
 name: Research Method
 description: How to research a question rigorously — gather from multiple sources, verify claims, separate fact from inference, and synthesise with citations.
+triggers:
+  - research
+  - investigate
+  - analyze
+  - compare
+  - evaluate
+  - sources
 ---
 
 # Research Method

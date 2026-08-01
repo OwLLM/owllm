@@ -135,6 +135,89 @@ export async function anySkillInstalled(): Promise<boolean> {
 
 const SKILL_BODY_BUDGET = 8000; // chars (~2k tokens) of inlined skill instructions
 
+/// Tokens too generic or structural to be useful matching signals.
+const STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "by", "can", "could", "did", "do",
+  "does", "for", "from", "had", "has", "have", "i", "if", "in", "into", "is", "it",
+  "its", "me", "my", "of", "on", "or", "out", "shall", "should", "that", "the", "this",
+  "to", "up", "was", "we", "were", "will", "with", "would", "you", "your",
+]);
+
+/// Extract lowercase alphanumeric tokens from free text, dropping stop words.
+function tokenize(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of (text || "").toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw.length >= 2 && !STOP_WORDS.has(raw)) out.add(raw);
+  }
+  return out;
+}
+
+/// Read the optional `triggers:` frontmatter array as normalised tokens.
+function readTriggers(fm: Record<string, unknown> | null): Set<string> {
+  const out = new Set<string>();
+  const t = fm?.triggers;
+  if (Array.isArray(t)) {
+    for (const item of t) {
+      if (typeof item === "string") {
+        for (const tok of tokenize(item)) out.add(tok);
+      }
+    }
+  }
+  return out;
+}
+
+/// Tokens from the skill's name + description, used as a low-weight fallback
+/// when no explicit triggers are declared or when they don't overlap.
+function skillKeywords(p: RawSkillPack): Set<string> {
+  const out = new Set<string>();
+  const name = fmString(p.frontmatter, "name");
+  const desc = fmString(p.frontmatter, "description");
+  for (const tok of tokenize(`${name} ${desc}`)) out.add(tok);
+  return out;
+}
+
+/// Auto-select the installed skills most relevant to the user's goal.
+/// Scores by explicit `triggers:` matches (weight 3) and name/description
+/// keyword matches (weight 1). Returns the top-N ids above the threshold.
+export async function selectRelevantSkillIds(
+  goalText: string,
+  opts: { max?: number; allowedIds?: string[]; threshold?: number } = {},
+): Promise<string[]> {
+  const { max = 2, allowedIds, threshold = 1 } = opts;
+  const want = tokenize(goalText);
+  if (want.size === 0) return [];
+  const raw = await rawPacks();
+  const visible = allowedIds ? raw.filter(p => allowedIds.includes(p.id)) : raw;
+  const scored = visible
+    .map(p => {
+      const triggers = readTriggers(p.frontmatter);
+      const keywords = skillKeywords(p);
+      let score = 0;
+      for (const w of want) {
+        if (triggers.has(w)) score += 3;
+        else if (keywords.has(w)) score += 1;
+      }
+      return { id: p.id, score };
+    })
+    .filter(s => s.score >= threshold)
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, max).map(s => s.id);
+}
+
+/// Build a Solo-mode skill block that merges the agent's equipped skills with
+/// automatically selected skills based on the user's goal. Returns the block
+/// plus the list of ids that were auto-loaded so the caller can log/audit them.
+export async function buildSoloSkillBlock(
+  equippedIds: string[],
+  goalText: string,
+  strict = false,
+): Promise<{ block: string; autoLoaded: string[] }> {
+  const autoLoaded = strict ? [] : await selectRelevantSkillIds(goalText, { max: 2 });
+  const merged = [...new Set([...equippedIds, ...autoLoaded])];
+  const block = await buildAgentSkillBlock(merged, strict);
+  return { block, autoLoaded };
+}
+
 /// Build the SKILL block for a specialist prompt. Descriptions always shown;
 /// bodies inlined smallest-first within SKILL_BODY_BUDGET. Whatever isn't
 /// inlined this turn, the agent can pull on demand with the `load_skill` tool

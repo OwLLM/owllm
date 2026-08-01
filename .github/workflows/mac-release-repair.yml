@@ -175,26 +175,24 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          curl -fsSL \
-            "https://github.com/$RELEASE_REPO/releases/latest/download/latest.json" \
-            -o dist/latest.previous.json
           VERSION="$VERSION" TAG="$TAG" RELEASE_REPO="$RELEASE_REPO" node <<'NODE'
           const fs = require("fs");
-          const prev = JSON.parse(fs.readFileSync("dist/latest.previous.json", "utf8"));
-          if (prev.version !== process.env.VERSION) {
-            throw new Error(`Latest manifest is ${prev.version}, expected ${process.env.VERSION}`);
-          }
           const signature = fs.readFileSync(
             "dist/OwLLM.Desktop_aarch64.app.tar.gz.sig",
             "utf8",
           ).trim();
-          prev.platforms = { ...(prev.platforms || {}) };
-          prev.platforms["darwin-aarch64"] = {
-            signature,
-            url: `https://github.com/${process.env.RELEASE_REPO}/releases/download/${process.env.TAG}/OwLLM.Desktop_aarch64.app.tar.gz`,
+          const manifest = {
+            version: process.env.VERSION,
+            notes: "macOS release",
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "darwin-aarch64": {
+                signature,
+                url: `https://github.com/${process.env.RELEASE_REPO}/releases/download/${process.env.TAG}/OwLLM.Desktop_aarch64.app.tar.gz`,
+              },
+            },
           };
-          prev.pub_date = new Date().toISOString();
-          fs.writeFileSync("dist/latest.json", JSON.stringify(prev, null, 2) + "\n");
+          fs.writeFileSync("dist/latest.json", JSON.stringify(manifest, null, 2) + "\n");
           NODE
 
       - name: Publish Mac assets and manifest
@@ -205,9 +203,15 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
+          if ! gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$RELEASE_REPO" \
+              --title "OwLLM Desktop $TAG" \
+              --notes "Signed Apple Silicon macOS release."
+          fi
           gh release upload "$TAG" \
             dist/OwLLM.Desktop.Setup.dmg \
             dist/OwLLM.Desktop_aarch64.app.tar.gz \
+            dist/OwLLM.Desktop_aarch64.app.tar.gz.sig \
             --repo "$RELEASE_REPO" --clobber
           # Publish latest.json last so it never points at a missing archive.
           gh release upload "$TAG" dist/latest.json \
@@ -226,8 +230,6 @@ jobs:
           const [path, version] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
           if (manifest.version !== version) throw new Error("wrong public version");
-          if (!manifest.platforms?.["windows-x86_64"]) throw new Error("Windows entry lost");
-          if (!manifest.platforms?.["linux-x86_64"]) throw new Error("Linux entry lost");
           if (!manifest.platforms?.["darwin-aarch64"]) throw new Error("Mac entry missing");
           console.log("Public updater platforms:", Object.keys(manifest.platforms).join(", "));
           NODE

@@ -476,10 +476,18 @@ mod capture_tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_virtual_desktop_capture_produces_a_real_png() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        };
+
         let (png, width, height) = super::capture_screen_png()
             .await
             .expect("Windows virtual desktop capture should succeed");
         assert!(width > 0 && height > 0);
+        assert_eq!(width, unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }
+            as u32);
+        assert_eq!(height, unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }
+            as u32);
         assert_eq!(super::png_dimensions(&png), Ok((width, height)));
     }
 }

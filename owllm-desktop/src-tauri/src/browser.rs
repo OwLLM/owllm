@@ -3256,6 +3256,23 @@ struct PageCaptureMetrics {
     height: u32,
 }
 
+const MAX_FULL_PAGE_PIXELS: f64 = 80_000_000.0;
+
+fn full_page_scale(metrics: &PageCaptureMetrics) -> Result<f64, String> {
+    if metrics.width == 0 || metrics.height == 0 {
+        return Err("page reported an empty document".into());
+    }
+    let area = metrics.width as f64 * metrics.height as f64;
+    let scale = (MAX_FULL_PAGE_PIXELS / area).sqrt().min(1.0);
+    if scale < 0.1 {
+        return Err(format!(
+            "page is too large to capture safely ({}x{} CSS pixels)",
+            metrics.width, metrics.height
+        ));
+    }
+    Ok(scale)
+}
+
 fn save_browser_capture(
     app: &tauri::AppHandle,
     png: &[u8],
@@ -3265,6 +3282,7 @@ fn save_browser_capture(
     tab_id: Option<u64>,
     req: u64,
 ) -> Result<String, String> {
+    crate::support::png_dimensions(png)?;
     let dir = app
         .path()
         .app_cache_dir()
@@ -3347,17 +3365,7 @@ fn capture_full_page_png(
 ) -> Result<(Vec<u8>, u32, u32), String> {
     use base64::Engine as _;
 
-    if metrics.width == 0 || metrics.height == 0 {
-        return Err("page reported an empty document".into());
-    }
-    let area = metrics.width as f64 * metrics.height as f64;
-    let scale = (80_000_000.0 / area).sqrt().min(1.0);
-    if scale < 0.1 {
-        return Err(format!(
-            "page is too large to capture safely ({}x{} CSS pixels)",
-            metrics.width, metrics.height
-        ));
-    }
+    let scale = full_page_scale(metrics)?;
     let params = json!({
         "format": "png",
         "fromSurface": true,
@@ -3383,6 +3391,177 @@ fn capture_full_page_png(
         .map_err(|e| format!("decode WebView2 screenshot: {e}"))?;
     let (width, height) = crate::support::png_dimensions(&png)?;
     Ok((png, width, height))
+}
+
+/// Render the one-page PDF returned by WKWebView into a bounded RGBA bitmap.
+/// CoreGraphics is used directly so this remains installer-local and does not
+/// shell out to Preview, `sips`, ImageMagick, or another GUI process.
+#[cfg(target_os = "macos")]
+fn render_macos_pdf(
+    pdf: &[u8],
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use std::ffi::c_void;
+
+    type CFDataRef = *const c_void;
+    type CGColorSpaceRef = *mut c_void;
+    type CGContextRef = *mut c_void;
+    type CGDataProviderRef = *mut c_void;
+    type CGPDFDocumentRef = *mut c_void;
+    type CGPDFPageRef = *mut c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDataCreate(allocator: *const c_void, bytes: *const u8, length: isize) -> CFDataRef;
+        fn CFRelease(value: *const c_void);
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGDataProviderCreateWithCFData(data: CFDataRef) -> CGDataProviderRef;
+        fn CGDataProviderRelease(provider: CGDataProviderRef);
+        fn CGPDFDocumentCreateWithProvider(provider: CGDataProviderRef) -> CGPDFDocumentRef;
+        fn CGPDFDocumentRelease(document: CGPDFDocumentRef);
+        fn CGPDFDocumentGetPage(document: CGPDFDocumentRef, page: usize) -> CGPDFPageRef;
+        fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
+        fn CGColorSpaceRelease(space: CGColorSpaceRef);
+        fn CGBitmapContextCreate(
+            data: *mut c_void,
+            width: usize,
+            height: usize,
+            bits_per_component: usize,
+            bytes_per_row: usize,
+            space: CGColorSpaceRef,
+            bitmap_info: u32,
+        ) -> CGContextRef;
+        fn CGContextRelease(context: CGContextRef);
+        fn CGContextSetRGBFillColor(
+            context: CGContextRef,
+            red: f64,
+            green: f64,
+            blue: f64,
+            alpha: f64,
+        );
+        fn CGContextFillRect(context: CGContextRef, rect: objc2_core_foundation::CGRect);
+        fn CGContextTranslateCTM(context: CGContextRef, tx: f64, ty: f64);
+        fn CGContextScaleCTM(context: CGContextRef, sx: f64, sy: f64);
+        fn CGContextDrawPDFPage(context: CGContextRef, page: CGPDFPageRef);
+    }
+
+    let scale = full_page_scale(metrics)?;
+    let width = ((metrics.width as f64 * scale).round() as u32).max(1);
+    let height = ((metrics.height as f64 * scale).round() as u32).max(1);
+    let stride = width as usize * 4;
+    let mut rgba = vec![0u8; stride * height as usize];
+
+    unsafe {
+        let data = CFDataCreate(std::ptr::null(), pdf.as_ptr(), pdf.len() as isize);
+        if data.is_null() {
+            return Err("CoreFoundation could not read the WebKit PDF".into());
+        }
+        let provider = CGDataProviderCreateWithCFData(data);
+        CFRelease(data);
+        if provider.is_null() {
+            return Err("CoreGraphics could not create a PDF data provider".into());
+        }
+        let document = CGPDFDocumentCreateWithProvider(provider);
+        CGDataProviderRelease(provider);
+        if document.is_null() {
+            return Err("WebKit returned an invalid PDF snapshot".into());
+        }
+        let page = CGPDFDocumentGetPage(document, 1);
+        if page.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("WebKit PDF snapshot contained no page".into());
+        }
+        let color_space = CGColorSpaceCreateDeviceRGB();
+        if color_space.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("CoreGraphics could not create an RGB color space".into());
+        }
+        // kCGImageAlphaPremultipliedLast: RGBA, matching encode_png.
+        let context = CGBitmapContextCreate(
+            rgba.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            stride,
+            color_space,
+            1,
+        );
+        CGColorSpaceRelease(color_space);
+        if context.is_null() {
+            CGPDFDocumentRelease(document);
+            return Err("CoreGraphics could not allocate the screenshot bitmap".into());
+        }
+        let target = objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::ZERO,
+            objc2_core_foundation::CGSize::new(width as f64, height as f64),
+        );
+        CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0);
+        CGContextFillRect(context, target);
+        CGContextTranslateCTM(context, 0.0, height as f64);
+        CGContextScaleCTM(context, scale, -scale);
+        CGContextDrawPDFPage(context, page);
+        CGContextRelease(context);
+        CGPDFDocumentRelease(document);
+    }
+
+    let png = crate::support::encode_png(&rgba, width, height)?;
+    Ok((png, width, height))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_full_page_png(
+    webview: &Webview,
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSData, NSError};
+    use objc2_web_kit::{WKPDFConfiguration, WKWebView};
+
+    full_page_scale(metrics)?;
+    let capture_width = metrics.width;
+    let capture_height = metrics.height;
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, String>>();
+    webview
+        .with_webview(move |platform| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                let _ = tx.send(Err(
+                    "WKWebView capture was not scheduled on the main thread".into(),
+                ));
+                return;
+            };
+            let raw = platform.inner().cast::<WKWebView>();
+            let Some(wkwebview) = (unsafe { raw.as_ref() }) else {
+                let _ = tx.send(Err("WKWebView handle was unavailable".into()));
+                return;
+            };
+            let configuration = unsafe { WKPDFConfiguration::new(mtm) };
+            let rect = objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(capture_width as f64, capture_height as f64),
+            );
+            unsafe { configuration.setRect(rect) };
+            let callback = block2::RcBlock::new(move |data: *mut NSData, error: *mut NSError| {
+                let result = if let Some(data) = unsafe { data.as_ref() } {
+                    Ok(data.to_vec())
+                } else if let Some(error) = unsafe { error.as_ref() } {
+                    Err(format!("WKWebView full-page PDF failed: {error:?}"))
+                } else {
+                    Err("WKWebView full-page PDF returned no data".into())
+                };
+                let _ = tx.send(result);
+            });
+            unsafe {
+                wkwebview
+                    .createPDFWithConfiguration_completionHandler(Some(&configuration), &callback)
+            };
+        })
+        .map_err(|e| format!("schedule WKWebView full-page snapshot: {e}"))?;
+    let pdf = rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WKWebView full-page screenshot timed out".to_string())??;
+    render_macos_pdf(&pdf, metrics)
 }
 
 #[cfg(target_os = "linux")]
@@ -3419,7 +3598,7 @@ fn capture_full_page_png(
         .map_err(|_| "WebKitGTK full-page screenshot timed out".to_string())?
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn capture_full_page_png(
     _webview: &Webview,
     _metrics: &PageCaptureMetrics,

@@ -14,12 +14,11 @@ const home = read("pages/core/HomePage.tsx");
 const styles = read("styles.css");
 const rust = read("../../src-tauri/src/lib.rs");
 
-check("Home launcher row uses the responsive laptop grid",
-  home.includes('className="home-launcher-grid"')
-    && !home.includes('gridTemplateColumns: "repeat(3, 1fr)"'));
-check("Home launcher squares stop expanding into oversized posters",
-  /\.home-launcher-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*360px\)\)/.test(styles)
-    && /\.home-launcher-grid\s*\{[\s\S]*justify-content:\s*center/.test(styles));
+check("Home launcher row uses the shared responsive grid",
+  home.includes('className="home-launcher-grid"'));
+check("Home launcher squares resize with the available page width",
+  /\.home-launcher-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/.test(styles)
+    && !/\.home-launcher-grid\s*\{[\s\S]*grid-template-columns:[^;]*(?:360px|max-content)/.test(styles));
 check("macOS performs one startup-only safe-area fit",
   rust.includes("fn fit_macos_main_window(window: &tauri::Window)")
     && rust.includes("static FIT_ONCE: AtomicBool")

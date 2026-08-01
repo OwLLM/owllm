@@ -4067,6 +4067,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-javascript-core"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a1e6550c4caed348956ce3370c9ffeca70bb1dbed4fa96112e7c6170e074586"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-osa-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4168,6 +4178,8 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-javascript-core",
+ "objc2-security",
 ]
 
 [[package]]
@@ -4277,6 +4289,7 @@ dependencies = [
  "aes-gcm",
  "ashpd",
  "base64 0.22.1",
+ "block2",
  "cairo-rs",
  "cbc",
  "chrono",
@@ -4290,6 +4303,10 @@ dependencies = [
  "mailparse",
  "md-5",
  "native-tls",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-web-kit",
  "once_cell",
  "pdf-extract",
  "png 0.17.16",

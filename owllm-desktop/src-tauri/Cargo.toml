@@ -219,6 +219,22 @@ cairo-rs = { version = "0.18", features = ["png"] }
 # path to types already in the tree, not a new library.
 webkit2gtk = { version = "2.0", features = ["v2_30"] }
 
+# WKWebView's snapshot API is viewport-only. Full-document capture on macOS
+# therefore asks WebKit for a single-page PDF of the document, then renders
+# that PDF into the same bounded PNG format used by Windows and Linux. Keep the
+# bindings on the same objc2 family and versions Tauri/Wry use.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-core-foundation = { version = "0.3.2", features = ["objc2"] }
+objc2-foundation = { version = "0.3.2", features = ["NSData", "NSError"] }
+objc2-web-kit = { version = "0.3.2", features = [
+    "block2",
+    "objc2-core-foundation",
+    "WKPDFConfiguration",
+    "WKWebView",
+] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

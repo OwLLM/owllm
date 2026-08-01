@@ -732,6 +732,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
+  const [secondaryAttachments, setSecondaryAttachments] = useState<Attachment[]>([]);
+  const secondaryFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
   const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
@@ -2138,18 +2140,20 @@ function CodeWorkspace({ pageId, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
-    opts?: { withEvents?: boolean },
+    opts?: { withEvents?: boolean; attachments?: Attachment[] },
   ): Promise<string> => {
     // The second agent runs its OWN model (falling back to the primary's when
     // it hasn't picked one), independent of the primary chat.
     const secModel = secondaryModelEffective;
     const provider = providerFor(secModel, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
+    const attachments = opts?.attachments ?? [];
+    const imgs = imageAttachments(attachments);
     await refreshBrowserState();
     const browserLine = getBrowserStateLine();
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "");
-    const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
+    const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     showSecondaryMemoryPack(pack);
     if (isLocal) {
       const managedHere = requiresManagedLocalServer(secModel, provider);
@@ -2157,14 +2161,14 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (managedHere && !port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
-        userContent: enrichedUser, temperature: 0.3,
+        userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
         signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
         allowedTools: ["all"],
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], imgs.length ? imgs : undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -2362,7 +2366,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   const sendSecondary = async (textOverride?: string) => {
     const fromComposer = textOverride === undefined;
     const text = (textOverride ?? secondaryDraft).trim();
-    if (!text) return;
+    const attachments = fromComposer ? secondaryAttachments : [];
+    const images = imageAttachments(attachments);
+    if (!text && attachments.length === 0) return;
     if (secondaryBusy) {
       // No steer queue on the second pane (yet) — say so instead of dropping.
       setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏸ Second agent is mid-turn — this message was not delivered. Wait or press Stop, then resend.", ts: Date.now() }]);
@@ -2370,7 +2376,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
-    if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
     setSecondaryBusy(true);
@@ -2379,13 +2385,21 @@ function CodeWorkspace({ pageId, onTitle }: {
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
-    setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
+    const documentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
+    setSecondaryMessages((m) => [...m, {
+      role: "user",
+      content: visibleText,
+      context: appendDocumentAttachmentText(text, attachments),
+      images: images.length ? attachmentThumbs(images) : undefined,
+      ts: Date.now(),
+    }]);
     setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
     let aborted = false;
     let replyText = "";
     try {
       setStatus("Second agent working…");
-      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2433,12 +2447,63 @@ function CodeWorkspace({ pageId, onTitle }: {
     >Terminal</button>
   );
 
+  // Both project agents use this one attachment path. Parsing, accepted file
+  // types, previews, paste/drop behavior, and model payloads must stay in sync.
+  const addProjectComposerFiles = async (
+    files: FileList | File[],
+    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
+  ) => {
+    for (const file of Array.from(files)) {
+      try {
+        const attachment = await fileToChatAttachment(file);
+        setAttachments((current) => [...current, attachment]);
+      } catch (e: any) {
+        setStatus(String(e?.message ?? e));
+      }
+    }
+  };
+  const addCodeFiles = (files: FileList | File[]) => {
+    void addProjectComposerFiles(files, setCodeAttachments);
+  };
+  const addSecondaryFiles = (files: FileList | File[]) => {
+    void addProjectComposerFiles(files, setSecondaryAttachments);
+  };
+  const renderAttachmentTray = (
+    attachments: Attachment[],
+    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
+  ) => attachments.length > 0 && (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {attachments.map((attachment, i) => (
+        <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+          {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
+          <button onClick={() => setAttachments((current) => current.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+        </div>
+      ))}
+    </div>
+  );
+  const renderAttachmentPicker = (
+    owner: "primary" | "secondary",
+    inputRef: { current: HTMLInputElement | null },
+    addFiles: (files: FileList | File[]) => void,
+  ) => (
+    <>
+      <input data-ui={`Code${owner === "primary" ? "Primary" : "Secondary"}AttachmentInput`} ref={inputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
+             onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
+      <button onClick={() => inputRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+    </>
+  );
+
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div data-ui="CodeSecondaryComposer" style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}>
+    <div
+      data-ui="CodeSecondaryComposer"
+      onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) e.preventDefault(); }}
+      onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
+      style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}
+    >
       <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
         <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
         <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
@@ -2454,11 +2519,14 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
         {renderTerminalButton("secondary")}
       </div>
+      {renderAttachmentTray(secondaryAttachments, setSecondaryAttachments)}
       <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
+        {renderAttachmentPicker("secondary", secondaryFileRef, addSecondaryFiles)}
         <textarea
           ref={secondaryDraftRef}
           value={secondaryDraft}
           onChange={(e) => setSecondaryDraft(e.target.value)}
+          onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
           placeholder="Message the second agent… (same workspace, its own conversation & model)"
           rows={2}
@@ -2474,9 +2542,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         ) : (
           <button
             onClick={() => { void sendSecondary(); }}
-            disabled={!secondaryDraft.trim()}
+            disabled={!secondaryDraft.trim() && secondaryAttachments.length === 0}
             title="Send to the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: (secondaryDraft.trim() || secondaryAttachments.length) ? 1 : 0.5 }}
           >Send</button>
         )}
       </div>
@@ -2787,14 +2855,6 @@ function CodeWorkspace({ pageId, onTitle }: {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
     if (activeAbs) dropTab(activeAbs);
   };
-  // Project-composer attachments — mirror addChatFiles (just-chat box).
-  const addCodeFiles = async (files: FileList | File[]) => {
-    for (const f of Array.from(files)) {
-      try { const a = await fileToChatAttachment(f); setCodeAttachments((x) => [...x, a]); }
-      catch (e: any) { setStatus(String(e?.message ?? e)); }
-    }
-  };
-
   const wsShort = (projectRoot || workspace) ? (projectRoot || workspace)!.replace(/^.*[\\/]/, "") : "No folder";
 
   // ---- Just-chat mode (no folder): the everyday-chat surface --------------
@@ -3789,20 +3849,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
           {renderTerminalButton("primary")}
         </div>
-        {codeAttachments.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {codeAttachments.map((attachment, i) => (
-              <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-                {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
-                <button onClick={() => setCodeAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
+        {renderAttachmentTray(codeAttachments, setCodeAttachments)}
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <input ref={codeFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
-                 onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button onClick={() => codeFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          {renderAttachmentPicker("primary", codeFileRef, addCodeFiles)}
           <textarea
             ref={codeDraftRef}
             value={draft}

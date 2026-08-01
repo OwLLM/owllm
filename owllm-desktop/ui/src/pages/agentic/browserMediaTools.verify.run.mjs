@@ -60,10 +60,17 @@ check("full-page capture never scrolls or resizes the shared browser",
   browser.includes('SnapshotRegion::FullDocument') &&
   !browser.includes('scroll-and-stitch'));
 check("full-page capture is bounded against hostile document sizes",
-  browser.includes("80_000_000.0 / area") &&
+  browser.includes("MAX_FULL_PAGE_PIXELS / area") &&
   browser.includes("page is too large to capture safely"));
-check("macOS full-page limitation is explicit rather than returning a viewport lie",
-  browser.includes('full-page screenshot is not yet implemented by this platform WebView'));
+check("macOS full-page capture uses a non-scrolling WebKit PDF and CoreGraphics render",
+  browser.includes("createPDFWithConfiguration_completionHandler") &&
+  browser.includes("WKPDFConfiguration") &&
+  browser.includes("CGContextDrawPDFPage") &&
+  browser.includes("render_macos_pdf(&pdf, metrics)") &&
+  browser.includes('target_os = "linux", target_os = "macos"'));
+check("saved captures are validated as real PNGs before hitting the filesystem",
+  browser.includes("crate::support::png_dimensions(png)?;") &&
+  support.includes('capture did not produce a valid PNG'));
 check("release CI compiles the capture code on Windows, macOS, and Linux",
   releaseWorkflow.includes("rust_target: 'x86_64-pc-windows-msvc'") &&
   releaseWorkflow.includes("rust_target: 'aarch64-apple-darwin'") &&
@@ -107,8 +114,12 @@ check("negative control catches an unbounded upload",
   !browser.replace("meta.len() > MAX_BROWSER_UPLOAD_BYTES", "false")
     .includes("meta.len() > MAX_BROWSER_UPLOAD_BYTES"));
 check("negative control catches desktop capture silently falling back to viewport",
+  browser.includes('return capture_desktop(&app, None, req);') &&
   !browser.replace('return capture_desktop(&app, None, req);', 'return capture_browser_window(&app, None, req);')
     .includes('return capture_desktop(&app, None, req);'));
+check("negative control catches removal of macOS full-page capture",
+  !browser.replace("render_macos_pdf(&pdf, metrics)", 'Err("macOS full-page unavailable".into())')
+    .includes("render_macos_pdf(&pdf, metrics)"));
 
 console.log(`\nbrowserMediaTools.verify: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

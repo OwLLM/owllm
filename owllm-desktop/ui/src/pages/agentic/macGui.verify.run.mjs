@@ -49,6 +49,15 @@ check("macOS reasserts the visible child frame above the main window",
     && overlay.includes("NS_WINDOW_ABOVE")
     && /overlay\.show\(\)\?;[\s\S]{0,220}order_macos_overlay_above_main\(main, overlay\)\?/.test(overlay)
     && (overlay.match(/show_overlay_above_main\(/g) || []).length >= 3);
+check("macOS frame can follow main beyond the visible screen edge",
+  overlay.includes("fn allow_macos_overlay_outside_screen(")
+    && overlay.includes("constrainFrameRect:toScreen:")
+    && overlay.includes("class_addMethod")
+    && overlay.includes("MACOS_UNCONSTRAINED_OVERLAY")
+    && !overlay.includes("AnyObject::set_class")
+    && !overlay.includes("ClassBuilder")
+    && overlay.includes("allow_macos_overlay_outside_screen(&overlay)")
+    && /create_overlay\(app, &main\)[\s\S]{0,500}sync_once\(&main, &overlay\)/.test(overlay));
 check("macOS Retina overlay geometry scales its transparent margins",
   overlay.includes("fn geometry_scale(scale_factor: f64) -> f64")
     && overlay.includes("main.scale_factor()")

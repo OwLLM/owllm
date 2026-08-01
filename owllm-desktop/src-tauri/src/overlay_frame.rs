@@ -8,6 +8,8 @@
 //! window flashes white over the whole app — the startup-flash
 //! regression. The 33ms sync loop picks it up as soon as it's ready.
 
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,9 @@ use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Windo
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static MACOS_UNCONSTRAINED_OVERLAY: AtomicPtr<objc2::runtime::AnyObject> =
+    AtomicPtr::new(std::ptr::null_mut());
 // Linux/Jetson cannot reliably repaint an already-drawn pixel back to alpha
 // zero. The frame therefore clears by unmapping the WHOLE overlay window,
 // which the compositor handles correctly. Windows keeps its CSS fade and
@@ -147,6 +152,8 @@ pub fn install(app: &mut App) {
 
 pub fn close_if_present<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) {
+        #[cfg(target_os = "macos")]
+        MACOS_UNCONSTRAINED_OVERLAY.store(std::ptr::null_mut(), Ordering::Release);
         let _ = overlay.hide();
         let _ = overlay.close();
     }
@@ -205,7 +212,106 @@ fn create_overlay(app: &mut App, main: &WebviewWindow) -> tauri::Result<WebviewW
     #[cfg(not(target_os = "macos"))]
     let _ = main;
 
-    builder.build()
+    let overlay = builder.build()?;
+
+    // AppKit normally constrains every NSWindow to the visible screen frame.
+    // That is wrong for this window: its transparent decoration deliberately
+    // extends beyond `main`, including above the menu bar when the user drags
+    // main to the top edge. Without the override, AppKit pins the overlay at
+    // the screen edge while main continues moving, visibly detaching the two.
+    #[cfg(target_os = "macos")]
+    allow_macos_overlay_outside_screen(&overlay)?;
+
+    Ok(overlay)
+}
+
+/// Let only the decorative macOS frame extend beyond the visible screen.
+///
+/// `NSWindow::setFrameTopLeftPoint` calls `constrainFrameRect:toScreen:` even
+/// for borderless child windows. Tao's `TaoWindow` class must not be replaced:
+/// its `sendEvent:` implementation resolves its superclass from the live
+/// object, and changing that class caused a reproducible EXC_BAD_ACCESS on the
+/// next input event. Instead, install one method on the existing `TaoWindow`
+/// class and bypass the clamp only when the receiver is this overlay. Every
+/// other OwLLM window delegates to AppKit's original implementation.
+#[cfg(target_os = "macos")]
+fn allow_macos_overlay_outside_screen(overlay: &WebviewWindow) -> tauri::Result<()> {
+    use objc2::{
+        ffi, msg_send,
+        runtime::{AnyObject, Imp, Sel},
+        sel,
+    };
+    use objc2_foundation::NSRect;
+
+    unsafe extern "C-unwind" fn unconstrained_frame(
+        this: *mut AnyObject,
+        _cmd: Sel,
+        frame_rect: NSRect,
+        screen: *mut AnyObject,
+    ) -> NSRect {
+        if std::ptr::eq(this, MACOS_UNCONSTRAINED_OVERLAY.load(Ordering::Acquire)) {
+            return frame_rect;
+        }
+
+        // SAFETY: This method is installed directly on TaoWindow, whose
+        // superclass is NSWindow. Calling super preserves AppKit's normal
+        // screen constraint for main and every other Tao window.
+        let this_ref = unsafe { &*this };
+        let superclass = this_ref
+            .class()
+            .superclass()
+            .expect("TaoWindow must inherit from NSWindow");
+        unsafe {
+            msg_send![
+                super(this_ref, superclass),
+                constrainFrameRect: frame_rect,
+                toScreen: screen
+            ]
+        }
+    }
+
+    let window = overlay.ns_window()? as *mut AnyObject;
+    // SAFETY: ns_window returns the live NSWindow retained by the WebviewWindow.
+    let window = unsafe { &*window };
+    let class = window.class();
+    let selector = sel!(constrainFrameRect:toScreen:);
+    let already_installed = class
+        .instance_methods()
+        .iter()
+        .any(|method| method.name() == selector);
+    if !already_installed {
+        let inherited = class
+            .superclass()
+            .and_then(|superclass| superclass.instance_method(selector))
+            .ok_or_else(|| {
+                std::io::Error::other("NSWindow constrainFrameRect:toScreen: is unavailable")
+            })?;
+        let implementation: Imp = unsafe {
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect,
+                Imp,
+            >(unconstrained_frame)
+        };
+        // SAFETY: The implementation has the exact inherited method ABI and
+        // the inherited type encoding is reused verbatim. TaoWindow is already
+        // registered, so class_addMethod is the supported runtime operation.
+        let added = unsafe {
+            ffi::class_addMethod(
+                class as *const _ as *mut _,
+                selector,
+                implementation,
+                ffi::method_getTypeEncoding(inherited),
+            )
+        };
+        if !added.as_bool() {
+            return Err(std::io::Error::other(
+                "failed to install the macOS overlay screen-constraint handler",
+            )
+            .into());
+        }
+    }
+    MACOS_UNCONSTRAINED_OVERLAY.store(window as *const _ as *mut _, Ordering::Release);
+    Ok(())
 }
 
 /// Make `main` the OWNER of `overlay` via Win32

@@ -40,7 +40,6 @@ import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWiza
 import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncModal";
 import { githubStatus, GITHUB_CHANGED_EVENT } from "./pages/agentic/github";
 import WatcherDrawer from "./support/WatcherDrawer";
-import GenSpeedBadge from "./components/GenSpeedBadge";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
@@ -209,57 +208,19 @@ function WindowControls() {
   );
 }
 
-// Live state shown in the header SysInfoBlock — polled every 2s
-// from the same Rust commands the ServerPage uses, so the two views
-// can't disagree.
-type ServerStatusLite = {
-  running: boolean;
-  model_id: string | null;
-  port: number | null;
-  message: string;
-};
-type VramGpu = { index: number; used_mib: number; total_mib: number };
-type VramStatusLite = { gpus: VramGpu[] };
-
-// Model ids commonly include the organisation, fine-tune recipe and quant.
-// Keeping the tail is useful because it usually carries the quant, while a
-// middle ellipsis prevents one unusually descriptive id from taking over the
-// header. The full id remains available on hover in SysInfoBlock.
-function abbreviateModelId(modelId: string, maxLength = 42): string {
-  if (modelId.length <= maxLength) return modelId;
-  const tailLength = Math.min(14, Math.floor((maxLength - 1) / 2));
-  const headLength = maxLength - tailLength - 1;
-  return `${modelId.slice(0, headLength)}…${modelId.slice(-tailLength)}`;
-}
-
-function useLiveSysInfo() {
-  const [server, setServer] = useState<ServerStatusLite>({
-    running: false, model_id: null, port: null, message: "",
-  });
-  const [vram, setVram] = useState<VramStatusLite>({ gpus: [] });
+// Keep the local inference key in sync at startup even though the oversized
+// live server control no longer occupies the main header. ServerPage refreshes
+// it again whenever the user changes the network-exposure setting.
+function useLocalServerKeySync() {
   useEffect(() => {
-    if (!isTauri()) return; // no invoke() in vite dev / Playwright
-    let dead = false;
-    const tick = async () => {
-      try {
-        const [s, v] = await Promise.all([
-          invoke<ServerStatusLite>("server_status"),
-          invoke<VramStatusLite>("vram_status"),
-        ]);
-        if (!dead) { setServer(s); setVram(v); }
-      } catch { /* keep last good values */ }
-    };
-    tick();
+    if (!isTauri()) return;
     // Mirror the local server's required api-key (set when the user EXPOSES the
     // server on the network — llama-server then enforces --api-key on 127.0.0.1
     // too) so local inference attaches it instead of 401-ing.
     invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get")
       .then((c) => setLocalServerKey(c.enabled ? c.apiKey : ""))
       .catch(() => {});
-    const id = window.setInterval(tick, 2000);
-    return () => { dead = true; window.clearInterval(id); };
   }, []);
-  return { server, vram };
 }
 
 // Track the live viewport so HybridFrame fills the window instead
@@ -591,7 +552,7 @@ function MiniFrameReplica({ width, active, children }: {
 
 // ---------------------------------------------------------------------
 // ModeBar — top dark-blue header with theme controls, mode toggles,
-// title, and SysInfo. Mode toggles drive the active mode state.
+// title, and window controls. Mode toggles drive the active mode state.
 // ---------------------------------------------------------------------
 type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
@@ -628,7 +589,7 @@ const HEADER_TAB_WORKING_ANIMATION = "owllm-tab-working 1.4s ease-in-out infinit
 
 function ModeBar({
   mode, setMode, installed,
-  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor,
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
@@ -644,7 +605,6 @@ function ModeBar({
   textColorKey: TextColorSelection;
   textColor: string;
   onPickTextColor: (color: TextColorSelection) => void;
-  onOpenServer: () => void;
   onOpenMarketplace: () => void;
   onOpenSigning: () => void;
   onOpenSettingsPage: (key: string) => void;
@@ -744,7 +704,7 @@ function ModeBar({
       // border is always present (transparent when idle) so a run starting
       // never shifts the layout below.
       height: 88, boxSizing: "border-box",
-      display: "grid", gridTemplateColumns: "auto 1fr auto auto",
+      display: "grid", gridTemplateColumns: "auto 1fr auto",
       alignItems: "center", padding: "7px 18px 1px 20px", gap: 16,
       // Language changes text, never the physical header/control order.
       direction: "ltr",
@@ -1263,58 +1223,7 @@ function ModeBar({
         </>
       )}
 
-      <SysInfoBlock onOpenServer={onOpenServer} />
       <WindowControls />
-    </div>
-  );
-}
-
-// Header right-block — live status. Replaces the hardcoded Qt
-// mock-up that pretended a "Quagenmed-K4" server was always
-// running and VRAM was "N/A".
-// Clicking the block opens the Server modal (same trigger as the
-// "Server" tab) so the user can spin a model up/down from anywhere.
-function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
-  const { server, vram } = useLiveSysInfo();
-  // Mirrors Qt main.py:28564/28573 — pluralised "Servers", count-based.
-  // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
-  // ServerStatusLite carries only one server, so N is 0 or 1.
-  const fullModelId = server.model_id ?? "?";
-  const serverLine = server.running
-    ? `🟢 Servers: 1 (${abbreviateModelId(fullModelId)})`
-    : "🟢 Servers: 0";
-  const vramLine = vram.gpus.length === 0
-    ? "VRAM: N/A"
-    : vram.gpus
-        .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
-        .join("   ");
-  return (
-    <div
-      data-ui="SysInfoBlock"
-      onClick={onOpenServer}
-      title={server.running
-        ? `Model: ${fullModelId}\nOpen Server Control`
-        : "Open Server Control"}
-      style={{
-        width: "min(420px, 31vw)", minWidth: 0, height: 60,
-        display: "flex", flexDirection: "column",
-        alignItems: "stretch", justifyContent: "center", gap: 3,
-        fontSize: 12, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
-        // Trimmed from the Qt-port's hard 543px to free room for the
-        // inline WindowControls 4th grid column. overflow:hidden +
-        // text-overflow on the children below keeps long model ids
-        // from pushing the layout.
-        overflow: "hidden",
-        cursor: "pointer",
-      }}
-    >
-      <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {serverLine}
-        <GenSpeedBadge variant="header" />
-      </div>
-      <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        <span style={{ marginRight: 4 }}>💾</span>{vramLine}
-      </div>
     </div>
   );
 }
@@ -1610,6 +1519,7 @@ const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.use
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
+  useLocalServerKeySync();
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
   // straight to the page it wants to diff (e.g. ?page=train).
   const initialDeep = useMemo(() => {
@@ -1954,7 +1864,6 @@ export default function AppShell() {
             textColorKey={theme.textColorKey}
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
-            onOpenServer={() => setServerModalOpen(true)}
             onOpenSigning={() => setSigningModalOpen(true)}
             onOpenMarketplace={() => {
               openWebUrl(MARKETPLACE_URL)

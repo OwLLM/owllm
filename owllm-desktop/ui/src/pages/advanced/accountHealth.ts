@@ -1,5 +1,9 @@
 export type AccountRemediation = "reauth" | "update" | "subscription" | "retry" | null;
 
+export function isProviderUsageLimit(detail: string): boolean {
+  return /weekly limit|usage limit|quota exceeded|insufficient_quota|rate_limit_event[^]*?status["']?\s*:\s*["']?rejected/i.test(detail);
+}
+
 export function classifySubscriptionFailure(detail: string): Exclude<AccountRemediation, null> {
   const text = detail.toLowerCase();
   if (/401|unauthori[sz]ed|not authenticated|not logged in|login.*expired|sign-in.*expired|invalid.*(?:token|grant|credential)|grant.*invalid|re-?authenticate/.test(text)) {
@@ -8,7 +12,7 @@ export function classifySubscriptionFailure(detail: string): Exclude<AccountReme
   if (/newer version|update required|upgrade.*cli|outdated|unsupported version|unknown (?:option|argument)|unrecognized (?:option|argument)|no such option|reinstall/.test(text)) {
     return "update";
   }
-  if (/subscription required|not subscribed|upgrade your plan|billing required|quota|rate limit|no credit|free tier|payment/.test(text)) {
+  if (isProviderUsageLimit(detail) || /subscription required|not subscribed|upgrade your plan|billing required|quota|rate limit|no credit|free tier|payment/.test(text)) {
     return "subscription";
   }
   return "retry";

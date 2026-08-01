@@ -892,6 +892,14 @@ const BRIDGE_JS: &str = r##"
   // alone lose the values. Keep a provisional copy of the last complete login
   // while the user types, and also report on submit-ish clicks, Enter, and
   // tab-hide — the report itself dedupes via credSent.
+  var credReportTimer = 0;
+  function scheduleCredReport() {
+    if (credReportTimer) clearTimeout(credReportTimer);
+    credReportTimer = setTimeout(function () {
+      credReportTimer = 0;
+      reportCred();
+    }, 700);
+  }
   document.addEventListener("input", function (e) {
     var t = e.target;
     if (t && t.tagName === "INPUT") {
@@ -899,7 +907,8 @@ const BRIDGE_JS: &str = r##"
       if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
         try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e) {}
       }
-      var c = grabCred(); if (c) window.__owllmProv = c;
+      var c = grabCred();
+      if (c) { window.__owllmProv = c; scheduleCredReport(); }
     }
   }, true);
   document.addEventListener("click", function (e) {

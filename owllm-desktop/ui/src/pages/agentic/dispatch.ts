@@ -59,6 +59,7 @@ import { DEVICE_PREFIX, parseDeviceModel, peerNameFor } from "./peerCatalogue";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
+import { isProviderUsageLimit } from "../advanced/accountHealth";
 // Deterministic routing — shared with the desktop path so BOTH dispatch loops
 // route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
 // this module, so this is a type-only cycle at runtime — safe.
@@ -1698,6 +1699,9 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
       // until the backoff died — the "inconsistent logouts, worst with Kimi".
       try {
         const probe = await invoke<{ ok: boolean; detail: string }>("accounts_test_probe_live", { backend });
+        if (!probe.ok && isProviderUsageLimit(probe.detail)) {
+          throw new CliPreflightError(probe.detail);
+        }
         // A revoked Kimi refresh grant is not a cold-token race: repeating the
         // same CLI call can never repair it. Stop before the real job and give
         // the user the one action that can recover the account.
@@ -1705,6 +1709,7 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
           throw new Error(kimiReconnectMessage(probe.detail));
         }
       } catch (error: any) {
+        if (error instanceof CliPreflightError) throw error;
         if (backend === "kimi_cli" && isCliReauthRequired(error?.message ?? String(error))) throw error;
         // Other warm-up failures are best-effort: the real call below still
         // carries the provider's most precise error and normal retry policy.
@@ -1769,6 +1774,7 @@ export function isTransientNetError(msg: string): boolean {
   // "timed out" (two words) is what wait_cli_child's kill emits — without it a
   // 20-min CLI timeout was UNCLASSIFIED and killed the whole run instead of
   // retrying like every other transient failure.
+  if (isProviderUsageLimit(msg)) return false;
   return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|timed out|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 

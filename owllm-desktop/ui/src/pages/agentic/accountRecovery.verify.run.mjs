@@ -16,6 +16,7 @@ const browserVault = read("src-tauri/src/browser_vault.rs");
 const onboarding = read("ui/src/pages/core/AccountSyncModal.tsx");
 const accounts = read("ui/src/pages/advanced/AccountsPage.tsx");
 const pty = read("ui/src/pages/advanced/PtyTerminal.tsx");
+const dispatch = read("ui/src/pages/agentic/dispatch.ts");
 const lib = read("src-tauri/src/lib.rs");
 
 const compiled = ts.transpileModule(healthSource, {
@@ -24,7 +25,7 @@ const compiled = ts.transpileModule(healthSource, {
 const temp = path.join(os.tmpdir(), `owllm-account-health-${process.pid}.cjs`);
 fs.writeFileSync(temp, compiled);
 const require = createRequire(import.meta.url);
-const { classifySubscriptionFailure, isKimiLoginSuccess } = require(temp);
+const { classifySubscriptionFailure, isKimiLoginSuccess, isProviderUsageLimit } = require(temp);
 fs.rmSync(temp, { force: true });
 
 let failed = 0;
@@ -38,6 +39,7 @@ check("expired OAuth grant becomes reconnect", classifySubscriptionFailure("auth
 check("newer CLI requirement becomes update", classifySubscriptionFailure("model requires a newer version of the CLI") === "update");
 check("unknown legacy option becomes update", classifySubscriptionFailure("unknown option --output-format") === "update");
 check("quota becomes subscription remediation", classifySubscriptionFailure("quota exceeded") === "subscription");
+check("Claude rejected seven-day window is a usage limit", isProviderUsageLimit('{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}'));
 check("unclassified transport failures remain retryable", classifySubscriptionFailure("child exited unexpectedly") === "retry");
 check("Kimi JSON success is recognized", isKimiLoginSuccess('{"type":"success","message":"Logged in successfully."}'));
 check("Kimi success survives split terminal buffering", isKimiLoginSuccess('noise\\n{"type":"success"'));
@@ -96,6 +98,12 @@ check(
     && browser.includes("__owllmLoginUser")
     && browser.includes("if !private_session && url.starts_with(\"http\")")
     && browser.includes(".filter(|tab| !private_tabs.contains(&tab.id))"),
+);
+check(
+  "provider usage limits stop preflight instead of entering the reconnect/retry loop",
+  accounts.includes('state.remediation === "subscription"')
+    && dispatch.includes("throw new CliPreflightError(probe.detail)")
+    && dispatch.includes("if (isProviderUsageLimit(msg)) return false"),
 );
 
 if (failed) {

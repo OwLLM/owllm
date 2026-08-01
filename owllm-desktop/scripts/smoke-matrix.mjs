@@ -133,7 +133,12 @@ function runHarnesses() {
       else if (e.name.endsWith(".verify.run.mjs")) found.push(p);
     }
   })(root);
-  const dependencyFree = new Set(["organizationProfile.verify.run.mjs"]);
+  const dependencyFree = new Set([
+    "organizationProfile.verify.run.mjs",
+    "ptyAuthInput.verify.run.mjs",
+    "browserCredentialVault.verify.run.mjs",
+    "claudeCliConnection.verify.run.mjs",
+  ]);
   const files = found.sort();
   const runHarness = (p) => {
     const t0 = Date.now();

@@ -4275,7 +4275,9 @@ version = "0.9.80"
 dependencies = [
  "aes",
  "aes-gcm",
+ "ashpd",
  "base64 0.22.1",
+ "cairo-rs",
  "cbc",
  "chrono",
  "ed25519-dalek 2.2.0",

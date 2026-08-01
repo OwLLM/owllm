@@ -72,7 +72,7 @@ check(browserRs.includes("const CHROME_H: f64 = 96.0"),
   "chrome bar is two rows (58px identity strip + 38px nav toolbar)");
 check(/fn content_webview_for_tab[\s\S]{0,500}tab_id\.or_else\(active_tab_id\)[\s\S]{0,300}tab_label\(id\)/.test(browserRs),
   "agent commands resolve an explicit tab id before falling back to the active tab");
-check(/pub fn browser_cmd[\s\S]{0,500}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
+check(/pub fn browser_cmd[\s\S]{0,1200}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
   "every DOM action captures its target tab before navigation or evaluation");
 check(browserRs.includes("pub fn browser_list_tabs") &&
       browserRs.includes("pub fn browser_select_tab") &&

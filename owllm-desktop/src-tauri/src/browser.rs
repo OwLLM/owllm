@@ -603,6 +603,63 @@ const BRIDGE_JS: &str = r##"
     pt("pointerup"); ms("mouseup");
     try { el.click(); } catch (e) { ms("click"); }
   }
+  // Rust streams a local file into this page as base64 chunks, then this
+  // creates a real FileList on the target input. No OS file picker is opened,
+  // so browser automation never steals the user's keyboard or blocks the GUI.
+  // The Rust side enforces the size cap before any bytes enter the WebView.
+  var uploads = Object.create(null);
+  function fileInputFor(index) {
+    var indexed = index === null || index === undefined ? null : elAt(index);
+    if (indexed && indexed.matches && indexed.matches('input[type=file]')) return indexed;
+    if (indexed && indexed.control && indexed.control.matches && indexed.control.matches('input[type=file]')) return indexed.control;
+    if (indexed && indexed.querySelector) {
+      var nested = indexed.querySelector('input[type=file]');
+      if (nested) return nested;
+    }
+    for (var parent = indexed && indexed.parentElement; parent; parent = parent.parentElement) {
+      var nearby = parent.querySelector && parent.querySelector('input[type=file]');
+      if (nearby) return nearby;
+    }
+    var all = document.querySelectorAll('input[type=file]');
+    if (all.length === 1) return all[0];
+    throw new Error(all.length
+      ? "multiple file inputs found; click the site's attachment control first, snapshot, then pass its index"
+      : "no file input found; click the site's attachment/upload control first");
+  }
+  window.__owllmUploadStart = function (token, index, name, mime) {
+    try {
+      uploads[token] = { input: fileInputFor(index), name: name, mime: mime, chunks: [] };
+    } catch (e) {
+      uploads[token] = { error: String(e && e.message || e), chunks: [] };
+    }
+  };
+  window.__owllmUploadChunk = function (token, chunk) {
+    if (uploads[token] && !uploads[token].error) uploads[token].chunks.push(chunk);
+  };
+  window.__owllmUploadFinish = function (reqId, token) {
+    var upload = uploads[token];
+    delete uploads[token];
+    try {
+      if (!upload) throw new Error("upload session was lost during page navigation");
+      if (upload.error) throw new Error(upload.error);
+      var parts = [];
+      for (var i = 0; i < upload.chunks.length; i++) {
+        var raw = atob(upload.chunks[i]);
+        var bytes = new Uint8Array(raw.length);
+        for (var j = 0; j < raw.length; j++) bytes[j] = raw.charCodeAt(j);
+        parts.push(bytes);
+      }
+      var file = new File(parts, upload.name, { type: upload.mime, lastModified: Date.now() });
+      var transfer = new DataTransfer();
+      transfer.items.add(file);
+      upload.input.files = transfer.files;
+      fire(upload.input, "input");
+      fire(upload.input, "change");
+      report(reqId, "attached " + upload.name + " (" + file.size + " bytes)");
+    } catch (e) {
+      report(reqId, "ERROR: " + String(e && e.message || e));
+    }
+  };
   window.__owllmRun = function (reqId, action, paramsJson) {
     var p = {};
     try { p = paramsJson ? JSON.parse(paramsJson) : {}; } catch (e) {}
@@ -610,6 +667,26 @@ const BRIDGE_JS: &str = r##"
       switch (action) {
         case "info":
           return report(reqId, JSON.stringify({ url: location.href, title: realTitle(), ready: document.readyState }));
+        case "capture_metrics": {
+          var root = document.documentElement;
+          var body = document.body;
+          var width = Math.max(
+            root ? root.scrollWidth : 0, root ? root.offsetWidth : 0,
+            body ? body.scrollWidth : 0, body ? body.offsetWidth : 0,
+            window.innerWidth || 0
+          );
+          var height = Math.max(
+            root ? root.scrollHeight : 0, root ? root.offsetHeight : 0,
+            body ? body.scrollHeight : 0, body ? body.offsetHeight : 0,
+            window.innerHeight || 0
+          );
+          return report(reqId, JSON.stringify({
+            width: Math.ceil(width), height: Math.ceil(height),
+            viewport_width: Math.ceil(window.innerWidth || 0),
+            viewport_height: Math.ceil(window.innerHeight || 0),
+            device_scale: Number(window.devicePixelRatio || 1)
+          }));
+        }
         case "await_load":
           if (document.readyState === "complete" || document.readyState === "interactive") {
             return report(reqId, "Loaded: " + location.href + " — " + realTitle());
@@ -2993,6 +3070,438 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
     }
 }
 
+const MAX_BROWSER_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES: usize = 96 * 1024; // divisible by 3: independently-decodable base64
+
+fn arg_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+    })
+}
+
+fn browser_upload_path(params: &Value) -> Result<std::path::PathBuf, String> {
+    let raw = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "browser_upload_file requires a file path".to_string())?;
+    let path = std::path::Path::new(raw);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .ok_or_else(|| "relative upload paths require the project cwd".to_string())?;
+        std::path::Path::new(&crate::agent_tools::host_cwd(cwd)).join(path)
+    };
+    let resolved = resolved
+        .canonicalize()
+        .map_err(|e| format!("cannot open upload file {}: {e}", resolved.display()))?;
+    let meta = resolved
+        .metadata()
+        .map_err(|e| format!("cannot inspect upload file {}: {e}", resolved.display()))?;
+    if !meta.is_file() {
+        return Err(format!("upload path is not a file: {}", resolved.display()));
+    }
+    if meta.len() > MAX_BROWSER_UPLOAD_BYTES {
+        return Err(format!(
+            "browser upload is capped at 25 MiB to keep the shared WebView responsive; {} is {:.1} MiB",
+            resolved.display(),
+            meta.len() as f64 / 1_048_576.0
+        ));
+    }
+    Ok(resolved)
+}
+
+fn browser_upload_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+fn wait_for_direct_reply(
+    win: &Webview,
+    req: u64,
+    action: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let start = Instant::now();
+    loop {
+        if let Some(payload) = take_if_complete(req) {
+            let out = decode_b64(&payload);
+            if let Some(message) = out.strip_prefix("ERROR: ") {
+                return Err(message.to_string());
+            }
+            return Ok(out);
+        }
+        if let Some((total, have)) = reply_progress(req) {
+            if total > 1 {
+                if let Some(k) = (0..total).find(|k| !have.contains(k)) {
+                    let _ = win.eval(&format!(
+                        "try{{window.__owllmEmit&&window.__owllmEmit({req},{k})}}catch(e){{}}"
+                    ));
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "browser action '{action}' timed out — the page may have navigated; snapshot and try again"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn upload_file_to_page(win: &Webview, req: u64, params: &Value) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let path = browser_upload_path(params)?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("read upload file {}: {e}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "upload filename is not valid Unicode".to_string())?;
+    let index = arg_u64(params.get("index"));
+    let token = format!("upload-{req}");
+    let start = format!(
+        "try{{window.__owllmUploadStart&&window.__owllmUploadStart({},{},{},{})}}catch(e){{}}",
+        serde_json::to_string(&token).unwrap(),
+        index.map_or_else(|| "null".to_string(), |index| index.to_string()),
+        serde_json::to_string(name).unwrap(),
+        serde_json::to_string(browser_upload_mime(&path)).unwrap(),
+    );
+    win.eval(&start)
+        .map_err(|e| format!("start browser upload: {e}"))?;
+    for chunk in bytes.chunks(UPLOAD_CHUNK_BYTES) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+        win.eval(&format!(
+            "try{{window.__owllmUploadChunk&&window.__owllmUploadChunk({},{})}}catch(e){{}}",
+            serde_json::to_string(&token).unwrap(),
+            serde_json::to_string(&encoded).unwrap(),
+        ))
+        .map_err(|e| format!("stream browser upload: {e}"))?;
+    }
+    win.eval(&format!(
+        "try{{window.__owllmUploadFinish&&window.__owllmUploadFinish({req},{})}}catch(e){{}}",
+        serde_json::to_string(&token).unwrap(),
+    ))
+    .map_err(|e| format!("finish browser upload: {e}"))?;
+    wait_for_direct_reply(win, req, "upload_file", Duration::from_secs(30))
+}
+
+fn prune_browser_captures(dir: &std::path::Path) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut captures = read
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            entry.path().is_file() && name.starts_with("browser-") && name.ends_with(".png")
+        })
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    captures.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (index, (modified, path)) in captures.into_iter().enumerate() {
+        let expired = modified
+            .elapsed()
+            .map(|age| age > Duration::from_secs(7 * 24 * 60 * 60))
+            .unwrap_or(false);
+        if index >= 50 || expired {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct PageCaptureMetrics {
+    width: u32,
+    height: u32,
+}
+
+fn save_browser_capture(
+    app: &tauri::AppHandle,
+    png: &[u8],
+    width: u32,
+    height: u32,
+    scope: &str,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("browser capture cache: {e}"))?
+        .join("browser-screenshots");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create browser capture cache {}: {e}", dir.display()))?;
+    prune_browser_captures(&dir);
+    let path = dir.join(format!(
+        "browser-{scope}-{}-{req}.png",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
+    ));
+    let temporary = path.with_extension("png.tmp");
+    std::fs::write(&temporary, png)
+        .map_err(|e| format!("write browser screenshot {}: {e}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "finish browser screenshot {}: {error}",
+            path.display()
+        ));
+    }
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "width": width,
+        "height": height,
+        "scope": scope,
+        "tab_id": tab_id,
+    })
+    .to_string())
+}
+
+#[cfg(windows)]
+fn call_webview2_devtools(webview: &Webview, method: &str, params: &str) -> Result<String, String> {
+    use webview2_com::{CallDevToolsProtocolMethodCompletedHandler, CoTaskMemPWSTR};
+
+    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    let method = method.to_string();
+    let params = params.to_string();
+    webview
+        .with_webview(move |platform| {
+            let immediate_tx = tx.clone();
+            let result = (|| -> Result<(), String> {
+                let core = unsafe { platform.controller().CoreWebView2() }
+                    .map_err(|e| format!("get WebView2 core: {e}"))?;
+                let callback = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
+                    move |status, payload| {
+                        let value = status
+                            .map(|_| payload)
+                            .map_err(|e| format!("WebView2 DevTools call failed: {e}"));
+                        let _ = tx.send(value);
+                        Ok(())
+                    },
+                ));
+                let method_wide = CoTaskMemPWSTR::from(method.as_str());
+                let params_wide = CoTaskMemPWSTR::from(params.as_str());
+                unsafe {
+                    core.CallDevToolsProtocolMethod(
+                        *method_wide.as_ref().as_pcwstr(),
+                        *params_wide.as_ref().as_pcwstr(),
+                        &callback,
+                    )
+                }
+                .map_err(|e| format!("start WebView2 DevTools call: {e}"))?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = immediate_tx.send(Err(error));
+            }
+        })
+        .map_err(|e| format!("schedule WebView2 snapshot: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WebView2 full-page screenshot timed out".to_string())?
+}
+
+#[cfg(windows)]
+fn capture_full_page_png(
+    webview: &Webview,
+    metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use base64::Engine as _;
+
+    if metrics.width == 0 || metrics.height == 0 {
+        return Err("page reported an empty document".into());
+    }
+    let area = metrics.width as f64 * metrics.height as f64;
+    let scale = (80_000_000.0 / area).sqrt().min(1.0);
+    if scale < 0.1 {
+        return Err(format!(
+            "page is too large to capture safely ({}x{} CSS pixels)",
+            metrics.width, metrics.height
+        ));
+    }
+    let params = json!({
+        "format": "png",
+        "fromSurface": true,
+        "captureBeyondViewport": true,
+        "clip": {
+            "x": 0,
+            "y": 0,
+            "width": metrics.width,
+            "height": metrics.height,
+            "scale": scale,
+        }
+    })
+    .to_string();
+    let raw = call_webview2_devtools(webview, "Page.captureScreenshot", &params)?;
+    let data = serde_json::from_str::<Value>(&raw)
+        .map_err(|e| format!("parse WebView2 screenshot response: {e}"))?
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "WebView2 screenshot response contained no PNG data".to_string())?
+        .to_string();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| format!("decode WebView2 screenshot: {e}"))?;
+    let (width, height) = crate::support::png_dimensions(&png)?;
+    Ok((png, width, height))
+}
+
+#[cfg(target_os = "linux")]
+fn capture_full_page_png(
+    webview: &Webview,
+    _metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let (tx, rx) = mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+
+            platform.inner().snapshot(
+                SnapshotRegion::FullDocument,
+                SnapshotOptions::NONE,
+                None::<&webkit2gtk::gio::Cancellable>,
+                move |result| {
+                    let result = result
+                        .map_err(|e| format!("WebKitGTK full-page snapshot: {e}"))
+                        .and_then(|surface| {
+                            let mut png = Vec::new();
+                            surface
+                                .write_to_png(&mut png)
+                                .map_err(|e| format!("encode WebKitGTK snapshot: {e}"))?;
+                            let (width, height) = crate::support::png_dimensions(&png)?;
+                            Ok((png, width, height))
+                        });
+                    let _ = tx.send(result);
+                },
+            );
+        })
+        .map_err(|e| format!("schedule WebKitGTK full-page snapshot: {e}"))?;
+    rx.recv_timeout(Duration::from_secs(30))
+        .map_err(|_| "WebKitGTK full-page screenshot timed out".to_string())?
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn capture_full_page_png(
+    _webview: &Webview,
+    _metrics: &PageCaptureMetrics,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    Err("full-page screenshot is not yet implemented by this platform WebView".into())
+}
+
+fn capture_browser_window(
+    app: &tauri::AppHandle,
+    requested_tab: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let active = active_tab_id();
+    if requested_tab.is_some() && requested_tab != active {
+        return Err(format!(
+            "browser screenshot captures the shared visible tab only (active tab is {}); select the requested tab first",
+            active.map_or_else(|| "none".to_string(), |id| id.to_string())
+        ));
+    }
+    let window = get_window(app).ok_or_else(|| "browser window is unavailable".to_string())?;
+    let (png, width, height) = crate::support::capture_window_png(&window)?;
+    save_browser_capture(app, &png, width, height, "viewport", active, req)
+}
+
+fn capture_browser_full_page(
+    app: &tauri::AppHandle,
+    webview: &Webview,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let raw = eval_until_reply(
+        webview,
+        req,
+        "capture_metrics",
+        &json!({}),
+        Duration::from_secs(8),
+    )?;
+    let metrics: PageCaptureMetrics = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse page capture dimensions: {e}"))?;
+    let (png, width, height) = capture_full_page_png(webview, &metrics)?;
+    save_browser_capture(app, &png, width, height, "full-page", tab_id, req)
+}
+
+fn capture_desktop(
+    app: &tauri::AppHandle,
+    tab_id: Option<u64>,
+    req: u64,
+) -> Result<String, String> {
+    let (png, width, height) = tauri::async_runtime::block_on(crate::support::capture_screen_png())?;
+    save_browser_capture(app, &png, width, height, "desktop", tab_id, req)
+}
+
+/// Read back only PNGs created by `browser_screenshot`. This lets local/API
+/// vision models receive the pixels on their next tool-loop turn without
+/// granting an arbitrary binary-file read over Tauri IPC.
+#[tauri::command(async)]
+pub fn browser_read_capture(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine as _;
+
+    let root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("browser capture cache: {e}"))?
+        .join("browser-screenshots")
+        .canonicalize()
+        .map_err(|e| format!("browser capture cache is unavailable: {e}"))?;
+    let requested = std::path::PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("browser screenshot does not exist: {e}"))?;
+    if !requested.starts_with(&root)
+        || requested.extension().and_then(|ext| ext.to_str()) != Some("png")
+    {
+        return Err("only PNGs created by browser_screenshot can be read".into());
+    }
+    let bytes = std::fs::read(&requested)
+        .map_err(|e| format!("read browser screenshot {}: {e}", requested.display()))?;
+    if bytes.len() > 12 * 1024 * 1024 {
+        return Err("browser screenshot exceeds the 12 MiB vision-input limit".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// Run one action against the live page and return its text reply.
 ///
 /// `navigate` uses the native `webview.navigate()` (robust across origins),
@@ -3001,6 +3510,16 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let _operation = lock_browser_operation();
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
+    let screenshot_scope = params
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("viewport")
+        .trim()
+        .to_ascii_lowercase();
+    if action == "screenshot" && screenshot_scope == "desktop" {
+        return capture_desktop(&app, None, req);
+    }
     if get_window(&app).is_none() || browser_is_suspended() {
         browser_start_inner(&app)?;
     }
@@ -3009,8 +3528,6 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         Some(id) => format!("browser tab {id} does not exist"),
         None => "browser did not start".to_string(),
     })?;
-    let req = REQ.fetch_add(1, Ordering::SeqCst);
-
     match action.as_str() {
         "navigate" | "open" => {
             let url_s = params
@@ -3039,11 +3556,16 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             std::thread::sleep(Duration::from_millis(300));
             eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
-        "screenshot" => {
-            // Native window is visible to the user; return a page summary rather
-            // than pixels (agents act via snapshot). Honest + cheap.
-            eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(8))
-        }
+        "screenshot" => match screenshot_scope.as_str() {
+            "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
+            "full_page" | "full-page" | "page" => {
+                capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
+            }
+            other => Err(format!(
+                "unknown screenshot scope {other:?}; use viewport, full_page, or desktop"
+            )),
+        },
+        "upload_file" => upload_file_to_page(&win, req, &params),
         _ => eval_until_reply(&win, req, &action, &params, Duration::from_secs(12)),
     }
 }

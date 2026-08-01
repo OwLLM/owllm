@@ -543,6 +543,7 @@ pub fn run() {
             browser::browser_select_tab,
             browser::browser_close_tab,
             browser::browser_cmd,
+            browser::browser_read_capture,
             browser::browser_stop,
             browser::browser_status,
             browser::browser_view,

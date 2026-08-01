@@ -1687,7 +1687,8 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
+  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, onPickAgentModel,
+  models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
   perAgentSkills, projectCwd, labelOverrides,
 }: {
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
@@ -1714,6 +1715,12 @@ function AgentChatGrid({
   modelFor: (agentName: string) => string;
   /// Map a resolved model id → provider string, for the header chip tint.
   providerFor: (modelId: string) => string;
+  /// Reuse the shared model picker from the small logo trigger on every card.
+  onPickAgentModel: (agentName: string, modelId: string) => void;
+  models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  criticEnabled: boolean;
+  onToggleCritic: () => void;
   /// Per-agent working-time map (name → cumulative timing), for the card clocks.
   agentTiming?: Map<string, AgentTiming>;
 }) {
@@ -1829,6 +1836,13 @@ function AgentChatGrid({
             accent={accent}
             onClick={() => onSelectAgent(a.name)}
             onOpenEditor={() => onOpenEditor(a.name)}
+            onPickModel={(id) => onPickAgentModel(a.name, id)}
+            models={models}
+            accountsStatus={accountsStatus}
+            isCritic={a.name === CRITIC_AGENT_NAME}
+            criticEnabled={criticEnabled}
+            onToggleCritic={onToggleCritic}
+            modelId={resolvedModel}
             modelLabel={modelLabel}
             modelTint={modelTint}
             modelTitle={modelTitle}
@@ -2334,7 +2348,8 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
 function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick, onOpenEditor,
-  modelLabel, modelTint, modelTitle,
+  onPickModel, models, accountsStatus, isCritic, criticEnabled, onToggleCritic,
+  modelId, modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
   timing, skills, isPublisher, isBrowser, projectCwd, label,
 }: {
@@ -2374,11 +2389,18 @@ function AgentChatTile({
   /// prompt). Suppressed while the user is mid text-selection in the tile.
   onOpenEditor: () => void;
   /// Short model name shown as a logo-chip on the right of the header.
+  modelId: string;
   modelLabel: string;
   /// Provider brand colour for the model chip.
   modelTint: string;
   /// Full model short-name for the chip tooltip (chip shows the lab label).
   modelTitle: string;
+  onPickModel: (modelId: string) => void;
+  models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  isCritic: boolean;
+  criticEnabled: boolean;
+  onToggleCritic: () => void;
   ringPx: number;
   outerPx: number;
   alphaA: number;
@@ -2471,6 +2493,25 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
+        {isCritic && (
+          <button
+            type="button"
+            aria-pressed={criticEnabled}
+            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
+            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
+            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
+            onKeyDown={(e) => e.stopPropagation()}
+            style={{
+              width: 24, height: 22, padding: 0, flexShrink: 0,
+              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
+              borderRadius: 6,
+              background: criticEnabled ? "rgba(255,184,76,0.18)" : "rgba(0,0,0,0.25)",
+              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+              cursor: "pointer", fontSize: 13, lineHeight: 1,
+              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
+            }}
+          >✦</button>
+        )}
         {/* The NAME is the editor handle: clicking it opens the per-agent
             model/colour/prompt popup. The clickable element is an inline-block
             sized to the name GLYPHS (not the full-width header row), so the
@@ -2494,22 +2535,34 @@ function AgentChatTile({
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
-        {modelLabel && (() => {
+        {(() => {
           const Logo = LAB_LOGO[modelLabel];
           return (
-            <span
-              title={`Model: ${modelTitle || modelLabel}`}
-              style={{
-                display: "inline-flex", alignItems: "center",
-                fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
-                color: modelTint,
-                background: "rgba(0,0,0,0.30)",
-                border: `1px solid ${modelTint}66`,
-                borderRadius: 4, padding: "1px 6px",
-                maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >{Logo ? <Logo size={21} color={modelTint} /> : modelLabel}</span>
+            <div
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              style={{ width: 30, height: 30, flexShrink: 0 }}
+            >
+              <ModelPicker
+                value={modelId}
+                onChange={onPickModel}
+                models={models}
+                status={accountsStatus}
+                fallbackLabel={modelLabel || "(pick a model)"}
+                compactTitle={`Model: ${modelTitle || modelLabel || "pick a model"}`}
+                compactTrigger={
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      width: 24, height: 24, fontSize: 9, fontWeight: 800,
+                      color: modelTint, background: "rgba(0,0,0,0.30)",
+                      border: `1px solid ${modelTint}66`, borderRadius: 5,
+                    }}
+                  >{Logo ? <Logo size={19} color={modelTint} /> : (modelLabel || "◌")}</span>
+                }
+              />
+            </div>
           );
         })()}
         {/* Per-agent working time — to the RIGHT of the name. Green while this
@@ -9027,6 +9080,27 @@ export function AgentsPage({
   // agent_projects.director_mode. (Was briefly split into a 2nd critic_super_user
   // toggle in v0.5.86; merged back here in v0.5.87 — they meant the same thing.)
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
+  // The Critical Thinker remains enabled by default, but each project can
+  // turn it off from its own card without changing Director Mode or other
+  // projects. This is a UI preference, not secret/provider state.
+  const criticEnabledKey = selectedProjectId
+    ? `owllm:agents:critic-enabled:${selectedProjectId}`
+    : "";
+  const [criticEnabled, setCriticEnabledState] = useState<boolean>(true);
+  useEffect(() => {
+    if (!criticEnabledKey) { setCriticEnabledState(true); return; }
+    try { setCriticEnabledState(localStorage.getItem(criticEnabledKey) !== "0"); }
+    catch { setCriticEnabledState(true); }
+  }, [criticEnabledKey]);
+  const setCriticEnabled = (v: boolean | ((prev: boolean) => boolean)) => {
+    setCriticEnabledState(prev => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      if (criticEnabledKey) {
+        try { localStorage.setItem(criticEnabledKey, next ? "1" : "0"); } catch { /* best effort */ }
+      }
+      return next;
+    });
+  };
   // Parallel dispatch (Stage 1): when ON the orchestrator is told to fan out
   // INDEPENDENT tasks in one reply (Phase 2b already runs them concurrently).
   // Per-project UI preference in localStorage (no DB/Rust needed). Default OFF
@@ -11752,7 +11826,7 @@ export function AgentsPage({
         // NOT auto-publish — we surface the ask and stop, so nothing ships past a real
         // user gate. Otherwise the work ships as usual. -----
         let needsUserDecision = false;
-        if (sText && !isAuthError(sText) && !ctrl.signal.aborted && canDelegateTo(coder, CRITIC_AGENT_NAME)) {
+        if (criticEnabled && sText && !isAuthError(sText) && !ctrl.signal.aborted && canDelegateTo(coder, CRITIC_AGENT_NAME)) {
           const CRITIC_NAME = CRITIC_AGENT_NAME;
           addActive(CRITIC_NAME);
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
@@ -11997,7 +12071,7 @@ export function AgentsPage({
       let criticWasConsulted = false;
       {
         const { question, cleaned } = extractUserInputRequest(orchReply);
-        if (question && canDelegateTo(orch, CRITIC_AGENT_NAME)) {
+        if (criticEnabled && question && canDelegateTo(orch, CRITIC_AGENT_NAME)) {
           criticWasConsulted = true;
           appendThought(orch.name, {
             role: "dispatch", color: "#ff9ad9",
@@ -12072,7 +12146,7 @@ export function AgentsPage({
       //     it gets up to 3 rounds to gate the plan and the orchestrator is told to
       //     satisfy it. Still hard-capped so it can't loop forever.
       // Director mode forces a review even if the orchestrator never says "critic".
-      if (!criticWasConsulted && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+      if (criticEnabled && !criticWasConsulted && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
           (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_PRE_ROUNDS = directorMode ? 3 : 2;
@@ -12892,7 +12966,7 @@ export function AgentsPage({
       // STRICTLY NON-BLOCKING in both: a refusal, a satisfied verdict, or any
       // error ships the current answer as-is. The critic can improve the output,
       // never withhold it.
-      if (canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+      if (criticEnabled && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
           (directorMode || needsCriticalThinkerReview(`${text}\n${finalReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_POST_ROUNDS = directorMode ? 2 : 1;
@@ -14192,6 +14266,11 @@ export function AgentsPage({
                 onOpenEditor={(name) => setEditingAgent(name)}
                 modelFor={modelFor}
                 providerFor={providerFor}
+                onPickAgentModel={onPickAgentModel}
+                models={models}
+                accountsStatus={accountsStatus}
+                criticEnabled={criticEnabled}
+                onToggleCritic={() => setCriticEnabled(v => !v)}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
                 projectCwd={publisherCwd}

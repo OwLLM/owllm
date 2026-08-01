@@ -7,10 +7,10 @@
 export const RECORDER_FPS_KEY = "owllm:tutorial-recorder:fps";
 export const RECORDER_AUTOSTOP_KEY = "owllm:tutorial-recorder:autostop-after-job";
 
-// Selectable frame rates. 15 fps keeps tutorials readable while halving the
-// default frame count; users can still select 30/60 for motion-heavy captures.
-export const FPS_OPTIONS = [5, 10, 15, 24, 30, 60] as const;
-export const DEFAULT_FPS = 15;
+// Five and ten FPS made scrolling, pointer motion, and seeking look broken.
+// Fifteen is the compact floor; 30 is the default for a normal UI recording.
+export const FPS_OPTIONS = [15, 24, 30, 60] as const;
+export const DEFAULT_FPS = 30;
 
 export type RecorderFormat = {
   mimeType: string;
@@ -107,9 +107,9 @@ export function bitrateForFps(fps: number): number {
 }
 
 // Preserve UI/text detail without spending a fixed number of bits on every
-// resolution. Screen video compresses efficiently, especially with VP9; scale
-// with pixels and FPS, retain a floor for legible low-FPS captures, and cap the
-// result so a 4K display cannot unexpectedly fill the drive.
+// resolution. The previous 0.075 bpp/frame ceiling starved dense UI captures.
+// This higher quality budget is still variable-rate, so static screens remain
+// compact while scrolling and small text receive enough bits to stay sharp.
 export function bitrateForCapture(
   fps: number,
   width: number | undefined,
@@ -118,9 +118,9 @@ export function bitrateForCapture(
 ): number {
   const safeWidth = Number.isFinite(width) && Number(width) > 0 ? Number(width) : 1920;
   const safeHeight = Number.isFinite(height) && Number(height) > 0 ? Number(height) : 1080;
-  const bitsPerPixelFrame = mimeType.includes("vp9") ? 0.055 : 0.075;
+  const bitsPerPixelFrame = mimeType.includes("vp9") ? 0.11 : 0.14;
   const calculated = safeWidth * safeHeight * clampFps(fps) * bitsPerPixelFrame;
-  return Math.max(750_000, Math.min(8_000_000, Math.round(calculated)));
+  return Math.max(4_000_000, Math.min(24_000_000, Math.round(calculated)));
 }
 
 /// True the instant a run goes from active → inactive: the edge that means "the

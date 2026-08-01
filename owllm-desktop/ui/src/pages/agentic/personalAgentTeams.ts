@@ -24,6 +24,7 @@ export const PERSONAL_TEAM_RUNTIME_TOOL_NAMES = new Set([
   "browser_tab_close",
   "browser_tab_select",
   "browser_tabs",
+  "browser_upload_file",
   "mcp_call_connected",
   "mcp_install_curated",
   "mcp_search_capabilities",

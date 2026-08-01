@@ -138,6 +138,7 @@ function runHarnesses() {
     "ptyAuthInput.verify.run.mjs",
     "browserCredentialVault.verify.run.mjs",
     "claudeCliConnection.verify.run.mjs",
+    "isolatedWorktreeSync.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

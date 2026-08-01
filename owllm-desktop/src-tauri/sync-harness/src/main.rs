@@ -359,6 +359,88 @@ fn runtime_files_auto_resolve() -> Result<(), String> {
     Ok(())
 }
 
+/// The isolated page may already contain origin commits. Squashing that page
+/// into a stale canonical checkout first erases the ancestry that tells Git an
+/// intermediate remote change was intentionally reverted. The old order then
+/// resurrects that remote version during reconciliation. Reconcile-first keeps
+/// the page's revert as an explicit local delta.
+fn pre_reconcile_before_squash_preserves_reverts() -> Result<(), String> {
+    let w = world("pre-reconcile-squash");
+    let base_sha = head(&w.a);
+    let remote_url = w.remote.to_string_lossy().replace('\\', "/");
+
+    // The isolated page starts at the same base as the canonical checkout.
+    let page = w.root.join("page");
+    must(&w.root, &["clone", &remote_url, "page"]);
+    must(&page, &["config", "user.name", "Page Agent"]);
+    must(&page, &["config", "user.email", "page@test.local"]);
+
+    // Another machine introduces an unwanted intermediate UI version.
+    edit_line(&w.a, 10, "line 10 DUPLICATE AUTH BOX");
+    commit_all(&w.a, "remote adds duplicate auth input");
+    must(&w.a, &["push", "origin", "main"]);
+
+    // The page receives that remote commit, then intentionally restores the
+    // terminal-only design while adding the actual agent fix.
+    must(&page, &["pull", "--ff-only", "origin", "main"]);
+    edit_line(&page, 10, "line 10");
+    write(&page, "agent-fix.txt", "save credentials before navigation\n");
+    commit_all(&page, "restore terminal-only auth and save credentials");
+    let page_sha = head(&page);
+    let page_url = page.to_string_lossy().replace('\\', "/");
+
+    // Controlled old-order experiment: squash page -> stale project, then
+    // reconcile. The squash cannot encode a change from base back to base, so
+    // Git silently resurrects the duplicate input from origin.
+    let old = w.root.join("old-order");
+    must(&w.root, &["clone", &remote_url, "old-order"]);
+    must(&old, &["config", "user.name", "Old Order"]);
+    must(&old, &["config", "user.email", "old@test.local"]);
+    must(&old, &["reset", "--hard", &base_sha]);
+    must(&old, &["remote", "add", "page", &page_url]);
+    must(&old, &["fetch", "page", "HEAD"]);
+    must(&old, &["merge", "--squash", "--no-commit", &page_sha]);
+    commit_all(&old, "old order squash");
+    must(&old, &["merge", "--no-edit", "origin/main"]);
+    check(
+        read(&old, "shared.txt").contains("DUPLICATE AUTH BOX"),
+        "old-order control did not reproduce the reverted-change loss",
+    )?;
+
+    // Correct order used by fleet_worktree_sync: canonical reconciliation
+    // first, then squash only the page delta, then push.
+    let fixed = w.root.join("fixed-order");
+    must(&w.root, &["clone", &remote_url, "fixed-order"]);
+    must(&fixed, &["config", "user.name", "Fixed Order"]);
+    must(&fixed, &["config", "user.email", "fixed@test.local"]);
+    must(&fixed, &["reset", "--hard", &base_sha]);
+    must(&fixed, &["remote", "add", "page", &page_url]);
+    must(&fixed, &["fetch", "page", "HEAD"]);
+    let pre = sync_repo(&fixed, "main", None).map_err(|e| format!("pre-sync: {e:?}"))?;
+    check(
+        pre.action == "fast-forwarded",
+        &format!("canonical pre-sync should fast-forward, got {}", pre.action),
+    )?;
+    must(&fixed, &["merge", "--squash", "--no-commit", &page_sha]);
+    commit_all(&fixed, "fixed order squash");
+    let post = sync_repo(&fixed, "main", None).map_err(|e| format!("post-sync: {e:?}"))?;
+    check(
+        post.action == "pushed",
+        &format!("fixed result should push, got {}", post.action),
+    )?;
+    check(
+        !read(&fixed, "shared.txt").contains("DUPLICATE AUTH BOX"),
+        "reconcile-first failed to preserve the page's intentional revert",
+    )?;
+    check(
+        read(&fixed, "agent-fix.txt").contains("save credentials"),
+        "reconcile-first lost the page's real fix",
+    )?;
+    check(remote_tip(&w) == head(&fixed), "fixed result was not published")?;
+    let _ = std::fs::remove_dir_all(&w.root);
+    Ok(())
+}
+
 fn main() {
     let scenarios: &[(&str, Scenario)] = &[
         ("different files from two PCs both survive", different_files_both_survive),
@@ -369,6 +451,10 @@ fn main() {
         ("failing verify withholds the push", verify_failure_blocks_push),
         ("behind fast-forwards; synced is up-to-date", behind_and_up_to_date),
         ("disposable runtime files auto-resolve", runtime_files_auto_resolve),
+        (
+            "reconcile before squash preserves intentional reverts",
+            pre_reconcile_before_squash_preserves_reverts,
+        ),
     ];
     let mut failed = 0;
     for (name, f) in scenarios {

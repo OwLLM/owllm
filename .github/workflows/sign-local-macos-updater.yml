@@ -1,0 +1,68 @@
+name: Sign locally built macOS updater
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Public release tag containing the locally built Mac archive
+        required: true
+      sha256:
+        description: SHA-256 of the locally built Mac updater archive
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sign-macos-updater:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ inputs.tag }}
+      EXPECTED_SHA256: ${{ inputs.sha256 }}
+      ARCHIVE: OwLLM.Desktop_aarch64.app.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Tauri signer
+        working-directory: owllm-desktop
+        run: npm ci --ignore-scripts
+
+      - name: Download locally-built archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 \
+            -o "$ARCHIVE" \
+            "https://github.com/OwLLM/owllm/releases/download/$TAG/$ARCHIVE"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$ARCHIVE" | shasum -a 256 -c -
+
+      - name: Sign updater archive
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/updater.key"
+          chmod 600 "$RUNNER_TEMP/updater.key"
+          node owllm-desktop/node_modules/@tauri-apps/cli/tauri.js signer sign \
+            --private-key-path "$RUNNER_TEMP/updater.key" \
+            --password= \
+            "$ARCHIVE" < /dev/null
+          test "$(wc -c < "$ARCHIVE.sig")" -ge 200
+
+      - name: Preserve updater signature
+        uses: actions/upload-artifact@v4
+        with:
+          name: owllm-macos-signature-${{ inputs.tag }}
+          path: OwLLM.Desktop_aarch64.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove temporary signing key
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/updater.key"

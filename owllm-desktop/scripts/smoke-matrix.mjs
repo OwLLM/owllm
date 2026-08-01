@@ -104,6 +104,7 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
   ["../.github/workflows/release.yml", /latest-\$\{\{ matrix\.rust_target \}\}\.json/, "matrix updater manifests keep unique names instead of overwriting Linux/macOS entries"],
+  ["../.github/workflows/release.yml", /TAURI_BUILD_MAX_ATTEMPTS=3[\s\S]{0,900}retrying in 15 seconds/, "transient platform-bundler downloads retry without discarding a completed native build"],
   ["../.github/workflows/release.yml", /\["linux-x86_64", \(name\) => \/\\\.AppImage\$\/i\.test\(name\)\]/, "a published Linux AppImage cannot be omitted from latest.json"],
 ];
 

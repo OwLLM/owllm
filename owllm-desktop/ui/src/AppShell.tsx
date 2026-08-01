@@ -1878,13 +1878,14 @@ export default function AppShell() {
       if (key === "server") { setServerModalOpen(true); return; }
       if (SETTINGS_NAV_KEYS.has(key)) { setSettingsModalKey(key); return; }
       if (key === "signing") { setSigningModalOpen(true); return; }
-      // Find which module owns this page key so we can light up the
-      // matching ModeBar toggle alongside the SubTabs row.
-      for (const m of ALL_MODULES) {
-        if (m.pages.some(p => p.key === key) && m.id !== "core" && m.id !== "advanced") {
-          if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") setMode(m.id);
-          break;
-        }
+      // Find which module owns this page key so the ModeBar and SubTabs stay
+      // in the same workspace. Core pages must clear an active mode too;
+      // otherwise a navigate-to-Home event leaves `mode=finetuning` with
+      // `activeKey=home`, so the header and page content disagree.
+      const owner = ALL_MODULES.find(m => m.pages.some(p => p.key === key));
+      if (owner?.id === "core") setMode("home");
+      else if (owner?.id === "finetuning" || owner?.id === "agentic" || owner?.id === "gamify") {
+        setMode(owner.id);
       }
       setActiveKey(key);
     };

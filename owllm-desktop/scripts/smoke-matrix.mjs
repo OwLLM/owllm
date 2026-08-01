@@ -114,6 +114,7 @@ const TRIPWIRES = [
   ["../.github/workflows/mac-release-repair.yml", /macos-arm64:[\s\S]{0,80}runs-on: macos-latest/, "macOS-only releases use an available hosted Apple Silicon runner"],
   ["../.github/workflows/mac-release-repair.yml", /Preserve signed macOS release files[\s\S]{0,240}actions\/upload-artifact@v4[\s\S]*Publish Mac assets and manifest/, "signed macOS files survive a public-repository credential failure"],
   ["../.github/workflows/mac-release-repair.yml", /Restore Apple Silicon Rust build cache[\s\S]{0,180}shared-key: tauri-aarch64-apple-darwin/, "macOS-only releases reuse the existing Apple Silicon build cache"],
+  ["../.github/workflows/sign-local-macos-updater.yml", /workflow_dispatch:[\s\S]{0,500}sha256:[\s\S]{0,500}runs-on: macos-latest[\s\S]{0,1200}Download locally-built archive[\s\S]{0,1200}signer sign/, "local Mac releases sign the checksum-pinned prebuilt archive without another application build"],
 ];
 
 function runStatic() {

@@ -1432,6 +1432,51 @@ pub enum WorktreeSyncOutcome {
     Error { message: String },
 }
 
+/// Repair the precise stale-squash shape produced by the old isolated Sync
+/// order. The canonical commit and page commit must have byte-identical trees,
+/// and the page must already contain origin/<target>. Joining those histories
+/// with `ours` cannot choose one source version over another because there is
+/// no source difference; it only restores the ancestry the squash discarded.
+/// Any dirty checkout or differing tree remains a normal, user-visible conflict.
+fn bridge_equivalent_page_history(
+    project: &Path,
+    branch: &str,
+    target: &str,
+) -> Result<bool, String> {
+    let (status_ok, status, _) = git(project, &["status", "--porcelain"])?;
+    if !status_ok || !status.trim().is_empty() {
+        return Ok(false);
+    }
+    let local_tree_ref = "HEAD^{tree}";
+    let page_tree_ref = format!("{branch}^{{tree}}");
+    let (local_ok, local_tree, _) = git(project, &["rev-parse", local_tree_ref])?;
+    let (page_ok, page_tree, _) = git(project, &["rev-parse", &page_tree_ref])?;
+    if !local_ok || !page_ok || local_tree.trim() != page_tree.trim() {
+        return Ok(false);
+    }
+
+    let remote_ref = format!("origin/{target}");
+    let (contains_remote, _, _) = git(
+        project,
+        &["merge-base", "--is-ancestor", &remote_ref, branch],
+    )?;
+    if !contains_remote {
+        return Ok(false);
+    }
+
+    let (merged, merge_out, merge_err) = git(
+        project,
+        &["merge", "--no-ff", "--no-edit", "--strategy=ours", branch],
+    )?;
+    if !merged {
+        return Err(format!(
+            "could not bridge byte-identical page and canonical histories: {}",
+            git_failure_message("git merge --strategy=ours", &merge_out, &merge_err)
+        ));
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn fleet_worktree_sync(
     worktree_path: String,
@@ -1484,14 +1529,13 @@ fn fleet_worktree_sync_blocking(
         FinalizeOutcome::Committed { .. } | FinalizeOutcome::NoChanges => {}
     }
 
-    let merged = fleet_worktree_merge_locked(&project, "code", &branch)?;
-    if let MergeOutcome::Conflict { files } = &merged {
-        return Ok(WorktreeSyncOutcome::Conflict { files: files.clone() });
-    }
-    if let MergeOutcome::Error { message } = &merged {
-        return Ok(WorktreeSyncOutcome::Error { message: message.clone() });
-    }
-
+    // Reconcile the canonical checkout BEFORE squash-merging the page branch.
+    // The page may already contain commits fetched from origin. Squashing it
+    // onto a stale project checkout collapses those remote commits into one
+    // local snapshot; the later three-way reconciliation can then conflict or
+    // resurrect an intermediate remote version that the page intentionally
+    // changed again. Bringing the project current first makes the squash
+    // contain only the page's actual delta.
     let (has_origin, _, _) = git(&project, &["remote", "get-url", "origin"])?;
     let target = git(&project, &["symbolic-ref", "--short", "-q", "HEAD"])
         .ok()
@@ -1500,6 +1544,38 @@ fn fleet_worktree_sync_blocking(
             (!branch.is_empty()).then_some(branch)
         })
         .unwrap_or_else(|| "main".to_string());
+    if has_origin {
+        if let Err(err) = crate::sync_core::sync_repo(&project, &target, None) {
+            let bridged = if matches!(&err, crate::sync_core::SyncError::Conflict { .. }) {
+                bridge_equivalent_page_history(&project, &branch, &target)?
+            } else {
+                false
+            };
+            if !bridged {
+                return Ok(WorktreeSyncOutcome::Error {
+                    message: format!(
+                        "canonical reconciliation failed before local integration: {err:?}"
+                    ),
+                });
+            }
+            if let Err(retry_err) = crate::sync_core::sync_repo(&project, &target, None) {
+                return Ok(WorktreeSyncOutcome::Error {
+                    message: format!(
+                        "canonical reconciliation still failed after joining byte-identical histories: {retry_err:?}"
+                    ),
+                });
+            }
+        }
+    }
+
+    let merged = fleet_worktree_merge_locked(&project, "code", &branch)?;
+    if let MergeOutcome::Conflict { files } = &merged {
+        return Ok(WorktreeSyncOutcome::Conflict { files: files.clone() });
+    }
+    if let MergeOutcome::Error { message } = &merged {
+        return Ok(WorktreeSyncOutcome::Error { message: message.clone() });
+    }
+
     let detail = if has_origin {
         crate::sync_core::sync_repo(&project, &target, None)
             .map_err(|e| format!("remote reconciliation failed: {e:?}"))?

@@ -97,11 +97,17 @@ jobs:
             rust_target: 'x86_64-pc-windows-msvc'
             tauri_args: '--target x86_64-pc-windows-msvc'
             artifact: 'owllm-desktop-windows-x64'
+            updater_platform: 'windows-x86_64'
+            updater_pattern: '*-setup.exe'
+            updater_asset: 'OwLLM.Desktop.Setup.exe'
           - label: 'macOS Apple Silicon'
             os: 'macos-latest'
             rust_target: 'aarch64-apple-darwin'
             tauri_args: '--target aarch64-apple-darwin'
             artifact: 'owllm-desktop-macos-arm64'
+            updater_platform: 'darwin-aarch64'
+            updater_pattern: '*.app.tar.gz'
+            updater_asset: 'OwLLM.Desktop_aarch64.app.tar.gz'
           # NOTE: the 'macOS Intel' (macos-13 / x86_64-apple-darwin) entry was
           # removed 2026-07: GitHub retired the macos-13 runner image, so the
           # job queued forever and blocked every release (the queued job also
@@ -118,11 +124,17 @@ jobs:
             # the staging step despite a successful build.
             tauri_args: '--target x86_64-unknown-linux-gnu'
             artifact: 'owllm-desktop-linux-x64'
+            updater_platform: 'linux-x86_64'
+            updater_pattern: '*.AppImage'
+            updater_asset: 'OwLLM.Desktop_amd64.AppImage'
           - label: 'Linux ARM64'
             os: 'ubuntu-24.04-arm'
             rust_target: 'aarch64-unknown-linux-gnu'
             tauri_args: '--target aarch64-unknown-linux-gnu'
             artifact: 'owllm-desktop-linux-arm64'
+            updater_platform: 'linux-aarch64'
+            updater_pattern: '*.AppImage'
+            updater_asset: 'OwLLM.Desktop_aarch64.AppImage'
 
     steps:
       - name: Checkout
@@ -195,6 +207,10 @@ jobs:
       - name: Install UI dependencies
         working-directory: owllm-desktop
         run: npm ci
+
+      - name: Verify updater manifest generation
+        working-directory: owllm-desktop
+        run: node scripts/generate-updater-manifest.verify.run.mjs
 
       - name: Build the Vite UI
         working-directory: owllm-desktop
@@ -492,13 +508,37 @@ jobs:
               -o -iname 'latest.json' \
               -o -iname '*.sig' \
             \) -exec cp {} stage/ \;
-          # Every Tauri matrix leg emits a file named latest.json. Giving each
-          # one a target-qualified name prevents download-artifact's
-          # merge-multiple mode from nondeterministically overwriting two of
-          # the three signed platform manifests in the release job.
-          if [ -f stage/latest.json ]; then
-            mv stage/latest.json "stage/latest-${{ matrix.rust_target }}.json"
+          # Tauri 2 creates the signed updater package and its .sig file, but
+          # does not create latest.json. Select the updater package for this
+          # matrix leg, give it a stable public filename, and generate the
+          # target-qualified manifest consumed by the release job.
+          updater_source=$(find stage -maxdepth 1 -type f -name '${{ matrix.updater_pattern }}' -print -quit)
+          if [ -z "$updater_source" ] || [ ! -f "$updater_source.sig" ]; then
+            echo "Signed updater package not found for ${{ matrix.updater_platform }}" >&2
+            exit 1
           fi
+          updater_target="stage/${{ matrix.updater_asset }}"
+          updater_signature="$updater_target.sig"
+          if [ "$updater_source" != "$updater_target" ]; then
+            mv "$updater_source" "$updater_target"
+          fi
+          if [ "$updater_source.sig" != "$updater_signature" ]; then
+            mv "$updater_source.sig" "$updater_signature"
+          fi
+
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          release_tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            release_tag='${{ github.event.inputs.version }}'
+            if [ -z "$release_tag" ]; then release_tag="v$version"; fi
+          fi
+          UPDATER_VERSION="$version" \
+          UPDATER_RELEASE_TAG="$release_tag" \
+          UPDATER_PLATFORM='${{ matrix.updater_platform }}' \
+          UPDATER_ASSET='${{ matrix.updater_asset }}' \
+          UPDATER_SIGNATURE_FILE="$updater_signature" \
+          UPDATER_OUTPUT="stage/latest-${{ matrix.rust_target }}.json" \
+            node scripts/generate-updater-manifest.mjs
           # Portable Windows exe — useful for power-users who don't want
           # the installer overhead. Copy it next to the setup so it ships
           # with the same release.

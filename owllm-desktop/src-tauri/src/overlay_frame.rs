@@ -70,12 +70,16 @@ pub fn enabled() -> bool {
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false)
     }
-    // macOS: overlay frame never shipped; stay opt-in only.
+    // macOS supports transparent child windows through Tauri's
+    // `macos-private-api` feature. Use the same split-window frame as Windows
+    // so the outer margin is genuinely transparent instead of being painted by
+    // the opaque main webview. Keep the existing environment opt-out for GPU /
+    // compositor troubleshooting.
     #[cfg(target_os = "macos")]
     {
         std::env::var("OWLLM_OVERLAY_FRAME")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
     }
 }
 
@@ -112,7 +116,7 @@ pub fn install(app: &mut App) {
         return;
     };
 
-    let overlay = match create_overlay(app) {
+    let overlay = match create_overlay(app, &main) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("[overlay-frame] failed to create overlay window: {e}");
@@ -128,7 +132,7 @@ pub fn install(app: &mut App) {
     // tao's GTK set_ignore_cursor_events path can panic before the GDK window
     // is realized, so Linux uses a native empty input region in
     // set_owner_to_main instead.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let _ = overlay.set_ignore_cursor_events(true);
 
     // Make main the OWNER so the chrome rides with our app instead of
@@ -148,7 +152,7 @@ pub fn close_if_present<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
+fn create_overlay(app: &mut App, main: &WebviewWindow) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(OVERLAY_LABEL) {
         return Ok(existing);
     }
@@ -179,7 +183,7 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     // explorer windows). The owner-relationship set in `set_owner_to_main`
     // below is what keeps the overlay z-ordered above main without
     // promoting it to a system-wide topmost window.
-    WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         app,
         OVERLAY_LABEL,
         WebviewUrl::App("overlay-frame.html".into()),
@@ -191,8 +195,17 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     .shadow(false)
     .resizable(false)
     .skip_taskbar(true)
-    .visible(false)
-    .build()
+    .visible(false);
+
+    // NSWindow child ordering keeps the frame directly above its main window,
+    // hides/minimises it with the app, and prevents it floating over unrelated
+    // applications. Windows retains its established owner setup below.
+    #[cfg(target_os = "macos")]
+    let builder = builder.parent(main)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = main;
+
+    builder.build()
 }
 
 /// Make `main` the OWNER of `overlay` via Win32
@@ -286,6 +299,7 @@ pub fn overlay_frame_set_visible(app: tauri::AppHandle, visible: bool) -> Result
                 sync_geometry(
                     main.outer_position().map_err(|e| e.to_string())?,
                     main.outer_size().map_err(|e| e.to_string())?,
+                    main.scale_factor().map_err(|e| e.to_string())?,
                     &overlay,
                 )
                 .map_err(|e| e.to_string())?;
@@ -340,7 +354,12 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     let Some(overlay) = main.app_handle().get_webview_window(OVERLAY_LABEL) else {
         return Ok(());
     };
-    sync_geometry(main.outer_position()?, main.outer_size()?, &overlay)?;
+    sync_geometry(
+        main.outer_position()?,
+        main.outer_size()?,
+        main.scale_factor()?,
+        &overlay,
+    )?;
     // Never show the overlay before its page painted — a not-yet-ready
     // transparent WebView2 window flashes WHITE over the app. If the 700ms
     // startup wait timed out, the sync loop shows it once mark_ready fires.
@@ -353,17 +372,48 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
 fn sync_geometry(
     pos: tauri::PhysicalPosition<i32>,
     size: tauri::PhysicalSize<u32>,
+    scale_factor: f64,
     overlay: &WebviewWindow,
 ) -> tauri::Result<()> {
+    let scale = geometry_scale(scale_factor);
+    let offset_x = (CONTENT_OFFSET_X as f64 * scale).round() as i32;
+    let offset_y = (CONTENT_OFFSET_Y as f64 * scale).round() as i32;
+    let extra_w = (OVERLAY_EXTRA_W as f64 * scale).round() as u32;
+    let extra_h = (OVERLAY_EXTRA_H as f64 * scale).round() as u32;
     overlay.set_position(tauri::PhysicalPosition {
-        x: pos.x - CONTENT_OFFSET_X,
-        y: pos.y - CONTENT_OFFSET_Y,
+        x: pos.x - offset_x,
+        y: pos.y - offset_y,
     })?;
     overlay.set_size(tauri::PhysicalSize {
-        width: size.width + OVERLAY_EXTRA_W,
-        height: size.height + OVERLAY_EXTRA_H,
+        width: size.width + extra_w,
+        height: size.height + extra_h,
     })?;
     Ok(())
+}
+
+/// Physical window coordinates need Retina/HiDPI-scaled margins while the HTML
+/// frame constants are CSS pixels. The Win32 follow loop predates this helper
+/// and deliberately retains its direct, event-loop-free geometry path.
+fn geometry_scale(scale_factor: f64) -> f64 {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = scale_factor;
+        1.0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Logical distance from the overlay's top edge to the opaque content window.
+/// Used by the macOS startup fitter so the transparent chrome clears the menu.
+pub fn content_offset_y() -> f64 {
+    CONTENT_OFFSET_Y as f64
 }
 
 // On Windows the follow loop + sync_now use the event-loop-free sync_once_win32
@@ -371,7 +421,12 @@ fn sync_geometry(
 // non-Windows path, so silence the Windows dead-code warning.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
-    sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
+    sync_geometry(
+        main.outer_position()?,
+        main.outer_size()?,
+        main.scale_factor()?,
+        overlay,
+    )?;
 
     if !main.is_visible()? {
         let _ = overlay.hide();

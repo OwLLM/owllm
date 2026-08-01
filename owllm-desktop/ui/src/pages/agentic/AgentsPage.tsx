@@ -14256,10 +14256,31 @@ const AGENTS_PAGES_KEY = "owllm:agents:pages";
 const AGENTS_ACTIVE_PAGE_KEY = "owllm:agents:activePage";
 function newAgentsPageId(): string { return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function loadAgentsPages(): AgentsPageMeta[] {
+  let pages: AgentsPageMeta[] = [];
   try {
     const a = JSON.parse(localStorage.getItem(AGENTS_PAGES_KEY) || "[]");
-    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
-  } catch { return []; }
+    pages = Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { /* rebuild from the per-page project bindings below */ }
+
+  // The tab catalog and each tab's selected project are separate writes. A
+  // crash/restart can therefore leave a real project conversation behind an
+  // incomplete catalog. Closing a tab deliberately removes its binding, so a
+  // surviving binding is unambiguous recovery evidence and is safe to restore.
+  try {
+    const known = new Set(pages.map((page) => page.id));
+    const recovered: AgentsPageMeta[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const match = key?.match(/^owllm:agents:page:(.+):project$/);
+      const id = match?.[1];
+      if (!id || known.has(id) || !localStorage.getItem(key!)) continue;
+      known.add(id);
+      recovered.push({ id, title: "Recovered page" });
+    }
+    recovered.sort((a, b) => a.id.localeCompare(b.id));
+    pages = [...pages, ...recovered];
+  } catch { /* one malformed record must not block the Agents page */ }
+  return pages;
 }
 
 export default function AgentsPages() {

@@ -27,6 +27,25 @@ if errorlevel 1 (
 rustup toolchain install stable-x86_64-pc-windows-gnu
 if errorlevel 1 exit /b 1
 
+rem The checkout can live under a deep path (e.g. AppData\Local\owllm\fleet\...).
+rem CMake builds for C dependencies (opusic-sys, libsqlite3-sys) then exceed the
+rem 250-char CMAKE_OBJECT_PATH_MAX limit and fail. Redirect cargo's target dir to
+rem a short path, unless the caller already chose one. Prefer a drive-root dir for
+rem maximum headroom, falling back to LOCALAPPDATA when the root is not writable.
+if defined CARGO_TARGET_DIR goto :target_ready
+set "CARGO_TARGET_DIR=%SystemDrive%\owllm-t"
+if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%" 2>nul
+if exist "%CARGO_TARGET_DIR%" goto :target_ready
+set "CARGO_TARGET_DIR=%LOCALAPPDATA%\owllm-t"
+:target_ready
+if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%"
+if not exist "%CARGO_TARGET_DIR%" (
+  echo [owllm-desktop] Cannot create cargo target dir "%CARGO_TARGET_DIR%".
+  echo Set CARGO_TARGET_DIR to a writable short path and run again.
+  exit /b 1
+)
+echo [owllm-desktop] Cargo target dir: %CARGO_TARGET_DIR%
+
 rem Ensure module ZIPs exist for the bundle. bootstrap.bat is idempotent
 rem and re-uses cached downloads. Skip if dist\modules\manifest.json
 rem is already present (build-release was run recently) -- bypass with
@@ -72,7 +91,7 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo [owllm-desktop] Done.
-set "RELEASE=%cd%\src-tauri\target\x86_64-pc-windows-gnu\release"
+set "RELEASE=%CARGO_TARGET_DIR%\x86_64-pc-windows-gnu\release"
 set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
@@ -105,5 +124,5 @@ rem profiles, while preserving the cached third-party dependencies needed by the
 rem next build. This prevents source/UI revisions from growing target forever.
 call cargo clean -p owllm-desktop --manifest-path src-tauri\Cargo.toml
 if errorlevel 1 echo [owllm-desktop] warn: artifact prune failed; retained cache for this run
-echo   Cargo dependency cache retained in src-tauri\target
+echo   Cargo dependency cache retained in %CARGO_TARGET_DIR%
 exit /b 0

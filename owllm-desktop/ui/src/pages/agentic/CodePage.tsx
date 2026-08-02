@@ -168,6 +168,7 @@ type CodeState = {
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
+  secondaryOpen: true,
 };
 // Hydration migration: older sessions saved page notices (the run timing
 // footer, the auto-feed pause note) as plain assistant answers, which let them
@@ -905,7 +906,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
   const chatMode: boolean = stx.chatMode ?? false;
-  const secondaryOpen: boolean = stx.secondaryOpen ?? false;
+  // New coding pages show both agent panes initially. Once the user explicitly
+  // collapses or expands the second pane, that persisted choice wins.
+  const secondaryOpen: boolean = stx.secondaryOpen ?? true;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   // BOUNDED RENDERING (WebView2 "Out of Memory" fix) — see components/StreamWindow.tsx.
   // Long Code-page runs appended transcript entries forever; only the tail is put
@@ -2461,6 +2464,35 @@ function CodeWorkspace({ pageId, onTitle }: {
     void addProjectComposerFiles(files, setSecondaryAttachments);
   };
 
+  // The two coding agents deliberately share the same composer geometry and
+  // model-picker slot. Their values and callbacks remain separate below, so
+  // visual parity cannot accidentally merge their routing.
+  const CODE_COMPOSER_MIN_HEIGHT = 82;
+  const CODE_COMPOSER_MAX_HEIGHT = 142;
+  const CODE_COMPOSER_MODEL_MIN_WIDTH = 180;
+  const renderCodeModelPicker = (
+    owner: "primary" | "secondary",
+    value: string,
+    onChange: (next: string | ((current: string) => string)) => void,
+    disabled: boolean,
+    fallbackLabel: string,
+  ) => (
+    <div
+      data-ui={owner === "primary" ? "CodePrimaryComposerModelPicker" : "CodeSecondaryComposerModelPicker"}
+      style={{ minWidth: CODE_COMPOSER_MODEL_MIN_WIDTH }}
+    >
+      <ModelPicker
+        value={value}
+        onChange={onChange}
+        models={availableModels}
+        status={accountsStatus}
+        disabled={disabled}
+        fallbackLabel={fallbackLabel}
+        placement="top"
+      />
+    </div>
+  );
+
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
@@ -2477,20 +2509,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       busy={secondaryBusy}
       disabled={secondaryBusy}
       placeholder="Message the second agent… (same workspace, its own conversation & model)"
-      minHeight={44}
-      maxHeight={120}
+      minHeight={CODE_COMPOSER_MIN_HEIGHT}
+      maxHeight={CODE_COMPOSER_MAX_HEIGHT}
       modelPicker={
-        <div data-ui="CodeSecondaryComposerModelPicker" style={{ minWidth: 0 }}>
-          <ModelPicker
-            value={secondaryModelId}
-            onChange={setSecondaryModelId}
-            models={availableModels}
-            status={accountsStatus}
-            disabled={secondaryBusy}
-            fallbackLabel="Same as 1st agent"
-            placement="top"
-          />
-        </div>
+        renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy, "Same as 1st agent")
       }
       headerExtra={renderTerminalButton("secondary")}
       attachments={secondaryAttachments}
@@ -3780,22 +3802,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         onStop={stop}
         busy={busy}
         placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
-        minHeight={82}
-        maxHeight={142}
+        minHeight={CODE_COMPOSER_MIN_HEIGHT}
+        maxHeight={CODE_COMPOSER_MAX_HEIGHT}
         status={status}
-        modelPicker={
-          <div data-ui="CodePrimaryComposerModelPicker" style={{ minWidth: 180 }}>
-            <ModelPicker
-              value={modelId}
-              onChange={setModelId}
-              models={availableModels}
-              status={accountsStatus}
-              disabled={busy}
-              fallbackLabel="(pick a model)"
-              placement="top"
-            />
-          </div>
-        }
+        modelPicker={renderCodeModelPicker("primary", modelId, setModelId, busy, "(pick a model)")}
         headerExtra={renderTerminalButton("primary")}
         attachments={codeAttachments}
         onAttachFiles={addCodeFiles}

@@ -295,6 +295,7 @@
 }
 
 .owc__model {
+  margin-left: auto;
   min-width: 0;
   max-width: 260px;
 }

@@ -82,16 +82,16 @@ check(zoom.nextChatFontStep(0, -120) === 1 && zoom.nextChatFontStep(3, 120) === 
   "a wheel notch moves the shared step in the wheel's direction");
 
 // --- 3. Bounds (readable min/max, no overflow) ------------------------------
-check(zoom.nextChatFontStep(6, -120) === 6,
-  "zooming in at the +6 ceiling is clamped (never past readable max)");
-check(zoom.nextChatFontStep(-1, 120) === -1,
-  "zooming out at the -1 floor is clamped (never past readable min)");
+check(zoom.nextChatFontStep(9, -120) === 9,
+  "zooming in at the +9 ceiling is clamped (never past readable max)");
+check(zoom.nextChatFontStep(-3, 120) === -3,
+  "zooming out at the -3 floor is clamped (never past readable min)");
 // Repeated notches never escape the range.
 let s = 0;
-for (let i = 0; i < 20; i += 1) s = zoom.nextChatFontStep(s, -120);
-check(s === 6, "many zoom-in notches saturate exactly at +6");
-for (let i = 0; i < 20; i += 1) s = zoom.nextChatFontStep(s, 120);
-check(s === -1, "many zoom-out notches saturate exactly at -1");
+for (let i = 0; i < 30; i += 1) s = zoom.nextChatFontStep(s, -120);
+check(s === 9, "many zoom-in notches saturate exactly at +9");
+for (let i = 0; i < 30; i += 1) s = zoom.nextChatFontStep(s, 120);
+check(s === -3, "many zoom-out notches saturate exactly at -3");
 
 // --- 4. Restore after restart (persistence) ---------------------------------
 // The wheel drives the SAME persisted step as the Settings buttons, so a

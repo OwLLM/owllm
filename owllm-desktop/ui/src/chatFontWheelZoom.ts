@@ -53,9 +53,9 @@ export function wheelZoomDelta(deltaY: number): number {
 }
 
 // Apply one wheel notch to the current step, clamped to the readable range
-// ([-1, +6] via chatFontPreferences). Keeping the clamp here means the wheel can
+// ([-3, +9] via chatFontPreferences). Keeping the clamp here means the wheel can
 // never push the text past the same bounds the buttons enforce, so layouts that
-// already tolerate the +6 ceiling never overflow.
+// already tolerate the +9 ceiling never overflow.
 export function nextChatFontStep(current: number, deltaY: number): number {
   return clampChatFontStep(current + wheelZoomDelta(deltaY));
 }

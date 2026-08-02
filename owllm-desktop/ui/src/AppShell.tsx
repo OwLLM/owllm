@@ -56,7 +56,8 @@ import {
 } from "./chatFontPreferences";
 import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
-import { installWorldPresenceConnection } from "./pages/gamify/worldPresence";
+import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
+import { getIdentity } from "./pages/advanced/remoteDevices";
 import { openWebUrl } from "./utils/openWebUrl";
 
 // tauri.conf.json now sets decorations:false again — the OS title
@@ -2074,7 +2075,24 @@ export default function AppShell() {
 // installed yet. Dismissing it (Skip or Install) records `wizard.completed`
 // in localStorage so subsequent launches stay clean.
 function WorldPresenceRunner() {
-  useEffect(() => installWorldPresenceConnection(), []);
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void getIdentity()
+      .then((identity) => presenceNodeIdForDevice(identity.device_id))
+      .then((nodeId) => {
+        if (!disposed) stop = installWorldPresenceConnection({ nodeId });
+      })
+      .catch(() => {
+        // Browser-only development and a temporarily unavailable native identity
+        // retain the old device-local anonymous id instead of losing presence.
+        if (!disposed) stop = installWorldPresenceConnection();
+      });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
   return null;
 }
 

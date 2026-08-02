@@ -34,6 +34,30 @@ export function readOrCreateNodeId(storage: PresenceStorage | undefined = availa
   return created;
 }
 
+const DEVICE_PRESENCE_DOMAIN = "owllm-world-presence-device-v1\0";
+
+/**
+ * Derive the anonymous public-presence token from OwLLM's stable native device
+ * identity. The domain-separated one-way hash lets the owner's private Fleet
+ * records reconcile with Live World without sending the native device id.
+ */
+export async function presenceNodeIdForDevice(deviceId: string): Promise<string> {
+  const normalized = deviceId.trim().toLowerCase();
+  if (!normalized) return "";
+  const bytes = new TextEncoder().encode(`${DEVICE_PRESENCE_DOMAIN}${normalized}`);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Stable short label for a public node; unlike a row index it never changes. */
+export function presenceServerCode(nodeId: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < nodeId.length; index += 1) {
+    hash = Math.imul(hash ^ nodeId.charCodeAt(index), 16777619);
+  }
+  return `OW-${(hash >>> 0).toString(36).toUpperCase().padStart(7, "0")}`;
+}
+
 export type WorldMapMode = "world" | "fleet";
 export type PresenceSocketRole = "presence" | "viewer";
 export type PresenceOs = "Windows" | "macOS" | "Linux" | "Other";
@@ -65,6 +89,15 @@ export type PresenceSnapshot = {
   counts: PresenceCounts;
   updatedAt: string | null;
 };
+
+export function isFleetDeviceLiveInWorld(
+  deviceId: string,
+  presenceIds: ReadonlyMap<string, string>,
+  nodes: Pick<PublicPresenceNode, "id" | "online">[],
+): boolean {
+  const presenceId = presenceIds.get(deviceId);
+  return Boolean(presenceId && nodes.some((node) => node.id === presenceId && node.online));
+}
 
 export type PresenceConnectionStatus = {
   configured: boolean;

@@ -35,7 +35,10 @@ import {
 import {
   groupPresenceByCountry,
   includeSelfDevice,
+  isFleetDeviceLiveInWorld,
   presenceCity,
+  presenceNodeIdForDevice,
+  presenceServerCode,
   readWorldMapMode,
   saveWorldMapMode,
   subscribeWorldPresence,
@@ -82,7 +85,7 @@ const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
 const OS_DISPLAY_ORDER: PresenceOs[] = ["Windows", "macOS", "Linux", "Other"];
 const PLANET_BASE_LIGHT_INTENSITY = 1;
-const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15;
+const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25;
 
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
@@ -531,7 +534,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     })));
 
     // Every planet receives one neutral baseline. Direct sunlight adds at most
-    // 15% at the subsolar point, so textures remain readable on both sides
+    // 18.75% at the subsolar point, so textures remain readable on both sides
     // without the sun-facing hemisphere washing out.
     scene.add(new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY));
     const sunLocal = new THREE.Vector3();
@@ -651,7 +654,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     }
 
     // One layer-scoped light per planet prevents the eight directions from
-    // stacking. Each surface therefore receives exactly one 15% sun term above
+    // stacking. Each surface therefore receives exactly one 18.75% sun term above
     // the shared baseline. Earth retains its real-UTC terminator; every other
     // planet is lit from the rendered Sun at the system origin.
     const planetSunLights = planetMeshes.map(({ spec, anchor, mesh }, index) => {
@@ -1032,6 +1035,7 @@ export default function WorldMapPage() {
   const [mode, setMode] = useState<WorldMapMode>(readWorldMapMode);
   const [publicNodes, setPublicNodes] = useState<PublicPresenceNode[]>([]);
   const [fleet, setFleet] = useState<DeviceRecord[]>([]);
+  const [fleetPresenceIds, setFleetPresenceIds] = useState<Map<string, string>>(new Map());
   const [selfId, setSelfId] = useState("");
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1154,8 +1158,14 @@ export default function WorldMapPage() {
     setFleetError("");
     try {
       const [identity, devices] = await Promise.all([getIdentity(), listDevices()]);
+      const nextFleet = fleetWithSelf(identity, devices);
+      const presenceIds = await Promise.all(nextFleet.map(async (device) => [
+        device.device_id,
+        await presenceNodeIdForDevice(device.device_id),
+      ] as const));
       setSelfId(identity.device_id);
-      setFleet(fleetWithSelf(identity, devices));
+      setFleet(nextFleet);
+      setFleetPresenceIds(new Map(presenceIds));
     } catch (reason) {
       setFleetError(String(reason));
     } finally {
@@ -1169,8 +1179,15 @@ export default function WorldMapPage() {
       try {
         const [identity, devices] = await Promise.all([getIdentity(), listDevices()]);
         if (!alive) return;
+        const nextFleet = fleetWithSelf(identity, devices);
+        const presenceIds = await Promise.all(nextFleet.map(async (device) => [
+          device.device_id,
+          await presenceNodeIdForDevice(device.device_id),
+        ] as const));
+        if (!alive) return;
         setSelfId(identity.device_id);
-        setFleet(fleetWithSelf(identity, devices));
+        setFleet(nextFleet);
+        setFleetPresenceIds(new Map(presenceIds));
         setFleetError("");
       } catch (reason) {
         if (alive) setFleetError(String(reason));
@@ -1194,7 +1211,9 @@ export default function WorldMapPage() {
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
     ? publicNodes.map((node) => ({
         id: node.id,
-        label: node.region ? regionWithFlag(node.region) : t("Anonymous OWLLM node"),
+        label: node.region
+          ? `${regionWithFlag(node.region)} · ${presenceServerCode(node.id)}`
+          : `${t("Anonymous OWLLM node")} · ${presenceServerCode(node.id)}`,
         detail: `${node.os === "Other" ? t("Other") : node.os} · ${node.online ? t("Online") : t("Offline")}`,
         latitude: node.latitude,
         longitude: node.longitude,
@@ -1202,7 +1221,10 @@ export default function WorldMapPage() {
         kind: "world" as const,
       }))
     : fleet.map((device) => {
-        const online = isDeviceOnline(device);
+        // Live World is the primary app-presence signal. The signed/private
+        // Fleet heartbeat remains a compatibility fallback for older clients.
+        const online = isFleetDeviceLiveInWorld(device.device_id, fleetPresenceIds, publicNodes)
+          || isDeviceOnline(device);
         return {
           id: device.device_id,
           label: device.is_self || device.device_id === selfId ? t("This device") : device.name,
@@ -1211,7 +1233,7 @@ export default function WorldMapPage() {
           kind: "fleet" as const,
           orbit: fleetOrbit(device.device_id),
         };
-      }), [fleet, mode, publicNodes, selfId, t]);
+      }), [fleet, fleetPresenceIds, mode, publicNodes, selfId, t]);
 
   const onlineCount = nodes.filter((node) => node.online).length;
   const countries = useMemo(() => groupPresenceByCountry(publicNodes), [publicNodes]);
@@ -1415,6 +1437,10 @@ export default function WorldMapPage() {
                 const expanded = expandedCountry === countryKey;
                 const flag = country.countryCode ? countryCodeToFlag(country.countryCode) : "🌐";
                 const countryName = countryDisplayName(country.countryCode, language) || t("Unknown country");
+                const cities = [...new Set(country.nodes
+                  .map((node) => presenceCity(node.region))
+                  .filter(Boolean))]
+                  .sort((a, b) => a.localeCompare(b, language));
                 return (
                   <div key={countryKey} style={{ borderBottom: "1px solid var(--border)", padding: "10px 2px" }}>
                     <div style={{ display: "grid", gridTemplateColumns: "62px minmax(0,1fr)", gap: 12, alignItems: "start" }}>
@@ -1442,6 +1468,11 @@ export default function WorldMapPage() {
                         <div style={{ marginTop: 2, color: "var(--accent-ink)", fontSize: 11.5, fontWeight: 750 }}>
                           {country.onlineCount}/{country.nodes.length} {t("online now")}
                         </div>
+                        {cities.length > 0 && (
+                          <div title={cities.join(", ")} style={{ marginTop: 3, color: "var(--fg-muted)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {cities.join(", ")}
+                          </div>
+                        )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 6 }}>
                           {OS_DISPLAY_ORDER
                             .filter((os) => country.osCounts[os].total > 0)
@@ -1472,7 +1503,7 @@ export default function WorldMapPage() {
                           border: "1px solid var(--border)", borderRadius: 10, background: "rgba(var(--accent-rgb),.05)",
                         }}
                       >
-                        {[...country.nodes].sort((a, b) => Number(b.online) - Number(a.online) || a.region.localeCompare(b.region)).map((publicNode, index) => {
+                        {[...country.nodes].sort((a, b) => Number(b.online) - Number(a.online) || a.region.localeCompare(b.region)).map((publicNode) => {
                           const globeNode = nodesById.get(publicNode.id);
                           const city = presenceCity(publicNode.region) || t("Unknown city");
                           return (
@@ -1490,7 +1521,7 @@ export default function WorldMapPage() {
                               <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: publicNode.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: publicNode.online ? "0 0 9px var(--accent)" : "none" }} />
                               <span style={{ minWidth: 0 }}>
                                 <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {countryName} · {t("Server")} {index + 1}
+                                  {countryName} · {t("Server")} {presenceServerCode(publicNode.id)}
                                 </span>
                                 <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                   {city} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.online ? t("Online") : t("Offline")}

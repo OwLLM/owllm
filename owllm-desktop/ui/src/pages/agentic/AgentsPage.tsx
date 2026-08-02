@@ -2717,7 +2717,7 @@ function AgentChatTile({
 // close, ✕ button) and adds Esc-to-close.
 function AgentEditorModal({
   agentName, displayName, icon,
-  initialModel, initialColor, initialPrompt, initialProfileRef, projectId,
+  initialModel, initialColor, initialPrompt, initialProfileRef, projectId, projectCwd,
   models, accountsStatus, serverState, effectiveTeamModel, providerFor,
   templateId, onPickModel, onPreviewColor, onClose, onSaved,
 }: {
@@ -2729,6 +2729,7 @@ function AgentEditorModal({
   initialPrompt: string;
   initialProfileRef?: RevisionRef;
   projectId: string;
+  projectCwd?: string;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
   serverState: ServerStatus;
@@ -2800,6 +2801,7 @@ function AgentEditorModal({
         serverState.port ?? 0, useModel, prov,
         sys, `Reorganise this agent prompt:\n\n${source}`,
         0.1, ctrl.signal, (d) => { out += d; },
+        projectCwd,
       );
       // Pull the JSON object out of the reply (models sometimes wrap it in prose
       // or a ```json fence despite instructions).

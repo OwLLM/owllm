@@ -98,6 +98,7 @@ for (const scenario of [
   "verify_failure_blocks_push",
   "behind_and_up_to_date",
   "runtime_files_auto_resolve",
+  "pre_reconcile_before_squash_preserves_reverts",
 ]) {
   if (!harness.includes(`fn ${scenario}`)) fail(`harness scenario missing: ${scenario}`);
 }

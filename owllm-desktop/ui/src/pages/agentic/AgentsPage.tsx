@@ -6978,6 +6978,23 @@ function needsCriticalThinkerReview(text: string): boolean {
   // thinker" (or @critical_thinker) to bring it in.
   return /\b(critical[\s_]+thinker|critic)\b/i.test(text);
 }
+
+/// A Personal Secretary screenshot-to-message request is an external
+/// operation, not a software-planning goal. Running it through the secretary
+/// orchestrator, triager, responder, and final integration adds several model
+/// turns before the browser can act. Keep this narrow: only a Secretary/Chief
+/// of Staff project and an explicit capture + outbound-message request qualify.
+export function isPersonalSecretaryMediaRequest(
+  text: string,
+  team: Pick<Team, "id" | "name" | "display"> | null | undefined,
+  projectName = "",
+): boolean {
+  const teamLabel = `${team?.id ?? ""} ${team?.name ?? ""} ${team?.display ?? ""} ${projectName}`;
+  const isSecretary = /secretary|chief[\s_-]*of[\s_-]*staff|personal[\s_-]+assistant/i.test(teamLabel);
+  const isCapture = /\b(screen[\s_-]*shot|screenshot|capture)\b/i.test(text);
+  const isOutbound = /\b(send|message|whatsapp|attach|upload|share)\b/i.test(text);
+  return isSecretary && isCapture && isOutbound;
+}
 function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
   const directivesBlock = formatDirectivesBlock(directives);
   return [
@@ -10434,6 +10451,11 @@ export function AgentsPage({
       intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
     const directCriticSpec = runtimeTeam.agents.find(agent =>
       agent.name === CRITIC_AGENT_NAME || agent.base === "critic" || agent.base === "critical_thinker");
+    const directExternalAction = isPersonalSecretaryMediaRequest(
+      text,
+      activeTeam,
+      selectedProject?.name ?? "",
+    );
     // Remember this goal so a failed second-agent / forwarded send can offer a
     // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
     // only genuine goals land here.
@@ -10451,7 +10473,7 @@ export function AgentsPage({
     // Otherwise attaching a picture silently diverted the run to the read-only
     // single-assistant orchestrator below, skipping the solo-loop's publish
     // (the "I said publish but it switched to the orchestrator" bug).
-    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0)) {
+    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0) && !directExternalAction) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (soloMode || hasSpecialists) {
@@ -10677,6 +10699,15 @@ export function AgentsPage({
           ? `You are the orchestrator of '${activeTeam.display}'.`
           : "You are the team's orchestrator.",
         "Answer the user concisely.",
+        directExternalAction
+          ? [
+            "FAST EXTERNAL OPERATION: perform this narrow screenshot-and-message request directly.",
+            "Do not plan, delegate, invoke a critic, inspect the project, or run unrelated tools.",
+            "Use browser_screenshot with scope=app to capture only the native OWLLM application window at full pixels.",
+            "When sending a UI screenshot through WhatsApp, attach the PNG as a Document (not Photos & videos) so WhatsApp does not recompress readable text.",
+            "Verify the recipient, attachment filename, and sent confirmation, then report the actual result.",
+          ].join("\n")
+          : "",
         // Tool-use directive. Small local models tend to DESCRIBE their
         // toolbox and say "now let me test them" without ever emitting the
         // structured tool call, so the turn ends with no action taken (the
@@ -14371,10 +14402,31 @@ const AGENTS_PAGES_KEY = "owllm:agents:pages";
 const AGENTS_ACTIVE_PAGE_KEY = "owllm:agents:activePage";
 function newAgentsPageId(): string { return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function loadAgentsPages(): AgentsPageMeta[] {
+  let pages: AgentsPageMeta[] = [];
   try {
     const a = JSON.parse(localStorage.getItem(AGENTS_PAGES_KEY) || "[]");
-    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
-  } catch { return []; }
+    pages = Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { /* rebuild from the per-page project bindings below */ }
+
+  // The tab catalog and each tab's selected project are separate writes. A
+  // crash/restart can therefore leave a real project conversation behind an
+  // incomplete catalog. Closing a tab deliberately removes its binding, so a
+  // surviving binding is unambiguous recovery evidence and is safe to restore.
+  try {
+    const known = new Set(pages.map((page) => page.id));
+    const recovered: AgentsPageMeta[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const match = key?.match(/^owllm:agents:page:(.+):project$/);
+      const id = match?.[1];
+      if (!id || known.has(id) || !localStorage.getItem(key!)) continue;
+      known.add(id);
+      recovered.push({ id, title: "Recovered page" });
+    }
+    recovered.sort((a, b) => a.id.localeCompare(b.id));
+    pages = [...pages, ...recovered];
+  } catch { /* one malformed record must not block the Agents page */ }
+  return pages;
 }
 
 export default function AgentsPages() {

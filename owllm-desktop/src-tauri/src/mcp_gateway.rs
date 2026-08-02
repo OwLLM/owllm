@@ -662,9 +662,9 @@ fn tool_specs() -> Vec<Value> {
             "description": "Switch device emulation: desktop, iphone, android or tablet (viewport size + mobile user-agent).",
             "inputSchema": { "type": "object", "properties": { "device": { "type": "string", "enum": ["desktop", "iphone", "android", "tablet"] } }, "required": ["device"] } }),
         json!({ "name": "browser_screenshot",
-            "description": "Capture a real PNG. scope=viewport captures the visible browser window; full_page captures the whole document without scrolling where supported; desktop captures the screen/virtual desktop (Linux Wayland may show the required system consent dialog). Returns an absolute saved path.",
+            "description": "Capture a real PNG. scope=viewport captures the visible browser window; full_page captures the whole document without scrolling where supported; app captures the native OWLLM app window only at native pixels; desktop captures the screen/virtual desktop (Linux Wayland may show the required system consent dialog). Returns an absolute saved path. For readable UI screenshots sent through WhatsApp, use scope=app and attach the PNG as a Document to avoid photo recompression.",
             "inputSchema": { "type": "object", "properties": {
-                "scope": { "type": "string", "enum": ["viewport", "full_page", "desktop"], "default": "viewport" },
+                "scope": { "type": "string", "enum": ["viewport", "full_page", "app", "desktop"], "default": "viewport" },
                 "tab_id": tab
             } } }),
         json!({ "name": "browser_upload_file",

@@ -24,15 +24,13 @@ check(header.includes('height: 88, boxSizing: "border-box"'),
 check(header.includes('padding: "7px 18px 1px 20px"'),
   "header padding is 3px smaller on top and 9px smaller on bottom");
 
-const sysStart = shell.indexOf('data-ui="SysInfoBlock"');
-const sysEnd = shell.indexOf("\n    </div>\n  );", sysStart);
-const sysInfo = shell.slice(sysStart, sysEnd);
-check(sysStart !== -1 && sysEnd !== -1, "right-side system status remains present");
-check(!sysInfo.includes('data-ui="HeaderApiKeyLabel"') && !sysInfo.includes("API key: owllm-local"),
-  "hardcoded API-key line is absent from the header");
-check(sysInfo.includes('data-ui="HeaderServersLabel"') && sysInfo.includes('data-ui="HeaderVramLabel"'),
-  "server and VRAM status remain visible");
-check(sysInfo.includes('<GenSpeedBadge variant="header" />'),
-  "live generation speed remains available without the API-key line");
+check(!shell.includes('data-ui="SysInfoBlock"'),
+  "oversized right-side server control is absent");
+check(!shell.includes('data-ui="HeaderApiKeyLabel"') && !shell.includes("API key: owllm-local"),
+  "hardcoded API-key line remains absent from the header");
+check(!shell.includes('data-ui="HeaderServersLabel"') && !shell.includes('data-ui="HeaderVramLabel"'),
+  "server and VRAM status no longer consume main-header space");
+check(header.includes('gridTemplateColumns: "auto 1fr auto"'),
+  "header retains only its left controls, spacer, and compact window controls");
 
 console.log(`app header compact verification: ${passed}/${passed} passed`);

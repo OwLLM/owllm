@@ -84,7 +84,10 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Fresh Linux runners can spend more than 45 minutes in the optimized
+    # Rust/Tauri link. Keep a hard bound, but leave enough time for both Linux
+    # architectures to reach packaging instead of cancelling healthy builds.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -94,11 +97,17 @@ jobs:
             rust_target: 'x86_64-pc-windows-msvc'
             tauri_args: '--target x86_64-pc-windows-msvc'
             artifact: 'owllm-desktop-windows-x64'
+            updater_platform: 'windows-x86_64'
+            updater_pattern: '*-setup.exe'
+            updater_asset: 'OwLLM.Desktop.Setup.exe'
           - label: 'macOS Apple Silicon'
             os: 'macos-latest'
             rust_target: 'aarch64-apple-darwin'
             tauri_args: '--target aarch64-apple-darwin'
             artifact: 'owllm-desktop-macos-arm64'
+            updater_platform: 'darwin-aarch64'
+            updater_pattern: '*.app.tar.gz'
+            updater_asset: 'OwLLM.Desktop_aarch64.app.tar.gz'
           # NOTE: the 'macOS Intel' (macos-13 / x86_64-apple-darwin) entry was
           # removed 2026-07: GitHub retired the macos-13 runner image, so the
           # job queued forever and blocked every release (the queued job also
@@ -115,6 +124,17 @@ jobs:
             # the staging step despite a successful build.
             tauri_args: '--target x86_64-unknown-linux-gnu'
             artifact: 'owllm-desktop-linux-x64'
+            updater_platform: 'linux-x86_64'
+            updater_pattern: '*.AppImage'
+            updater_asset: 'OwLLM.Desktop_amd64.AppImage'
+          - label: 'Linux ARM64'
+            os: 'ubuntu-24.04-arm'
+            rust_target: 'aarch64-unknown-linux-gnu'
+            tauri_args: '--target aarch64-unknown-linux-gnu'
+            artifact: 'owllm-desktop-linux-arm64'
+            updater_platform: 'linux-aarch64'
+            updater_pattern: '*.AppImage'
+            updater_asset: 'OwLLM.Desktop_aarch64.AppImage'
 
     steps:
       - name: Checkout
@@ -147,7 +167,7 @@ jobs:
       # and Fedora 38+.
       # ---------------------------------------------------------------
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -187,6 +207,10 @@ jobs:
       - name: Install UI dependencies
         working-directory: owllm-desktop
         run: npm ci
+
+      - name: Verify updater manifest generation
+        working-directory: owllm-desktop
+        run: node scripts/generate-updater-manifest.verify.run.mjs
 
       - name: Build the Vite UI
         working-directory: owllm-desktop
@@ -339,7 +363,22 @@ jobs:
           # set and makes Tauri run signtool with no cert — that broke v0.7.33).
           # The SimplySign/Certum cert lives only on the host, so CI builds unsigned;
           # signed releases come from the host publish path, which HAS the cert.
-          npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":null}}}'
+          # Tauri downloads platform bundlers (for example WiX on Windows) on
+          # first use. Retry the complete command so a transient CDN reset does
+          # not discard an otherwise successful 20+ minute native build; Cargo
+          # reuses the completed target on subsequent attempts.
+          TAURI_BUILD_MAX_ATTEMPTS=3
+          for attempt in $(seq 1 "$TAURI_BUILD_MAX_ATTEMPTS"); do
+            if npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":null}}}'; then
+              break
+            fi
+            if [ "$attempt" -eq "$TAURI_BUILD_MAX_ATTEMPTS" ]; then
+              echo "Tauri packaging failed after $TAURI_BUILD_MAX_ATTEMPTS attempts" >&2
+              exit 1
+            fi
+            echo "Tauri build attempt $attempt failed; retrying in 15 seconds..." >&2
+            sleep 15
+          done
 
       # ---------------------------------------------------------------
       # Smoke test — launch the built binary and verify it stays alive
@@ -469,13 +508,37 @@ jobs:
               -o -iname 'latest.json' \
               -o -iname '*.sig' \
             \) -exec cp {} stage/ \;
-          # Every Tauri matrix leg emits a file named latest.json. Giving each
-          # one a target-qualified name prevents download-artifact's
-          # merge-multiple mode from nondeterministically overwriting two of
-          # the three signed platform manifests in the release job.
-          if [ -f stage/latest.json ]; then
-            mv stage/latest.json "stage/latest-${{ matrix.rust_target }}.json"
+          # Tauri 2 creates the signed updater package and its .sig file, but
+          # does not create latest.json. Select the updater package for this
+          # matrix leg, give it a stable public filename, and generate the
+          # target-qualified manifest consumed by the release job.
+          updater_source=$(find stage -maxdepth 1 -type f -name '${{ matrix.updater_pattern }}' -print -quit)
+          if [ -z "$updater_source" ] || [ ! -f "$updater_source.sig" ]; then
+            echo "Signed updater package not found for ${{ matrix.updater_platform }}" >&2
+            exit 1
           fi
+          updater_target="stage/${{ matrix.updater_asset }}"
+          updater_signature="$updater_target.sig"
+          if [ "$updater_source" != "$updater_target" ]; then
+            mv "$updater_source" "$updater_target"
+          fi
+          if [ "$updater_source.sig" != "$updater_signature" ]; then
+            mv "$updater_source.sig" "$updater_signature"
+          fi
+
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          release_tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            release_tag='${{ github.event.inputs.version }}'
+            if [ -z "$release_tag" ]; then release_tag="v$version"; fi
+          fi
+          UPDATER_VERSION="$version" \
+          UPDATER_RELEASE_TAG="$release_tag" \
+          UPDATER_PLATFORM='${{ matrix.updater_platform }}' \
+          UPDATER_ASSET='${{ matrix.updater_asset }}' \
+          UPDATER_SIGNATURE_FILE="$updater_signature" \
+          UPDATER_OUTPUT="stage/latest-${{ matrix.rust_target }}.json" \
+            node scripts/generate-updater-manifest.mjs
           # Portable Windows exe — useful for power-users who don't want
           # the installer overhead. Copy it next to the setup so it ships
           # with the same release.
@@ -565,15 +628,15 @@ jobs:
             Object.assign(platforms, manifest.platforms || {});
           }
 
-          const assets = fs.readdirSync("dist");
-          const expected = [
-            ["windows-x86_64", (name) => /\.exe$/i.test(name)],
-            ["darwin-aarch64", (name) => /\.app\.tar\.gz$/i.test(name)],
-            ["linux-x86_64", (name) => /\.AppImage$/i.test(name)],
+          const requiredPlatforms = [
+            "windows-x86_64",
+            "darwin-aarch64",
+            "linux-x86_64",
+            "linux-aarch64",
           ];
-          for (const [platform, hasArtifact] of expected) {
-            if (assets.some(hasArtifact) && !platforms[platform]) {
-              throw new Error(`${platform} artifact exists but its signed updater entry is missing`);
+          for (const platform of requiredPlatforms) {
+            if (!platforms[platform]) {
+              throw new Error(`Required signed updater entry is missing: ${platform}`);
             }
           }
 

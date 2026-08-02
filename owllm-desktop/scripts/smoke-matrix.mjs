@@ -103,8 +103,18 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/AgentsPage.tsx", /toolCalls\.slice\(toolsWin\.start\)/, "Tool Calls view renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
-  ["../.github/workflows/release.yml", /latest-\$\{\{ matrix\.rust_target \}\}\.json/, "matrix updater manifests keep unique names instead of overwriting Linux/macOS entries"],
-  ["../.github/workflows/release.yml", /\["linux-x86_64", \(name\) => \/\\\.AppImage\$\/i\.test\(name\)\]/, "a published Linux AppImage cannot be omitted from latest.json"],
+  ["../.github/workflows/release.yml", /UPDATER_OUTPUT="stage\/latest-\$\{\{ matrix\.rust_target \}\}\.json"[\s\S]{0,100}generate-updater-manifest\.mjs/, "release builds generate target-qualified updater manifests instead of expecting Tauri to emit latest.json"],
+  ["../.github/workflows/release.yml", /Verify updater manifest generation[\s\S]{0,180}generate-updater-manifest\.verify\.run\.mjs/, "updater manifest regression check runs before every release build"],
+  ["../.github/workflows/release.yml", /TAURI_BUILD_MAX_ATTEMPTS=3[\s\S]{0,900}retrying in 15 seconds/, "transient platform-bundler downloads retry without discarding a completed native build"],
+  ["../.github/workflows/release.yml", /label: 'Linux ARM64'[\s\S]{0,240}ubuntu-24\.04-arm[\s\S]{0,240}aarch64-unknown-linux-gnu/, "official release matrix builds and signs Linux ARM64 on a native hosted runner"],
+  ["../.github/workflows/release.yml", /timeout-minutes: 90/, "optimized Linux release builds are not cancelled at the old 45-minute cap"],
+  ["../.github/workflows/release.yml", /requiredPlatforms[\s\S]{0,300}"linux-x86_64"[\s\S]{0,120}"linux-aarch64"/, "public updater manifest requires both Linux architectures"],
+  ["../.github/workflows/mac-release-repair.yml", /gh release view "\$TAG"[\s\S]{0,240}gh release create "\$TAG"/, "macOS-only release path creates a missing public release instead of requiring another platform first"],
+  ["../.github/workflows/mac-release-repair.yml", /const manifest = \{[\s\S]{0,240}version: process\.env\.VERSION[\s\S]{0,400}"darwin-aarch64"/, "macOS-only release path generates its updater manifest without a pre-existing cross-platform manifest"],
+  ["../.github/workflows/mac-release-repair.yml", /macos-arm64:[\s\S]{0,80}runs-on: macos-latest/, "macOS-only releases use an available hosted Apple Silicon runner"],
+  ["../.github/workflows/mac-release-repair.yml", /Preserve signed macOS release files[\s\S]{0,240}actions\/upload-artifact@v4[\s\S]*Publish Mac assets and manifest/, "signed macOS files survive a public-repository credential failure"],
+  ["../.github/workflows/mac-release-repair.yml", /Restore Apple Silicon Rust build cache[\s\S]{0,180}shared-key: tauri-aarch64-apple-darwin/, "macOS-only releases reuse the existing Apple Silicon build cache"],
+  ["../.github/workflows/sign-local-macos-updater.yml", /workflow_dispatch:[\s\S]{0,500}sha256:[\s\S]{0,500}runs-on: macos-latest[\s\S]{0,1200}Download locally-built archive[\s\S]{0,1200}signer sign/, "local Mac releases sign the checksum-pinned prebuilt archive without another application build"],
 ];
 
 function runStatic() {

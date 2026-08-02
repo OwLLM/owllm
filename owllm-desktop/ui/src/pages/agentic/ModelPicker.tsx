@@ -329,7 +329,7 @@ function displayForId(id: string, entries: ModelPickerEntry[]): string {
 
 export default function ModelPicker({
   value, onChange, models, status, placeholder, disabled, fallbackLabel,
-  localOnly, placement = "auto", compactTrigger, compactTitle,
+  localOnly, placement = "auto", compactTrigger, compactTitle, appearance = "default",
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -350,6 +350,8 @@ export default function ModelPicker({
   /// identity as a logo. The popover remains this shared picker unchanged.
   compactTrigger?: React.ReactNode;
   compactTitle?: string;
+  /// Opt-in visual treatment for the CodePage composer controls.
+  appearance?: "default" | "solid-psychedelic";
 }) {
   const [open, setOpen] = useState(false);
   // Sections start COLLAPSED (lab name + count only) so the popover stays
@@ -465,17 +467,26 @@ export default function ModelPicker({
   }
 
   return (
-    <div ref={wrapRef} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+    <div
+      ref={wrapRef}
+      className={appearance === "solid-psychedelic" ? "ow-model-picker ow-model-picker--solid-psychedelic" : "ow-model-picker"}
+      style={{ position: "relative", flex: 1, minWidth: 0 }}
+    >
       <button
         ref={btnRef}
         type="button"
         disabled={disabled}
         onClick={togglePopover}
         title={compactTitle || triggerLabel}
+        className="ow-model-picker__trigger"
+        data-state={value ? "selected" : "unselected"}
         style={{
           width: "100%", height: 30, padding: compactTrigger ? 0 : "0 10px",
-          background: "var(--bg-input)", color: "var(--fg-strong)",
-          border: "1px solid var(--border)", borderRadius: 8,
+          ...(appearance === "default" ? {
+            background: "var(--bg-input)", color: "var(--fg-strong)",
+            border: "1px solid var(--border)",
+          } : {}),
+          borderRadius: 8,
           fontSize: 12, textAlign: "left",
           cursor: disabled ? "not-allowed" : "pointer",
           display: "flex", alignItems: "center", justifyContent: compactTrigger ? "center" : undefined, gap: 6,
@@ -532,19 +543,27 @@ export default function ModelPicker({
                       title={e.hint ? `${e.label} — ${e.hint}` : e.label}
                       onClick={() => { onChange(e.id); setOpen(false); }}
                       disabled={muted}
+                      className="ow-model-picker__option"
+                      data-state={isActive ? "selected" : "unselected"}
                       style={{
                         display: "flex", alignItems: "center", gap: 8,
                         padding: "6px 14px",
-                        background: isActive ? "var(--accent-soft)" : "transparent",
-                        color: muted ? "var(--fg-subtle)" : "var(--fg)",
+                        ...(appearance === "default" ? {
+                          background: isActive ? "var(--accent-soft)" : "transparent",
+                          color: muted ? "var(--fg-subtle)" : "var(--fg)",
+                        } : {}),
                         border: "none",
                         textAlign: "left",
                         fontSize: 12,
                         cursor: muted ? "not-allowed" : "pointer",
                         opacity: muted ? 0.55 : 1,
                       }}
-                      onMouseEnter={ev => { if (!muted) (ev.currentTarget as HTMLElement).style.background = isActive ? "var(--accent-soft)" : "var(--bg-surface)"; }}
-                      onMouseLeave={ev => { if (!muted) (ev.currentTarget as HTMLElement).style.background = isActive ? "var(--accent-soft)" : "transparent"; }}
+                      onMouseEnter={appearance === "default"
+                        ? (ev) => { if (!muted) ev.currentTarget.style.background = isActive ? "var(--accent-soft)" : "var(--bg-surface)"; }
+                        : undefined}
+                      onMouseLeave={appearance === "default"
+                        ? (ev) => { if (!muted) ev.currentTarget.style.background = isActive ? "var(--accent-soft)" : "transparent"; }
+                        : undefined}
                     >
                       <span style={{
                         width: 6, height: 6, borderRadius: 3,

@@ -300,6 +300,72 @@
   max-width: 260px;
 }
 
+/* CodePage model controls reuse the app's psychedelic stop colours as crisp,
+   solid states. They deliberately do not inherit the active-pane aura: the
+   picker must stay calm while selected, hovered, or keyboard-focused. */
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger {
+  font-weight: 800;
+  box-shadow: none;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger[data-state="unselected"] {
+  border: 1px solid #7fd4ff;
+  background: var(--bg-surface);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger[data-state="selected"] {
+  border-color: #b07cff;
+  background: #b07cff;
+  color: #160c24;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger:hover:not(:disabled),
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger[data-state="selected"]:hover:not(:disabled) {
+  border-color: #ff5c8a;
+  background: #ff5c8a;
+  color: #260812;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger:focus-visible,
+.ow-model-picker--solid-psychedelic .ow-model-picker__option:focus-visible {
+  outline: 2px solid #ffd93c;
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__option {
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__option[data-state="unselected"] {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__option[data-state="selected"] {
+  background: #b07cff;
+  color: #160c24;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__option:hover:not(:disabled),
+.ow-model-picker--solid-psychedelic .ow-model-picker__option[data-state="selected"]:hover:not(:disabled) {
+  background: #ff5c8a;
+  color: #260812;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__trigger:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
 .owc__tray {
   display: flex;
   flex-wrap: wrap;

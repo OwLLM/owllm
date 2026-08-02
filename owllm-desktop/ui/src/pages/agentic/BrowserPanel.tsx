@@ -187,9 +187,8 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
   const browserTabs = status?.tabs ?? [];
 
   return (
-    <>
-      <style>{`@keyframes owllmBrowserFrameHue { to { filter: hue-rotate(360deg); } }`}</style>
-      <div
+    <div
+      data-ui="BrowserWindowShell"
         ref={boxRef}
         style={inline
           // Inline (Browser agent card): no floating frame — fill the tile.
@@ -199,21 +198,21 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
           // Default 300px up from the bottom-right corner so it doesn't sit on
           // the app's own controls (user spec 2026-07-05).
           ...(pos ? { left: pos.x, top: pos.y } : { right: 24, bottom: 324 }),
-          width: 560, maxWidth: "92vw",
-          // Psychedelic rainbow frame — the same conic-gradient ring as the
-          // Critical Thinker card. The 3px padding shows the gradient, the inner
-          // panel covers the centre, and owllmBrowserFrameHue slowly hue-shifts it.
-          padding: 3, borderRadius: 15,
-          background: "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)",
-          animation: "owllmBrowserFrameHue 8s linear infinite",
+          width: 560, maxWidth: "92vw", boxSizing: "border-box",
+          // Match the main OWLLM window's quiet frame: a standard border and
+          // a small, even inset so the content never touches the shell edge.
+          padding: 4, border: "1px solid var(--border-strong)", borderRadius: 12,
+          background: "var(--bg-panel)",
           boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
         }}
       >
-        <div style={inline
+        <div
+          data-ui="BrowserWindowShellContent"
+          style={inline
           ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", overflow: "hidden" }
           : {
-          display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 6px)",
-          background: "var(--bg-panel)", borderRadius: 12, overflow: "hidden",
+          display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 10px)",
+          background: "var(--bg-panel)", borderRadius: 8, overflow: "hidden",
         }}>
           <div
             onMouseDown={inline ? undefined : onDragStart}
@@ -343,6 +342,5 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       </div>
         </div>
       </div>
-    </>
   );
 }

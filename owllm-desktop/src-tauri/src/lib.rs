@@ -825,6 +825,7 @@ pub fn run() {
                     ..
                 } if label == "main" => {
                     overlay_frame::sync_now(app);
+                    browser::queue_split_reflow(app);
                 }
                 tauri::RunEvent::WindowEvent {
                     label,

@@ -2489,6 +2489,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         disabled={disabled}
         fallbackLabel={fallbackLabel}
         placement="top"
+        appearance="solid-psychedelic"
       />
     </div>
   );

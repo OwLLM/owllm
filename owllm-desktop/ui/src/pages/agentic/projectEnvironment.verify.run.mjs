@@ -100,9 +100,11 @@ try {
       && projects.includes('"environment": input.project_environment.clone()'),
     "the portable Project Card carries the non-secret environment recipe");
   check(browser.includes("pub fn browser_arrange")
-      && browser.includes("resize only the browser")
+      && browser.includes("arrange_split_screen")
+      && browser.includes("SPLIT_SCREEN_ACTIVE")
+      && browser.includes("main-left/browser-right")
       && lib.includes("browser::browser_arrange"),
-    "the cross-platform browser layout command is registered without resizing the main GUI");
+    "the cross-platform browser layout command coordinates the main-left/browser-right split");
 
   console.log(`OK project environments: ${passed}/${passed} checks passed`);
 } finally {

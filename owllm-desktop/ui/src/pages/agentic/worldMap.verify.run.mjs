@@ -135,6 +135,22 @@ try {
   const stableStore = memory();
   const firstId = presence.readOrCreateNodeId(stableStore);
   check("Stable anonymous node id is created and reused", firstId.length > 0 && presence.readOrCreateNodeId(stableStore) === firstId);
+  const devicePresenceId = await presence.presenceNodeIdForDevice("device-A");
+  const sameDevicePresenceId = await presence.presenceNodeIdForDevice("DEVICE-A");
+  const peerPresenceId = await presence.presenceNodeIdForDevice("device-B");
+  check("Native devices derive stable opaque public-presence ids",
+    devicePresenceId.length === 64
+      && devicePresenceId === sameDevicePresenceId
+      && devicePresenceId !== peerPresenceId
+      && !devicePresenceId.includes("device"));
+  const presenceIds = new Map([["device-A", devicePresenceId], ["device-B", peerPresenceId]]);
+  check("Fleet liveness reconciles the same installations with Live World",
+    presence.isFleetDeviceLiveInWorld("device-A", presenceIds, [{ id: devicePresenceId, online: true }])
+      && !presence.isFleetDeviceLiveInWorld("device-B", presenceIds, [{ id: peerPresenceId, online: false }]));
+  check("Public server codes are stable and do not expose the node id",
+    presence.presenceServerCode(devicePresenceId) === presence.presenceServerCode(devicePresenceId)
+      && /^OW-[0-9A-Z]{7}$/.test(presence.presenceServerCode(devicePresenceId))
+      && !presence.presenceServerCode(devicePresenceId).includes(devicePresenceId.slice(0, 6)));
   check("Presence socket URL carries the stable node id", presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId).includes(`id=${firstId}`));
   check("Presence socket may carry only a normalized OS family",
     presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId, "Windows").includes("os=Windows"));
@@ -261,9 +277,9 @@ try {
     page.includes("subsolarLocalDir(new Date(), sunLocal)")
       && page.includes("light.position.copy(anchor.position).addScaledVector(sunLocal, 10)")
       && !page.includes("sunLight.position.set(5.8"));
-  check("Every planet's sun-facing peak is exactly 15 percent above its baseline",
+  check("Every planet's sun-facing peak is exactly 18.75 percent above its baseline",
     page.includes("const PLANET_BASE_LIGHT_INTENSITY = 1")
-      && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15")
+      && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25")
       && page.includes("const planetSunLights = planetMeshes.map")
       && page.includes("light.layers.set(layer)")
       && page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
@@ -282,7 +298,10 @@ try {
       && page.includes("focusBoundsFor(spec, { min: earthMin, max: 17 }, earthDistance, requestedScale)"));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
-  check("My Fleet and Devices share one online rule", page.includes('from "../advanced/deviceLiveness"') && page.includes("isDeviceOnline(device)") && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
+  check("My Fleet uses Live World first and the Devices heartbeat as fallback",
+    page.includes("isFleetDeviceLiveInWorld(device.device_id, fleetPresenceIds, publicNodes)")
+      && page.includes("|| isDeviceOnline(device)")
+      && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
   check("My Fleet refreshes immediately after device vault sync", page.includes('window.addEventListener("owllm:devices:refresh"') && page.includes('window.removeEventListener("owllm:devices:refresh"'));
   check("Device vault records carry a publication heartbeat", read("../../src-tauri/src/remote_devices/protocol.rs").includes("published_at") && read("../../src-tauri/src/remote_devices/mod.rs").includes("rec.published_at = Some(now_rfc3339())"));
   check("Running apps republish the heartbeat on an interval", vaultSync.includes("REMOTE_DEVICE_HEARTBEAT_MS") && vaultSync.includes("void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS"));
@@ -298,7 +317,10 @@ try {
     page.includes("Only your OS family and approximate city are shown"));
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
   check("World Map ghosts recorded-but-offline nodes and shows both counts", page.includes("online: node.online") && page.includes('t("recorded")') && page.includes('t("online now")'));
-  check("Presence runs application-wide, always on", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
+  check("Presence runs application-wide from the opaque native-device hash",
+    appShell.includes("<WorldPresenceRunner />")
+      && appShell.includes("presenceNodeIdForDevice(identity.device_id)")
+      && appShell.includes("installWorldPresenceConnection({ nodeId })"));
   check("Stable node id (and any legacy consent key) stay device-local", vaultSync.includes('"owllm:world-map:node-id"') && vaultSync.includes('"owllm:world-map:presence-enabled"'));
   check("Worker retains anonymous nodes in SQLite and ghosts offline ones",
     worker.includes("acceptWebSocket")
@@ -337,12 +359,17 @@ try {
       && page.includes("maxHeight: 20 * 44")
       && page.includes('overflowY: "auto"')
       && page.includes("setExpandedCountry"));
-  check("Expanded country rows show full country, server number, city, OS, and status without repeating the flag",
+  check("Country rows expose cities and use stable server codes instead of row numbers",
     page.includes("countryDisplayName(country.countryCode, language)")
+      && page.includes("cities.join(\", \")")
       && page.includes('const city = presenceCity(publicNode.region) || t("Unknown city")')
-      && page.includes('{countryName} · {t("Server")} {index + 1}')
+      && page.includes('{countryName} · {t("Server")} {presenceServerCode(publicNode.id)}')
       && page.includes('{city} · {publicNode.os === "Other" ? t("Other") : publicNode.os}')
+      && !page.includes('{t("Server")} {index + 1}')
       && !page.includes(">{regionWithFlag(publicNode.region)}</span>"));
+  check("Sun-side illumination is raised by exactly twenty-five percent",
+    page.includes("PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25")
+      && page.includes("new THREE.DirectionalLight(0xffffff, PLANET_SUNLIGHT_INTENSITY)"));
   check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")
       && worker.includes("request.headers.get(\"User-Agent\")")

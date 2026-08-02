@@ -30,6 +30,12 @@ check(agents.includes('aria-label={`${criticEnabled ? "Disable" : "Enable"} Crit
   "Critical Thinker card exposes an accessible toggle");
 check(agents.includes("aria-pressed={criticEnabled}"),
   "Critical Thinker toggle exposes its current state");
+check(agents.includes('data-critic-toggle="true"') && agents.includes('>{criticEnabled ? "ON" : "OFF"}</span>'),
+  "Critical Thinker toggle visibly labels its ON/OFF state");
+const criticName = agents.indexOf(">{label ?? displayLabel(name)}</span>");
+const criticToggle = agents.indexOf('data-critic-toggle="true"');
+check(criticName >= 0 && criticToggle > criticName,
+  "Critical Thinker ON/OFF toggle appears after the card name");
 check(agents.includes("owllm:agents:critic-enabled:"),
   "Critical Thinker preference is scoped per project");
 check((agents.match(/criticEnabled &&/g) ?? []).length >= 4,

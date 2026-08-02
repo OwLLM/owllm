@@ -108,10 +108,6 @@ type ProjectKind = {
   kickoff: "brainstorm" | "goal";
   /// Preferred team template `name`s, in order; first available wins.
   teams: string[];
-  /// A deliberately small roster for this job, selected from the template by
-  /// agent name. Missing names are ignored; an unusable subset falls back to
-  /// the full template so custom/user templates remain compatible.
-  agentNames?: string[];
   /// Base of the automatic project name ("Personal Assistant" → "Personal
   /// Assistant 1", "… 2"). Kept separate from `title` so the derived folder
   /// stays clean ("Web App 1", not "Website / Web app 1").
@@ -122,14 +118,14 @@ type ProjectKind = {
 };
 const PROJECT_KINDS: ProjectKind[] = [
   { key: "product", icon: "🚀", title: "New product", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create the workspace, then start a model-selectable product brainstorm and design-to-build flow.", teams: ["product_studio"], nameSeed: "Product", namePh: "e.g. saas-idea", descSeed: "" },
-  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], nameSeed: "Web App", namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
-  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], nameSeed: "Responsive App", namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
-  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["dev_squad", "owllm_team"], agentNames: ["orchestrator", "coder", "critic", "devops"], nameSeed: "Software Tool", namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
-  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], agentNames: ["orchestrator", "reproducer", "root_cause", "patcher", "regression_test_author"], nameSeed: "Bug Fix", namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
+  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], nameSeed: "Web App", namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
+  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], nameSeed: "Responsive App", namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
+  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["dev_squad", "owllm_team"], nameSeed: "Software Tool", namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
+  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], nameSeed: "Bug Fix", namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
   { key: "review", icon: "🧐", title: "Code review", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository or checkout; reports concrete findings with file and line evidence.", teams: ["code_reviewer"], nameSeed: "Code Review", namePh: "e.g. review-pr42", descSeed: "Review this codebase for " },
-  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], agentNames: ["orchestrator", "triager", "responder", "scheduler"], nameSeed: "Personal Assistant", namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
-  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], agentNames: ["orchestrator", "librarian", "synthesizer", "fact_checker", "citer"], nameSeed: "Research", namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
-  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], agentNames: ["orchestrator", "outliner", "drafter", "editor"], nameSeed: "Writing", namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
+  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], nameSeed: "Personal Assistant", namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
+  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], nameSeed: "Research", namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
+  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], nameSeed: "Writing", namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
   { key: "data", icon: "📊", title: "Data analysis", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create an analysis workspace for datasets, notebooks, charts and findings.", teams: ["data_analyst"], nameSeed: "Data Analysis", namePh: "e.g. sales-analysis", descSeed: "Analyze data to answer " },
   { key: "social", icon: "📣", title: "Social campaign", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a campaign workspace for drafts and approvals; publishing still requires configured connectors.", teams: ["social_desk"], nameSeed: "Social Campaign", namePh: "e.g. launch-campaign", descSeed: "Plan a draft-first social campaign for " },
   { key: "custom", icon: "⚙️", title: "Existing folder / Custom…", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Open an existing folder and choose any team and permissions yourself.", teams: [], nameSeed: "Project", namePh: "e.g. cleanup-pr, paper-draft", descSeed: "" },
@@ -139,24 +135,18 @@ function kindTeam(kind: ProjectKind, teams: Team[]): Team | null {
   for (const n of kind.teams) { const t = teams.find(x => x.name === n); if (t) return t; }
   return null;
 }
+/// Every profile team ships the same generic roster (orchestrator + generalist
+/// + critical_thinker), so a project takes the template roster as-is — the old
+/// per-kind focused-subset lists died with the specialist rosters.
 function kindAgents(kind: ProjectKind | undefined, team: Team): Team["agents"] {
-  let selected = team.agents;
-  if (kind?.agentNames?.length) {
-    const wanted = new Set(kind.agentNames);
-    const focused = team.agents.filter(agent => wanted.has(agent.name));
-    if (focused.some(agent => agent.name === "orchestrator") && focused.length >= 2) {
-      selected = focused;
-    }
-  }
+  const selected = team.agents;
   // Browser access is role-gated in the Rust gateway. An assistant without a
   // browser specialist could see the configured service names but could never
   // actually read or operate their authenticated tabs.
   if (kind?.key === "assistant" && !selected.some(agent => agent.base === "browser")) {
     return [...selected, { name: "browser", base: "browser", icon: "owl:owl_webapp" }];
   }
-  return selected.some(agent => agent.name === "orchestrator") && selected.length >= 2
-    ? selected
-    : team.agents;
+  return selected;
 }
 
 /// Stable empty default — a fresh [] per render would re-run the naming effect
@@ -432,6 +422,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
             edges: projectEdges,
             roster: projectAgents.map(a => ({ name: a.name, base: a.base })),
             environment,
+            // The template this project runs. Profile teams share one generic
+            // roster, so the id is the only signal that survives for the
+            // header chip / Workbench / reset-to-template resolution.
+            templateId: team.id,
           }),
           project_environment: environment,
           team_default_model_id: "", trust_writes: newTrust, auto_approve_all: false,

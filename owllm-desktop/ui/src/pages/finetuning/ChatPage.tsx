@@ -25,6 +25,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import Composer from "../../components/Composer";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import { localInferenceFallback, resolveInferenceBase } from "../agentic/inferenceEndpoint";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
@@ -166,31 +167,6 @@ const TEMPLATES: Array<{ key: string; label: string; system: string }> = [
   { key: "custom",    label: "✏ Custom",               system: "" },
 ];
 
-const miniComposerBtn: CSSProperties = {
-  height: 26,
-  minWidth: 28,
-  padding: "0 8px",
-  borderRadius: 6,
-  border: "1px solid var(--border)",
-  background: "var(--bg-surface)",
-  color: "var(--fg)",
-  fontSize: 12,
-  fontWeight: 800,
-  cursor: "pointer",
-};
-
-const footerComposerBtn: CSSProperties = {
-  height: 28,
-  padding: "0 12px",
-  borderRadius: 6,
-  border: "1px solid var(--border-strong)",
-  background: "var(--bg-surface)",
-  color: "var(--fg)",
-  fontSize: 12,
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
 type Persisted = {
   count: 1 | 2 | 3;
   columns: Column[];
@@ -284,7 +260,6 @@ export default function ChatPage() {
   // Same shared fileToImageAttachment + Attachment shape as the Code/agentic chats.
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
-  const chatFileRef = useRef<HTMLInputElement>(null);
   const addComposerFiles = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       try {
@@ -295,12 +270,6 @@ export default function ChatPage() {
         setAttachmentError(String((error as { message?: string })?.message ?? error));
       }
     }
-  };
-  const onComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    e.preventDefault();
-    void addComposerFiles(files);
   };
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
@@ -317,7 +286,6 @@ export default function ChatPage() {
   // (pages unmount on tab change).
   const [chatMode, setChatMode] = useState<ChatMode>(persisted.chatMode ?? "ask");
   const [toolsEnabled, setToolsEnabled] = useState<boolean>(persisted.toolsEnabled ?? true);
-  const [slashOpen, setSlashOpen] = useState<boolean>(false);
   // Right-side settings panel — Qt main.py:18667-18690 ships a
   // QStackedWidget driven by A/B/C toggle buttons. We mirror that
   // here so a single set of System Prompt / Generation Params
@@ -595,9 +563,10 @@ export default function ChatPage() {
 
   const contextTokens = draft.match(/#[\w./:-]+/g) ?? [];
 
+  // The shared composer closes its own palette after a command runs.
   const runSlashCommand = (cmd: (typeof slashCommands)[number]) => {
     cmd.run();
-    setSlashOpen(false);
+    setDraft("");
   };
 
   const sendComposer = () => {
@@ -1725,247 +1694,69 @@ export default function ChatPage() {
             💬 Type your message:
           </div>
 
-          {/* Composer row — textarea + vertical Send/Clear/Save stack
-              (Qt main.py:18632-18657 btn_column). */}
-          <div style={{ display: "none", gap: 8, alignItems: "stretch" }}>
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
-                  e.preventDefault();
-                  sendAll();
-                }
-              }}
-              placeholder="Type your message here..."
-              style={{
-                flex: 1, minHeight: 90, maxHeight: 90,
-                resize: "none",
-                padding: 10, borderRadius: 8,
-                background: "var(--bg-input)",
-                color: "var(--fg)",
-                border: "1px solid var(--border-strong)",
-                fontFamily: "inherit", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5,
-                outline: "none",
-              }}
-            />
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, width: 130 }}>
-              {anyBusy ? (
-                <button
-                  onClick={stopAll}
+          {/* The one shared composer (components/Composer.tsx). Each column
+              keeps its own ModelPicker in its header — this chat fans one
+              draft out to up to three models at once, so there is no single
+              model to put in the composer header. */}
+          <Composer
+            dataUi="FinetuneChatComposer"
+            value={draft}
+            onChange={setDraft}
+            onSend={sendComposer}
+            onStop={stopAll}
+            busy={anyBusy}
+            placeholder="Ask, edit, or run an agent task. Type / for commands, # for context."
+            minHeight={74}
+            maxHeight={140}
+            autosize={false}
+            onKeyDown={(e) => {
+              // VS Code parity: Esc interrupts an in-flight generation, and
+              // Enter is inert while generating (no silent queueing here).
+              if (e.key === "Escape" && anyBusy) { e.preventDefault(); stopAll(); return; }
+              if (e.key === "Enter" && !e.shiftKey && anyBusy) e.preventDefault();
+            }}
+            /* Honest isolation badge: where this chat's tools actually run
+               (scratch dir path truth — flips loud red when isolation is on
+               but the scratch dir fell back to the host). */
+            badge={toolsEnabled && scratchDir ? (() => {
+              const iso = isolationBadge(scratchDir, isolationRequested);
+              return (
+                <span
+                  title={`${iso.title}
+
+Tools run in: ${scratchDir}`}
                   style={{
-                    height: 40,
-                    background: "linear-gradient(180deg, #f44336, #d32f2f)",
-                    color: "#fff", border: "none", borderRadius: 8,
-                    fontSize: 12, fontWeight: 700, cursor: "pointer",
-                    boxShadow: "0 0 16px -4px #f4433688",
+                    display: "inline-flex", alignItems: "center",
+                    height: 22, padding: "0 8px", borderRadius: 6, fontSize: 10.5,
+                    fontWeight: iso.hostFallback ? 800 : 700, whiteSpace: "nowrap",
+                    background: iso.bg, color: iso.color, border: `1px solid ${iso.border}`,
                   }}
-                >⏹ Stop</button>
-              ) : (
-                <button
-                  onClick={sendAll}
-                  disabled={!draft.trim()}
-                  style={{
-                    height: 40,
-                    background: "linear-gradient(180deg, var(--accent), var(--accent))",
-                    color: "var(--accent-fg)",
-                    border: "none", borderRadius: 8,
-                    fontSize: 12, fontWeight: 700,
-                    cursor: !draft.trim() ? "not-allowed" : "pointer",
-                    opacity: !draft.trim() ? 0.75 : 1,
-                    boxShadow: !draft.trim() ? "none" : "0 0 16px -4px var(--accent)88",
-                  }}
-                >📤 Send</button>
-              )}
-              <button
-                onClick={resetAll}
-                style={{
-                  height: 40,
-                  background: "var(--bg-elevated)",
-                  border: "1px solid var(--border-strong)",
-                  color: "var(--fg)",
-                  borderRadius: 8,
-                  fontSize: 12, fontWeight: 600,
-                  cursor: "pointer",
-                }}
-                title="Clear all transcripts"
-              >🗑️ Clear</button>
-              <button
-                onClick={saveJson}
-                style={{
-                  height: 40,
-                  background: "var(--bg-elevated)",
-                  border: "1px solid var(--border-strong)",
-                  color: "var(--fg)",
-                  borderRadius: 8,
-                  fontSize: 12, fontWeight: 600,
-                  cursor: "pointer",
-                }}
-                title="Save chat as JSON"
-              >💾 Save</button>
-            </div>
-          </div>
-          <div style={{
-            position: "relative",
-            border: "1px solid var(--border-strong)",
-            borderRadius: 8,
-            background: "var(--bg-input)",
-            boxShadow: "0 4px 18px rgba(0,0,0,0.18)",
-            overflow: "hidden",
-          }}>
-            {(slashOpen || draft.trim().startsWith("/")) && (
-              <div style={{
-                position: "absolute", left: 10, right: 10, bottom: "calc(100% + 6px)",
-                zIndex: 10, background: "var(--bg-elevated)",
-                border: "1px solid var(--border-strong)", borderRadius: 8,
-                boxShadow: "var(--shadow-lg)", padding: 4,
-              }}>
-                {slashCommands
-                  .filter((c) => c.name.startsWith(draft.trim()) || c.desc.toLowerCase().includes(draft.trim().replace("/", "").toLowerCase()))
-                  .map((cmd) => (
-                    <button key={cmd.name} onMouseDown={(e) => { e.preventDefault(); runSlashCommand(cmd); }} style={{
-                      width: "100%", display: "flex", gap: 10, alignItems: "center",
-                      padding: "7px 9px", border: "none", borderRadius: 6,
-                      background: "transparent", color: "var(--fg)", textAlign: "left",
-                      cursor: "pointer", fontSize: 12,
-                    }}>
-                      <span style={{ width: 70, color: "var(--accent-ink)", fontFamily: "Consolas, monospace", fontWeight: 800 }}>{cmd.name}</span>
-                      <span style={{ color: "var(--fg-muted)", fontWeight: 500 }}>{cmd.desc}</span>
-                    </button>
-                  ))}
-              </div>
-            )}
-            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderBottom: "1px solid var(--border)" }}>
-              {(["ask", "edit", "agent"] as const).map((m) => (
-                <button key={m} onClick={() => setChatMode(m)} style={{
-                  height: 26, padding: "0 10px", borderRadius: 6,
-                  border: chatMode === m ? "1px solid rgba(var(--accent-rgb),0.55)" : "1px solid transparent",
-                  background: chatMode === m ? "rgba(var(--accent-rgb),0.16)" : "transparent",
-                  color: chatMode === m ? "var(--accent-ink)" : "var(--fg-muted)",
-                  fontSize: 12, fontWeight: 700, textTransform: "capitalize",
-                }}>{m}</button>
-              ))}
-              <button onClick={() => setSlashOpen((v) => !v)} title="Slash commands" style={miniComposerBtn}>/</button>
-              <button onClick={() => setDraft((d) => `${d}${d.endsWith(" ") || !d ? "" : " "}#file `)} title="Add context mention" style={miniComposerBtn}>#</button>
-              {/* Honest isolation badge: where this chat's tools actually run
-                  (scratch dir path truth — flips loud red when isolation is on
-                  but the scratch dir fell back to the host). */}
-              {toolsEnabled && scratchDir && (() => {
-                const iso = isolationBadge(scratchDir, isolationRequested);
-                return (
-                  <span
-                    title={`${iso.title}\n\nTools run in: ${scratchDir}`}
-                    style={{
-                      marginLeft: "auto", display: "inline-flex", alignItems: "center",
-                      height: 22, padding: "0 8px", borderRadius: 6, fontSize: 10.5,
-                      fontWeight: iso.hostFallback ? 800 : 700, whiteSpace: "nowrap",
-                      background: iso.bg, color: iso.color, border: `1px solid ${iso.border}`,
-                    }}
-                  >{iso.text}</span>
-                );
-              })()}
-              <label title="Enable tool calls in Agent mode" style={{ marginLeft: toolsEnabled && scratchDir ? 0 : "auto", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11, fontWeight: 700 }}>
-                <input type="checkbox" checked={toolsEnabled} onChange={(e) => setToolsEnabled(e.target.checked)} />
-                Tools
-              </label>
-            </div>
-            {contextTokens.length > 0 && (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 8px 0" }}>
-                {contextTokens.map((t, i) => (
-                  <span key={`${t}-${i}`} style={{
-                    border: "1px solid rgba(var(--accent-rgb),0.35)",
-                    background: "rgba(var(--accent-rgb),0.10)",
-                    color: "var(--accent-ink)", borderRadius: 12,
-                    padding: "2px 8px", fontSize: 11, fontWeight: 700,
-                  }}>{t}</span>
-                ))}
-              </div>
-            )}
-            {chatAttachments.length > 0 && (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 8px 0" }}>
-                {chatAttachments.map((a, i) => (
-                  <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: "1px solid rgba(122,162,255,0.35)", background: "rgba(122,162,255,0.12)", color: "#9ad9ff", borderRadius: 12, padding: "2px 6px 2px 8px", fontSize: 11, fontWeight: 700 }}>
-                    {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
-                    <button onClick={() => setChatAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "transparent", color: "#9ad9ff", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
-                  </span>
-                ))}
-              </div>
-            )}
-            {attachmentError && (
-              <div role="alert" style={{ margin: "6px 8px 0", padding: "6px 8px", borderRadius: 7, border: "1px solid rgba(var(--error-rgb),0.5)", background: "rgba(var(--error-rgb),0.1)", color: "var(--error)", fontSize: 11 }}>
-                {attachmentError}
-              </div>
-            )}
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onPaste={onComposerPaste}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
-                  e.preventDefault();
-                  sendComposer();
-                }
-                if (e.key === "Escape") {
-                  setSlashOpen(false);
-                  // VS Code parity: Esc interrupts an in-flight generation.
-                  if (anyBusy) { e.preventDefault(); stopAll(); }
-                }
-              }}
-              placeholder="Ask, edit, or run an agent task. Type / for commands, # for context."
-              style={{
-                width: "100%", minHeight: 74, maxHeight: 140, resize: "vertical",
-                padding: "10px 12px", border: "none", outline: "none",
-                background: "transparent", color: "var(--fg)",
-                fontFamily: "inherit", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5,
-              }}
-            />
-            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderTop: "1px solid var(--border)" }}>
-              <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{chatMode === "agent" ? "Agent can use tools" : chatMode === "edit" ? "Edit-focused prompt" : "Ask-only prompt"}</span>
-              <div style={{ flex: 1 }} />
-              <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addComposerFiles(e.target.files); e.target.value = ""; }} />
-              <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={footerComposerBtn}>📎 Attach</button>
-              <button onClick={resetAll} title="Clear all transcripts" style={footerComposerBtn}>Clear</button>
-              <button onClick={saveJson} title="Save chat as JSON" style={footerComposerBtn}>Save</button>
-              {/* One primary interaction button (VS Code / ChatGPT pattern):
-                  it holds a single fixed slot and morphs Send -> Stop while
-                  any column is generating, so the control never moves and
-                  Stop is always where Send just was. Esc stops too — see the
-                  composer textarea's onKeyDown. */}
-              {(() => {
-                const canSend = !!draft.trim() || chatAttachments.length > 0;
-                return anyBusy ? (
-                  <button
-                    onClick={stopAll}
-                    title="Stop generating (Esc)"
-                    aria-label="Stop generating"
-                    style={{
-                      ...footerComposerBtn,
-                      minWidth: 92,
-                      background: "rgba(var(--error-rgb),0.16)",
-                      borderColor: "var(--error)",
-                      color: "var(--error)",
-                      cursor: "pointer",
-                    }}
-                  >■ Stop</button>
-                ) : (
-                  <button
-                    onClick={sendComposer}
-                    disabled={!canSend}
-                    title={canSend ? "Send (Enter)" : "Type a message first"}
-                    aria-label="Send message"
-                    style={{
-                      ...footerComposerBtn,
-                      minWidth: 92,
-                      background: canSend ? "var(--accent)" : "var(--bg-surface)",
-                      borderColor: canSend ? "var(--accent)" : "var(--border)",
-                      color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
-                      cursor: canSend ? "pointer" : "not-allowed",
-                    }}
-                  >➤ Send</button>
-                );
-              })()}
-            </div>
-          </div>
+                >{iso.text}</span>
+              );
+            })() : null}
+            attachments={chatAttachments}
+            onAttachFiles={(files) => { void addComposerFiles(files); }}
+            onRemoveAttachment={(i) => setChatAttachments((x) => x.filter((_, j) => j !== i))}
+            attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+            mentions={contextTokens}
+            onMention={() => setDraft((d) => `${d}${d.endsWith(" ") || !d ? "" : " "}#file `)}
+            notice={attachmentError ? { kind: "error", text: attachmentError } : null}
+            slashCommands={slashCommands.map((cmd) => ({ name: cmd.name, hint: cmd.desc, run: () => runSlashCommand(cmd) }))}
+            modes={[{ key: "ask", label: "ask" }, { key: "edit", label: "edit" }, { key: "agent", label: "agent" }]}
+            mode={chatMode}
+            onModeChange={(k) => setChatMode(k as typeof chatMode)}
+            toggles={[{ key: "tools", label: "Tools", title: "Enable tool calls in Agent mode", on: toolsEnabled, onToggle: () => setToolsEnabled(!toolsEnabled) }]}
+            barExtra={<>
+              <button className="owc__btn" onClick={resetAll} title="Clear all transcripts">Clear</button>
+              <button className="owc__btn" onClick={saveJson} title="Save chat as JSON">Save</button>
+            </>}
+            hint={chatMode === "agent" ? "Agent can use tools" : chatMode === "edit" ? "Edit-focused prompt" : "Ask-only prompt"}
+            showCounter
+            mic
+            sendLabel="➤ Send"
+            stopLabel="Stop"
+            stopTitle="Stop generating (Esc)"
+          />
         </div>
 
         {/* Draggable splitter — resize the right panel (default ~15%). */}

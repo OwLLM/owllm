@@ -79,10 +79,10 @@ try {
       && dialog.includes('data-ui="AssistantServicePicker"')
       && dialog.includes("project_environment: environment"),
     "new-project UI configures and persists the environment");
-  check(dialog.includes('agentNames: ["orchestrator", "coder", "critic", "browser"]')
-      && dialog.includes("const projectAgents = kindAgents(kind, team)")
-      && dialog.includes("focused agents"),
-    "web projects create a focused four-agent team instead of the full generic roster");
+  check(dialog.includes("const projectAgents = kindAgents(kind, team)")
+      && dialog.includes("templateId: team.id")
+      && !dialog.includes("agentNames"),
+    "projects take the template's generic profile roster and persist the template id");
   check(dialog.includes('kind?.key === "assistant"')
       && dialog.includes('{ name: "browser", base: "browser", icon: "owl:owl_webapp" }')
       && dialog.includes('edge.target === "browser"'),

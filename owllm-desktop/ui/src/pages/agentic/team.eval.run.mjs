@@ -50,9 +50,10 @@ const baseTrace = (over) => ({
 const codeFix = TEAM_FIXTURES.find((f) => f.team === "product_studio" && f.expectKind === "code");
 const trivial = TEAM_FIXTURES.find((f) => f.team === "product_studio" && f.expectKind === "general");
 
-// a GOOD code run — coder ran, wrote files, finished, critic shipped → all green
+// a GOOD code run — the generalist ran, wrote files, finished, critic shipped
+// → all green (profile teams run one generalist doer; domain classifies "other")
 const good = scoreRun(baseTrace({
-  goal: codeFix.goal, agents: [{ name: "frontend_coder", domain: "coder", runs: 1 }],
+  goal: codeFix.goal, agents: [{ name: "generalist", domain: "other", runs: 1 }],
   hops: 4, wroteFiles: true, done: true, criticVerdict: "ship",
 }), codeFix);
 check("good code run → ok", good.ok === true);
@@ -69,7 +70,7 @@ check("  …flags done-gate", talked.checks.find((c) => c.name === "done-gate")?
 
 // a runaway run — hit the hop cap → terminated check fails
 const runaway = scoreRun(baseTrace({
-  goal: codeFix.goal, agents: [{ name: "frontend_coder", domain: "coder", runs: 6 }],
+  goal: codeFix.goal, agents: [{ name: "generalist", domain: "other", runs: 6 }],
   hops: 40, wroteFiles: true, done: true, capHit: true,
 }), codeFix);
 check("capped run → terminated check fails", runaway.checks.find((c) => c.name === "terminated")?.pass === false);

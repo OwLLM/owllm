@@ -131,7 +131,7 @@ import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomai
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
-import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
+import { resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -155,6 +155,7 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
+import Composer from "../../components/Composer";
 import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -322,6 +323,10 @@ function buildGraphJson(opts: {
   agentSkills: Map<string, string[]>;
   agentToolExtras: Map<string, string[]>;
   previousGraphJson?: string | null;
+  /// Set when the roster is being (re)written FROM a template, so the project
+  /// remembers which template it runs — the generic profile rosters are
+  /// identical across templates, so the id is the only identity that survives.
+  templateId?: string;
 }): string {
   let previous: Record<string, unknown> = {};
   try {
@@ -330,6 +335,7 @@ function buildGraphJson(opts: {
   } catch { /* malformed legacy graph — rebuild the known fields */ }
   return JSON.stringify({
     ...previous,
+    ...(opts.templateId ? { templateId: opts.templateId } : {}),
     edges: opts.edges,
     roster: opts.agents.map(a => ({
       name: a.name,
@@ -408,6 +414,11 @@ type Team = {
   visibility: TeamVisibility;
   workflowRank: number;
   requiredMcp: string[];
+  /// For a project-backed Team ("project:…"): the template id persisted into
+  /// graph_json at creation. The profile conversion gave every bundled team the
+  /// SAME generic roster, so roster-shape matching can no longer tell templates
+  /// apart — the id is the only reliable identity signal.
+  templateId?: string;
 };
 type RoleData = {
   name: string;
@@ -754,9 +765,13 @@ function projectToTeam(p: ProjectRow): Team {
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
   const defaultModelByName = new Map<string, string>();
+  let templateId: string | undefined;
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
+      if (typeof parsed?.templateId === "string" && parsed.templateId.trim()) {
+        templateId = parsed.templateId.trim();
+      }
       if (Array.isArray(parsed?.edges)) {
         edges = parsed.edges
           .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
@@ -799,6 +814,7 @@ function projectToTeam(p: ProjectRow): Team {
     visibility: "custom",
     workflowRank: 999,
     requiredMcp: [],
+    templateId,
     agents,
     edges,
   };
@@ -814,6 +830,14 @@ function projectToTeam(p: ProjectRow): Team {
 function teamTemplateForActive(active: Team | null, teams: Team[]): Team | null {
   if (!active) return null;
   if (!active.id.startsWith("project:")) return active; // already a real template
+  // 0) the template id persisted into graph_json at creation. The profile
+  //    conversion gave every bundled team the SAME generic roster, so the
+  //    roster-shape strategies below can no longer tell converted templates
+  //    apart (they'd all match the alphabetically-first one). The id can.
+  if (active.templateId) {
+    const byId = teams.find(t => t.id === active.templateId || t.name === active.templateId);
+    if (byId) return byId;
+  }
   const projNames = active.agents.map(a => a.name).filter(Boolean);
   if (projNames.length === 0) return null;
   const nameSet = new Set(projNames);
@@ -2493,25 +2517,6 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
-        {isCritic && (
-          <button
-            type="button"
-            aria-pressed={criticEnabled}
-            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
-            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
-            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
-            onKeyDown={(e) => e.stopPropagation()}
-            style={{
-              width: 24, height: 22, padding: 0, flexShrink: 0,
-              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
-              borderRadius: 6,
-              background: criticEnabled ? "rgba(255,184,76,0.18)" : "rgba(0,0,0,0.25)",
-              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
-              cursor: "pointer", fontSize: 13, lineHeight: 1,
-              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
-            }}
-          >✦</button>
-        )}
         {/* The NAME is the editor handle: clicking it opens the per-agent
             model/colour/prompt popup. The clickable element is an inline-block
             sized to the name GLYPHS (not the full-width header row), so the
@@ -2532,6 +2537,38 @@ function AgentChatTile({
             }}
           >{label ?? displayLabel(name)}</span>
         </div>
+        {isCritic && (
+          <button
+            type="button"
+            data-critic-toggle="true"
+            aria-pressed={criticEnabled}
+            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
+            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
+            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
+            onKeyDown={(e) => e.stopPropagation()}
+            style={{
+              width: 50, height: 22, padding: "2px 4px 2px 5px", flexShrink: 0,
+              display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 3,
+              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
+              borderRadius: 999,
+              background: criticEnabled ? "rgba(255,184,76,0.22)" : "rgba(0,0,0,0.30)",
+              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+              cursor: "pointer", fontSize: 9, fontWeight: 800, lineHeight: 1,
+              letterSpacing: 0.3,
+              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
+            }}
+          >
+            <span>{criticEnabled ? "ON" : "OFF"}</span>
+            <span
+              aria-hidden="true"
+              style={{
+                width: 14, height: 14, flexShrink: 0, borderRadius: "50%",
+                background: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+                boxShadow: criticEnabled ? "0 0 5px rgba(255,209,102,0.65)" : "none",
+              }}
+            />
+          </button>
+        )}
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
@@ -4538,10 +4575,15 @@ function GraphCanvas({
   // these to graph_json (they'd just round-trip get filtered out).
   const hasSyntheticCritic = effective.has(CRITIC_AGENT_NAME);
   const baseLive = edges.filter(e => effective.has(e.source) && effective.has(e.target));
+  // The generic profile teams AUTHOR their orchestrator↔critic edges, so only
+  // inject the virtual pair where it isn't already present — otherwise every
+  // converted team drew the same edge twice (one real, one synthetic).
+  const syntheticPair = [
+    { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true },
+    { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true },
+  ].filter(se => !baseLive.some(e => e.source === se.source && e.target === se.target));
   const liveEdges: (Edge & { synthetic?: boolean })[] = hasSyntheticCritic && effective.has(orchName)
-    ? [...baseLive,
-       { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true } as any,
-       { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
+    ? [...baseLive, ...(syntheticPair as any[])]
     : baseLive;
 
   // Click a card to VERIFY its real connections: its incident edges + the
@@ -5273,7 +5315,6 @@ function ChatInputDock({
   // Files for the next team-chat turn. Images retain their bytes; documents are
   // parsed locally and carry extracted text only.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const addDockFiles = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       try {
@@ -5283,12 +5324,6 @@ function ChatInputDock({
         flashNote(String((error as { message?: string })?.message ?? error));
       }
     }
-  };
-  const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    e.preventDefault();
-    void addDockFiles(files);
   };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
@@ -5312,55 +5347,14 @@ function ChatInputDock({
     setPaletteOpen(false);
   };
 
-  // Web Speech API — toggle dictation. Only used on the desktop;
-  // Telegram path uses the bundled whisper.cpp pipeline already.
-  // WebView2 ships SpeechRecognition only when the Edge runtime has
-  // it enabled, which is NOT universal — when it's missing we keep
-  // the button visible but flash a tooltip via dockNote so the user
-  // doesn't think the button is broken.
-  const recogRef = useRef<any>(null);
-  const [recording, setRecording] = useState(false);
+  // Dictation lives in the shared composer (useDictation); when the WebView
+  // has no SpeechRecognition it reports back through onNotice → dockNote, so
+  // the user never sees a silently dead mic button.
   const [dockNote, setDockNote] = useState<string | null>(null);
   const flashNote = (msg: string) => {
     setDockNote(msg);
     setTimeout(() => setDockNote(null), 3500);
   };
-  const toggleMic = () => {
-    if (recording) {
-      try { recogRef.current?.stop?.(); } catch {}
-      setRecording(false);
-      return;
-    }
-    const Ctor = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!Ctor) {
-      flashNote("Mic dictation unavailable in this WebView. Use the Telegram bridge for voice messages.");
-      return;
-    }
-    const rec = new Ctor();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = "en-US";
-    const baseline = draft;
-    rec.onresult = (ev: any) => {
-      let partial = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        partial += ev.results[i][0].transcript;
-      }
-      setDraft((baseline ? baseline.trimEnd() + " " : "") + partial);
-    };
-    rec.onend = () => { setRecording(false); };
-    rec.onerror = (ev: any) => {
-      setRecording(false);
-      flashNote(`Mic error: ${ev?.error ?? "unknown"}`);
-    };
-    try { rec.start(); recogRef.current = rec; setRecording(true); }
-    catch (e) {
-      flashNote(`Mic start failed: ${String(e)}`);
-    }
-  };
-
-  const onAttach = () => fileInputRef.current?.click();
-
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
   // listens for to call .abort() on the active dispatch's
@@ -5412,195 +5406,53 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
-      {showPalette && filteredCmds.length > 0 && (
-        <div data-ui="SlashPalette" style={{
-          position:"absolute", left:12, right:12, bottom:"calc(100% - 4px)",
-          background:"var(--bg-panel)",
-          border:"1px solid var(--border-strong)",
-          borderRadius:10,
-          boxShadow:"0 -8px 30px rgba(0,0,0,0.55)",
-          maxHeight:260, overflowY:"auto",
-          zIndex:30, padding:"6px 0",
-        }}>
-          <div style={{ padding:"4px 12px 6px", fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase" }}>
-            Slash commands
-          </div>
-          {filteredCmds.map(c => (
-            <button
-              key={c.name}
-              type="button"
-              onClick={() => runCommand(c)}
-              style={{
-                display:"flex", alignItems:"baseline", gap:10, width:"100%",
-                padding:"6px 12px", background:"transparent", border:"none",
-                color:"var(--fg)", textAlign:"left", cursor:"pointer", fontSize:12,
-              }}
-              onMouseEnter={ev => { (ev.currentTarget as HTMLElement).style.background = "var(--bg-surface)"; }}
-              onMouseLeave={ev => { (ev.currentTarget as HTMLElement).style.background = "transparent"; }}
-            >
-              <span style={{ fontWeight:700, color:"#ffd97a", fontFamily:"Consolas, monospace" }}>{c.name}</span>
-              <span style={{ color:"var(--fg-muted)", fontSize:11 }}>{c.description}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      <div style={{
-        display:"flex", flexDirection:"column",
-        background:"var(--bg-surface)",
-        border:"1px solid rgba(255,200,80,0.40)",
-        borderRadius:12,
-        overflow:"hidden",
-      }}>
-        {attachments.length > 0 && (
-          <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
-            {attachments.map((a, i) => (
-              <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
-                {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
-                <button onClick={() => setAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
-              </span>
-            ))}
-          </div>
-        )}
-        <div style={{ display:"flex", alignItems:"flex-start", padding:"10px 12px 6px", gap:8 }}>
-          <textarea
-            ref={inputRef}
-            data-ui="UserInputArea"
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onPaste={onDockPaste}
-            onKeyDown={e => {
-              if (e.key === "Escape") { setPaletteOpen(false); return; }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                // While a run is active, Enter QUEUES the message to steer the run
-                // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
-                // route around it here; the ■ button remains the way to stop.
-                if (busy && (draft.trim() || attachments.length)) onSend(attachments);
-                else handleSend();
-              }
-            }}
-            placeholder="Queue another message…"
-            rows={1}
-            style={{
-              flex:1, minWidth:0, minHeight:24, maxHeight:240,
-              padding:0,
-              background:"transparent",
-              color:"var(--fg)",
-              border:"none",
-              fontSize:"var(--chat-font-size, 13px)", lineHeight:1.45,
-              fontFamily:"Segoe UI, sans-serif",
-              resize:"none",
-              outline:"none",
-              overflowY:"auto",
-            }}
-          />
-          <button
-            type="button"
-            onClick={toggleMic}
-            title={recording ? "Stop dictation" : "Start dictation (Web Speech)"}
-            style={{
-              flexShrink:0, width:28, height:28,
-              background: recording ? "rgba(255,140,140,0.20)" : "transparent",
-              border:"none", borderRadius:6,
-              color: recording ? "#ff8c8c" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:16,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >🎤</button>
-        </div>
-        {dockNote && (
-          <div style={{
-            padding:"4px 12px",
-            fontSize:11, color:"#ffd97a",
-            background:"rgba(255,217,122,0.08)",
-            borderTop:"1px solid rgba(255,217,122,0.20)",
-          }}>{dockNote}</div>
-        )}
-        <div style={{
-          display:"flex", alignItems:"center", gap:6,
-          padding:"4px 8px 8px",
-          borderTop:"1px solid rgba(255,255,255,0.04)",
-        }}>
-          <button
-            type="button"
-            onClick={onAttach}
-            title="Attach images or documents"
-            style={{
-              width:28, height:28, background:"transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color:"var(--fg-muted)", cursor:"pointer", fontSize:15,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >+</button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={CHAT_ATTACHMENT_ACCEPT}
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => { if (e.target.files) void addDockFiles(e.target.files); e.target.value = ""; }}
-          />
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(v => !v)}
-            title="Slash commands"
-            style={{
-              width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "var(--accent-ink)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >/</button>
-          <div style={{ flex:1 }} />
-          <button
-            type="button"
-            onClick={onToggleAutoApprove}
-            title={autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval"}
-            style={{
-              height:28, padding:"0 10px",
-              display:"flex", alignItems:"center", gap:6,
-              background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
-              borderRadius:6,
-              color: autoApprove ? "var(--accent-ink)" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:11, fontWeight:600,
-            }}
-          >
-            <span style={{ fontSize:13 }}>⚡</span>
-            <span>Auto mode</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!busy && !loadingModel && !draft.trim() && attachments.length === 0}
-            title={busy
-              ? "Stop the in-flight dispatch"
-              : loadingModel
-                ? "Loading model into VRAM — click sends as soon as ready"
-                : needsLoad
-                  ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
-                  : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
-            style={{
-              width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() || attachments.length ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
-              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() || attachments.length ? "var(--accent-fg)" : "var(--fg-muted)"),
-              border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
-              borderRadius:6,
-              cursor: (busy || loadingModel || draft.trim() || attachments.length) ? "pointer" : "not-allowed",
-              fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
-              display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
-            }}
-          >
-            {busy
-              ? "■"
-              : loadingModel
-                ? <><span>⏳</span><span>Loading</span></>
-                : needsLoad
-                  ? <><span>⚡</span><span>Load</span></>
-                  : "▶"}
-          </button>
-        </div>
-      </div>
+      <Composer
+        dataUi="UserInput"
+        textareaRef={inputRef}
+        value={draft}
+        onChange={setDraft}
+        onSend={handleSend}
+        onStop={handleSend}
+        busy={busy}
+        placeholder="Queue another message…"
+        minHeight={24}
+        maxHeight={240}
+        onKeyDown={e => {
+          if (e.key === "Enter" && !e.shiftKey && busy && (draft.trim() || attachments.length)) {
+            // While a run is active, Enter QUEUES the message to steer the run
+            // (onSend → onSupSend enqueues). The composer's own Enter would hit
+            // Stop instead, so route around it here; ■ remains the way to stop.
+            e.preventDefault();
+            onSend(attachments);
+            setAttachments([]);
+          }
+        }}
+        attachments={attachments}
+        onAttachFiles={(files) => { void addDockFiles(files); }}
+        onRemoveAttachment={(i) => setAttachments(x => x.filter((_, j) => j !== i))}
+        attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+        notice={dockNote ? { kind: "info", text: dockNote } : null}
+        onNotice={flashNote}
+        mic
+        showCounter
+        slashCommands={slashCommands.map(c => ({ name: c.name, hint: c.description, run: () => runCommand(c) }))}
+        toggles={[{
+          key: "auto",
+          label: "⚡ Auto mode",
+          title: autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval",
+          on: autoApprove,
+          onToggle: onToggleAutoApprove,
+        }]}
+        canSend={loadingModel || !!draft.trim() || attachments.length > 0}
+        sendLabel={loadingModel ? "⏳ Loading" : needsLoad ? "⚡ Load" : "▶"}
+        sendTitle={loadingModel
+          ? "Loading model into VRAM — click sends as soon as ready"
+          : needsLoad
+            ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
+            : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
+        stopLabel=""
+        stopTitle="Stop the in-flight dispatch"
+      />
     </div>
   );
 }
@@ -6979,22 +6831,6 @@ function needsCriticalThinkerReview(text: string): boolean {
   return /\b(critical[\s_]+thinker|critic)\b/i.test(text);
 }
 
-/// A Personal Secretary screenshot-to-message request is an external
-/// operation, not a software-planning goal. Running it through the secretary
-/// orchestrator, triager, responder, and final integration adds several model
-/// turns before the browser can act. Keep this narrow: only a Secretary/Chief
-/// of Staff project and an explicit capture + outbound-message request qualify.
-export function isPersonalSecretaryMediaRequest(
-  text: string,
-  team: Pick<Team, "id" | "name" | "display"> | null | undefined,
-  projectName = "",
-): boolean {
-  const teamLabel = `${team?.id ?? ""} ${team?.name ?? ""} ${team?.display ?? ""} ${projectName}`;
-  const isSecretary = /secretary|chief[\s_-]*of[\s_-]*staff|personal[\s_-]+assistant/i.test(teamLabel);
-  const isCapture = /\b(screen[\s_-]*shot|screenshot|capture)\b/i.test(text);
-  const isOutbound = /\b(send|message|whatsapp|attach|upload|share)\b/i.test(text);
-  return isSecretary && isCapture && isOutbound;
-}
 function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
   const directivesBlock = formatDirectivesBlock(directives);
   return [
@@ -9884,7 +9720,18 @@ export function AgentsPage({
       // fan-out. Per-agent model/voice/skill picks still apply — they're keyed
       // by agent name, which matches. (Names must match for the edges to
       // resolve too; teamTemplateForActive already required a roster match.)
-      if (tmpl && tmpl.agents.length > 0) return { ...proj, agents: tmpl.agents, edges: tmpl.edges };
+      if (tmpl && tmpl.agents.length > 0) {
+        // Keep project agents the template doesn't know about (e.g. the
+        // assistant flow's provisioned `browser` agent) plus their edges —
+        // adopting the template roster verbatim silently dropped them.
+        const tmplNames = new Set(tmpl.agents.map(a => a.name));
+        const extras = proj.agents.filter(a => !tmplNames.has(a.name));
+        const extraEdges = proj.edges.filter(e =>
+          extras.some(x => x.name === e.source || x.name === e.target) &&
+          (tmplNames.has(e.source) || extras.some(x => x.name === e.source)) &&
+          (tmplNames.has(e.target) || extras.some(x => x.name === e.target)));
+        return { ...proj, agents: [...tmpl.agents, ...extras], edges: [...tmpl.edges, ...extraEdges] };
+      }
       return proj;
     }
     return teams[0] ?? null;
@@ -9918,6 +9765,7 @@ export function AgentsPage({
           agentModels: perAgentModel, agentVoices: perAgentVoice,
           agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
           previousGraphJson: selectedProject.graph_json,
+          templateId: tmpl.id,
         }),
       },
     });
@@ -9951,6 +9799,7 @@ export function AgentsPage({
             agentModels: new Map(), agentVoices: new Map(),
             agentSkills: new Map(), agentToolExtras: new Map(),
             previousGraphJson: selectedProject.graph_json,
+            templateId: t.id,
           }),
         },
       });
@@ -10451,11 +10300,6 @@ export function AgentsPage({
       intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
     const directCriticSpec = runtimeTeam.agents.find(agent =>
       agent.name === CRITIC_AGENT_NAME || agent.base === "critic" || agent.base === "critical_thinker");
-    const directExternalAction = isPersonalSecretaryMediaRequest(
-      text,
-      activeTeam,
-      selectedProject?.name ?? "",
-    );
     // Remember this goal so a failed second-agent / forwarded send can offer a
     // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
     // only genuine goals land here.
@@ -10473,7 +10317,7 @@ export function AgentsPage({
     // Otherwise attaching a picture silently diverted the run to the read-only
     // single-assistant orchestrator below, skipping the solo-loop's publish
     // (the "I said publish but it switched to the orchestrator" bug).
-    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0) && !directExternalAction) {
+    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0)) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (soloMode || hasSpecialists) {
@@ -10699,15 +10543,6 @@ export function AgentsPage({
           ? `You are the orchestrator of '${activeTeam.display}'.`
           : "You are the team's orchestrator.",
         "Answer the user concisely.",
-        directExternalAction
-          ? [
-            "FAST EXTERNAL OPERATION: perform this narrow screenshot-and-message request directly.",
-            "Do not plan, delegate, invoke a critic, inspect the project, or run unrelated tools.",
-            "Use browser_screenshot with scope=app to capture only the native OWLLM application window at full pixels.",
-            "When sending a UI screenshot through WhatsApp, attach the PNG as a Document (not Photos & videos) so WhatsApp does not recompress readable text.",
-            "Verify the recipient, attachment filename, and sent confirmation, then report the actual result.",
-          ].join("\n")
-          : "",
         // Tool-use directive. Small local models tend to DESCRIBE their
         // toolbox and say "now let me test them" without ever emitting the
         // structured tool call, so the turn ends with no action taken (the
@@ -11732,10 +11567,18 @@ export function AgentsPage({
           ...(coder.extraSkills ?? []),
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
-        const sBlock = await buildAgentSkillBlock(
+        const { block: sBlock, autoLoaded: sAutoLoaded } = await buildSoloSkillBlock(
           runtimeSkillIds(coder, sIds),
+          text,
           !!coder.runtimePersonal,
         );
+        if (sAutoLoaded.length > 0) {
+          appendThought(coder.name, {
+            role: "system",
+            color: "#7fd4ff",
+            text: `📦 Auto-loaded skill(s): ${sAutoLoaded.join(", ")}`,
+          });
+        }
         // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
         // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
         // Alone, that lock is fatal — it does its slice and hands the rest to agents
@@ -12046,10 +11889,21 @@ export function AgentsPage({
         ...(orch.extraSkills ?? []),
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
-      const orchSkillBlock = await buildAgentSkillBlock(
+      // Auto-skill selection (same engine as the Solo path): merge the
+      // orchestrator's equipped skills with skills matched from the goal text,
+      // so a relevant procedure loads without the model having to discover it.
+      const { block: orchSkillBlock, autoLoaded: orchAutoLoaded } = await buildSoloSkillBlock(
         runtimeSkillIds(orch, orchSkillIds),
+        text,
         !!orch.runtimePersonal,
       );
+      if (orchAutoLoaded.length > 0) {
+        appendThought(orch.name, {
+          role: "system",
+          color: "#7fd4ff",
+          text: `📦 Auto-loaded skill(s): ${orchAutoLoaded.join(", ")}`,
+        });
+      }
       const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = effectiveModelFor(orch);

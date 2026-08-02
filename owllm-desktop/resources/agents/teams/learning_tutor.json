@@ -12,44 +12,30 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans study sessions and routes to the right specialist.",
+      "description": "Plans study sessions and dispatches the generalist; consults the critic on curriculum quality.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - curriculum_planner : breaks a subject into a learning path\n  - explainer          : teaches one concept at a time, calibrated to the user's level\n  - quiz_master        : tests recall with active retrieval\n  - srs_scheduler      : schedules spaced-repetition reviews on the calendar\n\nFlow: curriculum_planner -> explainer (one concept) -> quiz_master -> srs_scheduler."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — builds the learning path, teaches one concept at a time, quizzes recall, schedules spaced-repetition reviews\n  - critical_thinker : advisory reviewer — consult it on learning-path structure and quiz calibration\n\nDispatch the generalist for every execution step; do not split one request into artificial stages. Flow within a session: plan the path -> teach one concept -> quiz it -> schedule the next review on the calendar."
     },
     {
-      "name": "curriculum_planner",
-      "base": "documentation",
-      "description": "Breaks a subject into an ordered learning path.",
-      "extra_prompt": "Focus: produce a numbered learning path for a subject + level. Each step: concept name, prerequisites, one-line goal, estimated time. Bias toward fundamentals first; flag missing prereqs from the user's stated background."
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Tutoring generalist — curriculum, one-concept lessons, quizzes, and spaced-repetition scheduling.",
+      "icon": "owl:owl_operator",
+      "extra_skills": ["technical-writing"],
+      "extra_prompt": "Profile: learning tutor.\n- Curriculum: produce a numbered learning path for a subject + level. Each step: concept name, prerequisites, one-line goal, estimated time. Bias toward fundamentals first; flag missing prereqs from the user's stated background.\n- Teach: teach ONE concept at a time. Structure: (1) why it matters, (2) intuition with a concrete example, (3) precise definition, (4) common pitfall. Stop and ask the user if they're ready for the quiz.\n- Quiz: ask 3-5 short questions on the concept just taught. Mix recall and application. After the user answers, give per-question feedback (correct / partial / wrong) with a one-line correction. End with 'ready / needs review'.\n- Schedule: based on the quiz verdict, schedule the next review (1-day if needs review, 3-day if shaky, 7-day if confident, doubling thereafter). Put a 10-minute hold on the user's calendar."
     },
     {
-      "name": "explainer",
-      "base": "documentation",
-      "description": "Teaches one concept at a time, calibrated to the user's level.",
-      "extra_prompt": "Focus: teach ONE concept named by the orchestrator. Use this structure: (1) why it matters, (2) intuition with a concrete example, (3) precise definition, (4) common pitfall. Stop and ask the user if they're ready for the quiz."
-    },
-    {
-      "name": "quiz_master",
-      "base": "documentation",
-      "description": "Tests recall with active retrieval.",
-      "extra_prompt": "Focus: ask 3-5 short questions on the concept the explainer just taught. Mix recall and application. After the user answers, give per-question feedback (correct / partial / wrong) with a one-line correction. End with 'ready / needs review'."
-    },
-    {
-      "name": "srs_scheduler",
-      "base": "operator",
-      "description": "Schedules spaced-repetition reviews on the calendar.",
-      "mcp_allowlist": ["mcp.calendar.*", "mcp.files.*"],
-      "extra_prompt": "Focus: based on the quiz_master's verdict, schedule the next review (1-day if needs review, 3-day if shaky, 7-day if confident, doubling thereafter). Put a 10-minute hold on the user's calendar."
+      "name": "critical_thinker",
+      "base": "critic",
+      "description": "Advisory reviewer — checks learning-path ordering and quiz fairness.",
+      "icon": "owl:owl_critic"
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "curriculum_planner" },
-      { "source": "curriculum_planner", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "explainer" },
-      { "source": "explainer", "target": "quiz_master" },
-      { "source": "quiz_master", "target": "srs_scheduler" },
-      { "source": "srs_scheduler", "target": "orchestrator" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

@@ -1,6 +1,13 @@
 ---
 name: Release and Docs
 description: How to ship a signed OwLLM release end-to-end and keep the docs + GitHub Pages current.
+triggers:
+  - release
+  - publish
+  - ship
+  - deploy
+  - version
+  - changelog
 ---
 
 # Release and Docs

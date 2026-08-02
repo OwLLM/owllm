@@ -13,46 +13,30 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans ticket flow.",
+      "description": "Plans ticket flow and dispatches the generalist; consults the critic on risky replies.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - triager           : classifies and prioritises incoming tickets\n  - kb_responder      : drafts replies grounded in the KB only\n  - escalation_router : routes uncovered cases to the right human\n  - postmortem_writer : writes incident post-mortems\n\nNever auto-reply. Every customer-facing message is approval-gated."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — triages tickets, drafts KB-grounded replies, routes escalations, writes post-mortems\n  - critical_thinker : advisory reviewer — consult it before customer-facing messages and escalations\n\nDispatch the generalist for every execution step; do not split one request into artificial stages. Never auto-reply. Every customer-facing message is approval-gated."
     },
     {
-      "name": "triager",
-      "base": "operator",
-      "description": "Classifies and prioritises incoming tickets.",
-      "mcp_allowlist": ["mcp.helpdesk.*"],
-      "extra_prompt": "Focus: read each new ticket, assign category, priority (P0..P3), and a one-line summary. Tag tickets the kb_responder can answer vs. ones that need escalation."
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Support generalist — ticket triage, KB-grounded replies, escalation routing, and post-mortems.",
+      "icon": "owl:owl_operator",
+      "extra_skills": ["technical-writing"],
+      "extra_prompt": "Profile: customer support.\n- Triage: read each new ticket, assign category, priority (P0..P3), and a one-line summary. Tag tickets answerable from the KB vs. ones that need escalation.\n- KB replies: search the KB before drafting. Every claim in the reply must trace to a KB article — cite it. If the answer isn't in the KB, escalate instead. Never invent product behaviour.\n- Escalation: for tickets the KB can't answer, identify the right team (engineering, billing, account management) and ping the on-call in their Slack channel with the ticket id and a one-line summary.\n- Post-mortems: for resolved P0 / P1 incidents, draft a post-mortem: timeline, root cause, customer impact, fix, prevention items. Blameless tone. The on-call human reviews before publishing."
     },
     {
-      "name": "kb_responder",
-      "base": "documentation",
-      "description": "Drafts replies grounded in the KB only.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.helpdesk.*"],
-      "extra_prompt": "Focus: search the KB before drafting. Every claim in the reply must trace to a KB article — cite it. If the answer isn't in the KB, say 'escalate' and pass to escalation_router. Never invent product behaviour."
-    },
-    {
-      "name": "escalation_router",
-      "base": "operator",
-      "description": "Routes uncovered cases to the right human.",
-      "mcp_allowlist": ["mcp.slack.*", "mcp.helpdesk.*"],
-      "extra_prompt": "Focus: for tickets the kb_responder couldn't handle, identify the right team (engineering, billing, account management) and ping the on-call in their Slack channel with the ticket id and a one-line summary."
-    },
-    {
-      "name": "postmortem_writer",
-      "base": "documentation",
-      "description": "Writes incident post-mortems.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.helpdesk.*"],
-      "extra_prompt": "Focus: for resolved P0 / P1 incidents, draft a post-mortem: timeline, root cause, customer impact, fix, prevention items. Blameless tone. The on-call human reviews before publishing."
+      "name": "critical_thinker",
+      "base": "critic",
+      "description": "Advisory reviewer — sanity-checks customer-facing drafts and escalations before the user approves them.",
+      "icon": "owl:owl_critic"
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "triager" },
-      { "source": "triager", "target": "kb_responder" },
-      { "source": "kb_responder", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "escalation_router" },
-      { "source": "orchestrator", "target": "postmortem_writer" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

@@ -9,41 +9,31 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Coordinates the per-axis reviews and produces the unified summary.",
+      "description": "Dispatches the review and delivers the unified ranked verdict to the user.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - security_reviewer : looks for auth, injection, secret-handling, supply-chain issues\n  - perf_reviewer     : looks for hot-path regressions, N+1 queries, bad allocations\n  - style_critic      : checks consistency with the existing codebase's style\n  - summarizer        : merges the three reviews into a single ranked verdict\n\nFlow: dispatch all three reviewers in sequence, then send their outputs to summarizer. Pure read; never write. The user takes the verdict and acts on it."
+      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — reviews the changed code across security, performance, and style, then merges the findings into one ranked verdict\n  - critical_thinker : advisory reviewer — sanity-checks the merged verdict for rigour and specificity\n\nDispatch the generalist to run the full multi-axis review, then send its ranked verdict to critical_thinker before handing it to the user. This team is PURE READ; never write or modify code. The user takes the verdict and acts on it."
     },
     {
-      "name": "security_reviewer",
+      "name": "generalist",
+      "base": "solo_generalist",
+      "description": "Review generalist — security, performance, and style review of the changed code, merged into one ranked verdict. Read-only.",
+      "icon": "owl:owl_operator",
+      "extra_skills": ["code-review"],
+      "extra_prompt": "Profile: multi-axis code review. Read-only — never write or modify code.\n- Security: read the changed code and flag auth, injection, secret-handling, and supply-chain issues. Be specific: file:line, the issue, and a concrete remediation. If nothing of concern, say so explicitly.\n- Performance: flag hot-path regressions, N+1 queries, and allocation hot-spots. Quantify where possible (loop bound, expected query count, allocation frequency).\n- Style: read NEIGHBOURING files first to learn the codebase's conventions, then review the diff for deviations. Don't impose external preferences — match what's already there.\n- Summarise: merge the three axes into a single ranked list (P0 blockers, P1 should-fix, P2 nice-to-have), deduplicated. End with a single APPROVE / REVISE / REJECT verdict — REVISE if any axis found REVISE/REJECT-level issues."
+    },
+    {
+      "name": "critical_thinker",
       "base": "critic",
-      "description": "Looks for auth, injection, secret-handling, supply-chain issues.",
-      "extra_prompt": "Focus: read the changed code and flag security issues only. Be specific: file:line, the issue, and a concrete remediation. If nothing of concern, say so explicitly. Reply APPROVE / REVISE / REJECT."
-    },
-    {
-      "name": "perf_reviewer",
-      "base": "critic",
-      "description": "Looks for hot-path regressions, N+1 queries, allocation hot-spots.",
-      "extra_prompt": "Focus: read the changed code and flag performance issues only. Quantify where possible (loop bound, expected query count, allocation frequency). Reply APPROVE / REVISE / REJECT."
-    },
-    {
-      "name": "style_critic",
-      "base": "critic",
-      "description": "Checks consistency with the existing codebase's style.",
-      "extra_prompt": "Focus: read NEIGHBOURING files first to learn the codebase's conventions, then review the diff for deviations. Don't impose external preferences — match what's already there. Reply APPROVE / REVISE / REJECT."
-    },
-    {
-      "name": "summarizer",
-      "base": "documentation",
-      "description": "Merges the three reviews into a single ranked verdict.",
-      "extra_prompt": "Focus: produce one ranked list (P0 blockers, P1 should-fix, P2 nice-to-have) merging the three reviewers' notes. Deduplicate. End with a single APPROVE / REVISE / REJECT verdict — REVISE if any reviewer said REVISE/REJECT."
+      "description": "Advisory reviewer — checks the merged verdict is specific, evidence-based, and correctly ranked.",
+      "icon": "owl:owl_critic",
+      "extra_prompt": "Review the generalist's merged verdict, not the taste of it: every finding must carry file:line, the concrete issue, and a concrete remediation; the P0/P1/P2 ranking must match severity; duplicates must be collapsed; and the final line must be a single APPROVE / REVISE / REJECT consistent with the findings. Flag any vague, unsupported, or missing-axis findings."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "security_reviewer" },
-      { "source": "orchestrator", "target": "perf_reviewer" },
-      { "source": "orchestrator", "target": "style_critic" },
-      { "source": "orchestrator", "target": "summarizer" }
+      { "source": "orchestrator", "target": "generalist" },
+      { "source": "orchestrator", "target": "critical_thinker" },
+      { "source": "generalist", "target": "critical_thinker" }
     ]
   }
 }

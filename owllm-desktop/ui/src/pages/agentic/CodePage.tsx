@@ -11,6 +11,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, t
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import Composer from "../../components/Composer";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import PublishCards from "./PublishCards";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
@@ -713,7 +714,6 @@ function CodeWorkspace({ pageId, onTitle }: {
   // 🧠 button so "it remembered" is visible rather than something you infer.
   const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
-  const chatFileRef = useRef<HTMLInputElement | null>(null);
   const [launchPrompt, setLaunchPrompt] = useState(() => {
     try {
       const value = sessionStorage.getItem("owllm:code-launch-intent") ?? "";
@@ -731,9 +731,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
-  const codeFileRef = useRef<HTMLInputElement | null>(null);
   const [secondaryAttachments, setSecondaryAttachments] = useState<Attachment[]>([]);
-  const secondaryFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
   const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
@@ -837,12 +835,6 @@ function CodeWorkspace({ pageId, onTitle }: {
       try { const a = await fileToChatAttachment(f); setChatAttachments((x) => [...x, a]); }
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
-  };
-  const onChatPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return; // let normal text paste through
-    e.preventDefault();
-    void addChatFiles(files);
   };
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
   // shared chatRuntime store so it survives leaving this page and coming back.
@@ -2468,45 +2460,27 @@ function CodeWorkspace({ pageId, onTitle }: {
   const addSecondaryFiles = (files: FileList | File[]) => {
     void addProjectComposerFiles(files, setSecondaryAttachments);
   };
-  const renderAttachmentTray = (
-    attachments: Attachment[],
-    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
-  ) => attachments.length > 0 && (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-      {attachments.map((attachment, i) => (
-        <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-          {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
-          <button onClick={() => setAttachments((current) => current.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-        </div>
-      ))}
-    </div>
-  );
-  const renderAttachmentPicker = (
-    owner: "primary" | "secondary",
-    inputRef: { current: HTMLInputElement | null },
-    addFiles: (files: FileList | File[]) => void,
-  ) => (
-    <>
-      <input data-ui={`Code${owner === "primary" ? "Primary" : "Secondary"}AttachmentInput`} ref={inputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
-             onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
-      <button onClick={() => inputRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
-    </>
-  );
 
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div
-      data-ui="CodeSecondaryComposer"
-      onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) e.preventDefault(); }}
-      onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
-      style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}
-    >
-      <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
-        <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
+    <Composer
+      dataUi="CodeSecondaryComposer"
+      toolbarDataUi="CodeSecondaryComposerToolbar"
+      textareaRef={secondaryDraftRef}
+      value={secondaryDraft}
+      onChange={setSecondaryDraft}
+      onSend={() => { void sendSecondary(); }}
+      onStop={() => { secondaryAbortRef.current?.abort(); }}
+      busy={secondaryBusy}
+      disabled={secondaryBusy}
+      placeholder="Message the second agent… (same workspace, its own conversation & model)"
+      minHeight={44}
+      maxHeight={120}
+      modelPicker={
+        <div data-ui="CodeSecondaryComposerModelPicker" style={{ minWidth: 0 }}>
           <ModelPicker
             value={secondaryModelId}
             onChange={setSecondaryModelId}
@@ -2517,38 +2491,19 @@ function CodeWorkspace({ pageId, onTitle }: {
             placement="top"
           />
         </div>
-        {renderTerminalButton("secondary")}
-      </div>
-      {renderAttachmentTray(secondaryAttachments, setSecondaryAttachments)}
-      <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
-        {renderAttachmentPicker("secondary", secondaryFileRef, addSecondaryFiles)}
-        <textarea
-          ref={secondaryDraftRef}
-          value={secondaryDraft}
-          onChange={(e) => setSecondaryDraft(e.target.value)}
-          onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-          placeholder="Message the second agent… (same workspace, its own conversation & model)"
-          rows={2}
-          disabled={secondaryBusy}
-          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
-        />
-        {secondaryBusy ? (
-          <button
-            onClick={() => { secondaryAbortRef.current?.abort(); }}
-            title="Stop the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
-          >Stop</button>
-        ) : (
-          <button
-            onClick={() => { void sendSecondary(); }}
-            disabled={!secondaryDraft.trim() && secondaryAttachments.length === 0}
-            title="Send to the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: (secondaryDraft.trim() || secondaryAttachments.length) ? 1 : 0.5 }}
-          >Send</button>
-        )}
-      </div>
-    </div>
+      }
+      headerExtra={renderTerminalButton("secondary")}
+      attachments={secondaryAttachments}
+      onAttachFiles={addSecondaryFiles}
+      onRemoveAttachment={(i) => setSecondaryAttachments((current) => current.filter((_, j) => j !== i))}
+      attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+      attachmentInputDataUi="CodeSecondaryAttachmentInput"
+      mic
+      showCounter
+      onNotice={setStatus}
+      sendTitle="Send to the second agent"
+      stopTitle="Stop the second agent"
+    />
   );
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
@@ -2949,36 +2904,25 @@ function CodeWorkspace({ pageId, onTitle }: {
             </div>
           </div>
           <div style={{ borderTop: "1px solid var(--border)", padding: "10px 18px 12px", display: "flex", flexDirection: "column", gap: 8, maxWidth: CHAT_COLUMN_MAX, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
-          {chatAttachments.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {chatAttachments.map((a, i) => (
-                <div key={i} style={{ position: "relative", minWidth: a.kind === "image" ? 56 : 150, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: a.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-                  {a.kind === "image" ? <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {a.filename ?? "document"}</span>}
-                  <button onClick={() => setChatAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-                </div>
-              ))}
-            </div>
-          )}
           {/* One composer card rather than a bare edge-to-edge row, aligned to
               the same reading column as the transcript. */}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 14, padding: 6 }}>
-            <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 34, width: 34, justifyContent: "center", padding: 0, fontSize: 15, borderRadius: 10, background: "transparent", border: "none", color: "var(--fg-muted)" }}>📎</button>
-            <textarea
-              value={chatDraft}
-              onChange={(e) => setChatDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-              onPaste={onChatPaste}
-              placeholder="Message…  (paste or attach images/documents, Enter to send)"
-              rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 34, maxHeight: 200, background: "transparent", border: "none", outline: "none", color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "8px 4px", lineHeight: 1.5 }}
-            />
-            {chatBusy ? (
-              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 34, padding: "0 14px", borderRadius: 10, color: "var(--error)" }}>Stop</button>
-            ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 34, padding: "0 16px", borderRadius: 10, fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
-            )}
-          </div>
+          <Composer
+            dataUi="CodeJustChatComposer"
+            value={chatDraft}
+            onChange={setChatDraft}
+            onSend={sendChat}
+            onStop={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }}
+            busy={chatBusy}
+            placeholder="Message…  (paste or attach images/documents, Enter to send)"
+            minHeight={34}
+            maxHeight={200}
+            attachments={chatAttachments}
+            onAttachFiles={(files) => { void addChatFiles(files); }}
+            onRemoveAttachment={(i) => setChatAttachments((x) => x.filter((_, j) => j !== i))}
+            attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+            mic
+            showCounter
+          />
           </div>
         </div>
         {/* This branch returns EARLY, so the project-scoped modal further down
@@ -3823,20 +3767,24 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={secondaryOpen && wideView
         ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end", flexShrink: 0 }
         : { flexShrink: 0 }}>
-      <div
-        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
-        onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
-        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
-      >
-        {/* Each agent owns a toolbar immediately above — and exactly aligned
-            with — its own textarea. Both Terminal buttons address the same
-            workspace shell; the model selections remain independent. */}
-        <div data-ui="CodePrimaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <div style={status.includes("\n")
-            ? { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
-            : { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
-          <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
-          <div data-ui="CodePrimaryComposerModelPicker" style={{ width: "min(300px, 48%)", minWidth: 180 }}>
+      {/* Each agent owns a toolbar immediately above — and exactly aligned
+          with — its own textarea. Both Terminal buttons address the same
+          workspace shell; the model selections remain independent. */}
+      <Composer
+        dataUi="CodePrimaryComposer"
+        toolbarDataUi="CodePrimaryComposerToolbar"
+        textareaRef={codeDraftRef}
+        value={draft}
+        onChange={setDraft}
+        onSend={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
+        onStop={stop}
+        busy={busy}
+        placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
+        minHeight={82}
+        maxHeight={142}
+        status={status}
+        modelPicker={
+          <div data-ui="CodePrimaryComposerModelPicker" style={{ minWidth: 180 }}>
             <ModelPicker
               value={modelId}
               onChange={setModelId}
@@ -3847,38 +3795,32 @@ function CodeWorkspace({ pageId, onTitle }: {
               placement="top"
             />
           </div>
-          {renderTerminalButton("primary")}
-        </div>
-        {renderAttachmentTray(codeAttachments, setCodeAttachments)}
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          {renderAttachmentPicker("primary", codeFileRef, addCodeFiles)}
-          <textarea
-            ref={codeDraftRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
-            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
-            rows={3}
-            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
-          />
-          {busy ? (
-            <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
-          ) : (
-            /* One primary button — what it does follows the right-column MODE:
-               plan → Kanban plan/act, auto → act directly, chat → discuss only. */
-            <button
-              onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
-              disabled={(!draft.trim() && (agentMode === "plan" || codeAttachments.length === 0)) || preparing}
-              title={preparing ? "Preparing the workspace — unlocks in a moment"
-                : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
-                : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
-                : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeAttachments.length)) && !preparing) ? 1 : 0.5 }}
-            >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
-          )}
-        </div>
-      </div>
+        }
+        headerExtra={renderTerminalButton("primary")}
+        attachments={codeAttachments}
+        onAttachFiles={addCodeFiles}
+        onRemoveAttachment={(i) => setCodeAttachments((current) => current.filter((_, j) => j !== i))}
+        attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+        attachmentInputDataUi="CodePrimaryAttachmentInput"
+        mic
+        showCounter
+        onNotice={setStatus}
+        /* One primary button — what it does follows the MODE segment, which is
+           also mirrored by the right-hand side panel (same agentMode state). */
+        modes={[
+          { key: "plan", label: "📋 Plan", title: "Break the goal into ordered steps, then build them one by one (Kanban)" },
+          { key: "auto", label: "Auto", title: "Act directly — read, edit and run in the workspace" },
+          { key: "chat", label: "💬 Chat", title: "Discuss/review only — no edits, no state-changing commands" },
+        ]}
+        mode={agentMode}
+        onModeChange={(k) => setAgentMode(k as typeof agentMode)}
+        canSend={(!!draft.trim() || (agentMode !== "plan" && codeAttachments.length > 0)) && !preparing}
+        sendLabel={preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}
+        sendTitle={preparing ? "Preparing the workspace — unlocks in a moment"
+          : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
+          : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
+          : "Act directly — read, edit and run in the workspace"}
+      />
       {/* Right cell of the divided composer row — the second agent's input,
           aligned under its pane. (In narrow view it lives inside the pane.) */}
       {secondaryOpen && wideView && (

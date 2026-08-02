@@ -2,16 +2,17 @@
 // text inside chat message bodies (the shared ChatMarkdown / .md-body renderer
 // every chat surface reuses), the notebook step text, and the chat input box
 // in whole-pixel steps. Step 0 is the app's existing 13px body size; the range
-// runs from -1 (one step smaller, 12px) up to +6 (19px) in +1 increments.
+// runs from -3 (three steps smaller, 10px) up to +9 (22px) in +1 increments.
 // Pure module — storage is injectable so the verify harness can drive it
 // without a browser (same pattern as framePreferences / themePreferences).
 export const CHAT_FONT_STEP_KEY = "owllm:chat:font-step";
 
 export const CHAT_FONT_BASE_PX = 13;
-export const CHAT_FONT_MIN_STEP = -1;
-export const CHAT_FONT_MAX_STEP = 6;
+export const CHAT_FONT_MIN_STEP = -3;
+export const CHAT_FONT_MAX_STEP = 9;
 // Step 0 is the app's shipped size — the default a fresh install (or a
-// missing/corrupt preference) resolves to. -1 is an explicit smaller option.
+// missing/corrupt preference) resolves to. Negative steps are explicit
+// smaller options.
 export const CHAT_FONT_DEFAULT_STEP = 0;
 
 type ChatFontStorage = Pick<Storage, "getItem" | "setItem">;
@@ -29,7 +30,7 @@ export function clampChatFontStep(value: number): number {
   return Math.min(CHAT_FONT_MAX_STEP, Math.max(CHAT_FONT_MIN_STEP, Math.round(value)));
 }
 
-// Resolve a step to the concrete chat body font size in pixels (12..19).
+// Resolve a step to the concrete chat body font size in pixels (10..22).
 export function chatFontSizePx(step: number): number {
   return CHAT_FONT_BASE_PX + clampChatFontStep(step);
 }

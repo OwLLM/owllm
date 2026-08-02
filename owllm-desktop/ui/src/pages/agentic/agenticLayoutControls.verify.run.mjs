@@ -34,9 +34,9 @@ check("Terminal and model picker are absent from the crowded Code header", !code
 // the header slot still carries that agent's model picker and Terminal button.
 const primaryToolbar = codePage.slice(codePage.indexOf('dataUi="CodePrimaryComposer"'), codePage.indexOf("attachments={codeAttachments}"));
 const secondaryToolbar = codePage.slice(codePage.indexOf('dataUi="CodeSecondaryComposer"'), codePage.indexOf("attachments={secondaryAttachments}"));
-check("primary model selection shares its Terminal row above the input", primaryToolbar.includes('toolbarDataUi="CodePrimaryComposerToolbar"') && primaryToolbar.includes('data-ui="CodePrimaryComposerModelPicker"') && primaryToolbar.includes("<ModelPicker") && primaryToolbar.includes('renderTerminalButton("primary")'));
-check("second-agent model selection shares its Terminal row above its input", secondaryToolbar.includes('toolbarDataUi="CodeSecondaryComposerToolbar"') && secondaryToolbar.includes('data-ui="CodeSecondaryComposerModelPicker"') && secondaryToolbar.includes("<ModelPicker") && secondaryToolbar.includes('renderTerminalButton("secondary")'));
-check("both composer model selectors are dropups", primaryToolbar.includes('placement="top"') && secondaryToolbar.includes('placement="top"'));
+check("primary model selection shares its Terminal row above the input", primaryToolbar.includes('toolbarDataUi="CodePrimaryComposerToolbar"') && codePage.includes('renderCodeModelPicker("primary", modelId, setModelId, busy') && primaryToolbar.includes('renderTerminalButton("primary")'));
+check("second-agent model selection shares its Terminal row above its input", secondaryToolbar.includes('toolbarDataUi="CodeSecondaryComposerToolbar"') && codePage.includes('renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy') && secondaryToolbar.includes('renderTerminalButton("secondary")'));
+check("both composer model selectors are dropups", codePage.includes('placement="top"') && codePage.includes('renderCodeModelPicker("primary"') && codePage.includes('renderCodeModelPicker("secondary"'));
 check("Project Memory has a protected visible row in the left project rail", codePage.includes('data-ui="CodeProjectMemory"') && codePage.includes("🧠 Project Memory"));
 check("Code side-panel invocation no longer passes terminal header props", !codePage.includes("terminalOpen={termOpen && !termHidden}"));
 check("publisher panel can shrink inside the chat-grid column", agentsPage.includes('flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column"'));

@@ -59,9 +59,10 @@ pin("second composer owns its independent model picker above its textarea",
   codePageSrc.includes('toolbarDataUi="CodeSecondaryComposerToolbar"')
   && codePageSrc.indexOf('toolbarDataUi="CodeSecondaryComposerToolbar"') < codePageSrc.indexOf("textareaRef={secondaryDraftRef}"));
 pin("both composer pickers open upward and share a Terminal control",
-  codePageSrc.includes('data-ui="CodePrimaryComposerModelPicker"')
-  && codePageSrc.includes('data-ui="CodeSecondaryComposerModelPicker"')
-  && (codePageSrc.match(/placement="top"/g) || []).length >= 2
+  codePageSrc.includes('owner === "primary" ? "CodePrimaryComposerModelPicker" : "CodeSecondaryComposerModelPicker"')
+  && codePageSrc.includes('renderCodeModelPicker("primary", modelId, setModelId, busy')
+  && codePageSrc.includes('renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy')
+  && codePageSrc.includes('placement="top"')
   && codePageSrc.includes('renderTerminalButton("primary")')
   && codePageSrc.includes('renderTerminalButton("secondary")'));
 pin("model pickers are absent from both crowded chat headers",

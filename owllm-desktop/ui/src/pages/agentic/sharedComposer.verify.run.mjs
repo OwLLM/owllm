@@ -93,8 +93,9 @@ check("fine-tuning's private composer button styles and dead legacy row are gone
 check("every surface keeps the mic", (codePage.match(/^\s+mic$/gm) ?? []).length >= 3
   && /^\s+mic$/m.test(agentsPage) && /^\s+mic$/m.test(chatPage));
 check("both Code agents keep their own model picker and Terminal",
-  codePage.includes('data-ui="CodePrimaryComposerModelPicker"')
-  && codePage.includes('data-ui="CodeSecondaryComposerModelPicker"')
+  codePage.includes('owner === "primary" ? "CodePrimaryComposerModelPicker" : "CodeSecondaryComposerModelPicker"')
+  && codePage.includes('renderCodeModelPicker("primary", modelId, setModelId, busy')
+  && codePage.includes('renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy')
   && codePage.includes('headerExtra={renderTerminalButton("primary")}')
   && codePage.includes('headerExtra={renderTerminalButton("secondary")}'));
 check("Code agent 1 keeps its Plan / Auto / Chat modes",

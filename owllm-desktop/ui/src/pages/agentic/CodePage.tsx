@@ -47,6 +47,7 @@ import {
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
 import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
+import { projectsRootGet, projectPathUnder, projectFolderSlug } from "./projectsRoot";
 import { openSyncOnboarding } from "../core/AccountSyncModal";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
@@ -1370,8 +1371,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!project.repo_url) return; // stays ghosted with the source-PC guidance.
     setCatalogBusy(true);
     try {
+      const root = await projectsRootGet().catch(() => null);
       const parent = await invoke<string | null>("pick_folder", {
         title: `Choose where to clone ${project.name} on this computer`,
+        startDir: root?.path || null,
       });
       if (!parent) return;
       const location = await invoke<string>("github_clone_project", {
@@ -1672,8 +1675,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     setImportBusy(true);
     setImportMsg("Choose the local parent folder for this clone…");
     try {
+      const root = await projectsRootGet().catch(() => null);
       const parent = await invoke<string | null>("pick_folder", {
         title: selectedRepo ? `Choose where to clone ${selectedRepo.fullName}` : "Choose where to clone this GitHub project",
+        startDir: root?.path || null,
       });
       if (!parent) {
         setImportMsg("Import cancelled — no local folder was changed.");
@@ -1717,7 +1722,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [npOpen, setNpOpen] = useState(false);
   const [npName, setNpName] = useState("");
   const [npIsolate, setNpIsolate] = useState(true);
-  const [npFolder, setNpFolder] = useState("");
+  // Where the new project folder is created: the parent the user picked, else
+  // the per-device projects root chosen at onboarding. The full target path is
+  // always `projectPathUnder(parent, name)` — name and folder can't disagree.
+  const [npRoot, setNpRoot] = useState("");
+  const [npParent, setNpParent] = useState("");
+  const [npErr, setNpErr] = useState("");
   const [npBusy, setNpBusy] = useState(false);
   const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
   // Create a private GitHub repo for the new project (origin wired + pushed).
@@ -1728,11 +1738,18 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openNewProject = (intent = "") => {
     pendingProjectPromptRef.current = intent.trim();
     setNpName(launchProjectName(intent));
-    setNpFolder("");
+    setNpParent("");
+    setNpErr("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(!!gh?.connected);
     setNpBusy(false);
     setNpOpen(true);
+    // Auto-place under the projects root chosen at onboarding, so the location
+    // is already correct when the dialog appears. A parent the user picked
+    // meanwhile is never overwritten.
+    void projectsRootGet()
+      .then((r) => { setNpRoot(r.path); setNpParent((prev) => prev || r.path); })
+      .catch(() => setNpRoot(""));
     // Mirror Accounts logins into the sandbox, THEN show what's available —
     // automatically, no manual button. (No-op/instant if already synced.)
     if (sbox?.available) {
@@ -1745,14 +1762,22 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   const npBrowseFolder = async () => {
     try {
-      const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
-      if (picked) setNpFolder(picked);
-    } catch (e) { setStatus(`Folder pick failed: ${e}`); }
+      const picked = await invoke<string | null>("pick_folder", {
+        title: "Pick the parent folder for the new project",
+        // Open where this user keeps their projects rather than wherever the
+        // OS was last used.
+        startDir: npParent || npRoot || null,
+      });
+      if (picked) { setNpParent(picked); setNpErr(""); }
+    } catch (e) { setNpErr(`Folder pick failed: ${e}`); }
   };
   // Create from the modal: isolated → fresh ~/owllm project in the sandbox;
-  // otherwise open the chosen host folder (NOT isolated).
+  // otherwise a NEW `<parent>\<slug>` folder on the host, through the managed
+  // backend (folder + Project Card + git init). Opening an existing folder is
+  // the launchpad's separate "Local folder" action, not this dialog.
   const createNewProject = async () => {
     if (npBusy) return;
+    setNpErr("");
     setNpBusy(true);
     try {
       let createdPath = "";
@@ -1760,12 +1785,29 @@ function CodeWorkspace({ pageId, onTitle }: {
         const p = await sandboxCreateProject(npName.trim() || "project");
         createdPath = p.path;
         setNpOpen(false);
-      } else if (npFolder.trim()) {
-        createdPath = npFolder.trim();
-        setNpOpen(false);
       } else {
-        setNpBusy(false);
-        return;
+        const parent = (npParent || npRoot).trim();
+        if (!npName.trim()) { setNpErr("Give the project a name."); return; }
+        if (!parent) { setNpErr("Choose where to create the project."); return; }
+        const target = projectPathUnder(parent, npName);
+        const row = await invoke<ProjectCatalogRow>("create_project", {
+          input: {
+            name: npName.trim(),
+            description: pendingProjectPromptRef.current || "Coding workspace",
+            location: target,
+            repo_url: "",
+            create_location: true,
+            project_kind: "coding",
+            team: [],
+            graph_json: "",
+            team_default_model_id: "",
+            trust_writes: true,
+            auto_approve_all: false,
+          },
+        });
+        setCatalogProjects((prev) => [row, ...prev.filter((p) => p.id !== row.id)]);
+        createdPath = target;
+        setNpOpen(false);
       }
       const opening = openWorkspace(createdPath);
       const pendingPrompt = pendingProjectPromptRef.current;
@@ -1793,7 +1835,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       }
       if (createdPath) await ensureCatalogProject(createdPath, npName.trim() || undefined);
     } catch (e) {
-      setStatus(`Couldn't create project: ${e}`);
+      // Creation fails only while the dialog is still open (the later GitHub
+      // and catalog steps have their own handling) — keep the error in it,
+      // never in Agent 1's composer.
+      setNpErr(`Couldn't create the project: ${String((e as Error)?.message ?? e)}`);
     } finally {
       setNpBusy(false);
     }
@@ -3072,7 +3117,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       task, chatting is the daily one. */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
                     {([
-                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: () => openNewProject() },
+                      { icon: "✦", label: "New project", detail: "Create a new project folder under your projects root, optionally isolated and with a GitHub repository.", onClick: () => openNewProject() },
                       { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
                     ]).map((a) => (
                       <button key={a.label} onClick={a.onClick}
@@ -3264,23 +3309,48 @@ function CodeWorkspace({ pageId, onTitle }: {
               <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
                 {/* LEFT — name/folder, model, info */}
                 <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
-                  {npIsolate && sbox?.available ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Project name</label>
-                      <input autoFocus value={npName} onChange={(e) => setNpName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createNewProject(); }} placeholder="e.g. my-app"
-                        style={{ height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
-                      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>Created inside {engineLabel(sbox.kind)} at ~/owllm/{npName.trim() || "…"}</div>
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Folder</label>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <input value={npFolder} onChange={(e) => setNpFolder(e.target.value)} placeholder="Pick a folder on your drive…"
-                          style={{ flex: 1, minWidth: 0, height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
-                        <button onClick={npBrowseFolder} style={{ ...btn, height: 38, padding: "0 14px" }}>Browse…</button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Project name</label>
+                    <input autoFocus value={npName} onChange={(e) => { setNpName(e.target.value); setNpErr(""); }} onKeyDown={(e) => { if (e.key === "Enter") createNewProject(); }} placeholder="e.g. my-app"
+                      style={{ height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
+                  </div>
+
+                  {/* One location contract for both modes: the project is
+                      always CREATED as <parent> ▸ <slug>, the slug following
+                      the name live. Opening an existing folder is the
+                      launchpad's separate "Local folder" action. */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Created at</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div
+                        title={npIsolate && sbox?.available ? `~/owllm/${projectFolderSlug(npName)}` : (projectPathUnder(npParent || npRoot, npName) || "Choose where to create the project")}
+                        style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 13, overflow: "hidden", whiteSpace: "nowrap" }}
+                      >
+                        {npIsolate && sbox?.available ? (
+                          <>
+                            <span>🛡</span>
+                            <span style={{ color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{engineLabel(sbox.kind)} ▸ ~/owllm/</span>
+                            <b style={{ color: "var(--fg-strong)" }}>{projectFolderSlug(npName)}</b>
+                          </>
+                        ) : (npParent || npRoot) ? (
+                          <>
+                            <span>📁</span>
+                            <span style={{ color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{npParent || npRoot}</span>
+                            <span style={{ color: "var(--fg-muted)" }}>▸</span>
+                            <b style={{ color: "var(--fg-strong)" }}>{projectFolderSlug(npName)}</b>
+                          </>
+                        ) : (
+                          <span style={{ color: "var(--fg-muted)" }}>📁 Choose where to create the project…</span>
+                        )}
                       </div>
+                      {!(npIsolate && sbox?.available) && <button onClick={npBrowseFolder} style={{ ...btn, height: 38, padding: "0 14px" }}>Change…</button>}
                     </div>
-                  )}
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                      {npIsolate && sbox?.available
+                        ? <>Created inside {engineLabel(sbox.kind)} — isolated from your {isWsl ? "Windows" : "host"} files.</>
+                        : <>A new folder is created here, with git ready{npCreateRepo && gh?.connected ? " and a GitHub repository" : ""}.</>}
+                    </div>
+                  </div>
 
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Model</label>
@@ -3357,15 +3427,18 @@ function CodeWorkspace({ pageId, onTitle }: {
                 </div>
               </div>
 
+              {npErr && (
+                <div style={{ fontSize: 12, color: "var(--danger, #ff7a7a)", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px" }}>{npErr}</div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <button onClick={() => setNpOpen(false)} disabled={npBusy} style={{ ...btn, height: 38, padding: "0 14px" }}>Cancel</button>
                 <div style={{ flex: 1 }} />
                 <button
                   onClick={createNewProject}
-                  disabled={npBusy || (!npIsolate && !npFolder.trim())}
-                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || (!npIsolate && !npFolder.trim()) ? 0.6 : 1 }}
+                  disabled={npBusy || !npName.trim()}
+                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || !npName.trim() ? 0.6 : 1 }}
                 >
-                  {npBusy ? "Creating…" : (npIsolate ? "Create isolated project" : "Open folder")}
+                  {npBusy ? "Creating…" : (npIsolate && sbox?.available ? "Create isolated project" : "Create project")}
                 </button>
               </div>
             </div>

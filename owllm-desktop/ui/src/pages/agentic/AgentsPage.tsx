@@ -8969,7 +8969,7 @@ export function AgentsPage({
   const [soloMode, setSoloModeState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
-  // top-level so it can be reused later (e.g. from NewProjectDialog).
+  // top-level so other entry points can reuse it later.
   const [brainstormOpen, setBrainstormOpen] = useState(false);
   const [brainstormSeed, setBrainstormSeed] = useState("");
   // Cached "does BRIEF.md exist for this project's location" — drives

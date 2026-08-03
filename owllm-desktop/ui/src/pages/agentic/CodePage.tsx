@@ -146,6 +146,10 @@ type CodeState = {
   // (workspace, worktree, page id) as the primary chat, but with its OWN
   // independent, owner-tagged message history, draft, and model selection.
   secondaryOpen?: boolean;
+  // Outer coding-page columns. Missing values preserve the historical default
+  // (both visible); explicit user choices persist with this page's session.
+  projectRailOpen?: boolean;
+  utilityPanelOpen?: boolean;
   secondaryMessages?: Msg[];
   secondaryDraft?: string;
   /// Selectable last-reply auto-feed between the two panes (per direction):
@@ -169,6 +173,8 @@ const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
   secondaryOpen: true,
+  projectRailOpen: true,
+  utilityPanelOpen: true,
 };
 // Hydration migration: older sessions saved page notices (the run timing
 // footer, the auto-feed pause note) as plain assistant answers, which let them
@@ -909,6 +915,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   // New coding pages show both agent panes initially. Once the user explicitly
   // collapses or expands the second pane, that persisted choice wins.
   const secondaryOpen: boolean = stx.secondaryOpen ?? true;
+  const projectRailOpen: boolean = stx.projectRailOpen ?? true;
+  const utilityPanelOpen: boolean = stx.utilityPanelOpen ?? true;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   // BOUNDED RENDERING (WebView2 "Out of Memory" fix) — see components/StreamWindow.tsx.
   // Long Code-page runs appended transcript entries forever; only the tail is put
@@ -1125,6 +1133,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
   const setChatMode = (v: boolean) => setField("chatMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
+  const setProjectRailOpen = (v: boolean) => setField("projectRailOpen", v);
+  const setUtilityPanelOpen = (v: boolean) => setField("utilityPanelOpen", v);
   const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
     setField("secondaryMessages", (prev) => {
       const base = (prev as Msg[] | undefined) ?? [];
@@ -3513,35 +3523,60 @@ function CodeWorkspace({ pageId, onTitle }: {
       {/* Body: file-tree rail + transcript */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
         {workspace && (
-          <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
-            <button
-              data-ui="CodeProjectMemory"
-              onClick={() => { void openProjectMemory(); }}
-              title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
-              style={{ ...btn, width: "100%", height: 30, marginBottom: 4, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
-            >
-              🧠 Project Memory
-            </button>
-            <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
-            <PublishCards
-              repoDir={projectRoot || workspace}
-              gitDir={workspace}
-              branch={branch}
-              projectRoot={projectRoot}
-              isolated={isolated}
-              disabled={busy}
-              // Failed release actions become a coder task; send() queues it
-              // as a ⚡ steer when a run is already in flight. Pre-check the
-              // guards send() would trip so the card reports the truth instead
-              // of claiming "sent" while the task was silently dropped.
-              onFixIssues={(task) => {
-                if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
-                if (!workspace) return "no-workspace";
-                if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
-                void sendRef.current?.(task);
-                return "sent";
-              }}
-            />
+          <div
+            data-ui="CodeProjectRail"
+            data-state={projectRailOpen ? "expanded" : "collapsed"}
+            style={{ width: projectRailOpen ? 220 : 32, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
+          >
+            {projectRailOpen ? (
+              <>
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  <button
+                    data-ui="CodeProjectMemory"
+                    onClick={() => { void openProjectMemory(); }}
+                    title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
+                    style={{ ...btn, flex: 1, minWidth: 0, height: 30, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
+                  >
+                    🧠 Project Memory
+                  </button>
+                  <button
+                    data-ui="CodeProjectRailCollapse"
+                    onClick={() => setProjectRailOpen(false)}
+                    aria-label="Shrink left project column"
+                    title="Shrink left column"
+                    style={{ ...btn, width: 28, height: 30, padding: 0, flexShrink: 0, fontSize: 18, lineHeight: 1 }}
+                  >‹</button>
+                </div>
+                <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
+                <PublishCards
+                  repoDir={projectRoot || workspace}
+                  gitDir={workspace}
+                  branch={branch}
+                  projectRoot={projectRoot}
+                  isolated={isolated}
+                  disabled={busy}
+                  // Failed release actions become a coder task; send() queues it
+                  // as a ⚡ steer when a run is already in flight. Pre-check the
+                  // guards send() would trip so the card reports the truth instead
+                  // of claiming "sent" while the task was silently dropped.
+                  onFixIssues={(task) => {
+                    if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
+                    if (!workspace) return "no-workspace";
+                    if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
+                    void sendRef.current?.(task);
+                    return "sent";
+                  }}
+                />
+              </>
+            ) : (
+              <button
+                data-ui="CodeProjectRailExpand"
+                onClick={() => setProjectRailOpen(true)}
+                aria-label="Expand left project column"
+                title="Expand left column"
+                style={{ ...btn, width: 24, height: 30, padding: 0, fontSize: 18, lineHeight: 1 }}
+              >›</button>
+            )}
           </div>
         )}
       {/* Center column: chat panes on top, status + composer at the bottom of
@@ -3844,31 +3879,48 @@ function CodeWorkspace({ pageId, onTitle }: {
             with the team) and 📓 Notebook (the shared RunNotebook, inline).
             User spec 2026-07-04. */}
         {workspace && ruleScope.id && (
-          <CodeSidePanel
-            scopeId={ruleScope.id}
-            sharedWithTeam={ruleScope.shared}
-            directives={directives}
-            onDirectivesChanged={reloadDirectives}
-            mode={agentMode}
-            onModeChange={setAgentMode}
-            browserOpen={browserOpen}
-            onToggleBrowser={() => setBrowserOpen((v) => !v)}
-            usageProvider={providerFor(modelId, availableModels)}
-            notebook={
-              <RunNotebook
-                inline
-                projectId={ruleScope.id || null}
-                surfaceId={notebookSurfaceId}
-                projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
-                running={busy}
-                onFeed={feedFromNotebook}
-                modelId={modelId}
-                port={srvPort}
-                models={availableModels}
-                accountsStatus={accountsStatus}
-              />
-            }
-          />
+          utilityPanelOpen ? (
+            <CodeSidePanel
+              scopeId={ruleScope.id}
+              sharedWithTeam={ruleScope.shared}
+              directives={directives}
+              onDirectivesChanged={reloadDirectives}
+              mode={agentMode}
+              onModeChange={setAgentMode}
+              browserOpen={browserOpen}
+              onToggleBrowser={() => setBrowserOpen((v) => !v)}
+              usageProvider={providerFor(modelId, availableModels)}
+              onCollapse={() => setUtilityPanelOpen(false)}
+              notebook={
+                <RunNotebook
+                  inline
+                  projectId={ruleScope.id || null}
+                  surfaceId={notebookSurfaceId}
+                  projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
+                  running={busy}
+                  onFeed={feedFromNotebook}
+                  modelId={modelId}
+                  port={srvPort}
+                  models={availableModels}
+                  accountsStatus={accountsStatus}
+                />
+              }
+            />
+          ) : (
+            <div
+              data-ui="CodeUtilityPanelRail"
+              data-state="collapsed"
+              style={{ width: 32, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
+            >
+              <button
+                data-ui="CodeUtilityPanelExpand"
+                onClick={() => setUtilityPanelOpen(true)}
+                aria-label="Expand right utility column"
+                title="Expand right column"
+                style={{ ...btn, width: 24, height: 30, padding: 0, fontSize: 18, lineHeight: 1 }}
+              >‹</button>
+            </div>
+          )
         )}
       </div>
 

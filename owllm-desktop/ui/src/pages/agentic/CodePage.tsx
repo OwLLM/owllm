@@ -3527,7 +3527,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div
             data-ui="CodeProjectRail"
             data-state={projectRailOpen ? "expanded" : "collapsed"}
-            style={{ width: projectRailOpen ? 220 : 32, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
+            style={{ width: projectRailOpen ? 220 : 40, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: projectRailOpen ? "stretch" : "center", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: projectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: projectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
           >
             {projectRailOpen ? (
               <>
@@ -3575,8 +3575,11 @@ function CodeWorkspace({ pageId, onTitle }: {
                 onClick={() => setProjectRailOpen(true)}
                 aria-label="Expand left project column"
                 title="Expand left column"
-                style={{ ...btn, width: 24, height: 30, padding: 0, fontSize: 18, lineHeight: 1 }}
-              >›</button>
+                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ff78b7", background: "rgba(255, 82, 160, 0.16)", borderColor: "rgba(255, 105, 180, 0.68)", lineHeight: 1 }}
+              >
+                <span data-ui="CodeProjectRailCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>🧠</span>
+                <span aria-hidden="true" style={{ fontSize: 19 }}>›</span>
+              </button>
             )}
           </div>
         )}
@@ -3911,15 +3914,18 @@ function CodeWorkspace({ pageId, onTitle }: {
             <div
               data-ui="CodeUtilityPanelRail"
               data-state="collapsed"
-              style={{ width: 32, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
+              style={{ width: 40, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
             >
               <button
                 data-ui="CodeUtilityPanelExpand"
                 onClick={() => setUtilityPanelOpen(true)}
                 aria-label="Expand right utility column"
                 title="Expand right column"
-                style={{ ...btn, width: 24, height: 30, padding: 0, fontSize: 18, lineHeight: 1 }}
-              >‹</button>
+                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ffad42", background: "rgba(255, 153, 51, 0.17)", borderColor: "rgba(255, 166, 64, 0.7)", lineHeight: 1 }}
+              >
+                <span data-ui="CodeUtilityPanelCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>📓</span>
+                <span aria-hidden="true" style={{ fontSize: 19 }}>‹</span>
+              </button>
             </div>
           )
         )}

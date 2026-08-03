@@ -45,13 +45,24 @@ check(state.projectRailOpen === true && state.utilityPanelOpen === true,
   "both columns can be expanded again");
 
 check(codePage.includes('data-ui="CodeProjectRail"')
-  && codePage.includes('width: projectRailOpen ? 220 : 32')
+  && codePage.includes('width: projectRailOpen ? 220 : 40')
   && codePage.includes('data-state={projectRailOpen ? "expanded" : "collapsed"}'),
-  "left column shrinks to a stable arrow rail instead of disappearing");
+  "left column shrinks to a stable labelled rail instead of disappearing");
 check(codePage.includes('data-ui="CodeUtilityPanelRail"')
   && codePage.includes('data-state="collapsed"')
-  && codePage.includes("width: 32"),
-  "right column shrinks to a stable arrow rail instead of disappearing");
+  && codePage.includes("width: 40"),
+  "right column shrinks to a stable labelled rail instead of disappearing");
+check(codePage.includes('data-ui="CodeProjectRailCollapsedIcon"')
+  && codePage.includes('>🧠</span>')
+  && codePage.includes('fontSize: 22')
+  && codePage.includes('color: "#ff78b7"')
+  && codePage.includes('rgba(255, 82, 160, 0.16)'),
+  "collapsed left rail shows a larger pink brain control");
+check(codePage.includes('data-ui="CodeUtilityPanelCollapsedIcon"')
+  && codePage.includes('>📓</span>')
+  && codePage.includes('color: "#ffad42"')
+  && codePage.includes('rgba(255, 153, 51, 0.17)'),
+  "collapsed right rail shows a larger orange notebook control");
 check(codePage.includes('data-ui="CodeProjectRailCollapse"')
   && codePage.includes('data-ui="CodeProjectRailExpand"')
   && codePage.includes('aria-label="Shrink left project column"')

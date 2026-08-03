@@ -9,6 +9,8 @@
 
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import ModelPicker, { type AccountsStatusLite, type ModelInfo } from "./ModelPicker";
+import { CURATOR_OFF, getCuratorModel, setCuratorModel } from "./memoryCurator";
 
 // The 3D graph pulls in three.js — lazy-load it so the WebGL bundle only loads
 // when the user opens the Graph view (still bundled, so it works offline).
@@ -67,6 +69,14 @@ export default function TeamMemoryModal({
   const [newContent, setNewContent] = useState("");
   const [newKey, setNewKey] = useState("");
   const [newTags, setNewTags] = useState("");
+  // Post-run Memory Curator setting for this project: "" = default (Auto ·
+  // Cheapest), "off" = disabled, else the picked model id. Stored per scope in
+  // localStorage (memoryCurator.ts) — the run loops read it at run end.
+  const [curatorRaw, setCuratorRaw] = useState("");
+  // Model list + account availability for the shared ModelPicker; loaded once
+  // per open so the modal stays instant when the picker is never touched.
+  const [pickerModels, setPickerModels] = useState<ModelInfo[]>([]);
+  const [pickerAccounts, setPickerAccounts] = useState<AccountsStatusLite | null>(null);
   // Pin the exact durable project id supplied by the opener. Coding resolves
   // its folder asynchronously, so reading only its render-time prop could
   // briefly query the raw folder/fallback scope while Agents queried the real
@@ -113,8 +123,27 @@ export default function TeamMemoryModal({
     return () => window.removeEventListener(openEvent, onOpen as EventListener);
   }, [openEvent]);
   useEffect(() => { if (open) void reload(); }, [open, reload]);
+  // Curator setting follows the opened scope; picker data loads once per open.
+  useEffect(() => { if (open) setCuratorRaw(getCuratorModel(scope)); }, [open, scope]);
+  useEffect(() => {
+    if (!open) return;
+    void (async () => {
+      const [m, a] = await Promise.all([
+        invoke<ModelInfo[]>("list_models").catch(() => [] as ModelInfo[]),
+        invoke<AccountsStatusLite>("accounts_status").catch(() => null),
+      ]);
+      setPickerModels(m);
+      setPickerAccounts(a);
+    })();
+  }, [open]);
 
   if (!open) return null;
+
+  const curatorEnabled = curatorRaw !== CURATOR_OFF;
+  const applyCurator = (val: string) => {
+    setCuratorModel(scope, val);
+    setCuratorRaw(val);
+  };
 
   const add = async () => {
     const content = newContent.trim();
@@ -311,6 +340,38 @@ export default function TeamMemoryModal({
             </div>
           ))}
         </div>
+        )}
+
+        {/* Memory Curator — post-run fact extraction: on/off + which model
+            does it. Per-project, so a cheap (ideally local) model can curate
+            without adding to the team's own token spend. */}
+        {view === "list" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderTop: "1px solid var(--border)" }}>
+            <label
+              title="After each run, one small pass on the model picked here extracts up to 2 durable, novel facts from the outcome into this list. Off = facts are only written when an agent explicitly saves one."
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 600, color: "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}
+            >
+              <input
+                type="checkbox"
+                checked={curatorEnabled}
+                onChange={(e) => applyCurator(e.target.checked ? "" : CURATOR_OFF)}
+                style={{ accentColor: "var(--accent-ink)" }}
+              />
+              🧠 Curator — save up to 2 facts after each run
+            </label>
+            <div style={{ flex: 1 }} />
+            <div style={{ width: "min(300px, 45%)", opacity: curatorEnabled ? 1 : 0.45 }}>
+              <ModelPicker
+                value={curatorEnabled ? curatorRaw : ""}
+                onChange={(id) => applyCurator(id)}
+                models={pickerModels}
+                status={pickerAccounts}
+                disabled={!curatorEnabled}
+                fallbackLabel="Auto · Cheapest (default)"
+                placement="top"
+              />
+            </div>
+          </div>
         )}
 
         {/* Add note */}

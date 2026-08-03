@@ -13,26 +13,37 @@
   "mcp_pack": {
     "summary": "Configures filesystem, fetch, and no-key web search for source-aware drafting and local publishing targets.",
     "risk": "approval_required",
-    "approval_required": ["publishing", "file writes"],
+    "approval_required": [
+      "publishing",
+      "file writes"
+    ],
     "servers": [
       {
         "name": "filesystem",
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "C:/1_Git"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "fetch",
         "command": "uvx",
-        "args": ["mcp-server-fetch"],
+        "args": [
+          "mcp-server-fetch"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "duckduckgo",
         "command": "uvx",
-        "args": ["duckduckgo-mcp-server"],
+        "args": [
+          "duckduckgo-mcp-server"
+        ],
         "env": {},
         "enabled": true
       }
@@ -44,15 +55,34 @@
       "base": "orchestrator",
       "description": "Runs the piece through outline, draft, edit, SEO gate, and approval-gated publish via the generalist.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - generalist       : does ALL of the work — outlines, drafts in the user's voice, edits for clarity, and handles the approval-gated publish\n  - critical_thinker : advisory reviewer — SEO gate on titles, meta, headings, and internal links\n\nDispatch the generalist through the pipeline: outline -> draft -> edit, then send the edited piece to critical_thinker for the SEO review. Treat critical_thinker as a HARD gate: only publish on APPROVE; on REVISE/REJECT, send the notes back to the generalist. Publishing itself stays approval-gated — the generalist must state the destination and slug first and never auto-publish."
+      "extra_prompt": "Your team for this project — the standard six:\n  - scout            : read-only reconnaissance — gathers the context the workers need (code, sources, inboxes, data) and reports quotable findings; never edits\n  - worker_a         : execution lane A — full capability (files, shell, code, browser, connectors)\n  - worker_b         : execution lane B — identical capability; the second parallel lane\n  - critical_thinker : advisory reviewer — reviews substantive work before you call it done\n  - producer         : rule-based finisher — commits, packages, publishes, sends, or schedules ONLY work the review chain approved, and only when the goal asks for delivery\n\nDISPATCH DISCIPLINE:\n  - Decompose the goal into slices. INDEPENDENT slices go to worker_a AND worker_b in the same round — they run in parallel. Dependent steps stay in one lane.\n  - Give each lane an explicit, non-overlapping scope (files / features / sources). Two lanes must never touch the same files in the same round.\n  - Dispatch scout in parallel with the first work round whenever missing context would slow the workers down; quote its findings verbatim in later dispatches.\n  - A small single-step task takes ONE worker — never fan out for ceremony.\n  - Review chain: worker → critical_thinker on substantive work; on REVISE/REJECT send the exact notes back to the same lane.\n  - Delivery (commit / publish / send / schedule) is the producer's job, dispatched LAST, after review — the producer never creates content and never runs before approval.\n\nPROFILE GUIDANCE — this team's domain rules. Where they say \"the generalist\", read \"the worker lane you dispatch\":\n\nDispatch the generalist through the pipeline: outline -> draft -> edit, then send the edited piece to critical_thinker for the SEO review. Treat critical_thinker as a HARD gate: only publish on APPROVE; on REVISE/REJECT, send the notes back to the generalist. Publishing itself stays approval-gated — the generalist must state the destination and slug first and never auto-publish."
     },
     {
-      "name": "generalist",
+      "name": "scout",
+      "base": "researcher",
+      "description": "Read-only reconnaissance — gathers the context the workers need and reports quotable findings.",
+      "icon": "owl:owl_researcher",
+      "extra_prompt": "You are the team's scout — read-only reconnaissance, run in parallel with the workers. Focus for this profile: the subject matter, the user's existing voice/style samples, and the SEO landscape for the topic. Report compact, quotable facts (paths, quotes, numbers, links) the orchestrator can hand to the workers verbatim. Never edit files, never take actions with side effects — if a finding demands action, name it and hand it back."
+    },
+    {
+      "name": "worker_a",
       "base": "solo_generalist",
-      "description": "Content generalist — outline, draft, edit, and approval-gated publishing in one agent.",
+      "description": "Execution lane A — full-capability worker, interchangeable with lane B. Content generalist — outline, draft, edit, and approval-gated publishing in one agent.",
       "icon": "owl:owl_operator",
-      "extra_skills": ["technical-writing"],
-      "extra_prompt": "Profile: content studio.\n- Outline: given a topic + audience + length target, produce a numbered outline with H2 headings and 3-5 bullets per section. State the angle / thesis upfront.\n- Draft: turn the outline into prose in the user's configured voice (read past posts via the files MCP if available). Hit the length target within ±15%. Don't add sections that aren't in the outline.\n- Edit: tighten for clarity and pace. Cut throat-clearing intros, weasel words ('arguably', 'it could be argued'), and any sentence that doesn't add a fact or argument. Keep the user's voice intact — don't reach for corporate-blog-speak.\n- Publish: only after the SEO gate APPROVES. State the destination (file path or CMS URL) and the slug before invoking the side-effecting tool. Never auto-publish."
+      "extra_skills": [
+        "technical-writing"
+      ],
+      "extra_prompt": "You are execution lane A (worker_a) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_b's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: content studio.\n- Outline: given a topic + audience + length target, produce a numbered outline with H2 headings and 3-5 bullets per section. State the angle / thesis upfront.\n- Draft: turn the outline into prose in the user's configured voice (read past posts via the files MCP if available). Hit the length target within ±15%. Don't add sections that aren't in the outline.\n- Edit: tighten for clarity and pace. Cut throat-clearing intros, weasel words ('arguably', 'it could be argued'), and any sentence that doesn't add a fact or argument. Keep the user's voice intact — don't reach for corporate-blog-speak.\n- Publish: only after the SEO gate APPROVES. State the destination (file path or CMS URL) and the slug before invoking the side-effecting tool. Never auto-publish."
+    },
+    {
+      "name": "worker_b",
+      "base": "solo_generalist",
+      "description": "Execution lane B — full-capability worker, interchangeable with lane A. Content generalist — outline, draft, edit, and approval-gated publishing in one agent.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "technical-writing"
+      ],
+      "extra_prompt": "You are execution lane B (worker_b) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_a's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: content studio.\n- Outline: given a topic + audience + length target, produce a numbered outline with H2 headings and 3-5 bullets per section. State the angle / thesis upfront.\n- Draft: turn the outline into prose in the user's configured voice (read past posts via the files MCP if available). Hit the length target within ±15%. Don't add sections that aren't in the outline.\n- Edit: tighten for clarity and pace. Cut throat-clearing intros, weasel words ('arguably', 'it could be argued'), and any sentence that doesn't add a fact or argument. Keep the user's voice intact — don't reach for corporate-blog-speak.\n- Publish: only after the SEO gate APPROVES. State the destination (file path or CMS URL) and the slug before invoking the side-effecting tool. Never auto-publish."
     },
     {
       "name": "critical_thinker",
@@ -60,13 +90,53 @@
       "description": "Advisory reviewer — hard SEO gate on titles, meta, heading hierarchy, and internal links before publish.",
       "icon": "owl:owl_critic",
       "extra_prompt": "Focus: review title and meta for length + clarity (60 char title, 155 char description), heading hierarchy (one H1, descriptive H2s), internal-link opportunities to other posts in the user's archive. Reply APPROVE / REVISE / REJECT."
+    },
+    {
+      "name": "producer",
+      "base": "publisher",
+      "description": "Rule-based finisher — commits, packages, publishes, or sends only review-approved work; never invents work.",
+      "icon": "owl:owl_documentation",
+      "extra_prompt": "You are the producer — the rule-based finishing step. You act ONLY on work the review chain has approved, and only when the goal actually calls for delivery (commit, package, publish, send, schedule). Hard rules: never create or modify content yourself — you package and ship what the workers produced; never fabricate completion — quote the exact command output, message id, or artifact path that proves delivery; report failures verbatim, then stop; anything approval-gated for the user (outbound messages, payments, calendar mutations, publishes) is NEVER executed without the user's explicit approval in the thread. If nothing needs delivering, say so and end your turn."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "generalist" },
-      { "source": "orchestrator", "target": "critical_thinker" },
-      { "source": "generalist", "target": "critical_thinker" }
+      {
+        "source": "orchestrator",
+        "target": "scout"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_a"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_b"
+      },
+      {
+        "source": "orchestrator",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "orchestrator",
+        "target": "producer"
+      },
+      {
+        "source": "scout",
+        "target": "worker_a"
+      },
+      {
+        "source": "scout",
+        "target": "worker_b"
+      },
+      {
+        "source": "worker_a",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "worker_b",
+        "target": "critical_thinker"
+      }
     ]
   }
 }

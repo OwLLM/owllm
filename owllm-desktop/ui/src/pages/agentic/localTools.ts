@@ -673,7 +673,7 @@ export function stripMemoryDirectives(text: string): string {
 /// team memory for the current scope, then refresh the snapshot so later agents in
 /// the SAME run see them. Best-effort, never throws. Returns how many were written.
 /// Works on every model path — the directive is just text in the reply.
-export async function harvestMemoryWrites(reply: string, scopeOverride?: string): Promise<number> {
+export async function harvestMemoryWrites(reply: string, scopeOverride?: string, author = ""): Promise<number> {
   const dirs = parseMemoryDirectives(reply);
   if (!dirs.length) return 0;
   const scope = scopeOverride === undefined ? (_teamMemoryScope || "") : scopeOverride;
@@ -682,7 +682,7 @@ export async function harvestMemoryWrites(reply: string, scopeOverride?: string)
   for (const d of dirs) {
     try {
       await invoke<number>("team_memory_write", {
-        scope, content: d.content, key: d.key, tags: d.tags, author: "",
+        scope, content: d.content, key: d.key, tags: d.tags, author,
       });
       written++;
     } catch { /* best-effort per directive */ }

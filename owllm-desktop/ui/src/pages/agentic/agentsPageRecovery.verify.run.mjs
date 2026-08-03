@@ -15,7 +15,8 @@ check("Agents tabs rebuild from surviving per-page project bindings",
   source.includes('key?.match(/^owllm:agents:page:(.+):project$/)') &&
   source.includes('recovered.push({ id, title: "Recovered page" })'));
 check("Recovery never resurrects a tab whose binding was deleted",
-  source.includes("!localStorage.getItem(key!)"));
+  source.includes("const binding = localStorage.getItem(key!)") &&
+  source.includes("if (!binding || binding === AGENTS_PAGE_NEW_PROJECT) continue"));
 check("Recovered tabs are stable and do not duplicate catalog entries",
   source.includes("known.has(id)") && source.includes("known.add(id)"));
 check("Normal tab close removes the recovery binding",

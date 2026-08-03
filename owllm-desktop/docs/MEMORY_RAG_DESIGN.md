@@ -25,10 +25,12 @@ retrieving a small, relevant, well-labeled history pack when continuity helps.
 
 - **No semantic retrieval**: shared memory uses BM25-lite keyword ranking, so
   paraphrases and conceptual matches can be missed.
-- **No model-based memory curator yet**: retrieved items are mostly injected
-  directly. The deterministic context-pack formatter now labels memory as
-  current-task reference material, but no agent summarizes, labels stale items,
-  or chooses memory tiers adaptively.
+- **No model-based memory curator on the READ side yet**: retrieved items are
+  mostly injected directly. The deterministic context-pack formatter now labels
+  memory as current-task reference material, but no agent summarizes, labels
+  stale items, or chooses memory tiers adaptively. (The WRITE side is covered:
+  `memoryCurator.ts` runs one bounded post-run pass that saves at most 2 novel
+  durable facts on a per-project, user-picked cheap model — see FEATURES.md.)
 - **Limited summarization/hierarchy**: per-agent old turns are char-truncated,
   not recursively summarized.
 - **Partial proactive retrieval**: team memory is retrieved automatically per

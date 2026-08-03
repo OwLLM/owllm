@@ -48,16 +48,24 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 
 ## Agentic teams (`ui/src/pages/agentic/`)
 
-- **One generic team + profiles**: every bundled template is now a PROFILE over
-  the same 3-agent roster — orchestrator (read-only planner) + generalist
-  (`solo_generalist`, all tools, carries the profile's skill seeds + domain
-  rules) + critical_thinker (advisory, ON/OFF toggle on its card). What makes
-  "Chief of Staff" different from "Dev Squad" is data: `required_mcp` /
-  `mcp_pack` (connectors + approval policy), `extra_skills` seeds, and prompt
-  hints (`resources/agents/teams/*.json`; gate: `teamProfiles.verify.run.mjs`).
+- **One standard team + profiles**: every bundled template is a PROFILE over
+  the same 6-slot roster — orchestrator (read-only planner) + scout
+  (`researcher`, parallel read-only recon) + worker_a/worker_b
+  (`solo_generalist`, all tools, two interchangeable parallel execution lanes
+  carrying the profile's skill seeds + domain rules) + critical_thinker
+  (advisory, ON/OFF toggle on its card) + producer (`publisher`, rule-based
+  delivery: commit/publish/send only review-approved work; hosts the
+  `[PUBLISH]` protocol for owllm_team). What makes "Chief of Staff" different
+  from "Dev Squad" is data: `required_mcp` / `mcp_pack` (connectors + approval
+  policy), `extra_skills` seeds, and prompt hints
+  (`resources/agents/teams/*.json`; gate: `teamProfiles.verify.run.mjs`).
   Projects persist `templateId` in graph_json — rosters are identical across
-  profiles, so the id is the template identity. Custom multi-specialist teams
-  (Studio/Brainstorm) still dispatch through the same graph machinery.
+  profiles, so the id is the template identity. Solo mode collapses to
+  worker_a + Critic + Publisher. The one exemption is
+  `product_studio_classic` (category Custom): the full 10-agent hierarchical
+  studio (product_owner design sub-team → whitepaper.json → parallel FE/BE
+  lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
+  through the same graph machinery.
 - **Auto-skill selection**: before the first model token, the goal text is
   matched against installed skills' `triggers:`/keywords and the best 1–2 are
   injected automatically (Solo, team orchestrator, and bridge paths;
@@ -115,7 +123,12 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
   viewer, 📌 promote worklog→fact. Retrieved memory is framed as a
   current-task context pack so stale completed work cannot masquerade as the
-  active result. Design note: `docs/MEMORY_RAG_DESIGN.md`.
+  active result. A post-run **Memory Curator** (`memoryCurator.ts`) makes one
+  bounded pass after every solo/team/bridge run and saves at most 2 novel
+  durable facts (author `curator`); its model is a per-project setting in the
+  Team Memory modal (default Auto · Cheapest → free local model first, or Off)
+  so curation never silently inflates token spend. Design note:
+  `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
   prompt (and every Code-page coder turn). Editable from the Super User card

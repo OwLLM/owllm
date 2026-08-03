@@ -1,14 +1,22 @@
-// Regression verifier for the one-generic-team profile conversion.
+// Regression verifier for the standard-six team roster.
 //
-// Every bundled team in resources/agents/teams/ is now a PROFILE over the same
-// generic 3-agent roster (orchestrator + generalist[solo_generalist] +
-// critical_thinker[critic]). What makes "secretary" different from "dev_squad"
-// is DATA: required_mcp / mcp_pack (connectors + approval policy), extra_skills
-// seeds on the generalist, and domain prompt hints. This gate protects:
-//   1. the generic roster shape (so dispatch/solo/critic wiring always works),
-//   2. the safety-relevant profile data migrated from the old rosters
-//      (approval gates, publish honesty rules, source privacy),
-//   3. structural validity via the real normalizeTeam().
+// History: commit 89d864a0 (2026-08-01) collapsed all bundled rosters to one
+// generic 3-agent shape and this gate was written to ENFORCE that collapse —
+// which made the parallel dispatch engine permanently idle (one worker can
+// never fan out). On 2026-08-03 the rosters were re-standardized to SIX slots:
+//   orchestrator + scout[researcher] + worker_a/worker_b[solo_generalist]
+//   + critical_thinker[critic] + producer[publisher]
+// Same faces on every team; what differs per template is DATA (required_mcp /
+// mcp_pack, worker skill seeds, domain prompt hints). Solo mode collapses to
+// worker_a + critic + the rule-based producer. The full hierarchical Product
+// Studio survives as `product_studio_classic` (category Custom) and is the one
+// deliberate exemption from the standard shape. This gate protects:
+//   1. the standard six-slot roster + its parallel-lane edges,
+//   2. the safety-relevant profile data (approval gates, publish honesty
+//      rules, source privacy) — incl. the [PUBLISH] protocol living on the
+//      producer, the only base the host publish bridge accepts,
+//   3. structural validity via the real normalizeTeam(),
+//   4. the classic Product Studio's hierarchical shape.
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
@@ -33,7 +41,7 @@ function check(name, condition) {
 }
 
 const teamFiles = fs.readdirSync(TEAMS_ROOT).filter((f) => f.endsWith(".json"));
-check("bundled team profiles present", teamFiles.length >= 15);
+check("bundled team profiles present (19 standard + classic)", teamFiles.length >= 20);
 
 const teams = new Map();
 for (const f of teamFiles) {
@@ -45,32 +53,63 @@ for (const f of teamFiles) {
   if (data) teams.set(data.name ?? f.replace(/\.json$/, ""), data);
 }
 
-// --- generic roster shape ----------------------------------------------------
-const GENERIC = [
+// --- standard six-slot roster ------------------------------------------------
+const STANDARD = [
   { name: "orchestrator", base: "orchestrator" },
-  { name: "generalist", base: "solo_generalist" },
+  { name: "scout", base: "researcher" },
+  { name: "worker_a", base: "solo_generalist" },
+  { name: "worker_b", base: "solo_generalist" },
   { name: "critical_thinker", base: "critic" },
+  { name: "producer", base: "publisher" },
 ];
+const STANDARD_EDGES = [
+  ["orchestrator", "scout"],
+  ["orchestrator", "worker_a"],
+  ["orchestrator", "worker_b"],
+  ["orchestrator", "critical_thinker"],
+  ["orchestrator", "producer"],
+  ["scout", "worker_a"],
+  ["scout", "worker_b"],
+  ["worker_a", "critical_thinker"],
+  ["worker_b", "critical_thinker"],
+];
+// The hierarchical classic studio is the one deliberate exemption.
+const STANDARD_EXEMPT = new Set(["product_studio_classic"]);
 const skillIds = new Set(
   fs.readdirSync(SKILLS_ROOT).filter((d) => fs.existsSync(path.join(SKILLS_ROOT, d, "SKILL.md"))),
 );
+const workerPrompts = new Set();
 for (const [name, t] of teams) {
+  if (STANDARD_EXEMPT.has(name)) continue;
   const agents = Array.isArray(t.agents) ? t.agents : [];
   check(
-    `${name}: generic 3-agent roster (orchestrator + generalist + critical_thinker)`,
-    agents.length === 3 && GENERIC.every((g, i) => agents[i]?.name === g.name && agents[i]?.base === g.base),
+    `${name}: standard six-slot roster (orchestrator + scout + worker_a/b + critical_thinker + producer)`,
+    agents.length === 6 && STANDARD.every((g, i) => agents[i]?.name === g.name && agents[i]?.base === g.base),
   );
   const edges = t.graph?.edges ?? [];
   const hasEdge = (s, d) => edges.some((e) => e.source === s && e.target === d);
   check(
-    `${name}: canonical profile edges`,
-    hasEdge("orchestrator", "generalist") && hasEdge("orchestrator", "critical_thinker"),
+    `${name}: canonical parallel-lane edges`,
+    STANDARD_EDGES.every(([s, d]) => hasEdge(s, d)),
   );
-  const generalist = agents.find((a) => a?.name === "generalist");
-  const seeds = generalist?.extra_skills ?? [];
+  const wa = agents.find((a) => a?.name === "worker_a");
+  const wb = agents.find((a) => a?.name === "worker_b");
+  const seeds = wa?.extra_skills ?? [];
   check(
-    `${name}: generalist skill seeds exist as bundled packs`,
+    `${name}: worker skill seeds exist as bundled packs`,
     seeds.every((s) => skillIds.has(s)),
+  );
+  check(
+    `${name}: worker lanes are interchangeable (same skills, both carry the profile prompt)`,
+    JSON.stringify(wa?.extra_skills ?? []) === JSON.stringify(wb?.extra_skills ?? [])
+      && (wa?.extra_prompt ?? "").length > 0 && (wb?.extra_prompt ?? "").length > 0,
+  );
+  workerPrompts.add(wa?.extra_prompt ?? "");
+  const producer = agents.find((a) => a?.name === "producer");
+  check(
+    `${name}: producer is rule-based (approval-gated, never fabricates completion)`,
+    (producer?.extra_prompt ?? "").includes("never fabricate completion")
+      && /approval/i.test(producer?.extra_prompt ?? ""),
   );
   // Approval policy is profile DATA — a pack that declares approval_required
   // risk must actually list the gated actions.
@@ -81,22 +120,37 @@ for (const [name, t] of teams) {
     );
   }
 }
+// Same six faces everywhere would be the old collapse all over again if the
+// profiles stopped differing — every template must keep a distinct worker
+// profile prompt.
+check(
+  "templates genuinely differ (every worker profile prompt is distinct)",
+  workerPrompts.size === teams.size - [...teams.keys()].filter((n) => STANDARD_EXEMPT.has(n)).length,
+);
 
-// --- roles behind the generic roster ship with the app -----------------------
-for (const base of ["orchestrator", "solo_generalist", "critic"]) {
+// --- roles behind the standard roster ship with the app ----------------------
+for (const base of ["orchestrator", "researcher", "solo_generalist", "critic", "publisher"]) {
   check(`role '${base}' ships in resources/agents/roles`, fs.existsSync(path.join(ROLES_ROOT, `${base}.yaml`)));
 }
 
-// --- migrated safety invariants (were roster prompts; now profile prompts) ---
+// --- migrated safety invariants ----------------------------------------------
 const sec = teams.get("secretary");
 const secText = JSON.stringify(sec ?? {});
 check("secretary: outbound-message approval gate survives", /approve|approval/i.test(secText) && /never auto-send/i.test(secText));
 check("secretary: keeps email+calendar connectors", (sec?.required_mcp ?? []).includes("mcp.email") && (sec?.required_mcp ?? []).includes("mcp.calendar"));
 
 const owllm = teams.get("owllm_team");
-const owllmGen = owllm?.agents?.find((a) => a.name === "generalist")?.extra_prompt ?? "";
+const owllmProd = owllm?.agents?.find((a) => a.name === "producer")?.extra_prompt ?? "";
+const owllmWorker = owllm?.agents?.find((a) => a.name === "worker_a")?.extra_prompt ?? "";
 const owllmAll = JSON.stringify(owllm ?? {});
-check("owllm_team: [PUBLISH] host-sentinel protocol survives", owllmGen.includes("[PUBLISH dry notes=") && owllmGen.includes("PUBLISH_OK") && owllmGen.includes("PUBLISH_DRYRUN_OK"));
+check(
+  "owllm_team: [PUBLISH] host-sentinel protocol lives on the producer (the only base the host bridge accepts)",
+  owllmProd.includes("[PUBLISH dry notes=") && owllmProd.includes("PUBLISH_OK") && owllmProd.includes("PUBLISH_DRYRUN_OK"),
+);
+check(
+  "owllm_team: worker lanes do NOT carry the publish protocol (their base can't trigger the bridge)",
+  !owllmWorker.includes("[PUBLISH dry notes="),
+);
 check("owllm_team: SHIPPED ≠ COMMITTED honesty rule survives", /SHIPPED\s*[≠!]=?\s*COMMITTED|Committing \+ tagging is NOT shipping/i.test(owllmAll));
 check("owllm_team: never-push-source-public rule survives", /NEVER push source/i.test(owllmAll));
 check("owllm_team: verify-gate honesty survives", owllmAll.includes(".owllm/verify.json"));
@@ -105,8 +159,26 @@ const conc = teams.get("concierge");
 const concText = JSON.stringify(conc ?? {});
 check("concierge: payment stop + no-stored-payment rules survive", /Never store payment details/i.test(concText) && /confirm/i.test(concText));
 
-// --- template identity survives identical generic rosters --------------------
-// All profile teams share one roster, so roster-shape matching can no longer
+// --- classic Product Studio: the hierarchical exemption ----------------------
+const classic = teams.get("product_studio_classic");
+check("product_studio_classic ships (category Custom)", classic?.category === "Custom");
+const classicAgents = classic?.agents ?? [];
+check("classic: full 10-agent hierarchical roster", classicAgents.length === 10);
+const po = classicAgents.find((a) => a.name === "product_owner");
+check("classic: product_owner is the design sub-team leader", po?.role === "leader" && po?.base === "operator");
+const cEdges = classic?.graph?.edges ?? [];
+const cHas = (s, d) => cEdges.some((e) => e.source === s && e.target === d);
+check(
+  "classic: sub-orchestrator wiring intact (product_owner → design members, orchestrator → build lanes)",
+  cHas("orchestrator", "product_owner")
+    && ["ux_designer", "backend_arch", "whitepaper_writer", "design_critic"].every((m) => cHas("product_owner", m))
+    && ["frontend_coder", "backend_coder", "code_critic", "publisher"].every((m) => cHas("orchestrator", m)),
+);
+const classicText = JSON.stringify(classic ?? {});
+check("classic: whitepaper.json contract + FE/BE lane ownership survive", classicText.includes("whitepaper.json") && /LAYER OWNERSHIP \(HARD RULE\)/.test(classicText));
+
+// --- template identity survives identical standard rosters -------------------
+// All standard teams share one roster, so roster-shape matching can no longer
 // tell templates apart (every new project would resolve to the alphabetically
 // first template). The template id must be persisted at creation and preferred
 // during resolution — and re-persisted whenever the roster is rewritten from a
@@ -140,8 +212,14 @@ function load(rel) {
 const { normalizeTeam, soloGeneralistForTeam } = await load("teamConfig.ts");
 const roles = new Map([
   ["orchestrator", { canDispatch: true, toolAllowlist: ["read_file", "list_dir", "grep", "glob"] }],
+  ["researcher", { toolAllowlist: ["read_file", "list_dir", "grep", "glob", "browser"] }],
   ["solo_generalist", { toolAllowlist: ["all"] }],
   ["critic", { toolAllowlist: ["read_file", "shell"] }],
+  ["publisher", { toolAllowlist: ["read_file", "shell", "write_file_with_diff"] }],
+  // classic-studio bases
+  ["operator", { toolAllowlist: ["read_file", "list_dir", "grep"] }],
+  ["coder", { toolAllowlist: ["read_file", "write_file_with_diff", "shell"] }],
+  ["documentation", { toolAllowlist: ["read_file", "write_file_with_diff", "shell"] }],
 ]);
 for (const [name, t] of teams) {
   const team = {
@@ -153,10 +231,14 @@ for (const [name, t] of teams) {
   };
   const report = normalizeTeam(team, roles);
   check(`${name}: normalizeTeam clean (no auto-fixes, no warnings)`, report.changes.length === 0 && report.warnings.length === 0);
-  // Solo mode must adopt the team's OWN generalist (so profile skill seeds and
-  // prompt hints apply in Solo too), not synthesize a bare one.
+  // Solo mode must adopt the team's OWN first worker lane (so profile skill
+  // seeds and prompt hints apply in Solo too), not synthesize a bare one.
   const solo = soloGeneralistForTeam(team);
-  check(`${name}: Solo mode adopts the profile generalist`, solo.name === "generalist" && solo.base === "solo_generalist");
+  if (STANDARD_EXEMPT.has(name)) {
+    check(`${name}: Solo mode still resolves a solo_generalist`, solo.base === "solo_generalist");
+  } else {
+    check(`${name}: Solo mode adopts worker lane A`, solo.name === "worker_a" && solo.base === "solo_generalist");
+  }
 }
 
 console.log(`\nteamProfiles.verify: ${passed} passed, ${failed} failed`);

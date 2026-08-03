@@ -91,7 +91,10 @@ const ACCENT_BG = /background(Color)?\s*:[^;,}\n]*var\(--accent\)/;
 // elsewhere (labelBg / modeColor / glow …); the paired text colour is fixed
 // by design and the lint cannot see through the identifier.
 const VAR_BG = /background(Color)?\s*:\s*[a-zA-Z_$][\w$.]*\s*[,}\n]/;
-const BRAND_DATA = /glyph\s*:/;
+// Brand tables carry a vendor's own hue (xAI's grey among them) next to the
+// glyph or logo component that renders it — never body text on a themed
+// surface, so a low-saturation brand hex there is not the bug class.
+const BRAND_DATA = /glyph\s*:|Logo\s*:/;
 
 function rgbOf(hex) {
   let h = hex.slice(1);

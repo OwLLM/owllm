@@ -25,6 +25,7 @@ import {
   type Attachment,
 } from "../pages/agentic/dispatch";
 import { buildEntries, type AccountsStatusLite, type ModelPickerEntry } from "../pages/agentic/ModelPicker";
+import { runMemoryCurator } from "../pages/agentic/memoryCurator";
 
 /// How a bridge sends a reply on its platform. The ONLY transport coupling the
 /// dispatch core needs — everything inbound (receiving/download) lives in each
@@ -704,6 +705,14 @@ export function useBridgeDispatch() {
         }
       );
       finalForBridge = finalForBridge || finalReply;
+      // Post-run Memory Curator — fire-and-forget (must never delay the bridge
+      // reply); model + on/off are per-project (Team Memory modal).
+      if (projectId) {
+        void runMemoryCurator({
+          scope: projectId, goal: text, finalAnswer: finalReply,
+          port: serverRef.current.port ?? 0,
+        });
+      }
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `(dispatch error: ${String(e?.message ?? e)})` };
       try {

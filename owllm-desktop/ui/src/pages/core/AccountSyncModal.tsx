@@ -26,6 +26,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "../../utils/openWebUrl";
 import { projectsRootGet, projectsRootSet } from "../agentic/projectsRoot";
 import {
+  OpenAILogo,
+  AnthropicLogo,
+  GeminiLogo,
+  MoonshotLogo,
+  XaiLogo,
+} from "../advanced/brandLogos";
+import {
   githubStatus,
   githubConnect,
   githubDisconnect,
@@ -44,11 +51,11 @@ const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 const GITHUB_SIGNUP_URL = "https://github.com/signup";
 
 const SUBSCRIPTION_CHOICES = [
-  { key: "openai", icon: "◎", name: "ChatGPT Plus / Pro", detail: "Use your OpenAI Codex subscription" },
-  { key: "anthropic", icon: "A", name: "Claude Pro / Max", detail: "Use your Claude Code subscription" },
-  { key: "gemini", icon: "✦", name: "Google AI Pro / Ultra", detail: "Use your Gemini subscription" },
-  { key: "moonshot", icon: "K", name: "Kimi", detail: "Use your Kimi Code subscription" },
-  { key: "xai", icon: "𝕏", name: "SuperGrok / X Premium+", detail: "Use your Grok subscription" },
+  { key: "openai", Logo: OpenAILogo, color: "#10a37f", name: "ChatGPT Plus / Pro", detail: "Use your OpenAI Codex subscription" },
+  { key: "anthropic", Logo: AnthropicLogo, color: "#cc785c", name: "Claude Pro / Max", detail: "Use your Claude Code subscription" },
+  { key: "gemini", Logo: GeminiLogo, color: "#4285f4", name: "Google AI Pro / Ultra", detail: "Use your Gemini subscription" },
+  { key: "moonshot", Logo: MoonshotLogo, color: "#d36bff", name: "Kimi", detail: "Use your Kimi Code subscription" },
+  { key: "xai", Logo: XaiLogo, color: "#9aa0a6", name: "SuperGrok / X Premium+", detail: "Use your Grok subscription" },
 ] as const;
 
 function openExternal(url: string) {
@@ -333,7 +340,7 @@ export default function AccountSyncModal() {
     >
       <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
       <div style={{
-        width: "min(1180px, 96%)", maxHeight: "92%",
+        width: "min(1440px, 98%)", maxHeight: "92%",
         background: "var(--bg-panel)",
         border: "2px solid rgba(var(--accent-rgb),0.78)",
         borderRadius: 16, boxShadow: "0 28px 70px rgba(0,0,0,0.6)",
@@ -369,10 +376,10 @@ export default function AccountSyncModal() {
           >✕</button>
         </div>
 
-        {/* Three step columns */}
+        {/* Four step columns */}
         <div data-ui="OnboardingColumns" style={{
           padding: "18px 20px 12px", overflow: "auto", flex: 1,
-          display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))",
+          display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
           gap: 14, alignItems: "stretch",
         }}>
 
@@ -576,7 +583,9 @@ export default function AccountSyncModal() {
             <div data-ui="OnboardingInlineSubscriptionChoices" style={{ display: "flex", flexDirection: "column", gap: 7 }}>
               {SUBSCRIPTION_CHOICES.map((choice) => (
                 <button key={choice.key} onClick={() => openAccountSetup(choice.key)} style={choiceCard}>
-                  <span aria-hidden="true" style={choiceIcon}>{choice.icon}</span>
+                  <span aria-hidden="true" style={{ ...choiceIcon, background: `${choice.color}1a`, borderColor: `${choice.color}4d`, color: choice.color }}>
+                    <choice.Logo size={20} color={choice.color} />
+                  </span>
                   <span style={{ minWidth: 0 }}>
                     <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 12.5, fontWeight: 850 }}>{choice.name}</span>
                     <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.35, marginTop: 1 }}>{choice.detail}</span>

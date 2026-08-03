@@ -120,6 +120,7 @@ import { requiresManagedLocalServer } from "./peerCatalogue";
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
+import { runMemoryCurator } from "./memoryCurator";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
@@ -8351,6 +8352,12 @@ const agentSid = (pid: string | null | undefined): string => `agents:${pid || "n
 // null and couldn't otherwise stop it.
 const agentRunAborts = new Map<string, AbortController>();
 
+// Written into a tab's project binding when the user opened the tab through
+// "＋ New page → New project": the tab must land on the project hub instead of
+// silently adopting projects[0] (which is almost always another tab's project).
+// The binding is overwritten with a real project id as soon as one is picked.
+const AGENTS_PAGE_NEW_PROJECT = "__new-project__";
+
 // One agentic workspace. Multiple instances can be mounted at once (one per
 // tab in the AgentsPages shell below) — each remembers its own selected
 // project per pageId, so two tabs can run teams on the same or different
@@ -9406,10 +9413,13 @@ export function AgentsPage({
         rawModels.map(x => `${x.model_id}(${x.provider}${x.port == null ? ":no-port" : ""})`).join(", "));
       setProjects(rawProjects);
       setModels(rawModels);
-      if (rawProjects.length > 0) {
+      let stored: string | null = null;
+      try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
+      // A tab opened as "New project" stays unbound so the project hub renders;
+      // auto-adopting projects[0] is what made every new tab look like a clone
+      // of the previous one.
+      if (rawProjects.length > 0 && stored !== AGENTS_PAGE_NEW_PROJECT) {
         // Restore this tab's own project when it still exists; else first.
-        let stored: string | null = null;
-        try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
         const pick = rawProjects.find(p => p.id === stored) ?? rawProjects[0];
         setSelectedProjectId(pick.id);
         setProjectLocationDraft(pick.location || "", pick.id);
@@ -11839,6 +11849,12 @@ export function AgentsPage({
         if (soloMemKey) {
           await appendAgentMemory(soloMemKey, coder.profileRef?.id ?? coder.name, text, sFinal);
           await logScopedTeamWork(soloMemKey, coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
+          // Post-run Memory Curator — fire-and-forget so the answer ships now;
+          // model + on/off are per-project (Team Memory modal), default cheap.
+          void runMemoryCurator({
+            scope: soloMemKey, goal: text, finalAnswer: sFinal, port,
+            onNote: (t) => appendLog("system", { role: "system", color: "#9ad9ff", text: t }),
+          });
         }
         speakAgentReply(coder.name, sText);
         setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now(), seq: nextSeq() }]);
@@ -13212,6 +13228,13 @@ export function AgentsPage({
         }
       } catch { /* tracing must never break a run */ }
 
+      // Post-run Memory Curator — fire-and-forget so the run report is not
+      // delayed; model + on/off are per-project (Team Memory modal).
+      void runMemoryCurator({
+        scope: runtimeMemoryKey(orch, selectedProjectId), goal: text, finalAnswer: finalReply, port,
+        onNote: (t) => appendLog("system", { role: "system", color: "#9ad9ff", text: t }),
+      });
+
       setPhase("done");
       notebookRunCompletedCleanly = true;
     } catch (e: any) {
@@ -14273,7 +14296,10 @@ function loadAgentsPages(): AgentsPageMeta[] {
       const key = localStorage.key(i);
       const match = key?.match(/^owllm:agents:page:(.+):project$/);
       const id = match?.[1];
-      if (!id || known.has(id) || !localStorage.getItem(key!)) continue;
+      if (!id || known.has(id)) continue;
+      const binding = localStorage.getItem(key!);
+      // An unbound "New project" tab is not a conversation worth recovering.
+      if (!binding || binding === AGENTS_PAGE_NEW_PROJECT) continue;
       known.add(id);
       recovered.push({ id, title: "Recovered page" });
     }
@@ -14300,6 +14326,16 @@ export default function AgentsPages() {
   }, [active]);
   // Busy dot per tab — reported up by each instance (dispatch running).
   const [busyById, setBusyById] = useState<Map<string, boolean>>(new Map());
+  const [newPageMenuOpen, setNewPageMenuOpen] = useState(false);
+  // The active tab's project binding — what "another page on this project"
+  // would clone. Null while the tab is still on the hub.
+  const activeProjectId = (() => {
+    if (!active) return null;
+    try {
+      const bound = localStorage.getItem(`owllm:agents:page:${active.id}:project`);
+      return bound && bound !== AGENTS_PAGE_NEW_PROJECT ? bound : null;
+    } catch { return null; }
+  })();
   useEffect(() => {
     try { localStorage.setItem(AGENTS_PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
   }, [pages]);
@@ -14312,10 +14348,18 @@ export default function AgentsPages() {
   const setBusy = (id: string, b: boolean) =>
     setBusyById((m) => (m.get(id) === b ? m : new Map(m).set(id, b)));
 
-  const newPage = () => {
+  // "＋ New page" is two different intents, so it asks instead of guessing:
+  // another page on THIS project, or a blank page that starts on the project
+  // hub. `boundProject` pre-seeds the new tab's binding, which AgentsPage
+  // restores on mount.
+  const newPage = (boundProject: string | null) => {
     const id = newAgentsPageId();
+    try {
+      if (boundProject) localStorage.setItem(`owllm:agents:page:${id}:project`, boundProject);
+    } catch { /* the tab still opens; it just starts on the hub */ }
     setPages((ps) => [...ps, { id, title: "Agents" }]);
     setActiveId(id);
+    setNewPageMenuOpen(false);
   };
 
   const closePage = (id: string) => {
@@ -14365,11 +14409,57 @@ export default function AgentsPages() {
             </div>
           );
         })}
-        <button
-          onClick={newPage}
-          title="Open another Agents page — run a team on the same or a different project in parallel"
-          style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
-        >＋ New page</button>
+        <div data-ui="AgentsNewPageMenu" style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            onClick={() => setNewPageMenuOpen((v) => !v)}
+            title="Open another Agents page — on this project, or start a new one"
+            style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
+          >＋ New page ▾</button>
+          {newPageMenuOpen && (
+            <>
+              <div
+                onClick={() => setNewPageMenuOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 40 }}
+              />
+              <div style={{
+                position: "absolute", top: 30, left: 4, zIndex: 41, minWidth: 250,
+                display: "flex", flexDirection: "column", gap: 2, padding: 5,
+                borderRadius: 9, border: "1px solid var(--border-strong)",
+                background: "var(--bg-card)", boxShadow: "0 14px 40px rgba(0,0,0,.35)",
+              }}>
+                <button
+                  onClick={() => newPage(activeProjectId)}
+                  disabled={!activeProjectId}
+                  title={activeProjectId
+                    ? "Run a second team on this same project, in parallel"
+                    : "This page isn't bound to a project yet"}
+                  style={{
+                    textAlign: "left", padding: "7px 9px", borderRadius: 6, border: "1px solid transparent",
+                    background: "transparent", color: activeProjectId ? "var(--fg-strong)" : "var(--fg-subtle)",
+                    fontSize: 12, fontWeight: 700, cursor: activeProjectId ? "pointer" : "default",
+                  }}
+                >
+                  ＋ New page of “{active?.title || "Agents"}”
+                  <small style={{ display: "block", color: "var(--fg-muted)", fontWeight: 500, marginTop: 2 }}>
+                    Same project, a second team in parallel
+                  </small>
+                </button>
+                <button
+                  onClick={() => newPage(AGENTS_PAGE_NEW_PROJECT)}
+                  style={{
+                    textAlign: "left", padding: "7px 9px", borderRadius: 6, border: "1px solid transparent",
+                    background: "transparent", color: "var(--accent-ink)", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  }}
+                >
+                  ⌁ New project
+                  <small style={{ display: "block", color: "var(--fg-muted)", fontWeight: 500, marginTop: 2 }}>
+                    Opens the project hub to create or pick a project
+                  </small>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
       {/* Every visited page stays mounted; only the active one is visible. */}
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>

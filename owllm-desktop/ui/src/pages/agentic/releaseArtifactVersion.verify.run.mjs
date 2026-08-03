@@ -102,6 +102,7 @@ if (!resolveTargetDir) {
   check("resolve_target_dir returns the caller's CARGO_TARGET_DIR verbatim", false);
 } else if (bash) {
   const probe = `
+CARGO_TARGET_DIR=/tmp/owllm-probe-target
 to_posix_path() { printf '%s' "$1"; }
 ${resolveTargetDir}
 }
@@ -109,9 +110,14 @@ resolve_target_dir
 `;
   let got = "";
   try {
-    got = execFileSync(bash, ["-c", probe], {
+    // Via stdin with the variable set inside the script: on Windows, PATH
+    // `bash` can be the WSL interop shim, which space-joins argv (a multi-line
+    // -c script arrives flattened onto one line) and forwards no Windows env
+    // vars without WSLENV. stdin + in-script assignment survive every
+    // candidate (WSL, Git bash, native).
+    got = execFileSync(bash, ["-s"], {
       encoding: "utf8",
-      env: { ...process.env, CARGO_TARGET_DIR: "/tmp/owllm-probe-target" },
+      input: probe,
     }).trim();
   } catch (err) {
     console.error(`  probe failed: ${err.stderr || err.message}`);

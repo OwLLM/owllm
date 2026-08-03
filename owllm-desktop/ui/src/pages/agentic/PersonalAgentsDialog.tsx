@@ -735,6 +735,30 @@ export default function PersonalAgentsDialog({
                   </button>
                 ))}
                 {!visibleSkills.length ? <span style={{ color: "var(--fg-subtle)", fontSize: 10.5 }}>No personal skills visible in this project.</span> : null}
+
+                {/* The installed SKILL.md library is a DIFFERENT store from these
+                    hand-authored personal skills. Without it this rail reads as
+                    "no skills" to a user who has dozens installed. Read-only
+                    here: packs are installed in Studio → Skills and equipped
+                    per profile on the Profiles tab. */}
+                <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                <span style={label}>Installed skill library ({skills.length})</span>
+                <div style={{ color: "var(--fg-subtle)", fontSize: 10 }}>
+                  {skills.length
+                    ? "Downloaded SKILL.md packs. Equip them per profile on the Profiles tab; manage installs in Studio → Skills."
+                    : "No skill packs installed yet. Install them from Studio → Skills."}
+                </div>
+                <div style={{ display: "grid", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+                  {skills.map(pack => (
+                    <div key={pack.id} title={pack.description || pack.id} style={{
+                      padding: "5px 7px", borderRadius: 6, border: "1px solid var(--border)",
+                      background: "var(--bg-input)", fontSize: 11,
+                    }}>
+                      <b style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pack.name}</b>
+                      <small style={{ color: "var(--fg-subtle)" }}>~{pack.ctx} ctx</small>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               {skillDraft ? (

@@ -101,10 +101,13 @@ try {
     "the portable Project Card carries the non-secret environment recipe");
   check(browser.includes("pub fn browser_arrange")
       && browser.includes("arrange_split_screen")
-      && browser.includes("SPLIT_SCREEN_ACTIVE")
-      && browser.includes("main-left/browser-right")
+      && browser.includes("monitor.work_area()")
+      && browser.includes("set_client_bounds(&main")
+      && browser.includes("set_client_bounds(&browser")
+      && !browser.includes("SPLIT_SCREEN_ACTIVE")
+      && !browser.includes("queue_split_reflow")
       && lib.includes("browser::browser_arrange"),
-    "the cross-platform browser layout command coordinates the main-left/browser-right split");
+    "the cross-platform browser layout initially splits the usable screen and leaves later moves/resizes alone");
 
   console.log(`OK project environments: ${passed}/${passed} checks passed`);
 } finally {

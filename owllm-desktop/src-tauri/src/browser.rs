@@ -66,6 +66,9 @@ const CHROME_LABEL: &str = "owllm-browser-chrome";
 /// 38px nav toolbar with back/reload/URL (user spec 2026-07-29) — keep in
 /// step with browser-chrome.html's #tabsrow.
 const CHROME_H: f64 = 96.0;
+/// Same solid accent edge thickness as AppShell's `WindowAccentEdge`.
+/// The chrome webview paints it; page webviews leave this narrow edge exposed.
+const BROWSER_FRAME_T: f64 = 3.0;
 
 /// X where parked (inactive) tab webviews live. Tauri has no cross-platform
 /// hide() for child webviews, so inactive tabs are simply moved far offscreen
@@ -98,10 +101,6 @@ static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
 /// `BadDrawable` when a top-level WebView window is destroyed. A stopped
 /// browser therefore remains allocated but hidden and blank until it is reused.
 static BROWSER_SUSPENDED: AtomicBool = AtomicBool::new(false);
-/// True after the user asks for the browser/app side-by-side layout. Native
-/// move/resize events use this to keep both windows coordinated until the
-/// browser is stopped.
-static SPLIT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static RETIRED_LINUX_TABS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
@@ -1534,9 +1533,6 @@ enum BrowserUiEvent {
         width: u32,
         height: u32,
     },
-    /// Re-apply the coordinated main-left/browser-right layout after either
-    /// native window changes size.
-    ReflowSplit,
     /// A tab's document title changed (multi-tab shape): store it, refresh the
     /// chrome bar if that tab is active, re-push the strip — all off-callback.
     TabTitle {
@@ -1582,7 +1578,6 @@ struct BrowserUiBatch {
     url: Option<String>,
     title: Option<String>,
     layout: Option<(u32, u32)>,
-    reflow_split: bool,
     tab_titles: HashMap<u64, String>,
     push_tabs: bool,
     creds: Vec<String>,
@@ -1605,7 +1600,6 @@ impl BrowserUiBatch {
                 }
             }
             BrowserUiEvent::Layout { width, height } => self.layout = Some((width, height)),
-            BrowserUiEvent::ReflowSplit => self.reflow_split = true,
             BrowserUiEvent::TabTitle { id, title } => {
                 self.tab_titles.insert(id, title);
             }
@@ -1652,15 +1646,6 @@ fn queue_browser_ui(app: &tauri::AppHandle, event: BrowserUiEvent) {
     }
 }
 
-/// Ask the browser UI worker to re-apply the split layout. Native callbacks
-/// remain enqueue-only; the worker performs the cross-window operations after
-/// the callback has returned to the event loop.
-pub(crate) fn queue_split_reflow(app: &tauri::AppHandle) {
-    if SPLIT_SCREEN_ACTIVE.load(Ordering::SeqCst) {
-        queue_browser_ui(app, BrowserUiEvent::ReflowSplit);
-    }
-}
-
 fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) {
     while let Ok(first) = rx.recv() {
         let mut batch = BrowserUiBatch::default();
@@ -1699,11 +1684,6 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
         }
         if let Some((width, height)) = batch.layout {
             layout_children(&app, tauri::PhysicalSize::new(width, height));
-        }
-        if batch.reflow_split {
-            if let Err(e) = arrange_split_screen(&app) {
-                eprintln!("[browser] could not reflow split layout: {e}");
-            }
         }
         for (id, title) in batch.tab_titles {
             on_tab_title(&app, id, &title);
@@ -1748,7 +1728,6 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
             }
         }
         "close" => {
-            SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
             #[cfg(target_os = "linux")]
             {
                 persist_session(app);
@@ -1943,12 +1922,15 @@ fn attach_tab(
         .inner_size()
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
-    let x = if active { 0.0 } else { PARK_X };
+    let x = if active { BROWSER_FRAME_T } else { PARK_X };
     let _webview = win
         .add_child(
             content,
             LogicalPosition::new(x, CHROME_H),
-            LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+            LogicalSize::new(
+                (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
+                (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+            ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
     #[cfg(windows)]
@@ -2169,7 +2151,6 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
                 *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 if let Some(win) = target_window {
                     let _ = win.destroy();
@@ -2417,7 +2398,7 @@ fn build_framed(
     win.add_child(
         chrome,
         LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(win_w, CHROME_H),
+        LogicalSize::new(win_w, win_h),
     )
     .map_err(|e| format!("chrome bar webview: {e}"))?;
 
@@ -2450,10 +2431,8 @@ fn build_framed(
                         height: size.height,
                     },
                 );
-                queue_split_reflow(&handle);
             }
             WindowEvent::Destroyed => {
-                SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
                 // Pure state drop — no window/webview work.
                 *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
             }
@@ -2475,9 +2454,12 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     let ls = size.to_logical::<f64>(scale);
     if let Some(chrome) = app.get_webview(CHROME_LABEL) {
         let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = chrome.set_size(LogicalSize::new(ls.width, CHROME_H));
+        let _ = chrome.set_size(LogicalSize::new(ls.width, ls.height));
     }
-    let page = LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0));
+    let page = LogicalSize::new(
+        (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
+        (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+    );
     let (order, active) = {
         let guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         match guard.as_ref() {
@@ -2487,14 +2469,18 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     };
     for id in order {
         if let Some(content) = app.get_webview(&tab_label(id)) {
-            let x = if id == active { 0.0 } else { PARK_X };
+            let x = if id == active {
+                BROWSER_FRAME_T
+            } else {
+                PARK_X
+            };
             let _ = content.set_position(LogicalPosition::new(x, CHROME_H));
             let _ = content.set_size(page);
         }
     }
     // Legacy single-webview shape (no tab state).
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
-        let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
+        let _ = content.set_position(LogicalPosition::new(BROWSER_FRAME_T, CHROME_H));
         let _ = content.set_size(page);
     }
 }
@@ -2656,11 +2642,7 @@ fn attach_legacy_tab(
                     #[cfg(not(target_os = "linux"))]
                     let _ = api;
                 }
-                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-                    queue_split_reflow(&handle);
-                }
                 WindowEvent::Destroyed => {
-                    SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
                     queue_browser_ui(&handle, BrowserUiEvent::LegacyTabDestroyed { id });
                 }
                 _ => {}
@@ -3880,7 +3862,6 @@ fn eval_until_reply(
 /// Close the agent-browser window. Safe when nothing is open.
 #[tauri::command(async)]
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
-    SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
     match (get_window(&app), browser_is_suspended()) {
         (_, true) => Ok("browser was not running".to_string()),
         (Some(_), false) => {
@@ -3950,6 +3931,69 @@ fn split_screen_layout(origin: LogicalPosition<f64>, size: LogicalSize<f64>) -> 
     }
 }
 
+/// Set the visible client rectangle, not the invisible native resize frame.
+///
+/// `Window::set_position` targets the outer rectangle while `set_size` targets
+/// the client rectangle. On Windows an undecorated, resizable window still has
+/// an invisible 8px resize border: placing its outer edge at x=0 therefore put
+/// the visible app at x=8 and cropped the browser by 8px on the right. Measure
+/// the live client offset after sizing and compensate it on every platform.
+fn set_client_bounds(
+    window: &Window,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    // Linux's safe browser fallback is an intentionally decorated top-level
+    // WebView. Keep that OS title bar inside the work area; the main window is
+    // undecorated and follows the client-alignment path below.
+    #[cfg(target_os = "linux")]
+    if window.label() != "main" {
+        window
+            .set_size(size)
+            .map_err(|e| format!("resize {} window: {e}", window.label()))?;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let inner = window
+            .inner_size()
+            .map_err(|e| format!("measure {} client: {e}", window.label()))?
+            .to_logical::<f64>(scale);
+        let outer = window
+            .outer_size()
+            .map_err(|e| format!("measure {} frame: {e}", window.label()))?
+            .to_logical::<f64>(scale);
+        window
+            .set_size(LogicalSize::new(
+                (size.width - (outer.width - inner.width)).max(50.0),
+                (size.height - (outer.height - inner.height)).max(50.0),
+            ))
+            .map_err(|e| format!("fit {} window frame: {e}", window.label()))?;
+        return window
+            .set_position(position)
+            .map_err(|e| format!("position {} window: {e}", window.label()));
+    }
+
+    window
+        .set_size(size)
+        .map_err(|e| format!("resize {} window: {e}", window.label()))?;
+    window
+        .set_position(position)
+        .map_err(|e| format!("position {} window: {e}", window.label()))?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let inner = window
+        .inner_position()
+        .map_err(|e| format!("measure {} client position: {e}", window.label()))?
+        .to_logical::<f64>(scale);
+    let outer = window
+        .outer_position()
+        .map_err(|e| format!("measure {} outer position: {e}", window.label()))?
+        .to_logical::<f64>(scale);
+    window
+        .set_position(LogicalPosition::new(
+            position.x - (inner.x - outer.x),
+            position.y - (inner.y - outer.y),
+        ))
+        .map_err(|e| format!("align {} client bounds: {e}", window.label()))
+}
+
 fn arrange_split_screen(app: &tauri::AppHandle) -> Result<(), String> {
     let main = app
         .get_window("main")
@@ -3961,30 +4005,23 @@ fn arrange_split_screen(app: &tauri::AppHandle) -> Result<(), String> {
         .or_else(|| app.primary_monitor().ok().flatten())
         .ok_or_else(|| "could not determine a monitor for the split layout".to_string())?;
     let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
     let layout = split_screen_layout(
-        monitor.position().to_logical::<f64>(scale),
-        monitor.size().to_logical::<f64>(scale),
+        work_area.position.to_logical::<f64>(scale),
+        work_area.size.to_logical::<f64>(scale),
     );
 
     let _ = main.unmaximize();
     let _ = browser.unmaximize();
-    main.set_position(layout.app_position)
-        .map_err(|e| format!("position main window: {e}"))?;
-    main.set_size(layout.app_size)
-        .map_err(|e| format!("resize main window: {e}"))?;
-    browser
-        .set_position(layout.browser_position)
-        .map_err(|e| format!("position browser: {e}"))?;
-    browser
-        .set_size(layout.browser_size)
-        .map_err(|e| format!("resize browser: {e}"))?;
+    set_client_bounds(&main, layout.app_position, layout.app_size)?;
+    set_client_bounds(&browser, layout.browser_position, layout.browser_size)?;
     Ok(())
 }
 
 /// Place the browser on the right half and OwLLM on the left half of the
-/// monitor containing the main window. Both panes are flush with the monitor
-/// edges and meet at the center; native resize events re-apply this
-/// arrangement while it is active.
+/// usable area of the monitor containing the main window. This is a one-time
+/// initial arrangement: later user moves and resizes are deliberately left
+/// alone.
 #[tauri::command(async)]
 pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, String> {
     if layout.trim() != "right-half" {
@@ -3992,12 +4029,13 @@ pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, 
     }
     let _operation = lock_browser_operation();
     browser_start_inner(&app)?;
-    SPLIT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
     if let Err(error) = arrange_split_screen(&app) {
         return Err(error);
     }
-    SPLIT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
-    Ok("OwLLM arranged on the left and browser on the right half of the current monitor".to_string())
+    Ok(
+        "OwLLM arranged on the left and browser on the right half of the current monitor"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -4310,7 +4348,10 @@ mod tests {
         assert_eq!(layout.browser_position.y, 20.0);
         assert_eq!(layout.app_size.height, 1080.0);
         assert_eq!(layout.browser_size, layout.app_size);
-        assert_eq!(layout.browser_position.x, layout.app_position.x + layout.app_size.width);
+        assert_eq!(
+            layout.browser_position.x,
+            layout.app_position.x + layout.app_size.width
+        );
         assert_eq!(
             layout.browser_position.x + layout.browser_size.width,
             2020.0
@@ -4334,16 +4375,12 @@ mod tests {
         assert!(resized.browser_position.x > resized.app_position.x);
         assert_eq!(resized.app_position.x, 0.0);
         assert_eq!(resized.browser_position.y, 0.0);
-        assert_eq!(resized.browser_position.x + resized.browser_size.width, 1440.0);
+        assert_eq!(
+            resized.browser_position.x + resized.browser_size.width,
+            1440.0
+        );
     }
 
-    #[test]
-    fn resize_events_coalesce_a_split_reflow_request() {
-        let mut batch = BrowserUiBatch::default();
-        batch.absorb(BrowserUiEvent::ReflowSplit);
-        batch.absorb(BrowserUiEvent::ReflowSplit);
-        assert!(batch.reflow_split);
-    }
 }
 
 #[tauri::command(async)]

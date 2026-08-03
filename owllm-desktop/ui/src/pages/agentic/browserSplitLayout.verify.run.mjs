@@ -1,6 +1,6 @@
-// Coordinated native browser/app split contract. The launch simulation checks
-// the user interaction path; the geometry checks cover both initial placement
-// and a later monitor resize without requiring a Tauri desktop session.
+// One-time native browser/app split contract. The launch simulation checks the
+// user interaction path; source checks pin usable-screen geometry and ensure
+// later user moves/resizes are never overwritten by an automatic reflow.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,42 +33,35 @@ const split = (originX, originY, width, height) => {
   };
 };
 
-const initial = split(100, 20, 1920, 1080);
-check(initial.app.x === 100 && initial.app.y === 20, "initial app reaches the monitor's left and top edges");
-check(initial.browser.x > initial.app.x && initial.browser.y === 20, "initial browser shares the app's top edge");
-check(initial.app.width === initial.browser.width && initial.app.height === 1080 && initial.browser.height === 1080,
-  "initial panes have matching full-screen dimensions");
-check(initial.browser.x + initial.browser.width === 2020, "initial browser reaches the monitor's right edge");
+// A 2560x1440 monitor with a 40px taskbar has a 2560x1400 work area.
+const initial = split(0, 0, 2560, 1400);
+check(initial.app.x === 0 && initial.app.y === 0, "initial app reaches the work area's left and top edges");
+check(initial.browser.x > initial.app.x && initial.browser.y === 0, "initial browser shares the app's top edge");
+check(initial.app.width === initial.browser.width && initial.app.height === 1400 && initial.browser.height === 1400,
+  "initial panes have matching usable-screen dimensions");
+check(initial.browser.x + initial.browser.width === 2560, "initial browser reaches the work area's right edge");
 check(initial.browser.x === initial.app.x + initial.app.width, "initial panes meet without a center gap");
-
-const resized = split(0, 0, 1440, 900);
-check(resized.app.width < initial.app.width && resized.app.height < initial.app.height,
-  "monitor resize recomputes the smaller left app pane");
-check(resized.browser.x > resized.app.x && resized.browser.width === resized.app.width,
-  "monitor resize keeps the browser right of an equally sized app pane");
-check(resized.app.x === 0 && resized.app.y === 0 && resized.browser.y === 0
-    && resized.browser.x + resized.browser.width === 1440,
-  "resized panes remain flush with the monitor's outer edges");
-check(resized.app.height === resized.browser.height && resized.browser.x === resized.app.x + resized.app.width,
-  "resized panes remain equal and adjacent");
 
 check(browser.includes("fn split_screen_layout") && browser.includes("fn arrange_split_screen"),
   "native split geometry and coordinator are present");
-check(browser.includes("main.set_position(layout.app_position)")
-    && browser.includes("main.set_size(layout.app_size)")
-    && browser.includes(".set_position(layout.browser_position)")
-    && browser.includes(".set_size(layout.browser_size)"),
-  "native arrangement resizes and positions both app and browser windows");
+check(browser.includes("monitor.work_area()"),
+  "initial split uses the usable monitor work area instead of hiding behind taskbars or docks");
+check(browser.includes("fn set_client_bounds")
+    && browser.includes("inner_position()")
+    && browser.includes("outer_position()"),
+  "native arrangement compensates invisible resize borders to align visible client edges");
+check(browser.includes("set_client_bounds(&main") && browser.includes("set_client_bounds(&browser"),
+  "initial arrangement applies visible bounds to both app and browser windows");
 check(!browser.includes("BROWSER_TOP_MARGIN") && !browser.includes("const GAP:"),
   "native arrangement has no browser margin or pane gap");
 check(browser.includes("browser_position: LogicalPosition::new(browser_x, origin.y)")
     && browser.includes("browser_size: LogicalSize::new(pane_width, app_height)"),
   "native arrangement gives both panes the same origin and height");
-check(browser.includes("WindowEvent::Moved(_) | WindowEvent::Resized(_)")
-    && browser.includes("queue_split_reflow(&handle)"),
-  "browser resize and move interactions request a coordinated reflow");
-check(lib.includes("browser::queue_split_reflow(app)"),
-  "main app resize interactions request a coordinated reflow");
+check(!browser.includes("queue_split_reflow") && !browser.includes("ReflowSplit")
+    && !browser.includes("SPLIT_SCREEN_ACTIVE"),
+  "browser move and resize interactions remain user-controlled after initialization");
+check(!lib.includes("browser::queue_split_reflow(app)"),
+  "main app move and resize interactions remain user-controlled after initialization");
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-browser-split-"));
 try {

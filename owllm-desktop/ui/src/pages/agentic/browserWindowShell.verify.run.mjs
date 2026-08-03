@@ -1,11 +1,13 @@
-// Browser shell visual contract. Source-level coverage keeps this stable in
-// the release gate without requiring a native Tauri window in the verifier.
+// Native browser shell visual contract. Source-level coverage keeps the actual
+// separate browser window stable without requiring a Tauri desktop session.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const source = fs.readFileSync(path.join(here, "BrowserPanel.tsx"), "utf8").replace(/\r\n/g, "\n");
+const app = path.resolve(here, "../../../..");
+const browser = fs.readFileSync(path.join(app, "src-tauri/src/browser.rs"), "utf8").replace(/\r\n/g, "\n");
+const chrome = fs.readFileSync(path.join(app, "ui/public/browser-chrome.html"), "utf8").replace(/\r\n/g, "\n");
 
 let passed = 0;
 let failed = 0;
@@ -19,16 +21,16 @@ function check(condition, label) {
   }
 }
 
-check(source.includes('data-ui="BrowserWindowShell"'), "browser shell has a stable visual test hook");
-check(source.includes('data-ui="BrowserWindowShellContent"'), "shell content has a stable visual test hook");
-check(source.includes('width: 560') && source.includes('maxWidth: "92vw"'), "floating shell preserves its established dimensions");
-check(source.includes('boxSizing: "border-box"'), "border and inset are included in the established outer dimensions");
-check(source.includes('border: "1px solid var(--border-strong)"'), "floating shell uses the standard OWLLM frame border");
-check(source.includes('padding: 4'), "floating shell has a small uniform inset on every edge");
-check(source.includes('background: "var(--bg-panel)"'), "floating shell uses the main OWLLM panel surface");
-check(source.includes('maxHeight: "calc(82vh - 10px)"'), "inner height compensates for border and four-edge inset");
-check(source.includes('borderRadius: 8') && !source.includes('borderRadius: 15'), "content radius follows the standard inset shell");
-check(!source.includes('conic-gradient(from 0deg') && !source.includes('owllmBrowserFrameHue'), "owl-specific gradient frame and animation are removed");
+check(browser.includes("const BROWSER_FRAME_T: f64 = 3.0"), "native browser uses the main window's three-pixel edge thickness");
+check(chrome.includes('id="windowFrame"'), "native browser chrome has a stable edge-frame test hook");
+check(chrome.includes("border: 3px solid var(--accent)"), "native browser edge uses the standard accent frame");
+check(chrome.includes("pointer-events: none"), "browser edge never blocks page or window controls");
+check(chrome.includes("box-sizing: border-box"), "browser edge is painted inside the window bounds");
+check(browser.includes("LogicalPosition::new(BROWSER_FRAME_T, CHROME_H)"), "page leaves only the visible left frame edge");
+check(browser.includes("ls.width - (BROWSER_FRAME_T * 2.0)"), "page leaves matching left and right frame edges");
+check(browser.includes("ls.height - CHROME_H - BROWSER_FRAME_T"), "page leaves the matching bottom frame edge");
+check(browser.includes("LogicalSize::new(ls.width, ls.height)"), "chrome backing spans the complete native browser window");
+check(!chrome.includes("conic-gradient") && !chrome.includes("owllmBrowserFrameHue"), "native browser frame is standard, not owl-specific or animated");
 
 if (failed) {
   console.error(`browserWindowShell: ${passed} passed, ${failed} failed`);

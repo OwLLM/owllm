@@ -39,7 +39,14 @@
         background: var(--bg); user-select: none;
         font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       }
-      #rows { display: flex; flex-direction: column; height: 100%; }
+      /* The chrome webview spans the entire native window so it can paint the
+         same solid edge as the main app. Controls still occupy only CHROME_H. */
+      #rows { display: flex; flex-direction: column; height: 96px; }
+      #windowFrame {
+        position: fixed; inset: 0; z-index: 1000;
+        border: 3px solid var(--accent); box-sizing: border-box;
+        pointer-events: none;
+      }
       /* The identity row is 30px taller than a plain tab bar so the open
          page's real logo reads as the page's identity, not a decoration
          alongside a URL (user spec 2026-07-29). */
@@ -142,6 +149,7 @@
     </style>
   </head>
   <body>
+    <div id="windowFrame" aria-hidden="true"></div>
     <div id="rows">
       <div id="tabsrow">
         <img id="logo" src="app-icon.png" alt="" />

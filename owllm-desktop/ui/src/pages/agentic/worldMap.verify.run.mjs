@@ -271,19 +271,27 @@ try {
     page.includes("pointerDown") && /if \(!isClickGesture\(event\.clientX - downX, event\.clientY - downY\)\) return;/.test(page));
   check("Globe bundles photographic Earth texture layers", page.includes("EARTH_TEXTURES.day") && page.includes("EARTH_TEXTURES.normal") && page.includes("EARTH_TEXTURES.specular") && page.includes("EARTH_TEXTURES.clouds"));
   check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.AmbientLight"));
-  // The day/night terminator must follow the real UTC clock: the sun is aimed at
-  // the computed subsolar point every frame, not pinned to a fixed position.
-  check("Sun tracks the real subsolar point from the UTC clock",
-    page.includes("subsolarLocalDir(new Date(), sunLocal)")
-      && page.includes("light.position.copy(anchor.position).addScaledVector(sunLocal, 10)")
-      && !page.includes("sunLight.position.set(5.8"));
+  // The sun term must come from a light the renderer actually collects: lights
+  // are gathered by CAMERA layers, so a light parked on a layer the camera
+  // never enables is silently ignored and the scene falls back to flat ambient.
+  // One non-decaying point light at the system origin lights every planet.
+  check("Sun light really illuminates (origin point light, no camera-invisible layer lights)",
+    page.includes("new THREE.PointLight(0xffffff, PLANET_SUNLIGHT_INTENSITY, 0, 0)")
+      && page.includes("sunLight.position.set(0, 0, 0)")
+      && !page.includes("light.layers.set(")
+      && !page.includes("subsolarLocalDir"));
   check("Every planet has a bright readable baseline and a bounded sun-facing lift",
     page.includes("const PLANET_BASE_LIGHT_INTENSITY = 1.35")
       && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.25")
-      && page.includes("const planetSunLights = planetMeshes.map")
-      && page.includes("light.layers.set(layer)")
       && page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
       && !page.includes("new THREE.PointLight(0xfff2d0"));
+  // Earth's photographic albedo is measurably darker than every other planet
+  // map (mean sRGB 94, 35% near-black ocean pixels vs 0% elsewhere): the globe
+  // material must carry the linear-space gamma lift that equalises it.
+  check("Earth albedo gamma lift keeps the oceans as bright as the other planets",
+    page.includes("const EARTH_ALBEDO_GAMMA = 0.5")
+      && page.includes("globeMaterial.onBeforeCompile")
+      && page.includes("diffuseColor.rgb = pow(diffuseColor.rgb, vec3(${EARTH_ALBEDO_GAMMA}))"));
   // The shadowed hemisphere stays fully texture-readable through the neutral
   // baseline; no emissive/specular term can wash out the photographic map.
   check("Night hemisphere stays readable without extra highlight terms",
@@ -384,7 +392,7 @@ try {
       && !page.includes(">{regionWithFlag(publicNode.region)}</span>"));
   check("Sun-side illumination is raised by exactly twenty-five percent",
     page.includes("PLANET_BASE_LIGHT_INTENSITY * 0.25")
-      && page.includes("new THREE.DirectionalLight(0xffffff, PLANET_SUNLIGHT_INTENSITY)"));
+      && page.includes("new THREE.PointLight(0xffffff, PLANET_SUNLIGHT_INTENSITY, 0, 0)"));
   check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")
       && worker.includes("request.headers.get(\"User-Agent\")")

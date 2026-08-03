@@ -26,28 +26,31 @@ function check(condition, label) {
 }
 
 const split = (originX, originY, width, height) => {
-  const margin = 12;
-  const gap = 8;
-  const pane = Math.max(320, Math.max(width - margin * 2 - gap, 640) / 2);
-  const paneHeight = Math.max(320, height - margin * 2);
+  const pane = Math.max(320, width / 2);
   return {
-    app: { x: originX + margin, y: originY + margin, width: pane, height: paneHeight },
-    browser: { x: originX + margin + pane + gap, y: originY + margin, width: pane, height: paneHeight },
+    app: { x: originX, y: originY, width: pane, height: Math.max(320, height) },
+    browser: { x: originX + pane, y: originY, width: pane, height: Math.max(320, height) },
   };
 };
 
 const initial = split(100, 20, 1920, 1080);
-check(initial.app.x === 112 && initial.app.y === 32, "initial app is placed on the left with the shared inset");
-check(initial.browser.x > initial.app.x && initial.browser.y === 32, "initial browser is placed on the right with a small top margin");
-check(initial.app.width === initial.browser.width && initial.app.height === initial.browser.height,
-  "initial app and browser panes have matching dimensions");
-check(initial.browser.x + initial.browser.width === 2008, "initial browser ends at the monitor's inset right edge");
+check(initial.app.x === 100 && initial.app.y === 20, "initial app reaches the monitor's left and top edges");
+check(initial.browser.x > initial.app.x && initial.browser.y === 20, "initial browser shares the app's top edge");
+check(initial.app.width === initial.browser.width && initial.app.height === 1080 && initial.browser.height === 1080,
+  "initial panes have matching full-screen dimensions");
+check(initial.browser.x + initial.browser.width === 2020, "initial browser reaches the monitor's right edge");
+check(initial.browser.x === initial.app.x + initial.app.width, "initial panes meet without a center gap");
 
 const resized = split(0, 0, 1440, 900);
 check(resized.app.width < initial.app.width && resized.app.height < initial.app.height,
   "monitor resize recomputes the smaller left app pane");
 check(resized.browser.x > resized.app.x && resized.browser.width === resized.app.width,
   "monitor resize keeps the browser right of an equally sized app pane");
+check(resized.app.x === 0 && resized.app.y === 0 && resized.browser.y === 0
+    && resized.browser.x + resized.browser.width === 1440,
+  "resized panes remain flush with the monitor's outer edges");
+check(resized.app.height === resized.browser.height && resized.browser.x === resized.app.x + resized.app.width,
+  "resized panes remain equal and adjacent");
 
 check(browser.includes("fn split_screen_layout") && browser.includes("fn arrange_split_screen"),
   "native split geometry and coordinator are present");
@@ -56,8 +59,11 @@ check(browser.includes("main.set_position(layout.app_position)")
     && browser.includes(".set_position(layout.browser_position)")
     && browser.includes(".set_size(layout.browser_size)"),
   "native arrangement resizes and positions both app and browser windows");
-check(browser.includes("const MARGIN: f64 = 12.0") && browser.includes("const GAP: f64 = 8.0"),
-  "native arrangement preserves the top margin and pane gap");
+check(!browser.includes("BROWSER_TOP_MARGIN") && !browser.includes("const GAP:"),
+  "native arrangement has no browser margin or pane gap");
+check(browser.includes("browser_position: LogicalPosition::new(browser_x, origin.y)")
+    && browser.includes("browser_size: LogicalSize::new(pane_width, app_height)"),
+  "native arrangement gives both panes the same origin and height");
 check(browser.includes("WindowEvent::Moved(_) | WindowEvent::Resized(_)")
     && browser.includes("queue_split_reflow(&handle)"),
   "browser resize and move interactions request a coordinated reflow");

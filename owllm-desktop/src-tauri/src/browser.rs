@@ -3934,20 +3934,19 @@ struct SplitScreenLayout {
 }
 
 fn split_screen_layout(origin: LogicalPosition<f64>, size: LogicalSize<f64>) -> SplitScreenLayout {
-    const MARGIN: f64 = 12.0;
-    const GAP: f64 = 8.0;
+    // The split is edge-to-edge: both panes share the monitor's origin and
+    // full height, and meet at the center without a floating-card gap.
     const MIN_PANE: f64 = 320.0;
-    let available_width = (size.width - (MARGIN * 2.0) - GAP).max(MIN_PANE * 2.0);
-    let pane_width = (available_width / 2.0).max(MIN_PANE);
-    let height = (size.height - (MARGIN * 2.0)).max(320.0);
-    let y = origin.y + MARGIN;
-    let app_x = origin.x + MARGIN;
-    let browser_x = app_x + pane_width + GAP;
+    let available_width = size.width.max(MIN_PANE * 2.0);
+    let pane_width = available_width / 2.0;
+    let app_height = size.height.max(320.0);
+    let app_x = origin.x;
+    let browser_x = app_x + pane_width;
     SplitScreenLayout {
-        app_position: LogicalPosition::new(app_x, y),
-        app_size: LogicalSize::new(pane_width, height),
-        browser_position: LogicalPosition::new(browser_x, y),
-        browser_size: LogicalSize::new(pane_width, height),
+        app_position: LogicalPosition::new(app_x, origin.y),
+        app_size: LogicalSize::new(pane_width, app_height),
+        browser_position: LogicalPosition::new(browser_x, origin.y),
+        browser_size: LogicalSize::new(pane_width, app_height),
     }
 }
 
@@ -3983,8 +3982,9 @@ fn arrange_split_screen(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Place the browser on the right half and OwLLM on the left half of the
-/// monitor containing the main window. The browser keeps a small top margin;
-/// native resize events re-apply this arrangement while it is active.
+/// monitor containing the main window. Both panes are flush with the monitor
+/// edges and meet at the center; native resize events re-apply this
+/// arrangement while it is active.
 #[tauri::command(async)]
 pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, String> {
     if layout.trim() != "right-half" {
@@ -4301,18 +4301,19 @@ mod tests {
     }
 
     #[test]
-    fn split_layout_places_browser_right_and_app_left_with_top_inset() {
+    fn split_layout_places_matching_edge_to_edge_panes() {
         let layout = split_screen_layout(
             LogicalPosition::new(100.0, 20.0),
             LogicalSize::new(1920.0, 1080.0),
         );
-        assert_eq!(layout.app_position, LogicalPosition::new(112.0, 32.0));
-        assert_eq!(layout.browser_position.y, 32.0);
-        assert_eq!(layout.app_size, layout.browser_size);
-        assert_eq!(layout.browser_position.x, layout.app_position.x + layout.app_size.width + 8.0);
+        assert_eq!(layout.app_position, LogicalPosition::new(100.0, 20.0));
+        assert_eq!(layout.browser_position.y, 20.0);
+        assert_eq!(layout.app_size.height, 1080.0);
+        assert_eq!(layout.browser_size, layout.app_size);
+        assert_eq!(layout.browser_position.x, layout.app_position.x + layout.app_size.width);
         assert_eq!(
             layout.browser_position.x + layout.browser_size.width,
-            2008.0
+            2020.0
         );
     }
 
@@ -4328,8 +4329,12 @@ mod tests {
         );
         assert!(resized.app_size.width < wide.app_size.width);
         assert!(resized.app_size.height < wide.app_size.height);
-        assert_eq!(resized.app_size, resized.browser_size);
+        assert_eq!(resized.app_size.height, 900.0);
+        assert_eq!(resized.browser_size.height, 900.0);
         assert!(resized.browser_position.x > resized.app_position.x);
+        assert_eq!(resized.app_position.x, 0.0);
+        assert_eq!(resized.browser_position.y, 0.0);
+        assert_eq!(resized.browser_position.x + resized.browser_size.width, 1440.0);
     }
 
     #[test]

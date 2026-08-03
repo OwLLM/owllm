@@ -94,6 +94,18 @@ const TRIPWIRES = [
   // the moment a project opened the agent browser (v0.9.64, gdb-confirmed).
   ["src-tauri/src/browser.rs", /fn is_active_tab[\s\S]{0,900}TABS\.try_lock\(\)/, "is_active_tab never blocks the native UI-thread callback (v0.9.65 agent-browser freeze)"],
   ["src-tauri/src/browser.rs", /fn capture_reply[\s\S]{0,900}REPLIES\.try_lock\(\)/, "capture_reply never blocks the native UI-thread callback (v0.8.96)"],
+  // Zeroed-ref git storm (2026-08-01): a crash mid-ref-write left refs/heads/main
+  // as 41 NUL bytes, every sync retried forever, and a failing gc --auto wrote a
+  // pack per attempt — 5,046 packs / 11.5 GB, ~2 git procs/sec, which starved
+  // every other git operation on the box through the shared credential lock.
+  // Four independent guards; losing any one of them lets the runaway back.
+  ["src-tauri/src/vault.rs", /"config", "core\.fsync", "all"/, "refs are fsynced, so a crash cannot zero a ref (prevention, all OS)"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
+  ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
+  ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
+  ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,900}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
+  ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
+  ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).
   // Run views append forever; rendering every entry grew the DOM monotonically
   // until the renderer hit its per-process ceiling. If any of these render sites

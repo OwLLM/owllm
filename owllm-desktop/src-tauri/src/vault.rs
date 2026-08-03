@@ -56,7 +56,30 @@ fn token_and_login() -> Option<(String, String)> {
 /// access, but no fetch/push command may use it until the app reconnects.
 fn connected_vault_dir() -> Result<PathBuf, String> {
     token_and_login().ok_or_else(|| "GitHub is disconnected — vault sync is disabled.".to_string())?;
-    vault_dir().ok_or_else(|| "no vault dir".to_string())
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    // Every remote vault operation funnels through here, so this is the one place
+    // that has to hold the line: refuse to run while the breaker is open, and make
+    // sure the clone is hardened (durable ref writes, no auto-gc thrash) exactly
+    // once per process before anything touches it.
+    if let Some(secs) = sync_cooldown_remaining() {
+        return Err(format!(
+            "vault sync paused for {secs}s after repeated failures — the local clone needs attention"
+        ));
+    }
+    ensure_hardened(&dir);
+    Ok(dir)
+}
+
+/// Apply the durability + maintenance policy to an existing clone, once per run.
+/// Cheap no-op when there is no clone yet (`clone_vault` hardens the fresh one).
+fn ensure_hardened(dir: &std::path::Path) {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if !dir.join(".git").exists() || DONE.swap(true, Relaxed) {
+        return;
+    }
+    harden_repo(dir);
+    maintain_repo(dir);
 }
 
 /// GET an authenticated GitHub API URL; return the parsed JSON body.
@@ -260,30 +283,121 @@ pub(crate) fn is_broken_ref(err: &str) -> bool {
 /// 41-byte pointer is lost in this corruption — every commit object is still in
 /// the object store — so this recovers the full history. Working-tree files are
 /// NEVER touched. Best-effort; safe to call spuriously.
+/// True when a git ref/HEAD file on disk is unusable: empty, or nothing but NUL
+/// padding (the crash signature — the filesystem recorded the 41-byte size but
+/// never flushed the content). A MISSING file is not corruption: that is normal
+/// for packed refs and for an unborn branch, so callers must leave it alone.
+fn file_is_zeroed(path: &std::path::Path) -> bool {
+    match std::fs::read(path) {
+        Ok(b) => b.is_empty() || b.iter().all(|c| matches!(c, 0 | b'\n' | b'\r' | b' ')),
+        Err(_) => false,
+    }
+}
+
+/// Absolute `--git-common-dir` and `--absolute-git-dir` for `cwd`.
+///
+/// These differ and the distinction is load-bearing: in a linked worktree (every
+/// fleet per-agent checkout) `refs/heads/*` and `logs/refs/heads/*` live in the
+/// COMMON dir, while HEAD and the index live in the worktree's own gitdir. Using
+/// the worktree gitdir for refs would look under `.git/worktrees/<name>/refs/…`,
+/// find nothing, and silently never heal. `--path-format=absolute` is required
+/// because the bare form returns a RELATIVE ".git" from the repo root.
+fn git_dirs(cwd: Option<&std::path::Path>) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    if let (Ok(common), Ok(own)) = (
+        run_git_once(
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd,
+        ),
+        run_git_once(&["rev-parse", "--absolute-git-dir"], cwd),
+    ) {
+        let (common, own) = (common.trim(), own.trim());
+        if !common.is_empty() && !own.is_empty() {
+            return Some((
+                std::path::PathBuf::from(common),
+                std::path::PathBuf::from(own),
+            ));
+        }
+    }
+    // FALLBACK — a zeroed HEAD makes git disown the directory entirely ("fatal:
+    // not a git repository"), so `rev-parse` cannot locate the dirs we need in
+    // order to repair that very HEAD. Resolve them from the filesystem instead.
+    let base = cwd?;
+    let dot = base.join(".git");
+    let own = if dot.is_dir() {
+        dot
+    } else if dot.is_file() {
+        // Linked worktree / submodule: ".git" is a file holding "gitdir: <path>".
+        let txt = std::fs::read_to_string(&dot).ok()?;
+        let p = txt.split_once("gitdir:")?.1.trim();
+        let p = std::path::PathBuf::from(p);
+        if p.is_absolute() { p } else { base.join(p) }
+    } else {
+        return None;
+    };
+    // A worktree gitdir carries `commondir` (usually the relative "../..").
+    let common = match std::fs::read_to_string(own.join("commondir")) {
+        Ok(rel) => {
+            let rel = rel.trim();
+            let p = std::path::PathBuf::from(rel);
+            let joined = if p.is_absolute() { p } else { own.join(p) };
+            joined.canonicalize().unwrap_or(joined)
+        }
+        Err(_) => own.clone(),
+    };
+    Some((common, own))
+}
+
+/// Restore a zeroed ref. Handles BOTH shapes of the corruption:
+///   * the branch ref (`refs/heads/<b>`) — restored from its own reflog, else
+///     the matching remote-tracking ref;
+///   * the HEAD file itself — restored to the default branch (origin/HEAD, else
+///     an existing main/master), since a zeroed HEAD hides which branch we were on.
+///
+/// Only the pointer is lost in this corruption — every commit object survives —
+/// so the full history comes back. Working-tree files are NEVER touched.
+/// Best-effort, idempotent, and safe to call spuriously on any platform.
 pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
-    let Ok(head) = run_git_once(&["symbolic-ref", "--quiet", "HEAD"], cwd) else {
+    let Some((common, own)) = git_dirs(cwd) else {
         return;
+    };
+
+    // 1. HEAD is written the same way and can be zeroed too. Without this the
+    //    branch repair below cannot even learn which ref to fix.
+    let head_path = own.join("HEAD");
+    if file_is_zeroed(&head_path) {
+        let default = run_git_once(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], cwd)
+            .ok()
+            .map(|s| s.trim().replace("refs/remotes/origin/", "refs/heads/"))
+            .filter(|s| s.starts_with("refs/heads/"))
+            .or_else(|| {
+                ["main", "master"]
+                    .iter()
+                    .map(|b| format!("refs/heads/{b}"))
+                    .find(|r| common.join(r).exists())
+            })
+            .unwrap_or_else(|| "refs/heads/main".to_string());
+        let _ = std::fs::remove_file(head_path.with_extension("lock"));
+        if std::fs::write(&head_path, format!("ref: {default}\n")).is_ok() {
+            eprintln!("vault: restored zeroed HEAD -> {default}");
+        }
+    }
+
+    // 2. The branch ref HEAD points at.
+    let Ok(head) = run_git_once(&["symbolic-ref", "--quiet", "HEAD"], cwd) else {
+        return; // detached HEAD (or still unreadable) — nothing branch-shaped to fix
     };
     let refname = head.trim().to_string();
-    if refname.is_empty() {
+    if !refname.starts_with("refs/heads/") {
         return;
     }
-    let Ok(gitdir) = run_git_once(&["rev-parse", "--absolute-git-dir"], cwd) else {
-        return;
-    };
-    let gitdir = std::path::PathBuf::from(gitdir.trim());
-    let ref_path = gitdir.join(&refname);
-    // Act ONLY on a file that is genuinely unusable (all-NUL / empty). A missing
-    // ref file is normal (packed refs, or an unborn branch) — leave those alone.
-    let broken = match std::fs::read(&ref_path) {
-        Ok(b) => b.is_empty() || b.iter().all(|c| matches!(c, 0 | b'\n' | b'\r')),
-        Err(_) => false,
-    };
-    if !broken {
+    let ref_path = common.join(&refname);
+    if !file_is_zeroed(&ref_path) {
         return;
     }
     let mut candidates: Vec<String> = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(gitdir.join("logs").join(&refname)) {
+    if let Ok(text) = std::fs::read_to_string(common.join("logs").join(&refname)) {
+        // Reflog line: "<old-sha> <new-sha> <who> <when>\t<message>" — field 2 is
+        // the value the ref last held.
         if let Some(sha) = text
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -317,17 +431,109 @@ pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
     eprintln!("vault: ref {refname} is broken and could not be restored");
 }
 
+/// PREVENTION. Git does not fsync refs by default on ANY platform — the default
+/// `core.fsync` set covers objects and the index only, so a power loss or hard
+/// kill mid-ref-write leaves `refs/heads/<b>` as NUL bytes. That is exactly how
+/// the 2026-08-01 vault corruption happened (Kernel-Power 41 during a sync).
+/// `all` adds `reference`, making the ref write durable.
+///
+/// Also takes auto-gc off git's hands. A FAILING `gc --auto` re-fires on every
+/// subsequent command once the pack count passes gc.autoPackLimit (default 50)
+/// and writes a fresh pack each time — the runaway that reached 5,046 packs /
+/// 11.5 GB on a two-file repo. We consolidate deliberately in `maintain_repo`.
+/// Plain `git config`, so it behaves identically on Windows/macOS/Linux.
+pub(crate) fn harden_repo(dir: &std::path::Path) {
+    let _ = run_git_once(&["config", "core.fsync", "all"], Some(dir));
+    let _ = run_git_once(&["config", "gc.auto", "0"], Some(dir));
+    let _ = run_git_once(&["config", "maintenance.auto", "false"], Some(dir));
+}
+
+/// Deliberate, bounded replacement for the auto-gc we disabled. The vault commits
+/// on every change (~47k commits in 50 days observed), so pack count grows without
+/// limit and every git command has to mmap each pack index. Consolidates only when
+/// actually needed, and never more than once per process.
+pub(crate) fn maintain_repo(dir: &std::path::Path) {
+    const PACK_LIMIT: usize = 24;
+    let Some((common, _)) = git_dirs(Some(dir)) else {
+        return;
+    };
+    let pack_dir = common.join("objects").join("pack");
+    let packs = std::fs::read_dir(&pack_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
+                .count()
+        })
+        .unwrap_or(0);
+    if packs <= PACK_LIMIT {
+        return;
+    }
+    eprintln!("vault: {packs} packs (> {PACK_LIMIT}) — consolidating");
+    // Keep 30 days of reflog as the recovery source repair_broken_ref reads from;
+    // -ad folds every pack into one. Both take the shared git lock via run_git.
+    let _ = run_git(&["reflog", "expire", "--expire=30.days", "--all"], Some(dir));
+    let _ = run_git(&["repack", "-ad", "--quiet"], Some(dir));
+}
+
+/// Consecutive failures that persisted THROUGH a self-heal, plus the epoch second
+/// until which sync is paused. Only corruption-shaped failures count: ordinary
+/// network/auth errors must keep retrying normally.
+static REPO_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static COOLDOWN_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Seconds of cooldown left, if sync is currently paused.
+pub(crate) fn sync_cooldown_remaining() -> Option<u64> {
+    let until = COOLDOWN_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    until.checked_sub(now_secs()).filter(|s| *s > 0)
+}
+
+/// CIRCUIT BREAKER. Four UI timers drive vault sync; when the repo was broken they
+/// each retried on schedule forever (~2 git processes/second for 38 hours). After
+/// three failures that survived a self-heal, back off exponentially (1 min → 1 h)
+/// instead of hammering. Any success clears it immediately.
+fn note_repo_health(r: &Result<String, String>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    match r {
+        Ok(_) => {
+            REPO_FAILS.store(0, Relaxed);
+            COOLDOWN_UNTIL.store(0, Relaxed);
+        }
+        Err(e) if is_broken_ref(e) || is_corrupt_index(e) => {
+            let n = REPO_FAILS.fetch_add(1, Relaxed) + 1;
+            if n >= 3 {
+                let backoff = 60u64.saturating_mul(1u64 << (n - 3).min(6)).min(3600);
+                COOLDOWN_UNTIL.store(now_secs() + backoff, Relaxed);
+                eprintln!(
+                    "vault: repo still broken after self-heal ({n}x) — pausing sync {backoff}s"
+                );
+            }
+        }
+        Err(_) => {} // network / auth / merge conflicts are not corruption
+    }
+}
+
 fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     // Poisoned lock (a prior panic) must not wedge sync — recover the guard.
     let _guard = VAULT_GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     match run_git_once(args, cwd) {
         Err(e) if is_corrupt_index(&e) => {
             repair_index(cwd);
-            run_git_once(args, cwd) // retry once, now with a clean index
+            let retried = run_git_once(args, cwd); // retry once, now with a clean index
+            note_repo_health(&retried);
+            retried
         }
         Err(e) if is_broken_ref(&e) => {
             repair_broken_ref(cwd);
-            run_git_once(args, cwd) // retry once, now with a resolvable HEAD
+            let retried = run_git_once(args, cwd); // retry once, now with a resolvable HEAD
+            note_repo_health(&retried);
+            retried
         }
         other => other,
     }
@@ -344,11 +550,13 @@ fn clone_vault(token: &str, login: &str, dir: &std::path::Path) -> Result<(), St
     // Full clone (the vault is tiny text) so commit/push stay simple — shallow
     // clones complicate pushes.
     if run_git(&["clone", &plain, &dir_s], None).is_ok() {
+        harden_repo(dir); // durable ref writes from the very first sync
         return Ok(());
     }
     // Fallback: embed the token for this clone (the helper wasn't usable).
     let auth = format!("https://{login}:{token}@github.com/{login}/{VAULT_REPO}.git");
     run_git(&["clone", &auth, &dir_s], None)?;
+    harden_repo(dir);
     // Reset the remote to the tokenless URL so the token isn't left in
     // .git/config — the helper (or a future re-embed) handles auth on push.
     let _ = run_git(&["remote", "set-url", "origin", &plain], Some(dir));

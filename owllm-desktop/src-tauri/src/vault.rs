@@ -238,6 +238,85 @@ pub(crate) fn repair_index(cwd: Option<&std::path::Path>) {
     eprintln!("vault: rebuilt a corrupt git index");
 }
 
+/// A zeroed / unreadable branch ref — `.git/refs/heads/<branch>` left as 41 NUL
+/// bytes when the app dies mid-ref-write (the filesystem records the size but the
+/// content never flushes). HEAD then resolves to nothing and EVERY git command in
+/// the repo fails with "your current branch appears to be broken". Recognized for
+/// the same reason as a corrupt index: without it each sync tick retried forever,
+/// and since `gc --auto` failed too it wrote a fresh pack per attempt — observed
+/// live as 5,046 packs / 11.5 GB on a two-file vault, ~2 git processes a second,
+/// which starved every other git operation on the machine (the shared
+/// credential-store lock) until the app was killed.
+pub(crate) fn is_broken_ref(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains("reference broken")
+        || l.contains("branch appears to be broken")
+        || l.contains("failed to resolve head")
+        || l.contains("unable to resolve reference")
+}
+
+/// Restore a zeroed branch ref from the best source available: the ref's own
+/// reflog (the last SHA it held), then the matching remote-tracking ref. Only the
+/// 41-byte pointer is lost in this corruption — every commit object is still in
+/// the object store — so this recovers the full history. Working-tree files are
+/// NEVER touched. Best-effort; safe to call spuriously.
+pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
+    let Ok(head) = run_git_once(&["symbolic-ref", "--quiet", "HEAD"], cwd) else {
+        return;
+    };
+    let refname = head.trim().to_string();
+    if refname.is_empty() {
+        return;
+    }
+    let Ok(gitdir) = run_git_once(&["rev-parse", "--absolute-git-dir"], cwd) else {
+        return;
+    };
+    let gitdir = std::path::PathBuf::from(gitdir.trim());
+    let ref_path = gitdir.join(&refname);
+    // Act ONLY on a file that is genuinely unusable (all-NUL / empty). A missing
+    // ref file is normal (packed refs, or an unborn branch) — leave those alone.
+    let broken = match std::fs::read(&ref_path) {
+        Ok(b) => b.is_empty() || b.iter().all(|c| matches!(c, 0 | b'\n' | b'\r')),
+        Err(_) => false,
+    };
+    if !broken {
+        return;
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(gitdir.join("logs").join(&refname)) {
+        if let Some(sha) = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .and_then(|l| l.split_whitespace().nth(1))
+        {
+            candidates.push(sha.to_string());
+        }
+    }
+    if let Some(branch) = refname.strip_prefix("refs/heads/") {
+        candidates.push(format!("refs/remotes/origin/{branch}"));
+    }
+    // The zeroed file has to go FIRST: `update-ref` refuses to lock a ref it
+    // cannot read ("cannot lock ref: reference broken").
+    let _ = std::fs::remove_file(&ref_path);
+    let _ = std::fs::remove_file(ref_path.with_extension("lock"));
+    for c in candidates {
+        let spec = format!("{c}^{{commit}}");
+        let Ok(sha) = run_git_once(&["rev-parse", "--verify", &spec], cwd) else {
+            continue;
+        };
+        let sha = sha.trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        if run_git_once(&["update-ref", &refname, &sha], cwd).is_ok() {
+            eprintln!("vault: restored broken ref {refname} -> {sha}");
+            return;
+        }
+    }
+    eprintln!("vault: ref {refname} is broken and could not be restored");
+}
+
 fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     // Poisoned lock (a prior panic) must not wedge sync — recover the guard.
     let _guard = VAULT_GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -245,6 +324,10 @@ fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, Strin
         Err(e) if is_corrupt_index(&e) => {
             repair_index(cwd);
             run_git_once(args, cwd) // retry once, now with a clean index
+        }
+        Err(e) if is_broken_ref(&e) => {
+            repair_broken_ref(cwd);
+            run_git_once(args, cwd) // retry once, now with a resolvable HEAD
         }
         other => other,
     }

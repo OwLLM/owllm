@@ -858,11 +858,16 @@ fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String>
 
 /// Run a git command in `dir`, capture stdout+stderr+status. Self-heals a
 /// corrupt `.git/index` (rebuild from HEAD, retry once) so a per-agent worktree
-/// isn't wedged by a partial index write — shares the vault.rs helper.
+/// isn't wedged by a partial index write — shares the vault.rs helper. Same for
+/// a zeroed branch ref, which otherwise fails every command in the worktree.
 fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
     let r = git_once(dir, args)?;
     if !r.0 && crate::vault::is_corrupt_index(&r.2) {
         crate::vault::repair_index(Some(dir));
+        return git_once(dir, args);
+    }
+    if !r.0 && crate::vault::is_broken_ref(&r.2) {
+        crate::vault::repair_broken_ref(Some(dir));
         return git_once(dir, args);
     }
     Ok(r)

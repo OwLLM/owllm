@@ -10,7 +10,8 @@
 //
 // Privacy is unchanged from the ephemeral design: the source IP is never read
 // or stored, only Cloudflare's deliberately coarse edge lat/lon is used (then
-// rounded + jittered). The only client attribute exposed is a normalized OS
+// rounded to a coarse geographic grid). The only client attribute exposed is a
+// normalized OS
 // family (Windows/macOS/Linux/Other); no account or workspace data is accepted.
 // The stable node id is an opaque, per-installation random string supplied by
 // the client; it identifies nothing but "the same anonymous dot across visits".
@@ -43,15 +44,6 @@ function finite(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function stableFraction(seed, salt) {
-  let hash = 2166136261;
-  for (const character of `${salt}:${seed}`) {
-    hash ^= character.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 0xffffffff;
-}
-
 function randomId(cryptoApi = crypto) {
   return cryptoApi.randomUUID().replaceAll("-", "").slice(0, 24);
 }
@@ -74,22 +66,20 @@ export function normalizeOsFamily(raw) {
  * Reduce Cloudflare edge metadata to a deliberately coarse map point and city.
  * Source IP and exact request coordinates are never read, returned, or stored.
  */
-export function coarseLocation(cf, publicId) {
+export function coarseLocation(cf) {
   const latitude = finite(cf?.latitude);
   const longitude = finite(cf?.longitude);
   if (latitude == null || longitude == null) return null;
 
   const roundedLatitude = Math.round(latitude / 4) * 4;
   const roundedLongitude = Math.round(longitude / 4) * 4;
-  const jitterLatitude = (stableFraction(publicId, "lat") - 0.5) * 3;
-  const jitterLongitude = (stableFraction(publicId, "lon") - 0.5) * 3;
   const country = String(cf?.country ?? "").trim().slice(0, 2).toUpperCase();
   const city = String(cf?.city || cf?.region || "").trim().slice(0, 64);
 
   return {
     region: [country, city].filter(Boolean).join(" · ") || "Cloudflare edge",
-    latitude: Number(clamp(roundedLatitude + jitterLatitude, -85, 85).toFixed(2)),
-    longitude: Number(clamp(roundedLongitude + jitterLongitude, -180, 180).toFixed(2)),
+    latitude: Number(clamp(roundedLatitude, -85, 85).toFixed(2)),
+    longitude: Number(clamp(roundedLongitude, -180, 180).toFixed(2)),
   };
 }
 
@@ -307,7 +297,7 @@ export class WorldPresence {
         region: request.headers.get("X-OWLLM-Region"),
         latitude: request.headers.get("X-OWLLM-Latitude"),
         longitude: request.headers.get("X-OWLLM-Longitude"),
-      }, id);
+      });
       if (!location) return json({ error: "coarse_location_unavailable" }, 503);
       // Only installations that supply a stable client id are recorded forever.
       // A connection without one (pre-stable-id clients) is shown online while

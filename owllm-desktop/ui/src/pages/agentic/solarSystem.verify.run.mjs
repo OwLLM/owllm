@@ -286,7 +286,8 @@ try {
   check("Earth carries its world and fleet markers around the Sun",
     page.includes("const earthAnchor = new THREE.Group()")
     && page.includes("earthAnchor.add(earthGroup)")
-    && page.includes("earthAnchor.add(mesh)")
+    && page.includes('const nodeParent = node.kind === "world" ? globe : earthAnchor')
+    && page.includes("nodeParent.add(mesh)")
     && page.includes("earthAnchor.add(ring)"));
   check("Planet focus pauses orbital motion before reusing focus/zoom",
     /const focusPlanet = \(id: string, requestedScale = scaleTarget\) => \{[\s\S]{0,320}?orbitRunningRef\.current = false;[\s\S]{0,650}?planetWorldPosition\(spec, orbitClock\.elapsedSeconds, requestedScale\)/.test(page));

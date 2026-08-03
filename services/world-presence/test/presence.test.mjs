@@ -43,12 +43,14 @@ async function connect(mf, role, cf = {}, id = "", os = "") {
   return response.webSocket;
 }
 
-test("coarse location is stable, bounded, and never exposes exact coordinates", () => {
+test("coarse location uses the real geographic grid without per-node random displacement", () => {
   const input = { country: "KR", city: "Seoul", regionCode: "11", latitude: 37.5665, longitude: 126.978 };
   const first = coarseLocation(input, "node-a");
-  const second = coarseLocation(input, "node-a");
+  const second = coarseLocation(input, "node-b");
   assert.deepEqual(first, second);
   assert.equal(first.region, "KR · Seoul");
+  assert.equal(first.latitude, 36);
+  assert.equal(first.longitude, 128);
   assert.notEqual(first.latitude, input.latitude);
   assert.notEqual(first.longitude, input.longitude);
   assert.ok(first.latitude >= -85 && first.latitude <= 85);

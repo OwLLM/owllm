@@ -1776,16 +1776,17 @@ function CodeWorkspace({ pageId, onTitle }: {
         });
       }
       // Opt-in GitHub repo creation — after the workspace exists, so a repo
-      // failure never blocks the project itself. Best-effort with a loud
-      // status either way (the repo-setup popup can retry: same command).
+      // failure never blocks the project itself. Successful background setup
+      // stays out of Agent 1's composer; the Publisher card already shows the
+      // repository state. Real failures remain actionable there and here.
       if (npCreateRepo && createdPath) {
         try {
-          const msg = await invoke<string>("github_create_repo", {
+          await invoke<string>("github_create_repo", {
             cwd: createdPath,
             name: npName.trim() || null,
             private: true,
           });
-          setStatus(`🐙 ${msg}`);
+          setStatus("");
         } catch (e) {
           setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
         }

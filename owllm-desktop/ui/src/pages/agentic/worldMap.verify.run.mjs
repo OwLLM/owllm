@@ -277,25 +277,34 @@ try {
     page.includes("subsolarLocalDir(new Date(), sunLocal)")
       && page.includes("light.position.copy(anchor.position).addScaledVector(sunLocal, 10)")
       && !page.includes("sunLight.position.set(5.8"));
-  check("Every planet's sun-facing peak is exactly 18.75 percent above its baseline",
-    page.includes("const PLANET_BASE_LIGHT_INTENSITY = 1")
-      && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25")
+  check("Every planet has a bright readable baseline and a bounded sun-facing lift",
+    page.includes("const PLANET_BASE_LIGHT_INTENSITY = 1.35")
+      && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.25")
       && page.includes("const planetSunLights = planetMeshes.map")
       && page.includes("light.layers.set(layer)")
       && page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
       && !page.includes("new THREE.PointLight(0xfff2d0"));
   // The shadowed hemisphere stays fully texture-readable through the neutral
-  // baseline; no emissive/specular term can push the bright face past 15%.
+  // baseline; no emissive/specular term can wash out the photographic map.
   check("Night hemisphere stays readable without extra highlight terms",
     page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
       && /specular:\s*new THREE\.Color\(0x000000\)/.test(page)
       && !page.includes("emissiveIntensity"));
-  check("Earth retains its readable focus distance while orbital mode starts in system overview",
+  check("World Map initially reframes to the readable Earth view",
     page.includes("const WORLD_CAMERA_DISTANCE = 11.8")
       && page.includes("const WORLD_MIN_DISTANCE = 9.6")
       && page.includes("camera.position.set(0, 82, SYSTEM_OVERVIEW_DISTANCE)")
       && page.includes("controls.minDistance = 105")
+      && page.includes("let hasFleet: boolean | null = null")
       && page.includes("focusBoundsFor(spec, { min: earthMin, max: 17 }, earthDistance, requestedScale)"));
+  check("Geographic markers share the photographic Earth's exact rotation",
+    page.includes('const nodeParent = node.kind === "world" ? globe : earthAnchor')
+      && page.includes("nodeParent.add(mesh)")
+      && page.includes("nodeParent.add(halo)"));
+  check("World panel uses a readable blue map backdrop instead of near-black space",
+    page.includes("#315d89 0%")
+      && page.includes("#07172b 100%")
+      && !page.includes("#01030a 100%"));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
   check("My Fleet uses Live World first and the Devices heartbeat as fallback",
@@ -330,6 +339,12 @@ try {
       && worker.includes("publicNode(row, false)")
       && worker.includes("SELECT id, region, os, latitude"));
   check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
+  check("Worker uses real coarse-grid coordinates without per-node random displacement",
+    worker.includes("Math.round(latitude / 4) * 4")
+      && worker.includes("Math.round(longitude / 4) * 4")
+      && !worker.includes("jitterLatitude")
+      && !worker.includes("jitterLongitude")
+      && !worker.includes("stableFraction"));
   check("Worker broadcasts incremental membership changes with counts", worker.includes('type: "upsert"') && worker.includes('type: "remove"') && worker.includes("counts:"));
   check("Wrangler binds a free SQLite-backed Durable Object without D1", wrangler.includes("new_sqlite_classes") && !wrangler.includes("d1_databases"));
   check("Unavailable service is disclosed", page.includes("World presence service is not connected yet."));
@@ -368,7 +383,7 @@ try {
       && !page.includes('{t("Server")} {index + 1}')
       && !page.includes(">{regionWithFlag(publicNode.region)}</span>"));
   check("Sun-side illumination is raised by exactly twenty-five percent",
-    page.includes("PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25")
+    page.includes("PLANET_BASE_LIGHT_INTENSITY * 0.25")
       && page.includes("new THREE.DirectionalLight(0xffffff, PLANET_SUNLIGHT_INTENSITY)"));
   check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")

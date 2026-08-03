@@ -84,8 +84,8 @@ const SYSTEM_OVERVIEW_DISTANCE = 245;
 const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
 const OS_DISPLAY_ORDER: PresenceOs[] = ["Windows", "macOS", "Linux", "Other"];
-const PLANET_BASE_LIGHT_INTENSITY = 1;
-const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25;
+const PLANET_BASE_LIGHT_INTENSITY = 1.35;
+const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.25;
 
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
@@ -533,9 +533,9 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       sizeAttenuation: true,
     })));
 
-    // Every planet receives one neutral baseline. Direct sunlight adds at most
-    // 18.75% at the subsolar point, so textures remain readable on both sides
-    // without the sun-facing hemisphere washing out.
+    // Every planet receives a lifted neutral baseline. Direct sunlight adds at
+    // most 25% at the subsolar point, so the real map stays readable without
+    // the sun-facing hemisphere washing out.
     scene.add(new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY));
     const sunLocal = new THREE.Vector3();
     const sunQuat = new THREE.Quaternion();
@@ -654,7 +654,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     }
 
     // One layer-scoped light per planet prevents the eight directions from
-    // stacking. Each surface therefore receives exactly one 18.75% sun term above
+    // stacking. Each surface therefore receives exactly one 25% sun term above
     // the shared baseline. Earth retains its real-UTC terminator; every other
     // planet is lit from the rendered Sun at the system origin.
     const planetSunLights = planetMeshes.map(({ spec, anchor, mesh }, index) => {
@@ -757,7 +757,10 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const pulseMeshes: THREE.Mesh[] = [];
     const orbitRings: { line: THREE.LineLoop; node: GlobeNode }[] = [];
     const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; label?: THREE.Sprite; node: GlobeNode; baseScale: number }[] = [];
-    let hasFleet = false;
+    // null forces the initial population through the Earth reframe. Previously
+    // an empty/world node set compared false === false and left this page in the
+    // distant solar-system overview instead of showing the geographic map.
+    let hasFleet: boolean | null = null;
 
     const disposeNodeObject = (object: any) => {
       object.parent?.remove(object);
@@ -801,7 +804,11 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.userData.node = node;
-        earthAnchor.add(mesh);
+        // Geographic markers are local children of the Earth mesh so the same
+        // axial tilt and rotation keep them over their latitude/longitude.
+        // Fleet satellites remain outside that surface transform by design.
+        const nodeParent = node.kind === "world" ? globe : earthAnchor;
+        nodeParent.add(mesh);
         clickable.push(mesh);
 
         const halo = new THREE.Mesh(
@@ -809,7 +816,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
           new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
         );
         halo.userData.offset = index * 0.63;
-        earthAnchor.add(halo);
+        nodeParent.add(halo);
         pulseMeshes.push(halo);
 
         const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
@@ -1266,7 +1273,7 @@ export default function WorldMapPage() {
         </header>
 
         <div className="world-map-layout" style={{ display: "grid", gap: 14, flex: 1, minHeight: 450 }}>
-          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #142b50 0%, #081326 38%, #020713 72%, #01030a 100%)" }}>
+          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #315d89 0%, #183a5e 38%, #0c2440 72%, #07172b 100%)" }}>
             <Globe
               nodes={nodes}
               accent={colors.accentInk}

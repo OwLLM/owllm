@@ -49,6 +49,11 @@ use tauri::{
 /// bare white "window colour" a fresh webview shows (user spec 2026-07-05).
 const OWLLM_BG: Color = Color(14, 17, 23, 255);
 
+/// Local new-tab document. A data URL keeps the page self-contained and works
+/// in WebView2, WKWebView and WebKitGTK without inventing a network hostname.
+const BROWSER_HOME_TEMPLATE: &str = include_str!("../browser-home.html");
+const BROWSER_HOME_PREFIX: &str = "data:text/html;base64,";
+
 /// Label of the framed browser container on Windows/macOS. Linux labels each
 /// top-level tab with `tab_label(id)` instead.
 const BROWSER_LABEL: &str = "owllm-browser";
@@ -1243,7 +1248,7 @@ pub(crate) fn browser_tab_url(app: &tauri::AppHandle, tab_id: u64) -> Result<Str
         .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
     webview
         .url()
-        .map(|url| url.to_string())
+        .map(|url| public_browser_url(url.as_str()))
         .map_err(|e| format!("could not read browser tab {tab_id} URL: {e}"))
 }
 
@@ -1290,7 +1295,10 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
                     .map(|webview| BrowserTabInfo {
                         id: *id,
                         title: tabs.titles.get(id).cloned().unwrap_or_default(),
-                        url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
+                        url: webview
+                            .url()
+                            .map(|url| public_browser_url(url.as_str()))
+                            .unwrap_or_default(),
                         active: *id == tabs.active,
                     })
             })
@@ -1301,7 +1309,10 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
         .map(|webview| BrowserTabInfo {
             id: 0,
             title: String::new(),
-            url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
+            url: webview
+                .url()
+                .map(|url| public_browser_url(url.as_str()))
+                .unwrap_or_default(),
             active: true,
         })
         .into_iter()
@@ -1397,6 +1408,78 @@ fn read_session(stem: &str) -> BrowserSession {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<BrowserSession>(&raw).ok())
         .unwrap_or_default()
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn is_browser_home_url(url: &str) -> bool {
+    url.starts_with(BROWSER_HOME_PREFIX)
+}
+
+fn public_browser_url(url: &str) -> String {
+    if is_browser_home_url(url) {
+        "about:blank".to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Build the local start page with the five most recently known project URLs.
+/// Closed entries are newest-at-the-end; live tabs follow as a fallback. The
+/// session never contains credentials, page text or query results.
+fn browser_home_url() -> Result<tauri::Url, String> {
+    use base64::Engine as _;
+
+    let session = read_session(&live_session_stem());
+    let mut seen = HashSet::new();
+    let mut recent = Vec::new();
+    for raw in session.closed.iter().rev().chain(session.tabs.iter().rev()) {
+        let Ok(mut url) = raw.parse::<tauri::Url>() else {
+            continue;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            continue;
+        }
+        // Recent shortcuts must not surface OAuth codes, search terms or
+        // other query/fragment data that happened to be present in a tab URL.
+        url.set_query(None);
+        url.set_fragment(None);
+        let safe_url = url.to_string();
+        if !seen.insert(safe_url.clone()) {
+            continue;
+        }
+        let host = url.host_str().unwrap_or("Recent page");
+        let label = host.strip_prefix("www.").unwrap_or(host);
+        let origin = match url.port() {
+            Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+            None => format!("{}://{}", url.scheme(), host),
+        };
+        recent.push(format!(
+            "<a class=\"tile\" href=\"{}\"><span class=\"logo\"><img src=\"{}/favicon.ico\" alt=\"\"></span><span class=\"name\">{}</span><span class=\"host\">{}</span></a>",
+            html_escape(&safe_url),
+            html_escape(&origin),
+            html_escape(label),
+            html_escape(&safe_url),
+        ));
+        if recent.len() == 5 {
+            break;
+        }
+    }
+    if recent.is_empty() {
+        recent.push("<div class=\"empty\">Pages you close will appear here.</div>".to_string());
+    }
+    let html = BROWSER_HOME_TEMPLATE.replace("__OWLLM_RECENT__", &recent.join(""));
+    let encoded = base64::engine::general_purpose::STANDARD.encode(html.as_bytes());
+    format!("{BROWSER_HOME_PREFIX}{encoded}")
+        .parse()
+        .map_err(|error| format!("bad browser home URL: {error}"))
 }
 
 fn write_session(stem: &str, session: &BrowserSession) {
@@ -1762,7 +1845,9 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
         "tabnew" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                if let Err(e) = new_tab(&app, "about:blank", true, false) {
+                let result = browser_home_url()
+                    .and_then(|home| new_tab(&app, home.as_str(), true, false).map(|_| ()));
+                if let Err(e) = result {
                     eprintln!("[browser] new tab failed: {e}");
                 }
             });
@@ -1879,10 +1964,11 @@ fn attach_tab(
         })
         .on_page_load(move |wv, payload| {
             if is_active_tab(id) {
+                let display_url = public_browser_url(payload.url().as_str());
                 queue_browser_ui(
                     &wv.app_handle().clone(),
                     BrowserUiEvent::ChromeUpdate {
-                        url: Some(payload.url().to_string()),
+                        url: Some(display_url),
                         title: None,
                     },
                 );
@@ -2106,7 +2192,7 @@ fn activate_tab(app: &tauri::AppHandle, id: u64) {
     let url = app
         .get_webview(&tab_label(id))
         .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
+        .map(|url| public_browser_url(url.as_str()))
         .unwrap_or_default();
     let title = TABS
         .lock()
@@ -2244,7 +2330,7 @@ fn push_tabs(app: &tauri::AppHandle) {
                     "url": app
                         .get_webview(&tab_label(*id))
                         .and_then(|wv| wv.url().ok())
-                        .map(|url| url.to_string())
+                        .map(|url| public_browser_url(url.as_str()))
                         .unwrap_or_default(),
                     "active": *id == tabs.active,
                 })
@@ -2662,21 +2748,12 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         if browser_is_suspended() {
-            if active_tab_id().is_some_and(is_private_tab) {
-                let blank = "about:blank"
-                    .parse()
-                    .map_err(|e| format!("bad start url: {e}"))?;
-                resume_normal_browser(app, blank)?;
-            } else {
-                resume_browser(app, None)?;
-            }
+            resume_normal_browser(app, browser_home_url()?)?;
             return Ok("browser started".to_string());
         }
         return Ok("browser already running".to_string());
     }
-    let start_url = "about:blank"
-        .parse()
-        .map_err(|e| format!("bad start url: {e}"))?;
+    let start_url = browser_home_url()?;
     build_window(app, start_url, false)?;
     BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())

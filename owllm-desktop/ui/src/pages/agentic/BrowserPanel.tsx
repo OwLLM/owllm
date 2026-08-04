@@ -92,6 +92,28 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     } catch (e) { setErr(String(e)); }
   };
 
+  // The chrome bar's own controls, mirrored here so every platform has them.
+  // The Linux browser window carries no chrome bar — WebKitGTK cannot host the
+  // stacked webviews it is built from — so this panel is its only tab strip.
+  const newBrowserTab = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_new_tab"); await invoke("browser_focus"); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+  const reopenBrowserTab = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_reopen_closed"); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+  const pageCmd = async (action: "back" | "reload") => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_cmd", { action, params: {} }); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+
   const showWindow = async () => { try { await invoke("browser_start"); await invoke("browser_focus"); await refreshStatus(); } catch (e) { setErr(String(e)); } };
   const setDevice = async (device: string) => {
     if (busy) return;
@@ -235,8 +257,8 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
-            {!!browserTabs.length && (
-              <div style={{ display: "flex", gap: 4, marginBottom: 8, overflowX: "auto" }}>
+            {(!!browserTabs.length || !!status?.running) && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8, overflowX: "auto" }}>
                 {browserTabs.map((browserTab) => (
                   <div key={browserTab.id} style={{ display: "flex", alignItems: "center", minWidth: 0, border: "1px solid " + (browserTab.active ? "rgba(var(--accent-rgb),0.45)" : "var(--border)"), borderRadius: 7, background: browserTab.active ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-surface)" }}>
                     <button onClick={() => void selectBrowserTab(browserTab.id)} title={browserTab.url} style={{ maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: 0, background: "transparent", color: browserTab.active ? "var(--accent-ink)" : "var(--fg-muted)", cursor: "pointer", fontSize: 10.5, padding: "4px 7px" }}>
@@ -245,9 +267,19 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                     {browserTabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
                   </div>
                 ))}
+                <button className="ghost-btn" disabled={busy} onClick={() => void newBrowserTab()}
+                  title="New tab — opens the OwLLM start page"
+                  style={{ height: 24, minWidth: 24, padding: "0 6px", fontSize: 13, lineHeight: 1 }}>＋</button>
+                <button className="ghost-btn" disabled={busy} onClick={() => void reopenBrowserTab()}
+                  title="Reopen the page you closed last"
+                  style={{ height: 24, minWidth: 24, padding: "0 6px", fontSize: 12, lineHeight: 1 }}>↺</button>
               </div>
             )}
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <button className="ghost-btn" disabled={busy || !status?.running} onClick={() => void pageCmd("back")}
+                title="Back" style={{ height: 26, width: 26, padding: 0, fontSize: 12 }}>←</button>
+              <button className="ghost-btn" disabled={busy || !status?.running} onClick={() => void pageCmd("reload")}
+                title="Reload this page" style={{ height: 26, width: 26, padding: 0, fontSize: 12 }}>⟳</button>
               <input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void navigate(); }}
                 placeholder="open a URL (e.g. github.com) — agents inherit this session" style={field} />
               <button className="btn" disabled={busy} onClick={() => void navigate()} style={{ fontSize: 11, padding: "3px 10px" }}>Go</button>

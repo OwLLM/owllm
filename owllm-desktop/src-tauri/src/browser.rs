@@ -2969,6 +2969,26 @@ pub fn browser_open_tab(
     )
 }
 
+/// Open a new tab on the OwLLM start page — the chrome bar's "+" as a command
+/// so BrowserPanel can offer it too. Linux has no chrome bar at all (WebKitGTK
+/// cannot host the stacked webviews it is built from — see build_window), so on
+/// that platform this command is the only "+" there is.
+#[tauri::command(async)]
+pub fn browser_new_tab(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    let home = browser_home_url(&app)?;
+    let id = if get_window(&app).is_none() {
+        build_window(&app, home, false)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        active_tab_id().unwrap_or(0)
+    } else if browser_is_suspended() {
+        resume_normal_browser(&app, home)?
+    } else {
+        new_tab(&app, home.as_str(), true, false)?
+    };
+    Ok(json!({ "tab_id": id }).to_string())
+}
+
 /// Reopen the page that was closed last — the ↺ button and Ctrl+Shift+T.
 #[tauri::command(async)]
 pub fn browser_reopen_closed(app: tauri::AppHandle) -> Result<String, String> {

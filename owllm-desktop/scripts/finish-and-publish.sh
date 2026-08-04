@@ -70,10 +70,15 @@ else
 fi
 cd "$REPO"
 
+to_posix_path() {
+  cygpath -u "$1" 2>/dev/null || wslpath -u "$1" 2>/dev/null || printf '%s' "$1"
+}
+
 # One app process already has a backend lease, but separate OwLLM windows (or a
 # direct script invocation) are separate processes. Use the repository's common
 # Git directory so every worktree and every app instance shares one atomic lock.
-GIT_COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+GIT_COMMON_RAW="$(git rev-parse --git-common-dir)"
+GIT_COMMON="$(cd "$(to_posix_path "$GIT_COMMON_RAW")" && pwd)"
 PUBLISH_LOCK="$GIT_COMMON/owllm-publish.lock"
 PUBLISH_LOCK_OWNER="$PUBLISH_LOCK/owner"
 claim_publish_lock() {

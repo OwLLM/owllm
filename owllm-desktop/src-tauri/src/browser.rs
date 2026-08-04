@@ -1788,7 +1788,11 @@ fn parse_chrome_event(title: &str) -> Option<(String, String)> {
     if tag != "EVT" {
         return None;
     }
-    let (action, b64) = rest.split_once('\u{2063}')?;
+    let (wire_action, b64) = rest.split_once('\u{2063}')?;
+    // The chrome page appends a nonce so repeated identical clicks are not
+    // coalesced by the WebView title-change implementation. It is transport
+    // metadata, never part of the native action name.
+    let action = wire_action.split_once('#').map_or(wire_action, |(name, _)| name);
     Some((action.to_string(), decode_b64(b64)))
 }
 
@@ -4285,7 +4289,7 @@ mod tests {
     fn chrome_events_parse() {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode("github.com");
-        let t = format!("{SENTINEL}EVT\u{2063}nav\u{2063}{b64}");
+        let t = format!("{SENTINEL}EVT\u{2063}nav#17\u{2063}{b64}");
         assert_eq!(
             parse_chrome_event(&t),
             Some(("nav".to_string(), "github.com".to_string()))

@@ -31,18 +31,18 @@ if (!source.includes("owllm-browser-ui-dispatch") || !source.includes("fn queue_
   fail("the cross-platform browser UI dispatcher is missing");
 }
 
-const chromeTitle = bodies(framed, "on_document_title_changed");
+const chromeNavigation = bodies(framed, "on_navigation");
 const chromeLoad = bodies(framed, "on_page_load");
 const tabTitle = bodies(attach, "on_document_title_changed");
 const tabLoad = bodies(attach, "on_page_load");
 const windowCallbacks = [...framed.matchAll(/\.on_window_event\(move \|[^|]*\|\s*\{([\s\S]*?)\n\s*\}\);/g)].map((m) => m[1]);
-if (chromeTitle.length !== 1 || chromeLoad.length !== 1 || tabTitle.length !== 1 ||
+if (chromeNavigation.length !== 1 || chromeLoad.length !== 1 || tabTitle.length !== 1 ||
     tabLoad.length !== 1 || windowCallbacks.length !== 1) {
-  fail(`unexpected callback shape: chrome title=${chromeTitle.length}, chrome load=${chromeLoad.length}, ` +
+  fail(`unexpected callback shape: chrome navigation=${chromeNavigation.length}, chrome load=${chromeLoad.length}, ` +
        `tab title=${tabTitle.length}, tab load=${tabLoad.length}, window=${windowCallbacks.length}`);
 }
 
-const callbacks = [...chromeTitle, ...chromeLoad, ...tabTitle, ...tabLoad, ...windowCallbacks];
+const callbacks = [...chromeNavigation, ...chromeLoad, ...tabTitle, ...tabLoad, ...windowCallbacks];
 // on_tab_title/push_tabs eval into the chrome webview and store_typed_login
 // does vault I/O — all must be reached only via the dispatcher, never called
 // from inside a native callback.

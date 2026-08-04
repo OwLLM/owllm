@@ -38,6 +38,9 @@ check("recent shortcuts strip query strings and fragments", browserRs.includes("
 check("only http(s) session entries can become recent shortcuts", browserRs.includes('matches!(url.scheme(), "http" | "https")'));
 check("fresh browser starts on the home page", /let start_url = browser_home_url\(\)\?;[\s\S]{0,100}build_window/.test(browserRs));
 check("plus button opens the home page", /"tabnew"[\s\S]{0,250}browser_home_url\(\)/.test(browserRs));
+check("plus click crosses the reliable intercepted-navigation channel", home.length > 0
+  && /new URL\("\/__owllm_browser_event__"/.test(fs.readFileSync(path.join(root, "ui/public/browser-chrome.html"), "utf8"))
+  && /\.on_navigation\(move \|url\|[\s\S]{0,500}BrowserUiEvent::ChromeAction/.test(browserRs));
 check("suspended Linux browser resumes on the home page", /browser_is_suspended\(\)[\s\S]{0,120}resume_normal_browser\(app, browser_home_url\(\)\?\)/.test(browserRs));
 check("internal data URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
 check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1000}public_browser_url/.test(browserRs) && /fn persist_session[\s\S]{0,1400}tab\.url != "about:blank"/.test(browserRs));

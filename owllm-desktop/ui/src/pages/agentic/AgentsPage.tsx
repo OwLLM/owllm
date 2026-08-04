@@ -6,6 +6,7 @@
 // templates + role definitions from agents.rs, bridge config from
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
@@ -37,7 +38,8 @@ import IconPickerDialog, {
   setAgentIconOverride,
   loadOverridesForProject,
 } from "./IconPickerDialog";
-import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite } from "./ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import {
   OpenAILogo, AnthropicLogo, GeminiLogo, DeepSeekLogo,
   XaiLogo, MoonshotLogo, MistralLogo,
@@ -2586,8 +2588,8 @@ function AgentChatTile({
                 onChange={onPickModel}
                 models={models}
                 status={accountsStatus}
-                fallbackLabel={modelLabel || "(pick a model)"}
-                compactTitle={`Model: ${modelTitle || modelLabel || "pick a model"}`}
+                fallbackLabel={modelLabel || SELECT_MODEL_LABEL}
+                compactTitle={`Model: ${modelTitle || modelLabel || SELECT_MODEL_LABEL}`}
                 compactTrigger={
                   <span
                     aria-hidden="true"
@@ -8488,6 +8490,10 @@ export function AgentsPage({
   };
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // Rule-based popup for a send with no model picked anywhere. Dispatch no
+  // longer auto-picks the first servable local model, so this is what the
+  // user sees instead of a run on weights they never chose.
+  const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // (The previous `chatSplit` 40/60 layout was removed 2026-05-28 —
   // the per-agent grid is now a CANVAS view mode rather than a side-
@@ -11224,23 +11230,25 @@ export function AgentsPage({
         const id = effectiveModelFor(a);
         if (id && isManagedLocalModel(id)) localCandidates.push(id);
       }
-      // Fallback chain so Send always works when local is needed:
+      // Resolution chain — BOTH steps are the user's own choice:
       //   1. Explicit pick (per-agent / team-default / orchestrator).
-      //   2. Whatever the local server is already serving (lets the
-      //      user re-use a model loaded by Chat / Server tabs).
-      //   3. First servable local/tuned model in the registry — auto-
-      //      pick so a fresh team with no model_id assigned still runs.
+      //   2. Whatever the local server is already serving (the user
+      //      started that on the Chat / Server tabs).
+      // There is deliberately no step 3. Falling back to the first servable
+      // model in the registry silently ran weights nobody picked — the run
+      // stops and the rule-based ModelRequiredDialog says so instead.
       let wantedLocal = localCandidates[0]?.trim() || "";
       if (!wantedLocal && serverState.model_id && isManagedLocalModel(serverState.model_id)) {
         wantedLocal = serverState.model_id;
       }
       if (!wantedLocal) {
-        const fallback = models.find(m =>
-          requiresManagedLocalServer(m.model_id, m.provider) && m.port != null);
-        if (fallback) wantedLocal = fallback.model_id;
-      }
-      if (!wantedLocal) {
-        setRunError("This team uses local model(s) but none are installed. Open the Models tab and add a local or tuned model first.");
+        setModelRequired({
+          where: "the team / agent Model picker",
+          detail: models.some(m => requiresManagedLocalServer(m.model_id, m.provider) && m.port != null)
+            ? "This team runs on a local model, but none is assigned."
+            : "This team runs on a local model and none is installed — add one on the Models tab.",
+        });
+        setRunError("No model selected — pick one for the team or the agent before sending.");
         dispatchInFlightRef.current = false;
         releaseRunAbort();
         return;
@@ -14079,6 +14087,12 @@ export function AgentsPage({
       })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
       <BrowserPanel open={browserPanelOpen} onClose={() => setBrowserPanelOpen(false)} />
+      <ModelRequiredDialog
+        open={modelRequired !== null}
+        where={modelRequired?.where || "the team / agent Model picker"}
+        detail={modelRequired?.detail}
+        onClose={() => setModelRequired(null)}
+      />
       <RunNotebook
         projectId={selectedProjectId}
         projectName={activeTeam?.display}
@@ -14327,6 +14341,12 @@ export default function AgentsPages() {
   // Busy dot per tab — reported up by each instance (dispatch running).
   const [busyById, setBusyById] = useState<Map<string, boolean>>(new Map());
   const [newPageMenuOpen, setNewPageMenuOpen] = useState(false);
+  // The tab strip scrolls horizontally (overflowX:auto), which per CSS also
+  // makes it clip vertically — an absolutely positioned dropdown inside it is
+  // invisible, so the button looks dead. Portal the menu to <body> and place it
+  // from the trigger's rect, the same way TunedModelCard escapes its card.
+  const newPageBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [newPageMenuPos, setNewPageMenuPos] = useState<{ top: number; left: number } | null>(null);
   // The active tab's project binding — what "another page on this project"
   // would clone. Null while the tab is still on the hub.
   const activeProjectId = (() => {
@@ -14411,18 +14431,23 @@ export default function AgentsPages() {
         })}
         <div data-ui="AgentsNewPageMenu" style={{ position: "relative", flexShrink: 0 }}>
           <button
-            onClick={() => setNewPageMenuOpen((v) => !v)}
+            ref={newPageBtnRef}
+            onClick={() => {
+              const r = newPageBtnRef.current?.getBoundingClientRect();
+              if (r) setNewPageMenuPos({ top: r.bottom + 4, left: r.left });
+              setNewPageMenuOpen((v) => !v);
+            }}
             title="Open another Agents page — on this project, or start a new one"
             style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
           >＋ New page ▾</button>
-          {newPageMenuOpen && (
+          {newPageMenuOpen && newPageMenuPos && createPortal(
             <>
               <div
                 onClick={() => setNewPageMenuOpen(false)}
-                style={{ position: "fixed", inset: 0, zIndex: 40 }}
+                style={{ position: "fixed", inset: 0, zIndex: 9998 }}
               />
               <div style={{
-                position: "absolute", top: 30, left: 4, zIndex: 41, minWidth: 250,
+                position: "fixed", top: newPageMenuPos.top, left: newPageMenuPos.left, zIndex: 9999, minWidth: 250,
                 display: "flex", flexDirection: "column", gap: 2, padding: 5,
                 borderRadius: 9, border: "1px solid var(--border-strong)",
                 background: "var(--bg-card)", boxShadow: "0 14px 40px rgba(0,0,0,.35)",
@@ -14457,7 +14482,8 @@ export default function AgentsPages() {
                   </small>
                 </button>
               </div>
-            </>
+            </>,
+            document.body
           )}
         </div>
       </div>

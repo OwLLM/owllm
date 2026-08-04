@@ -14,7 +14,8 @@ import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import Composer from "../../components/Composer";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import PublishCards from "./PublishCards";
-import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type AccountsStatusLite } from "./ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -99,7 +100,9 @@ const CODING_SYSTEM = (ws: string) =>
   `You are OWLLM's coding agent, working directly inside the user's project at:\n${ws}\n\n` +
   `You have real tools: read_file, grep, glob, list_dir, edit_file, write_file_with_diff, ` +
   `create_dir and shell. Use them — do NOT ask the user to paste files or run commands you can run yourself. ` +
-  `Read and search before you edit. Make the smallest correct change that satisfies the request, keep the ` +
+  `GitHub project actions are first-class tools: github_status, github_repo_url, github_create_repo, ` +
+  `github_clone_project, and github_list_repositories. Use those for repository/account actions; use shell ` +
+  `for ordinary git commands. Read and search before you edit. Make the smallest correct change that satisfies the request, keep the ` +
   `surrounding code's style, and after editing briefly state what you changed and why. Paths may be given ` +
   `relative to the workspace.`;
 
@@ -118,6 +121,9 @@ const sidForPage = (pageId: string) => `code:ws:${pageId}`;
 type CodeState = {
   messages: Msg[];
   tasks: Task[];
+  /// Goal that produced the transient Plan & Build board. Kept so a stopped
+  /// plan can resume without asking the model to invent the goal again.
+  planGoal?: string;
   workspace: string;       // where edits happen — the worktree path when isolated
   modelId: string;
   draft: string;
@@ -634,6 +640,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  // Set to the picker the user must visit when a send is blocked for having no
+  // model. Rule-based popup — no auto-pick happens behind it.
+  const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const secondaryAbortRef = useRef<AbortController | null>(null);
 
@@ -1110,6 +1119,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
     setField("messages", (prev) => stampOwner(typeof v === "function" ? v(prev) : v, "primary"));
   const setTasks = (v: Task[] | ((t: Task[]) => Task[])) => setField("tasks", v);
+  const setPlanGoal = (v: string | undefined) => setField("planGoal", v);
   const setWorkspace = (v: string) => setField("workspace", v);
   const setModelId = (v: string | ((s: string) => string)) => setField("modelId", v);
   const setDraft = (v: string | ((s: string) => string)) => setField("draft", v);
@@ -1158,7 +1168,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         .then((all) => {
           if (dead) return;
           setAvailableModels(all);
-          setModelId((cur) => cur || all.find((m) => m.provider === "local" || m.provider === "tuned")?.model_id || "");
+          // NO auto-pick. A page with nothing saved keeps modelId empty so the
+          // picker reads "Select model"; Send raises ModelRequiredDialog. The
+          // old `cur || first local/tuned` made a fresh page look configured
+          // while running weights the user never chose.
         })
         .catch((e) => setStatus(`Couldn't load models: ${e}`));
       invoke<AccountsStatusLite>("accounts_status")
@@ -2254,7 +2267,18 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { blockSend("No model selected — pick one in the Coder header."); return; }
+    if (!modelId) {
+      setModelRequired({ where: "the Coder header" });
+      blockSend("No model selected — pick one in the Coder header.");
+      return;
+    }
+    // This Kanban is the execution state of one Plan & Build run, not a durable
+    // backlog. A new manual Auto/Chat turn supersedes it. Programmatic Notebook
+    // turns leave it alone because that queue owns separate persistent state.
+    if (fromComposer && agentMode !== "plan") {
+      setTasks([]);
+      setPlanGoal(undefined);
+    }
     if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -2426,7 +2450,11 @@ function CodeWorkspace({ pageId, onTitle }: {
       return;
     }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
+    if (!secondaryModelEffective) {
+      setModelRequired({ where: "the second-agent pane", detail: "The second agent falls back to the 1st agent's model — neither is set." });
+      setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
+      return;
+    }
     if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
@@ -2645,7 +2673,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     const attachments = chatAttachments;
     const images = imageAttachments(attachments);
     if ((!text && attachments.length === 0) || chatBusy) return;
-    if (!modelId) { setStatus("Pick a model in the Coder header first."); return; }
+    if (!modelId) {
+      setModelRequired({ where: "the Coder header", detail: "Chat mode uses the same model as the coder." });
+      setStatus("Pick a model in the Coder header first.");
+      return;
+    }
     setChatDraft("");
     setChatAttachments([]);
     setChatBusy(true);
@@ -2718,16 +2750,43 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
+  const executePlanCards = async (goal: string, plan: Task[], ctrl: AbortController) => {
+    for (let i = 0; i < plan.length; i++) {
+      if (plan[i].status === "done" || plan[i].status === "failed") continue;
+      if (ctrl.signal.aborted) break;
+      setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "running" } : t)));
+      setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
+      setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
+      try {
+        const stepReply = await runTurn(
+          CODING_SYSTEM(workspace),
+          `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
+          [], ctrl.signal, { withEvents: true },
+        );
+        await logCodeWork("code", plan[i].title, stepReply);
+        setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "done" } : t)));
+      } catch (e) {
+        const err = e as { name?: string };
+        if (err.name === "AbortError") break;
+        setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "failed" } : t)));
+        setMessages((m) => [...m, { role: "assistant", content: `⚠ Step ${i + 1} failed: ${e}`, ts: Date.now() }]);
+        break;
+      }
+    }
+    setStatus(ctrl.signal.aborted ? "Plan paused." : "Plan complete.");
+  };
+
   // Phase 3: plan the goal into task cards, then execute each step in turn,
   // moving its card pending → running → done/failed on the Kanban board.
   const planAndExecute = async () => {
     const goal = draft.trim();
     if (!goal || busy) return;
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
     setDraft("");
     setBusy(true);
     setTasks([]);
+    setPlanGoal(goal);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
@@ -2754,28 +2813,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       const plan: Task[] = steps.map((title, i) => ({ id: i, title, status: "pending" }));
       setTasks(plan);
       // 2) ACT — run each step through the coding agent in sequence.
-      for (let i = 0; i < plan.length; i++) {
-        if (ctrl.signal.aborted) break;
-        setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "running" } : t)));
-        setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
-        setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
-        try {
-          const stepReply = await runTurn(
-            CODING_SYSTEM(workspace),
-            `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
-            [], ctrl.signal, { withEvents: true },
-          );
-          await logCodeWork("code", plan[i].title, stepReply);
-          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
-        } catch (e) {
-          const err = e as { name?: string };
-          if (err.name === "AbortError") break;
-          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "failed" } : t)));
-          setMessages((m) => [...m, { role: "assistant", content: `⚠ Step ${i + 1} failed: ${e}`, ts: Date.now() }]);
-          break;
-        }
-      }
-      setStatus("Plan complete.");
+      await executePlanCards(goal, plan, ctrl);
     } catch (e) {
       const err = e as { name?: string; message?: string };
       if (err.name !== "AbortError") setMessages((m) => [...m, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
@@ -2792,12 +2830,40 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
+  const resumePlan = async () => {
+    if (busy || tasks.every((t) => t.status === "done" || t.status === "failed")) return;
+    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
+    const marker = "📋 Plan & build: ";
+    const savedGoal = [...messages].reverse().find((m) => m.role === "user" && m.content.startsWith(marker));
+    const goal = (stx.planGoal || savedGoal?.content.slice(marker.length) || "").trim();
+    if (!goal) { setStatus("This older saved plan has no recoverable goal. Clear it and create a new plan."); return; }
+    const resumable = tasks.map((t) => t.status === "running" ? { ...t, status: "pending" as const } : t);
+    setTasks(resumable);
+    setPlanGoal(goal);
+    setBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setRunPhase("resuming plan");
+    try {
+      await executePlanCards(goal, resumable, ctrl);
+    } finally {
+      setRunPhase(null);
+      setLlamaLoading(null);
+      setBusy(false);
+      abortRef.current = null;
+    }
+  };
+
   // Stop = abort the JS side AND kill any spawned CLI child — the abort alone
   // never reached a claude/codex/kimi/gemini process, which kept running to
   // completion while the button looked dead.
   const stop = () => {
     abortRef.current?.abort();
     void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    // A stopped card did not finish. Return it to To do so the persisted board
+    // is honest and the rule-based Resume action can pick it up.
+    setTasks((ts) => ts.map((t) => t.status === "running" ? { ...t, status: "pending" } : t));
     setRunPhase(null);
     setLlamaLoading(null);
     setBusy(false);
@@ -2809,7 +2875,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       // Clear = RUN STATE only (tasks, streaming drafts, run timestamps).
       // BOTH chat transcripts — primary and the second-agent pane — survive;
       // wiping conversations is "Clear history"'s explicitly-confirmed job.
-      return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+      return { ...cur, tasks: [], planGoal: undefined, draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
   // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
@@ -2950,7 +3016,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             </span>
             <div style={{ flex: 1 }} />
             <div style={{ width: 240, maxWidth: "40%" }}>
-              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel={SELECT_MODEL_LABEL} />
             </div>
             {/* 🧠 This conversation's own memory — the SAME viewer and the same
                 team_memory store the projects use, scoped to this thread. */}
@@ -3354,7 +3420,7 @@ function CodeWorkspace({ pageId, onTitle }: {
 
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Model</label>
-                    <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+                    <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel={SELECT_MODEL_LABEL} />
                   </div>
 
                   <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.6, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
@@ -3541,6 +3607,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
+        {!busy && tasks.some((t) => t.status === "pending" || t.status === "running") && (
+          <button onClick={() => { void resumePlan(); }} title="Continue the remaining cards in this Plan & Build run" style={btn}>▶ Resume plan</button>
+        )}
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
         {/* Clear history is now PER AGENT — each pane's own button lives in that
             pane's header (below), with an independent ↩ Undo. */}
@@ -3636,7 +3705,11 @@ function CodeWorkspace({ pageId, onTitle }: {
                   onFixIssues={(task) => {
                     if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
                     if (!workspace) return "no-workspace";
-                    if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
+                    if (!modelId) {
+                      setModelRequired({ where: "the Coder header", detail: "The release fix was not queued." });
+                      setStatus("No model selected — pick one in the Coder header.");
+                      return "no-model";
+                    }
                     void sendRef.current?.(task);
                     return "sent";
                   }}
@@ -3918,7 +3991,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         minHeight={CODE_COMPOSER_MIN_HEIGHT}
         maxHeight={CODE_COMPOSER_MAX_HEIGHT}
         status={status}
-        modelPicker={renderCodeModelPicker("primary", modelId, setModelId, busy, "(pick a model)")}
+        modelPicker={renderCodeModelPicker("primary", modelId, setModelId, busy, SELECT_MODEL_LABEL)}
         headerExtra={renderTerminalButton("primary")}
         attachments={codeAttachments}
         onAttachFiles={addCodeFiles}
@@ -4041,6 +4114,16 @@ function CodeWorkspace({ pageId, onTitle }: {
           (a real OwLLM WebviewWindow) the agents drive with the browser_* tools.
           Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
+
+      {/* 🧠 No model selected — every send path on this page routes its
+          blocked-for-no-model case here instead of only writing a status line
+          the user never looks at. */}
+      <ModelRequiredDialog
+        open={modelRequired !== null}
+        where={modelRequired?.where || "the Coder header"}
+        detail={modelRequired?.detail}
+        onClose={() => setModelRequired(null)}
+      />
 
       {/* 🧠 Project Memory — the SAME shared surface the Agents page opens,
           scoped by the SAME id both code agents use for memory (memoryScope():

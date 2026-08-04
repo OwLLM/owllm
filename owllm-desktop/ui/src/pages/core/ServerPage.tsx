@@ -22,7 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { bumpActivity } from "../../support/activityStats";
 import { LogBox } from "../../components/LogBox";
 import { listen } from "@tauri-apps/api/event";
-import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
 import {
   getServerCtx, setServerCtx, getServerModel, setServerModel,
@@ -853,7 +853,7 @@ function LLMServerColumn({
         models={models}
         status={null}
         localOnly
-        fallbackLabel={models.length === 0 ? "(No READY models - run onboarding first)" : "(pick a model)"}
+        fallbackLabel={models.length === 0 ? "(No READY models - run onboarding first)" : SELECT_MODEL_LABEL}
       />
 
       <div style={{
@@ -1442,7 +1442,10 @@ export default function ServerPage() {
       if (st.running && st.model_id) {
         if (modelId !== st.model_id) setModelId(st.model_id);
       } else if (!servable.some(m => m.model_id === modelId)) {
-        setModelId(servable[0]?.model_id ?? "");
+        // The saved pick is gone — clear it, but do NOT substitute the first
+        // servable model. Start is disabled while modelId is empty, so the
+        // picker just reads "Select model" until the user chooses.
+        setModelId("");
       }
     } catch (e) {
       setError(String(e));

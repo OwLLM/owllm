@@ -69,6 +69,12 @@ export type ModelPickerEntry = {
   available: boolean;
 };
 
+/// What EVERY picker shows when nothing is selected. Surfaces must not
+/// auto-pick a model on the user's behalf (that silently ran — and on a
+/// cloud route billed — weights the user never chose); they leave the
+/// value empty and Send raises ModelRequiredDialog instead.
+export const SELECT_MODEL_LABEL = "Select model";
+
 const SECTION_META: Record<Section, { label: string; color: string }> = {
   local:      { label: "LOCAL",         color: "#7fdfff" },
   tuned:      { label: "TUNED (LOCAL)", color: "#ffd166" },
@@ -420,7 +426,7 @@ export default function ModelPicker({
 
   const triggerLabel = value
     ? displayForId(value, entries)
-    : (fallbackLabel || placeholder || "(pick a model)");
+    : (fallbackLabel || placeholder || SELECT_MODEL_LABEL);
 
   const togglePopover = () => {
     if (!open) {

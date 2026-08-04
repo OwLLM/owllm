@@ -1247,6 +1247,42 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
+    name: "github_status",
+    aliases: ["github_account_status", "check_github"],
+    description: "Check whether the user's GitHub account is connected. Returns the login when connected.",
+    args: [],
+  },
+  {
+    name: "github_list_repositories",
+    aliases: ["github_repositories", "list_github_repositories", "list_github_repos"],
+    description: "List the repositories visible to the connected GitHub account.",
+    args: [],
+  },
+  {
+    name: "github_repo_url",
+    aliases: ["github_origin", "github_remote", "repo_url"],
+    description: "Read the GitHub origin URL for the current project. Returns an empty result when no GitHub origin is configured.",
+    args: [],
+  },
+  {
+    name: "github_create_repo",
+    aliases: ["create_github_repo", "create_github_repository"],
+    description: "Create or reuse a GitHub repository for the current project, wire it as origin, and push its current branch when it has a commit. Uses the connected account; never exposes credentials.",
+    args: [
+      { name: "name", required: false, description: "Repository name. Omit to derive it from the project folder.", aliases: ["repo", "repository", "repo_name"] },
+      { name: "private", required: false, description: "'true' or 'false'. Defaults to private.", aliases: ["is_private"] },
+    ],
+  },
+  {
+    name: "github_clone_project",
+    aliases: ["clone_github_project", "clone_github_repo", "github_clone_repo"],
+    description: "Clone a GitHub repository into a new local folder on this computer and return the created path.",
+    args: [
+      { name: "repo_url", required: true, description: "HTTPS or SSH GitHub repository URL.", aliases: ["url", "repository_url", "repo"] },
+      { name: "parent", required: true, description: "Existing local parent folder for the clone.", aliases: ["parent_dir", "directory", "folder"] },
+    ],
+  },
+  {
     name: "create_dir",
     aliases: ["mkdir", "makedir", "make_directory", "create_directory", "new_dir"],
     description: "Create a directory (and any missing parent dirs).",
@@ -2068,6 +2104,39 @@ async function executeToolCallInner(
           draft: /^(true|1|yes)$/i.test(String(call.args.draft ?? "")),
         });
         return { ok: true, output: truncate(log, 6000) };
+      }
+      case "github_status": {
+        const status = await invoke<{ connected: boolean; login: string | null }>("github_status");
+        return { ok: true, output: JSON.stringify(status) };
+      }
+      case "github_list_repositories": {
+        const repositories = await invoke<unknown[]>("github_list_repositories");
+        return { ok: true, output: JSON.stringify(repositories) };
+      }
+      case "github_repo_url": {
+        if (!cwd) return { ok: false, output: "github_repo_url: no project folder is open" };
+        const url = await invoke<string>("github_repo_url", { cwd });
+        return { ok: true, output: url || "No GitHub origin is configured for this project." };
+      }
+      case "github_create_repo": {
+        if (!cwd) return { ok: false, output: "github_create_repo: no project folder is open" };
+        const rawPrivate = call.args.private;
+        const privateValue = rawPrivate == null || rawPrivate === ""
+          ? null
+          : /^(true|1|yes)$/i.test(String(rawPrivate));
+        const result = await invoke<string>("github_create_repo", {
+          cwd,
+          name: call.args.name?.trim() || null,
+          private: privateValue,
+        });
+        return { ok: true, output: truncate(result, 6000) };
+      }
+      case "github_clone_project": {
+        const repoUrl = String(call.args.repo_url ?? "").trim();
+        const parent = String(call.args.parent ?? "").trim();
+        if (!repoUrl || !parent) return { ok: false, output: "github_clone_project: 'repo_url' and 'parent' are required" };
+        const location = await invoke<string>("github_clone_project", { repoUrl, parent });
+        return { ok: true, output: `Cloned ${repoUrl} to ${location}` };
       }
       case "ssh_exec":
       case "ssh": {

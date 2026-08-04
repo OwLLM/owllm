@@ -43,6 +43,17 @@ check("The sentinel is not treated as a recoverable conversation",
   agents.includes("if (!binding || binding === AGENTS_PAGE_NEW_PROJECT) continue"));
 check("Clicking outside dismisses the menu",
   agents.includes("onClick={() => setNewPageMenuOpen(false)}"));
+// The tab strip is overflowX:auto, which per CSS also clips vertically. An
+// absolutely positioned menu inside it was invisible, so the button read as
+// dead. The menu must be portalled out of that scroll container.
+check("The menu is portalled to <body> so the scrolling tab strip cannot clip it",
+  agents.includes("newPageMenuOpen && newPageMenuPos && createPortal(") &&
+  /<\/>,\s*document\.body\s*\)\}/.test(agents) &&
+  agents.includes('import { createPortal } from "react-dom"'));
+check("The portalled menu is placed from the trigger's live rect",
+  agents.includes("newPageBtnRef.current?.getBoundingClientRect()") &&
+  agents.includes("setNewPageMenuPos({ top: r.bottom + 4, left: r.left })") &&
+  agents.includes("position: \"fixed\", top: newPageMenuPos.top, left: newPageMenuPos.left"));
 
 // ---- Personal-agents Skills tab -------------------------------------------
 check("The Skills tab shows the installed skill library, not just personal skills",

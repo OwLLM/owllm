@@ -28,7 +28,8 @@ import { invoke } from "@tauri-apps/api/core";
 import Composer from "../../components/Composer";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import { localInferenceFallback, resolveInferenceBase } from "../agentic/inferenceEndpoint";
-import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import { getServerCtx } from "../core/serverContext";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
@@ -294,6 +295,8 @@ export default function ChatPage() {
   const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  // Rule-based popup raised by Send when no column picked a model.
+  const [modelRequired, setModelRequired] = useState(false);
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
   // Dedicated scratch dir for the chat playground's tools, so writes /
@@ -679,9 +682,10 @@ export default function ChatPage() {
     //   3. Whatever the local server is already running (so a fresh
     //      column still works if the server is up from another column
     //      or the Server tab).
-    //   4. First servable local/tuned model in the registry — auto-
-    //      pick so the user can just hit Send on a fresh column
-    //      without manually picking from the dropdown.
+    // There is deliberately NO step 4. Falling back to the first servable
+    // model in the registry made a fresh column look configured while
+    // answering from weights the user never chose; sendAll() blocks with
+    // ModelRequiredDialog instead.
     const driver = columns[0];
     const isServableProvider = (p: string | undefined) =>
       p === "local" || p === "tuned";
@@ -690,13 +694,10 @@ export default function ChatPage() {
       && isServableProvider(availableModels.find(x => x.model_id === status.model_id)?.provider))
       ? status.model_id
       : "";
-    const fallbackLocalId = availableModels
-      .find(m => isServableProvider(m.provider) && m.port != null)?.model_id ?? "";
     const wantedModelId = (
       col.selectedModel
       || driver?.selectedModel
       || runningLocalId
-      || fallbackLocalId
       || ""
     ).trim();
 
@@ -1382,6 +1383,15 @@ export default function ChatPage() {
     for (const id of ["A", "B", "C"] as const) chatRuntime.setError(SID(id), null);
     const text = draft.trim();
     if (!text && chatAttachments.length === 0) return;
+    // No model anywhere (no column pick, no running server) → nothing can
+    // resolve. Block with the rule-based popup and KEEP the draft, rather
+    // than auto-picking a model the user never chose.
+    const anyPick = columns.slice(0, count).some((c) => c.selectedModel.trim())
+      || !!columns[0]?.selectedModel.trim();
+    if (!anyPick && !(status.running && status.model_id)) {
+      setModelRequired(true);
+      return;
+    }
     setDraft("");
     const attachments = chatAttachments;
     setChatAttachments([]);
@@ -1615,7 +1625,7 @@ export default function ChatPage() {
                     onChange={(id) => updateCol(col.id, { selectedModel: id })}
                     models={availableModels as PickerModelInfo[]}
                     status={accountsStatus}
-                    fallbackLabel="— Select model —"
+                    fallbackLabel={SELECT_MODEL_LABEL}
                   />
                 </div>
 
@@ -1965,6 +1975,12 @@ Tools run in: ${scratchDir}`}
           </div>
         </aside>
       </div>
+      <ModelRequiredDialog
+        open={modelRequired}
+        where="the picker above a column"
+        detail="Your message was kept in the box."
+        onClose={() => setModelRequired(false)}
+      />
     </div>
   );
 }

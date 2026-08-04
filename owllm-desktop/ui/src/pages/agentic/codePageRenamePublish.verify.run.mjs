@@ -125,8 +125,14 @@ anchor("PublishCards.tsx", cards, "Finish release button renders next to Fix wit
   "🚀 Finish release with agent");
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and steers",
   'if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }');
+// Same invariant, wider: the guard now also raises the rule-based
+// ModelRequiredDialog (see modelSelectionNoAutopick.verify.run.mjs) instead of
+// only writing a status line, so the anchor matches its parts rather than the
+// old one-liner.
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",
-  'if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }');
+  'detail: "The release fix was not queued."');
+anchor("CodePage.tsx", codePage, "onFixIssues still reports no-model to the card",
+  'setStatus("No model selected — pick one in the Coder header.");\n                      return "no-model";');
 anchor("CodePage.tsx", codePage, "programmatic sends surface guard failures in the transcript",
   "if (!fromComposer) setMessages((msgs) => [...msgs, { role: \"assistant\", content: `⚠ ${why}");
 

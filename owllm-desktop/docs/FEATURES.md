@@ -43,6 +43,12 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
+- **No surface ever auto-picks a model.** With nothing saved the picker reads
+  **“Select model”** (`SELECT_MODEL_LABEL`) and Send/Generate/Run is blocked by
+  the rule-based `components/ModelRequiredDialog` — so a run can't use (or bill)
+  weights the user never chose. The one non-explicit source still allowed is a
+  local server the user started themselves, shown as “(use server model · …)”.
+  Guarded by `modelSelectionNoAutopick.verify.run.mjs`.
 - **Tool-calling is NATIVE GGUF ONLY**: OpenAI `tools` array → model's own chat
   template → structured `delta.tool_calls`. No XML protocol (see CLAUDE.md).
 

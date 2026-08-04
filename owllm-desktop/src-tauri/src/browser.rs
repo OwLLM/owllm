@@ -64,6 +64,7 @@ const BROWSER_LABEL: &str = "owllm-browser";
 /// compatibility lookup for browser windows created by older builds.
 const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
+const CHROME_EVENT_PATH: &str = "/__owllm_browser_event__";
 
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
 /// a 58px identity strip (30px taller than a plain tab bar) that carries the
@@ -1796,6 +1797,27 @@ fn parse_chrome_event(title: &str) -> Option<(String, String)> {
     Some((action.to_string(), decode_b64(b64)))
 }
 
+/// Parse a browser-chrome control request from its reserved, same-origin URL.
+/// The chrome WebView's navigation handler always cancels this navigation, so
+/// the URL is only a reliable cross-platform event envelope, never a request.
+fn parse_chrome_navigation(url: &tauri::Url) -> Option<(String, String)> {
+    if url.path() != CHROME_EVENT_PATH {
+        return None;
+    }
+    let mut action = None;
+    let mut data = String::new();
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "action" => action = Some(value.into_owned()),
+            "data" => data = decode_b64(&value),
+            _ => {}
+        }
+    }
+    action
+        .filter(|value| !value.is_empty())
+        .map(|value| (value, data))
+}
+
 /// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
 /// by `browser_ui_worker`, never directly by a native WebView callback.
 fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
@@ -2469,17 +2491,21 @@ fn build_framed(
         .map_err(|e| format!("browser window: {e}"))?;
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
-    // buttons/drag/URL box/tab strip report through the same title channel the
-    // page bridge uses; no IPC grant to any webview is needed.
+    // buttons/drag/URL box/tab strip use a reserved same-origin navigation as
+    // an event envelope. We intercept and cancel it before any document load;
+    // no IPC grant to this webview is needed.
+    let chrome_navigation_app = app.clone();
     let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
         .background_color(OWLLM_BG)
-        .on_document_title_changed(|wv, title| {
-            if let Some((action, data)) = parse_chrome_event(&title) {
-                queue_browser_ui(
-                    &wv.app_handle().clone(),
-                    BrowserUiEvent::ChromeAction { action, data },
-                );
-            }
+        .on_navigation(move |url| {
+            let Some((action, data)) = parse_chrome_navigation(url) else {
+                return true;
+            };
+            queue_browser_ui(
+                &chrome_navigation_app,
+                BrowserUiEvent::ChromeAction { action, data },
+            );
+            false
         })
         // The strip renders from Rust pushes — seed it once the bar exists.
         .on_page_load(|wv, _payload| {
@@ -4305,6 +4331,19 @@ mod tests {
         assert_eq!(parse_chrome_event(&reply), None);
         assert_eq!(parse_chrome_event("GitHub — where software is built"), None);
         assert_eq!(parse_reply(&t), None);
+
+        let nav: tauri::Url =
+            "http://tauri.localhost/__owllm_browser_event__?action=tabnew&data=&nonce=1"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            parse_chrome_navigation(&nav),
+            Some(("tabnew".to_string(), String::new()))
+        );
+        let ordinary: tauri::Url = "http://tauri.localhost/browser-chrome.html"
+            .parse()
+            .unwrap();
+        assert_eq!(parse_chrome_navigation(&ordinary), None);
     }
 
     #[test]

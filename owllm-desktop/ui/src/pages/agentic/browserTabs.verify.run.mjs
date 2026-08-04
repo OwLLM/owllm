@@ -161,9 +161,12 @@ check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel",
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");
 check(chromeHtml.includes("var eventSeq = 0") &&
-      chromeHtml.includes('action + "#" + (++eventSeq)') &&
-      browserRs.includes("wire_action.split_once('#')"),
-  "repeated identical chrome actions carry a nonce and are decoded natively");
+      chromeHtml.includes('new URL("/__owllm_browser_event__"') &&
+      chromeHtml.includes('target.searchParams.set("nonce", String(++eventSeq))'),
+  "repeated identical chrome actions use distinct intercepted navigation URLs");
+check(browserRs.includes("fn parse_chrome_navigation") &&
+      /\.on_navigation\(move \|url\|[\s\S]{0,500}BrowserUiEvent::ChromeAction[\s\S]{0,100}false/.test(browserRs),
+  "native chrome intercepts and cancels control-event navigation before loading");
 check(chromeHtml.includes('id="reopen"') && chromeHtml.includes('evt("tabreopen")')
       && /ctrlKey \|\| e\.metaKey[\s\S]*?shiftKey[\s\S]*?tabreopen/.test(chromeHtml),
   "the chrome exposes Reopen closed tab by button and Ctrl/Cmd+Shift+T");

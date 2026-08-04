@@ -15,9 +15,9 @@
      browser.rs CHROME_H must match the sum of both. The bar background follows
      the app header's --bg-header recipe (70% accent over #1c2244 navy —
      theme.ts resolveHeaderHex) so both headers match.
-     Rust link: NO IPC — buttons/drag/URL entry write sentinel-tagged events
-     into document.title (same channel the page bridge uses); Rust's
-     on_document_title_changed on this webview acts on them. Rust pushes page
+     Rust link: NO IPC — buttons/drag/URL entry request a reserved same-origin
+     navigation that Rust intercepts and cancels before any document load.
+     Rust pushes page
      url/title back by eval'ing window.__owllmChromeSet(...) and the live tab
      list via window.__owllmTabsSet(...). -->
 <html>
@@ -172,25 +172,19 @@
       </div>
     </div>
     <script>
-      var Z = String.fromCharCode(8291); // U+2063 invisible separator
-      var SENT = Z + "OWLLM" + Z;
-      var t0 = null;
       var eventSeq = 0;
-      // Event → Rust: park a sentinel in the title, restore a tick later
-      // (identical mechanics to the page bridge's reply channel).
+      // Event → Rust: request a reserved same-origin URL. The native chrome
+      // navigation handler extracts the payload and returns false, so this
+      // document never leaves the toolbar and no network request is made.
+      // A nonce guarantees repeated clicks still request distinct URLs.
       function evt(action, data) {
-        if (t0 === null && document.title.indexOf(SENT) !== 0) t0 = document.title;
         var b64 = "";
         try { b64 = btoa(unescape(encodeURIComponent(String(data == null ? "" : data)))); } catch (e) {}
-        // WebView2/WKWebView/WebKitGTK may coalesce an assignment that is
-        // byte-for-byte identical to the previous title. Include a monotonic
-        // wire nonce so two consecutive clicks on the same control (notably
-        // New tab) always reach Rust as separate native events.
-        document.title = SENT + "EVT" + Z + action + "#" + (++eventSeq) + Z + b64;
-        setTimeout(function () {
-          try { document.title = t0 || "OwLLM Browser Chrome"; } catch (e) {}
-          t0 = null;
-        }, 60);
+        var target = new URL("/__owllm_browser_event__", window.location.href);
+        target.searchParams.set("action", action);
+        target.searchParams.set("data", b64);
+        target.searchParams.set("nonce", String(++eventSeq));
+        window.location.assign(target.href);
       }
       var $ = function (id) { return document.getElementById(id); };
       $("min").addEventListener("click", function () { evt("minimize"); });

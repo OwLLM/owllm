@@ -40,7 +40,17 @@ check("sections retain the requested order", searchAt >= 0 && searchAt < socialA
 check("search engines include Google, DuckDuckGo, Naver, Bing and Brave", ["google.com", "duckduckgo.com", "naver.com", "bing.com", "search.brave.com"].every((site) => home.includes(site)));
 check("social row includes LinkedIn, Facebook, Instagram, X and Reddit", ["linkedin.com", "facebook.com", "instagram.com", "x.com", "reddit.com"].every((site) => home.includes(site)));
 check("messenger row includes WhatsApp, Kakao, LINE, WeChat and Telegram", ["web.whatsapp.com", "accounts.kakao.com", "line.me", "web.wechat.com", "web.telegram.org"].every((site) => home.includes(site)));
-check("shortcut logos are large and use each site's own favicon", home.includes("width: 56px") && (home.match(/favicon/g) || []).length >= 14);
+check("shortcut logos are large", home.includes("width: 56px"));
+// Instagram and WhatsApp refuse hotlinked favicons, so the shortcut logos are
+// bundled instead of fetched: remote logos silently render as broken tiles and
+// would leave the start page blank offline.
+const shortcutLogos = [...home.matchAll(/<img src="([^"]+)"/g)].map((m) => m[1]);
+check("shortcut logos are bundled, never hotlinked", shortcutLogos.length >= 15
+  && shortcutLogos.every((src) => src.startsWith("browser-icons/")));
+check("every bundled shortcut logo exists on disk", shortcutLogos.every((src) => {
+  const file = path.join(root, "ui/public", src);
+  return fs.existsSync(file) && fs.statSync(file).size > 256;
+}));
 check("the start page includes direct web search", home.includes('action="https://www.google.com/search"') && home.includes('name="q"'));
 check("recent pages come from persisted closed and live tab history", /session\.closed\.iter\(\)\.rev\(\)\.chain\(session\.tabs\.iter\(\)\.rev\(\)\)/.test(browserRs));
 check("recent URLs are limited and deduplicated", browserRs.includes("seen.insert(safe_url.clone())") && browserRs.includes("recent.len() == 5"));

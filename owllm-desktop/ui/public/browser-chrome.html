@@ -175,14 +175,22 @@
       var Z = String.fromCharCode(8291); // U+2063 invisible separator
       var SENT = Z + "OWLLM" + Z;
       var t0 = null;
+      var eventSeq = 0;
       // Event → Rust: park a sentinel in the title, restore a tick later
       // (identical mechanics to the page bridge's reply channel).
       function evt(action, data) {
         if (t0 === null && document.title.indexOf(SENT) !== 0) t0 = document.title;
         var b64 = "";
         try { b64 = btoa(unescape(encodeURIComponent(String(data == null ? "" : data)))); } catch (e) {}
-        document.title = SENT + "EVT" + Z + action + Z + b64;
-        setTimeout(function () { try { document.title = t0 || "OwLLM Browser Chrome"; } catch (e) {} }, 60);
+        // WebView2/WKWebView/WebKitGTK may coalesce an assignment that is
+        // byte-for-byte identical to the previous title. Include a monotonic
+        // wire nonce so two consecutive clicks on the same control (notably
+        // New tab) always reach Rust as separate native events.
+        document.title = SENT + "EVT" + Z + action + "#" + (++eventSeq) + Z + b64;
+        setTimeout(function () {
+          try { document.title = t0 || "OwLLM Browser Chrome"; } catch (e) {}
+          t0 = null;
+        }, 60);
       }
       var $ = function (id) { return document.getElementById(id); };
       $("min").addEventListener("click", function () { evt("minimize"); });

@@ -160,6 +160,10 @@ check(/#site\s*\{[^}]*width:\s*\d+px/.test(chromeHtml),
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");
+check(chromeHtml.includes("var eventSeq = 0") &&
+      chromeHtml.includes('action + "#" + (++eventSeq)') &&
+      browserRs.includes("wire_action.split_once('#')"),
+  "repeated identical chrome actions carry a nonce and are decoded natively");
 check(chromeHtml.includes('id="reopen"') && chromeHtml.includes('evt("tabreopen")')
       && /ctrlKey \|\| e\.metaKey[\s\S]*?shiftKey[\s\S]*?tabreopen/.test(chromeHtml),
   "the chrome exposes Reopen closed tab by button and Ctrl/Cmd+Shift+T");

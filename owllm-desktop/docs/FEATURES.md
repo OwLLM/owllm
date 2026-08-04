@@ -208,11 +208,18 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   overlays site content. The bar wears the app header's colour — the same
   `--bg-header` recipe (70% accent over `#1c2244`) resolved live from the
   shared localStorage accent key. Its buttons/drag/URL entry/tab events report
-  over the same title channel tagged `EVT` (`parse_chrome_event`) — no IPC
-  grant to any webview. If the multi-webview build fails on some platform, it
-  falls back to the previous decorated single-webview window (`build_legacy`)
-  so agent browsing never breaks. `browser_set_chrome` still paints the DWM
-  border (and the fallback's caption) in the app accent.
+  over a reserved same-origin navigation (`/__owllm_browser_event__`) that
+  `on_navigation` intercepts and cancels before any load — no IPC grant to any
+  webview. `browser_set_chrome` still paints the DWM border (and the fallback's
+  caption) in the app accent.
+- **Platform shapes**: the framed chrome-bar window above is **Windows and
+  macOS**. **Linux runs `build_legacy`** — one decorated top-level WebView per
+  tab — because WebKitGTK mislays stacked child webviews and SIGBUSes the web
+  process when they resize (seen on Jetson/Tegra), and it does so *without*
+  returning an error, so a runtime fallback never fires. Linux therefore has no
+  chrome bar and no `+` inside the browser window; `BrowserPanel` is its tab
+  strip, and carries the same actions (`＋` new tab → `browser_new_tab`, `↺`
+  reopen, `←` back, `⟳` reload) on every platform.
 - **Tabs (multiple pages at once)**: the chrome bar's tab strip opens any
   number of pages side by side, like a normal browser — `+` for a new tab,
   pills to switch, `✕` to close (closing the last tab closes the window). Each
@@ -248,7 +255,9 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   decryption is Windows-only in this build; macOS/Linux Chromium key stores
   (Keychain / Secret Service) are the next step.
 - **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, Code + Agents pages) —
-  Browse / Passwords / Import tabs.
+  Browse / Passwords / Import tabs. Browse carries the tab strip plus the
+  chrome-bar actions (`＋` new tab, `↺` reopen, `←`, `⟳`), so the browser is
+  fully drivable on Linux, where the window itself has no chrome bar.
 - **Browser agent** (role `resources/agents/roles/browser.yaml`, base `browser`):
   a dedicated team member that owns the non-isolated web work — localhost
   previews, live sites, form filling/testing, cross-device checks. Its team card

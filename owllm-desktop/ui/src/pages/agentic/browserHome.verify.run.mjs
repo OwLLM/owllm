@@ -65,5 +65,20 @@ check("suspended Linux browser resumes on the home page", /browser_is_suspended\
 check("internal home URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
 check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1000}public_browser_url/.test(browserRs) && /fn persist_session[\s\S]{0,1400}tab\.url != "about:blank"/.test(browserRs));
 
+// Cross-platform parity. Linux deliberately runs the decorated-window shape —
+// WebKitGTK mislays and SIGBUSes the stacked child webviews the OwLLM chrome
+// bar is built from — so the bar's "+" simply does not exist there. Every
+// chrome-bar action must therefore also be reachable from BrowserPanel, which
+// is the tab strip all three platforms share.
+const panel = fs.readFileSync(path.join(root, "ui/src/pages/agentic/BrowserPanel.tsx"), "utf8");
+const libRs = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+check("Linux is routed to the WebKitGTK-safe window shape on purpose", /#\[cfg\(target_os = "linux"\)\]\s*\{\s*build_legacy\(app, url, private_session\)/.test(browserRs));
+check("the framed chrome-bar shape still covers Windows and macOS", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*\{\s*match build_framed\(app, url\.clone\(\), private_session\)/.test(browserRs));
+check("a platform-independent command opens a start-page tab", /pub fn browser_new_tab/.test(browserRs) && /pub fn browser_new_tab[\s\S]{0,200}browser_home_url\(&app\)\?/.test(browserRs));
+check("browser_new_tab is registered with the app", libRs.includes("browser::browser_new_tab"));
+check("the in-app panel carries the + every platform can reach", /invoke\("browser_new_tab"\)/.test(panel));
+check("the in-app panel also carries reopen, back and reload", /invoke\("browser_reopen_closed"\)/.test(panel) && /invoke\("browser_cmd", \{ action/.test(panel));
+check("the panel tab strip shows whenever the browser runs", /!!browserTabs\.length \|\| !!status\?\.running/.test(panel));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

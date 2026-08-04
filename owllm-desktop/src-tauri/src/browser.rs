@@ -49,10 +49,11 @@ use tauri::{
 /// bare white "window colour" a fresh webview shows (user spec 2026-07-05).
 const OWLLM_BG: Color = Color(14, 17, 23, 255);
 
-/// Local new-tab document. A data URL keeps the page self-contained and works
-/// in WebView2, WKWebView and WebKitGTK without inventing a network hostname.
-const BROWSER_HOME_TEMPLATE: &str = include_str!("../browser-home.html");
-const BROWSER_HOME_PREFIX: &str = "data:text/html;base64,";
+/// Local new-tab document, served from the OwLLM app origin exactly like the chrome
+/// bar. It must NOT be a `data:` URL: Tauri refuses to build a webview for one
+/// unless the `webview-data-url` feature is enabled, so a `data:` start page
+/// made every "+" click fail to open a tab at all.
+const BROWSER_HOME_PAGE: &str = "browser-home.html";
 
 /// Label of the framed browser container on Windows/macOS. Linux labels each
 /// top-level tab with `tab_label(id)` instead.
@@ -1411,17 +1412,30 @@ fn read_session(stem: &str) -> BrowserSession {
         .unwrap_or_default()
 }
 
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+fn is_browser_home_url(url: &str) -> bool {
+    let Ok(parsed) = url.parse::<tauri::Url>() else {
+        return false;
+    };
+    if !parsed.path().ends_with(BROWSER_HOME_PAGE) {
+        return false;
+    }
+    // Only the app's own origin counts, so a remote page that happens to end in
+    // the same file name is never masked as the local start page.
+    parsed.scheme() == "tauri"
+        || matches!(
+            parsed.host_str(),
+            Some("tauri.localhost") | Some("localhost") | Some("127.0.0.1")
+        )
 }
 
-fn is_browser_home_url(url: &str) -> bool {
-    url.starts_with(BROWSER_HOME_PREFIX)
+/// Base URL of the OwLLM frontend — the dev server in development, the bundled
+/// app origin in a release build. Read from the main window's webview so we
+/// reuse Tauri's own resolution instead of duplicating it.
+fn app_origin(app: &tauri::AppHandle) -> Result<tauri::Url, String> {
+    app.get_webview_window("main")
+        .ok_or_else(|| "main window is not available".to_string())?
+        .url()
+        .map_err(|error| format!("could not resolve the app origin: {error}"))
 }
 
 fn public_browser_url(url: &str) -> String {
@@ -1435,7 +1449,7 @@ fn public_browser_url(url: &str) -> String {
 /// Build the local start page with the five most recently known project URLs.
 /// Closed entries are newest-at-the-end; live tabs follow as a fallback. The
 /// session never contains credentials, page text or query results.
-fn browser_home_url() -> Result<tauri::Url, String> {
+fn browser_home_url(app: &tauri::AppHandle) -> Result<tauri::Url, String> {
     use base64::Engine as _;
 
     let session = read_session(&live_session_stem());
@@ -1462,25 +1476,25 @@ fn browser_home_url() -> Result<tauri::Url, String> {
             Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
             None => format!("{}://{}", url.scheme(), host),
         };
-        recent.push(format!(
-            "<a class=\"tile\" href=\"{}\"><span class=\"logo\"><img src=\"{}/favicon.ico\" alt=\"\"></span><span class=\"name\">{}</span><span class=\"host\">{}</span></a>",
-            html_escape(&safe_url),
-            html_escape(&origin),
-            html_escape(label),
-            html_escape(&safe_url),
-        ));
+        recent.push(serde_json::json!({
+            "url": safe_url,
+            "origin": origin,
+            "label": label,
+        }));
         if recent.len() == 5 {
             break;
         }
     }
-    if recent.is_empty() {
-        recent.push("<div class=\"empty\">Pages you close will appear here.</div>".to_string());
-    }
-    let html = BROWSER_HOME_TEMPLATE.replace("__OWLLM_RECENT__", &recent.join(""));
-    let encoded = base64::engine::general_purpose::STANDARD.encode(html.as_bytes());
-    format!("{BROWSER_HOME_PREFIX}{encoded}")
-        .parse()
-        .map_err(|error| format!("bad browser home URL: {error}"))
+    // Handed to the page as base64url JSON in ?r= so the static document does
+    // not have to reach into the session store itself.
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_string(&recent).unwrap_or_else(|_| "[]".to_string()),
+    );
+    let mut url = app_origin(app)?
+        .join(BROWSER_HOME_PAGE)
+        .map_err(|error| format!("bad browser home URL: {error}"))?;
+    url.set_query(Some(&format!("r={encoded}")));
+    Ok(url)
 }
 
 fn write_session(stem: &str, session: &BrowserSession) {
@@ -1871,7 +1885,7 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
         "tabnew" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                let result = browser_home_url()
+                let result = browser_home_url(&app)
                     .and_then(|home| new_tab(&app, home.as_str(), true, false).map(|_| ()));
                 if let Err(e) = result {
                     eprintln!("[browser] new tab failed: {e}");
@@ -2778,12 +2792,12 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         if browser_is_suspended() {
-            resume_normal_browser(app, browser_home_url()?)?;
+            resume_normal_browser(app, browser_home_url(app)?)?;
             return Ok("browser started".to_string());
         }
         return Ok("browser already running".to_string());
     }
-    let start_url = browser_home_url()?;
+    let start_url = browser_home_url(app)?;
     build_window(app, start_url, false)?;
     BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())

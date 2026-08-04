@@ -60,7 +60,52 @@
       <a class="tile" href="https://web.wechat.com"><span class="logo"><img src="https://res.wx.qq.com/a/wx_fed/assets/res/NTI4MWU5.ico" alt=""></span><span class="name">WeChat</span></a>
       <a class="tile" href="https://web.telegram.org"><span class="logo"><img src="https://web.telegram.org/favicon.ico" alt=""></span><span class="name">Telegram</span></a>
     </div></section>
-    <section class="recent"><h2>Recently opened</h2><div class="row">__OWLLM_RECENT__</div></section>
+    <section class="recent"><h2>Recently opened</h2><div class="row" id="recent"></div></section>
   </main>
+  <script>
+    // Recents are handed over by Rust as base64url JSON in ?r= — the page is a
+    // static app-origin document, so it never reads the session store itself.
+    // Rust already stripped query strings and fragments from these URLs.
+    (function () {
+      var row = document.getElementById("recent");
+      var entries = [];
+      try {
+        var raw = new URLSearchParams(window.location.search).get("r");
+        if (raw) {
+          var b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+          while (b64.length % 4) { b64 += "="; }
+          entries = JSON.parse(decodeURIComponent(escape(atob(b64))));
+        }
+      } catch (e) { entries = []; }
+      if (!Array.isArray(entries) || !entries.length) {
+        row.innerHTML = '<div class="empty">Pages you close will appear here.</div>';
+        return;
+      }
+      entries.forEach(function (entry) {
+        if (!entry || typeof entry.url !== "string") { return; }
+        // Only ever render web links — never a javascript: or data: target.
+        if (!/^https?:\/\//i.test(entry.url)) { return; }
+        var a = document.createElement("a");
+        a.className = "tile";
+        a.href = entry.url;
+        var logo = document.createElement("span");
+        logo.className = "logo";
+        var img = document.createElement("img");
+        img.alt = "";
+        img.src = String(entry.origin || "") + "/favicon.ico";
+        logo.appendChild(img);
+        var name = document.createElement("span");
+        name.className = "name";
+        name.textContent = entry.label || "Recent page";
+        var host = document.createElement("span");
+        host.className = "host";
+        host.textContent = entry.url;
+        a.appendChild(logo);
+        a.appendChild(name);
+        a.appendChild(host);
+        row.appendChild(a);
+      });
+    })();
+  </script>
 </body>
 </html>

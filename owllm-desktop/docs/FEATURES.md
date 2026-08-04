@@ -444,6 +444,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   vault. The Signing page's **Web logins** card manages that vault (add /
   delete / open-signed-in / import from installed browsers via
   `browser_import`), so "renew the cert" never starts with a password reset.
+- **Browser start page**: the chrome bar's **＋** opens `browser-home.html` —
+  big-icon rows for search engines, social, messengers, plus the five most
+  recent project pages (query/fragment stripped) and a direct web-search box.
+  It is served from the app origin like `browser-chrome.html`, never as a
+  `data:` URL: Tauri rejects `data:` webviews unless the `webview-data-url`
+  feature is on, which made **＋** silently open nothing. Rust passes the
+  recents to the page as base64url JSON in `?r=` (`browser.rs::browser_home_url`).
 
 ## Sync, vault & publishing
 

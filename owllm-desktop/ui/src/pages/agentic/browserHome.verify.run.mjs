@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../../../../");
 const browserRs = fs.readFileSync(path.join(root, "src-tauri/src/browser.rs"), "utf8");
-const home = fs.readFileSync(path.join(root, "src-tauri/browser-home.html"), "utf8");
+const home = fs.readFileSync(path.join(root, "ui/public/browser-home.html"), "utf8");
+const cargoToml = fs.readFileSync(path.join(root, "src-tauri/Cargo.toml"), "utf8");
 
 let passed = 0;
 let failed = 0;
@@ -25,7 +26,16 @@ const searchAt = home.indexOf("Search engines");
 const socialAt = home.indexOf("Social");
 const messengerAt = home.indexOf("Messengers");
 const recentAt = home.indexOf("Recently opened");
-check("home replaces the black blank page with a local document", browserRs.includes('include_str!("../browser-home.html")'));
+check("home replaces the black blank page with a local document", browserRs.includes("BROWSER_HOME_PAGE") && browserRs.includes('"browser-home.html"'));
+// The "+" opened nothing because Tauri returns InvalidWebviewUrl for a data:
+// URL unless the `webview-data-url` feature is on. The start page must be a
+// normal app-origin document so every engine can load it.
+check("start page is NOT a data: URL", !browserRs.includes("data:text/html;base64,") && !/BROWSER_HOME_PREFIX/.test(browserRs));
+check("start page is served from the app origin", /fn app_origin/.test(browserRs) && /app_origin\(app\)\?[\s\S]{0,80}\.join\(BROWSER_HOME_PAGE\)/.test(browserRs));
+check("app does not depend on the webview-data-url feature", !cargoToml.includes("webview-data-url"));
+check("home page is bundled with the frontend so the app origin can serve it", fs.existsSync(path.join(root, "ui/public/browser-home.html")));
+check("recents reach the page as data, not injected HTML", home.includes('URLSearchParams(window.location.search).get("r")') && browserRs.includes("URL_SAFE_NO_PAD"));
+check("recent tiles only ever render http(s) targets", /\^https\?:\\\/\\\//.test(home));
 check("sections retain the requested order", searchAt >= 0 && searchAt < socialAt && socialAt < messengerAt && messengerAt < recentAt);
 check("search engines include Google, DuckDuckGo, Naver, Bing and Brave", ["google.com", "duckduckgo.com", "naver.com", "bing.com", "search.brave.com"].every((site) => home.includes(site)));
 check("social row includes LinkedIn, Facebook, Instagram, X and Reddit", ["linkedin.com", "facebook.com", "instagram.com", "x.com", "reddit.com"].every((site) => home.includes(site)));
@@ -36,13 +46,13 @@ check("recent pages come from persisted closed and live tab history", /session\.
 check("recent URLs are limited and deduplicated", browserRs.includes("seen.insert(safe_url.clone())") && browserRs.includes("recent.len() == 5"));
 check("recent shortcuts strip query strings and fragments", browserRs.includes("url.set_query(None)") && browserRs.includes("url.set_fragment(None)"));
 check("only http(s) session entries can become recent shortcuts", browserRs.includes('matches!(url.scheme(), "http" | "https")'));
-check("fresh browser starts on the home page", /let start_url = browser_home_url\(\)\?;[\s\S]{0,100}build_window/.test(browserRs));
-check("plus button opens the home page", /"tabnew"[\s\S]{0,250}browser_home_url\(\)/.test(browserRs));
+check("fresh browser starts on the home page", /let start_url = browser_home_url\(app\)\?;[\s\S]{0,100}build_window/.test(browserRs));
+check("plus button opens the home page", /"tabnew"[\s\S]{0,250}browser_home_url\(&app\)/.test(browserRs));
 check("plus click crosses the reliable intercepted-navigation channel", home.length > 0
   && /new URL\("\/__owllm_browser_event__"/.test(fs.readFileSync(path.join(root, "ui/public/browser-chrome.html"), "utf8"))
   && /\.on_navigation\(move \|url\|[\s\S]{0,500}BrowserUiEvent::ChromeAction/.test(browserRs));
-check("suspended Linux browser resumes on the home page", /browser_is_suspended\(\)[\s\S]{0,120}resume_normal_browser\(app, browser_home_url\(\)\?\)/.test(browserRs));
-check("internal data URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
+check("suspended Linux browser resumes on the home page", /browser_is_suspended\(\)[\s\S]{0,120}resume_normal_browser\(app, browser_home_url\(app\)\?\)/.test(browserRs));
+check("internal home URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
 check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1000}public_browser_url/.test(browserRs) && /fn persist_session[\s\S]{0,1400}tab\.url != "about:blank"/.test(browserRs));
 
 console.log(`\n${passed} passed, ${failed} failed`);

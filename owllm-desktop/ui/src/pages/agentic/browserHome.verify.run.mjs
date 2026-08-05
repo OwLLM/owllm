@@ -64,6 +64,9 @@ check("plus click crosses the reliable intercepted-navigation channel", home.len
 check("suspended Linux browser resumes on the home page", /browser_is_suspended\(\)[\s\S]{0,120}resume_normal_browser\(app, browser_home_url\(app\)\?\)/.test(browserRs));
 check("internal home URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
 check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1000}public_browser_url/.test(browserRs) && /fn persist_session[\s\S]{0,1400}tab\.url != "about:blank"/.test(browserRs));
+// browser_view reports the page's own location.href, so it is the one surface
+// that would hand agents and the panel the raw app-origin start-page URL.
+check("browser_view masks the start page like every other surface", /fn browser_view[\s\S]{0,900}public_browser_url\(url\)/.test(browserRs));
 
 // Cross-platform parity. Linux deliberately runs the decorated-window shape —
 // WebKitGTK mislays and SIGBUSes the stacked child webviews the OwLLM chrome

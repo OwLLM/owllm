@@ -4029,7 +4029,17 @@ pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
     }
     let win = content_webview(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
-    eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))
+    let reply = eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))?;
+    // The page reports its own location, so the start page would arrive as the
+    // internal app-origin document. Every other surface reports it as
+    // about:blank; agents and the panel must not see a different URL here.
+    let Ok(mut info) = serde_json::from_str::<serde_json::Value>(&reply) else {
+        return Ok(reply);
+    };
+    if let Some(url) = info.get("url").and_then(|url| url.as_str()) {
+        info["url"] = json!(public_browser_url(url));
+    }
+    Ok(info.to_string())
 }
 
 /// Focus/raise the agent-browser window so the user can watch or log in.

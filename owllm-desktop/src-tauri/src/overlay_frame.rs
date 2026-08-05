@@ -8,6 +8,8 @@
 //! window flashes white over the whole app — the startup-flash
 //! regression. The 33ms sync loop picks it up as soon as it's ready.
 
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,9 @@ use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Windo
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static MACOS_UNCONSTRAINED_OVERLAY: AtomicPtr<objc2::runtime::AnyObject> =
+    AtomicPtr::new(std::ptr::null_mut());
 // Linux/Jetson cannot reliably repaint an already-drawn pixel back to alpha
 // zero. The frame therefore clears by unmapping the WHOLE overlay window,
 // which the compositor handles correctly. Windows keeps its CSS fade and
@@ -70,12 +75,16 @@ pub fn enabled() -> bool {
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false)
     }
-    // macOS: overlay frame never shipped; stay opt-in only.
+    // macOS supports transparent child windows through Tauri's
+    // `macos-private-api` feature. Use the same split-window frame as Windows
+    // so the outer margin is genuinely transparent instead of being painted by
+    // the opaque main webview. Keep the existing environment opt-out for GPU /
+    // compositor troubleshooting.
     #[cfg(target_os = "macos")]
     {
         std::env::var("OWLLM_OVERLAY_FRAME")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
     }
 }
 
@@ -112,7 +121,7 @@ pub fn install(app: &mut App) {
         return;
     };
 
-    let overlay = match create_overlay(app) {
+    let overlay = match create_overlay(app, &main) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("[overlay-frame] failed to create overlay window: {e}");
@@ -128,7 +137,7 @@ pub fn install(app: &mut App) {
     // tao's GTK set_ignore_cursor_events path can panic before the GDK window
     // is realized, so Linux uses a native empty input region in
     // set_owner_to_main instead.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let _ = overlay.set_ignore_cursor_events(true);
 
     // Make main the OWNER so the chrome rides with our app instead of
@@ -143,12 +152,14 @@ pub fn install(app: &mut App) {
 
 pub fn close_if_present<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) {
+        #[cfg(target_os = "macos")]
+        MACOS_UNCONSTRAINED_OVERLAY.store(std::ptr::null_mut(), Ordering::Release);
         let _ = overlay.hide();
         let _ = overlay.close();
     }
 }
 
-fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
+fn create_overlay(app: &mut App, main: &WebviewWindow) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(OVERLAY_LABEL) {
         return Ok(existing);
     }
@@ -179,7 +190,7 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     // explorer windows). The owner-relationship set in `set_owner_to_main`
     // below is what keeps the overlay z-ordered above main without
     // promoting it to a system-wide topmost window.
-    WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         app,
         OVERLAY_LABEL,
         WebviewUrl::App("overlay-frame.html".into()),
@@ -191,8 +202,116 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     .shadow(false)
     .resizable(false)
     .skip_taskbar(true)
-    .visible(false)
-    .build()
+    .visible(false);
+
+    // NSWindow child ordering keeps the frame directly above its main window,
+    // hides/minimises it with the app, and prevents it floating over unrelated
+    // applications. Windows retains its established owner setup below.
+    #[cfg(target_os = "macos")]
+    let builder = builder.parent(main)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = main;
+
+    let overlay = builder.build()?;
+
+    // AppKit normally constrains every NSWindow to the visible screen frame.
+    // That is wrong for this window: its transparent decoration deliberately
+    // extends beyond `main`, including above the menu bar when the user drags
+    // main to the top edge. Without the override, AppKit pins the overlay at
+    // the screen edge while main continues moving, visibly detaching the two.
+    #[cfg(target_os = "macos")]
+    allow_macos_overlay_outside_screen(&overlay)?;
+
+    Ok(overlay)
+}
+
+/// Let only the decorative macOS frame extend beyond the visible screen.
+///
+/// `NSWindow::setFrameTopLeftPoint` calls `constrainFrameRect:toScreen:` even
+/// for borderless child windows. Tao's `TaoWindow` class must not be replaced:
+/// its `sendEvent:` implementation resolves its superclass from the live
+/// object, and changing that class caused a reproducible EXC_BAD_ACCESS on the
+/// next input event. Instead, install one method on the existing `TaoWindow`
+/// class and bypass the clamp only when the receiver is this overlay. Every
+/// other OwLLM window delegates to AppKit's original implementation.
+#[cfg(target_os = "macos")]
+fn allow_macos_overlay_outside_screen(overlay: &WebviewWindow) -> tauri::Result<()> {
+    use objc2::{
+        ffi, msg_send,
+        runtime::{AnyObject, Imp, Sel},
+        sel,
+    };
+    use objc2_foundation::NSRect;
+
+    unsafe extern "C-unwind" fn unconstrained_frame(
+        this: *mut AnyObject,
+        _cmd: Sel,
+        frame_rect: NSRect,
+        screen: *mut AnyObject,
+    ) -> NSRect {
+        if std::ptr::eq(this, MACOS_UNCONSTRAINED_OVERLAY.load(Ordering::Acquire)) {
+            return frame_rect;
+        }
+
+        // SAFETY: This method is installed directly on TaoWindow, whose
+        // superclass is NSWindow. Calling super preserves AppKit's normal
+        // screen constraint for main and every other Tao window.
+        let this_ref = unsafe { &*this };
+        let superclass = this_ref
+            .class()
+            .superclass()
+            .expect("TaoWindow must inherit from NSWindow");
+        unsafe {
+            msg_send![
+                super(this_ref, superclass),
+                constrainFrameRect: frame_rect,
+                toScreen: screen
+            ]
+        }
+    }
+
+    let window = overlay.ns_window()? as *mut AnyObject;
+    // SAFETY: ns_window returns the live NSWindow retained by the WebviewWindow.
+    let window = unsafe { &*window };
+    let class = window.class();
+    let selector = sel!(constrainFrameRect:toScreen:);
+    let already_installed = class
+        .instance_methods()
+        .iter()
+        .any(|method| method.name() == selector);
+    if !already_installed {
+        let inherited = class
+            .superclass()
+            .and_then(|superclass| superclass.instance_method(selector))
+            .ok_or_else(|| {
+                std::io::Error::other("NSWindow constrainFrameRect:toScreen: is unavailable")
+            })?;
+        let implementation: Imp = unsafe {
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect,
+                Imp,
+            >(unconstrained_frame)
+        };
+        // SAFETY: The implementation has the exact inherited method ABI and
+        // the inherited type encoding is reused verbatim. TaoWindow is already
+        // registered, so class_addMethod is the supported runtime operation.
+        let added = unsafe {
+            ffi::class_addMethod(
+                class as *const _ as *mut _,
+                selector,
+                implementation,
+                ffi::method_getTypeEncoding(inherited),
+            )
+        };
+        if !added.as_bool() {
+            return Err(std::io::Error::other(
+                "failed to install the macOS overlay screen-constraint handler",
+            )
+            .into());
+        }
+    }
+    MACOS_UNCONSTRAINED_OVERLAY.store(window as *const _ as *mut _, Ordering::Release);
+    Ok(())
 }
 
 /// Make `main` the OWNER of `overlay` via Win32
@@ -256,6 +375,43 @@ fn set_owner_to_main(_overlay: &WebviewWindow, _main: &WebviewWindow) -> tauri::
     Ok(())
 }
 
+/// Show the decorative window and keep it immediately above its main window.
+///
+/// Tao adds the macOS child with `NSWindowAbove` while both windows are still
+/// hidden. Showing `main` later can nevertheless put it in front of that hidden
+/// child (observed in the live v0.9.88 bundle). Re-adding the now-visible child
+/// with the same AppKit ordering is the documented way to reassert the child
+/// order without making it system-wide topmost.
+fn show_overlay_above_main(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
+    overlay.show()?;
+    #[cfg(target_os = "macos")]
+    order_macos_overlay_above_main(main, overlay)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = main;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn order_macos_overlay_above_main(
+    main: &WebviewWindow,
+    overlay: &WebviewWindow,
+) -> tauri::Result<()> {
+    use objc2::{msg_send, runtime::AnyObject};
+
+    const NS_WINDOW_ABOVE: isize = 1;
+
+    let main_window = main.ns_window()? as *mut AnyObject;
+    let overlay_window = overlay.ns_window()? as *mut AnyObject;
+    unsafe {
+        let _: () = msg_send![
+            &*main_window,
+            addChildWindow: &*overlay_window,
+            ordered: NS_WINDOW_ABOVE
+        ];
+    }
+    Ok(())
+}
+
 fn should_map_overlay() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -286,6 +442,7 @@ pub fn overlay_frame_set_visible(app: tauri::AppHandle, visible: bool) -> Result
                 sync_geometry(
                     main.outer_position().map_err(|e| e.to_string())?,
                     main.outer_size().map_err(|e| e.to_string())?,
+                    main.scale_factor().map_err(|e| e.to_string())?,
                     &overlay,
                 )
                 .map_err(|e| e.to_string())?;
@@ -340,12 +497,19 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     let Some(overlay) = main.app_handle().get_webview_window(OVERLAY_LABEL) else {
         return Ok(());
     };
-    sync_geometry(main.outer_position()?, main.outer_size()?, &overlay)?;
+    sync_geometry(
+        main.outer_position()?,
+        main.outer_size()?,
+        main.scale_factor()?,
+        &overlay,
+    )?;
     // Never show the overlay before its page painted — a not-yet-ready
     // transparent WebView2 window flashes WHITE over the app. If the 700ms
     // startup wait timed out, the sync loop shows it once mark_ready fires.
     if OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay() {
-        overlay.show()?;
+        if let Some(main_webview) = main.app_handle().get_webview_window("main") {
+            show_overlay_above_main(&main_webview, &overlay)?;
+        }
     }
     Ok(())
 }
@@ -353,17 +517,48 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
 fn sync_geometry(
     pos: tauri::PhysicalPosition<i32>,
     size: tauri::PhysicalSize<u32>,
+    scale_factor: f64,
     overlay: &WebviewWindow,
 ) -> tauri::Result<()> {
+    let scale = geometry_scale(scale_factor);
+    let offset_x = (CONTENT_OFFSET_X as f64 * scale).round() as i32;
+    let offset_y = (CONTENT_OFFSET_Y as f64 * scale).round() as i32;
+    let extra_w = (OVERLAY_EXTRA_W as f64 * scale).round() as u32;
+    let extra_h = (OVERLAY_EXTRA_H as f64 * scale).round() as u32;
     overlay.set_position(tauri::PhysicalPosition {
-        x: pos.x - CONTENT_OFFSET_X,
-        y: pos.y - CONTENT_OFFSET_Y,
+        x: pos.x - offset_x,
+        y: pos.y - offset_y,
     })?;
     overlay.set_size(tauri::PhysicalSize {
-        width: size.width + OVERLAY_EXTRA_W,
-        height: size.height + OVERLAY_EXTRA_H,
+        width: size.width + extra_w,
+        height: size.height + extra_h,
     })?;
     Ok(())
+}
+
+/// Physical window coordinates need Retina/HiDPI-scaled margins while the HTML
+/// frame constants are CSS pixels. The Win32 follow loop predates this helper
+/// and deliberately retains its direct, event-loop-free geometry path.
+fn geometry_scale(scale_factor: f64) -> f64 {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = scale_factor;
+        1.0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Logical distance from the overlay's top edge to the opaque content window.
+/// Used by the macOS startup fitter so the transparent chrome clears the menu.
+pub fn content_offset_y() -> f64 {
+    CONTENT_OFFSET_Y as f64
 }
 
 // On Windows the follow loop + sync_now use the event-loop-free sync_once_win32
@@ -371,15 +566,21 @@ fn sync_geometry(
 // non-Windows path, so silence the Windows dead-code warning.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
-    sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
+    sync_geometry(
+        main.outer_position()?,
+        main.outer_size()?,
+        main.scale_factor()?,
+        overlay,
+    )?;
 
     if !main.is_visible()? {
         let _ = overlay.hide();
     } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay()
     {
-        // Ready-gated for the same reason as prepare_and_show_for_main:
-        // an unpainted transparent webview shows as a white sheet.
-        let _ = overlay.show();
+        // Ready-gated for the same reason as prepare_and_show_for_main: an
+        // unpainted transparent webview shows as a white sheet. On macOS the
+        // helper also reasserts NSWindowAbove after every remap/restore.
+        let _ = show_overlay_above_main(main, overlay);
     } else if !should_map_overlay() {
         let _ = overlay.hide();
     }

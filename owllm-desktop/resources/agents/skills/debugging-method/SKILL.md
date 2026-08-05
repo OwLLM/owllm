@@ -1,6 +1,14 @@
 ---
 name: Debugging Method
 description: A systematic way to find the true root cause of a bug — reproduce, isolate, hypothesise, confirm — instead of guessing or patching symptoms.
+triggers:
+  - bug
+  - debug
+  - crash
+  - error
+  - regression
+  - reproduce
+  - broken
 ---
 
 # Debugging Method

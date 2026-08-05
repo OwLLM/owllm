@@ -40,6 +40,10 @@ check(onboarding.includes("ChatGPT Plus / Pro") && onboarding.includes("Claude P
   && onboarding.includes("Google AI Pro / Ultra") && onboarding.includes("Kimi")
   && onboarding.includes("SuperGrok / X Premium+"),
   "subscription choices are described using plans people recognize");
+check(onboarding.includes("OpenAILogo") && onboarding.includes("AnthropicLogo")
+  && onboarding.includes("GeminiLogo") && onboarding.includes("MoonshotLogo")
+  && onboarding.includes("XaiLogo"),
+  "subscription choices show the actual provider brand logos");
 check(onboarding.includes('dataUi="OnboardingAccountLoginPanel"') &&
       onboarding.includes('data-ui="OnboardingInlineSubscriptionChoices"') &&
       onboarding.includes("OwLLM opens the existing Accounts page with that provider highlighted"),

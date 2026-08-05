@@ -49,6 +49,12 @@ use tauri::{
 /// bare white "window colour" a fresh webview shows (user spec 2026-07-05).
 const OWLLM_BG: Color = Color(14, 17, 23, 255);
 
+/// Local new-tab document, served from the OwLLM app origin exactly like the chrome
+/// bar. It must NOT be a `data:` URL: Tauri refuses to build a webview for one
+/// unless the `webview-data-url` feature is enabled, so a `data:` start page
+/// made every "+" click fail to open a tab at all.
+const BROWSER_HOME_PAGE: &str = "browser-home.html";
+
 /// Label of the framed browser container on Windows/macOS. Linux labels each
 /// top-level tab with `tab_label(id)` instead.
 const BROWSER_LABEL: &str = "owllm-browser";
@@ -59,6 +65,7 @@ const BROWSER_LABEL: &str = "owllm-browser";
 /// compatibility lookup for browser windows created by older builds.
 const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
+const CHROME_EVENT_PATH: &str = "/__owllm_browser_event__";
 
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
 /// a 58px identity strip (30px taller than a plain tab bar) that carries the
@@ -66,6 +73,9 @@ const CHROME_LABEL: &str = "owllm-browser-chrome";
 /// 38px nav toolbar with back/reload/URL (user spec 2026-07-29) — keep in
 /// step with browser-chrome.html's #tabsrow.
 const CHROME_H: f64 = 96.0;
+/// Same solid accent edge thickness as AppShell's `WindowAccentEdge`.
+/// The chrome webview paints it; page webviews leave this narrow edge exposed.
+const BROWSER_FRAME_T: f64 = 3.0;
 
 /// X where parked (inactive) tab webviews live. Tauri has no cross-platform
 /// hide() for child webviews, so inactive tabs are simply moved far offscreen
@@ -1240,7 +1250,7 @@ pub(crate) fn browser_tab_url(app: &tauri::AppHandle, tab_id: u64) -> Result<Str
         .ok_or_else(|| format!("browser tab {tab_id} does not exist"))?;
     webview
         .url()
-        .map(|url| url.to_string())
+        .map(|url| public_browser_url(url.as_str()))
         .map_err(|e| format!("could not read browser tab {tab_id} URL: {e}"))
 }
 
@@ -1287,7 +1297,10 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
                     .map(|webview| BrowserTabInfo {
                         id: *id,
                         title: tabs.titles.get(id).cloned().unwrap_or_default(),
-                        url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
+                        url: webview
+                            .url()
+                            .map(|url| public_browser_url(url.as_str()))
+                            .unwrap_or_default(),
                         active: *id == tabs.active,
                     })
             })
@@ -1298,7 +1311,10 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
         .map(|webview| BrowserTabInfo {
             id: 0,
             title: String::new(),
-            url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
+            url: webview
+                .url()
+                .map(|url| public_browser_url(url.as_str()))
+                .unwrap_or_default(),
             active: true,
         })
         .into_iter()
@@ -1394,6 +1410,91 @@ fn read_session(stem: &str) -> BrowserSession {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<BrowserSession>(&raw).ok())
         .unwrap_or_default()
+}
+
+fn is_browser_home_url(url: &str) -> bool {
+    let Ok(parsed) = url.parse::<tauri::Url>() else {
+        return false;
+    };
+    if !parsed.path().ends_with(BROWSER_HOME_PAGE) {
+        return false;
+    }
+    // Only the app's own origin counts, so a remote page that happens to end in
+    // the same file name is never masked as the local start page.
+    parsed.scheme() == "tauri"
+        || matches!(
+            parsed.host_str(),
+            Some("tauri.localhost") | Some("localhost") | Some("127.0.0.1")
+        )
+}
+
+/// Base URL of the OwLLM frontend — the dev server in development, the bundled
+/// app origin in a release build. Read from the main window's webview so we
+/// reuse Tauri's own resolution instead of duplicating it.
+fn app_origin(app: &tauri::AppHandle) -> Result<tauri::Url, String> {
+    app.get_webview_window("main")
+        .ok_or_else(|| "main window is not available".to_string())?
+        .url()
+        .map_err(|error| format!("could not resolve the app origin: {error}"))
+}
+
+fn public_browser_url(url: &str) -> String {
+    if is_browser_home_url(url) {
+        "about:blank".to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Build the local start page with the five most recently known project URLs.
+/// Closed entries are newest-at-the-end; live tabs follow as a fallback. The
+/// session never contains credentials, page text or query results.
+fn browser_home_url(app: &tauri::AppHandle) -> Result<tauri::Url, String> {
+    use base64::Engine as _;
+
+    let session = read_session(&live_session_stem());
+    let mut seen = HashSet::new();
+    let mut recent = Vec::new();
+    for raw in session.closed.iter().rev().chain(session.tabs.iter().rev()) {
+        let Ok(mut url) = raw.parse::<tauri::Url>() else {
+            continue;
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            continue;
+        }
+        // Recent shortcuts must not surface OAuth codes, search terms or
+        // other query/fragment data that happened to be present in a tab URL.
+        url.set_query(None);
+        url.set_fragment(None);
+        let safe_url = url.to_string();
+        if !seen.insert(safe_url.clone()) {
+            continue;
+        }
+        let host = url.host_str().unwrap_or("Recent page");
+        let label = host.strip_prefix("www.").unwrap_or(host);
+        let origin = match url.port() {
+            Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+            None => format!("{}://{}", url.scheme(), host),
+        };
+        recent.push(serde_json::json!({
+            "url": safe_url,
+            "origin": origin,
+            "label": label,
+        }));
+        if recent.len() == 5 {
+            break;
+        }
+    }
+    // Handed to the page as base64url JSON in ?r= so the static document does
+    // not have to reach into the session store itself.
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_string(&recent).unwrap_or_else(|_| "[]".to_string()),
+    );
+    let mut url = app_origin(app)?
+        .join(BROWSER_HOME_PAGE)
+        .map_err(|error| format!("bad browser home URL: {error}"))?;
+    url.set_query(Some(&format!("r={encoded}")));
+    Ok(url)
 }
 
 fn write_session(stem: &str, session: &BrowserSession) {
@@ -1702,8 +1803,33 @@ fn parse_chrome_event(title: &str) -> Option<(String, String)> {
     if tag != "EVT" {
         return None;
     }
-    let (action, b64) = rest.split_once('\u{2063}')?;
+    let (wire_action, b64) = rest.split_once('\u{2063}')?;
+    // The chrome page appends a nonce so repeated identical clicks are not
+    // coalesced by the WebView title-change implementation. It is transport
+    // metadata, never part of the native action name.
+    let action = wire_action.split_once('#').map_or(wire_action, |(name, _)| name);
     Some((action.to_string(), decode_b64(b64)))
+}
+
+/// Parse a browser-chrome control request from its reserved, same-origin URL.
+/// The chrome WebView's navigation handler always cancels this navigation, so
+/// the URL is only a reliable cross-platform event envelope, never a request.
+fn parse_chrome_navigation(url: &tauri::Url) -> Option<(String, String)> {
+    if url.path() != CHROME_EVENT_PATH {
+        return None;
+    }
+    let mut action = None;
+    let mut data = String::new();
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "action" => action = Some(value.into_owned()),
+            "data" => data = decode_b64(&value),
+            _ => {}
+        }
+    }
+    action
+        .filter(|value| !value.is_empty())
+        .map(|value| (value, data))
 }
 
 /// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
@@ -1759,7 +1885,9 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
         "tabnew" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                if let Err(e) = new_tab(&app, "about:blank", true, false) {
+                let result = browser_home_url(&app)
+                    .and_then(|home| new_tab(&app, home.as_str(), true, false).map(|_| ()));
+                if let Err(e) = result {
                     eprintln!("[browser] new tab failed: {e}");
                 }
             });
@@ -1876,10 +2004,11 @@ fn attach_tab(
         })
         .on_page_load(move |wv, payload| {
             if is_active_tab(id) {
+                let display_url = public_browser_url(payload.url().as_str());
                 queue_browser_ui(
                     &wv.app_handle().clone(),
                     BrowserUiEvent::ChromeUpdate {
-                        url: Some(payload.url().to_string()),
+                        url: Some(display_url),
                         title: None,
                     },
                 );
@@ -1919,12 +2048,15 @@ fn attach_tab(
         .inner_size()
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
-    let x = if active { 0.0 } else { PARK_X };
+    let x = if active { BROWSER_FRAME_T } else { PARK_X };
     let _webview = win
         .add_child(
             content,
             LogicalPosition::new(x, CHROME_H),
-            LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+            LogicalSize::new(
+                (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
+                (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+            ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
     #[cfg(windows)]
@@ -2100,7 +2232,7 @@ fn activate_tab(app: &tauri::AppHandle, id: u64) {
     let url = app
         .get_webview(&tab_label(id))
         .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
+        .map(|url| public_browser_url(url.as_str()))
         .unwrap_or_default();
     let title = TABS
         .lock()
@@ -2238,7 +2370,7 @@ fn push_tabs(app: &tauri::AppHandle) {
                     "url": app
                         .get_webview(&tab_label(*id))
                         .and_then(|wv| wv.url().ok())
-                        .map(|url| url.to_string())
+                        .map(|url| public_browser_url(url.as_str()))
                         .unwrap_or_default(),
                     "active": *id == tabs.active,
                 })
@@ -2373,17 +2505,21 @@ fn build_framed(
         .map_err(|e| format!("browser window: {e}"))?;
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
-    // buttons/drag/URL box/tab strip report through the same title channel the
-    // page bridge uses; no IPC grant to any webview is needed.
+    // buttons/drag/URL box/tab strip use a reserved same-origin navigation as
+    // an event envelope. We intercept and cancel it before any document load;
+    // no IPC grant to this webview is needed.
+    let chrome_navigation_app = app.clone();
     let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
         .background_color(OWLLM_BG)
-        .on_document_title_changed(|wv, title| {
-            if let Some((action, data)) = parse_chrome_event(&title) {
-                queue_browser_ui(
-                    &wv.app_handle().clone(),
-                    BrowserUiEvent::ChromeAction { action, data },
-                );
-            }
+        .on_navigation(move |url| {
+            let Some((action, data)) = parse_chrome_navigation(url) else {
+                return true;
+            };
+            queue_browser_ui(
+                &chrome_navigation_app,
+                BrowserUiEvent::ChromeAction { action, data },
+            );
+            false
         })
         // The strip renders from Rust pushes — seed it once the bar exists.
         .on_page_load(|wv, _payload| {
@@ -2392,7 +2528,7 @@ fn build_framed(
     win.add_child(
         chrome,
         LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(win_w, CHROME_H),
+        LogicalSize::new(win_w, win_h),
     )
     .map_err(|e| format!("chrome bar webview: {e}"))?;
 
@@ -2417,13 +2553,15 @@ fn build_framed(
     let handle = app.clone();
     win.on_window_event(move |ev| {
         match ev {
-            WindowEvent::Resized(size) => queue_browser_ui(
-                &handle,
-                BrowserUiEvent::Layout {
-                    width: size.width,
-                    height: size.height,
-                },
-            ),
+            WindowEvent::Resized(size) => {
+                queue_browser_ui(
+                    &handle,
+                    BrowserUiEvent::Layout {
+                        width: size.width,
+                        height: size.height,
+                    },
+                );
+            }
             WindowEvent::Destroyed => {
                 // Pure state drop — no window/webview work.
                 *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -2446,9 +2584,12 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     let ls = size.to_logical::<f64>(scale);
     if let Some(chrome) = app.get_webview(CHROME_LABEL) {
         let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = chrome.set_size(LogicalSize::new(ls.width, CHROME_H));
+        let _ = chrome.set_size(LogicalSize::new(ls.width, ls.height));
     }
-    let page = LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0));
+    let page = LogicalSize::new(
+        (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
+        (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+    );
     let (order, active) = {
         let guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         match guard.as_ref() {
@@ -2458,14 +2599,18 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     };
     for id in order {
         if let Some(content) = app.get_webview(&tab_label(id)) {
-            let x = if id == active { 0.0 } else { PARK_X };
+            let x = if id == active {
+                BROWSER_FRAME_T
+            } else {
+                PARK_X
+            };
             let _ = content.set_position(LogicalPosition::new(x, CHROME_H));
             let _ = content.set_size(page);
         }
     }
     // Legacy single-webview shape (no tab state).
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
-        let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
+        let _ = content.set_position(LogicalPosition::new(BROWSER_FRAME_T, CHROME_H));
         let _ = content.set_size(page);
     }
 }
@@ -2647,21 +2792,12 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         if browser_is_suspended() {
-            if active_tab_id().is_some_and(is_private_tab) {
-                let blank = "about:blank"
-                    .parse()
-                    .map_err(|e| format!("bad start url: {e}"))?;
-                resume_normal_browser(app, blank)?;
-            } else {
-                resume_browser(app, None)?;
-            }
+            resume_normal_browser(app, browser_home_url(app)?)?;
             return Ok("browser started".to_string());
         }
         return Ok("browser already running".to_string());
     }
-    let start_url = "about:blank"
-        .parse()
-        .map_err(|e| format!("bad start url: {e}"))?;
+    let start_url = browser_home_url(app)?;
     build_window(app, start_url, false)?;
     BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
     Ok("browser started".to_string())
@@ -2831,6 +2967,26 @@ pub fn browser_open_tab(
         json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
             .to_string(),
     )
+}
+
+/// Open a new tab on the OwLLM start page — the chrome bar's "+" as a command
+/// so BrowserPanel can offer it too. Linux has no chrome bar at all (WebKitGTK
+/// cannot host the stacked webviews it is built from — see build_window), so on
+/// that platform this command is the only "+" there is.
+#[tauri::command(async)]
+pub fn browser_new_tab(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    let home = browser_home_url(&app)?;
+    let id = if get_window(&app).is_none() {
+        build_window(&app, home, false)?;
+        BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
+        active_tab_id().unwrap_or(0)
+    } else if browser_is_suspended() {
+        resume_normal_browser(&app, home)?
+    } else {
+        new_tab(&app, home.as_str(), true, false)?
+    };
+    Ok(json!({ "tab_id": id }).to_string())
 }
 
 /// Reopen the page that was closed last — the ↺ button and Ctrl+Shift+T.
@@ -3632,6 +3788,18 @@ fn capture_browser_window(
     save_browser_capture(app, &png, width, height, "viewport", active, req)
 }
 
+/// Capture only the main OWLLM application window. This is intentionally
+/// separate from the shared browser viewport and desktop scopes: UI text must
+/// occupy the PNG at native pixels instead of being a small rectangle inside
+/// a full desktop/browser capture.
+fn capture_app(app: &tauri::AppHandle, req: u64) -> Result<String, String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main OWLLM window is unavailable".to_string())?;
+    let (png, width, height) = crate::support::capture_window_png(&window)?;
+    save_browser_capture(app, &png, width, height, "app", None, req)
+}
+
 fn capture_browser_full_page(
     app: &tauri::AppHandle,
     webview: &Webview,
@@ -3705,8 +3873,12 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         .unwrap_or("viewport")
         .trim()
         .to_ascii_lowercase();
-    if action == "screenshot" && screenshot_scope == "desktop" {
-        return capture_desktop(&app, None, req);
+    if action == "screenshot" {
+        match screenshot_scope.as_str() {
+            "desktop" => return capture_desktop(&app, None, req),
+            "app" | "application" | "owllm" => return capture_app(&app, req),
+            _ => {}
+        }
     }
     if get_window(&app).is_none() || browser_is_suspended() {
         browser_start_inner(&app)?;
@@ -3746,6 +3918,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         }
         "screenshot" => match screenshot_scope.as_str() {
             "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
+            "app" | "application" | "owllm" => capture_app(&app, req),
             "full_page" | "full-page" | "page" => {
                 capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
             }
@@ -3873,12 +4046,123 @@ pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Place the browser on the right half of the monitor containing OwLLM.
+/// Geometry for the coordinated main-left/browser-right arrangement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SplitScreenLayout {
+    app_position: LogicalPosition<f64>,
+    app_size: LogicalSize<f64>,
+    browser_position: LogicalPosition<f64>,
+    browser_size: LogicalSize<f64>,
+}
+
+fn split_screen_layout(origin: LogicalPosition<f64>, size: LogicalSize<f64>) -> SplitScreenLayout {
+    // The split is edge-to-edge: both panes share the monitor's origin and
+    // full height, and meet at the center without a floating-card gap.
+    const MIN_PANE: f64 = 320.0;
+    let available_width = size.width.max(MIN_PANE * 2.0);
+    let pane_width = available_width / 2.0;
+    let app_height = size.height.max(320.0);
+    let app_x = origin.x;
+    let browser_x = app_x + pane_width;
+    SplitScreenLayout {
+        app_position: LogicalPosition::new(app_x, origin.y),
+        app_size: LogicalSize::new(pane_width, app_height),
+        browser_position: LogicalPosition::new(browser_x, origin.y),
+        browser_size: LogicalSize::new(pane_width, app_height),
+    }
+}
+
+/// Set the visible client rectangle, not the invisible native resize frame.
 ///
-/// Deliberately resize only the browser: project setup must never seize or
-/// permanently reshape the user's main app window. The user can still move or
-/// resize either window afterwards. Logical coordinates keep this correct on
-/// mixed-DPI Windows displays as well as macOS/Linux.
+/// `Window::set_position` targets the outer rectangle while `set_size` targets
+/// the client rectangle. On Windows an undecorated, resizable window still has
+/// an invisible 8px resize border: placing its outer edge at x=0 therefore put
+/// the visible app at x=8 and cropped the browser by 8px on the right. Measure
+/// the live client offset after sizing and compensate it on every platform.
+fn set_client_bounds(
+    window: &Window,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    // Linux's safe browser fallback is an intentionally decorated top-level
+    // WebView. Keep that OS title bar inside the work area; the main window is
+    // undecorated and follows the client-alignment path below.
+    #[cfg(target_os = "linux")]
+    if window.label() != "main" {
+        window
+            .set_size(size)
+            .map_err(|e| format!("resize {} window: {e}", window.label()))?;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let inner = window
+            .inner_size()
+            .map_err(|e| format!("measure {} client: {e}", window.label()))?
+            .to_logical::<f64>(scale);
+        let outer = window
+            .outer_size()
+            .map_err(|e| format!("measure {} frame: {e}", window.label()))?
+            .to_logical::<f64>(scale);
+        window
+            .set_size(LogicalSize::new(
+                (size.width - (outer.width - inner.width)).max(50.0),
+                (size.height - (outer.height - inner.height)).max(50.0),
+            ))
+            .map_err(|e| format!("fit {} window frame: {e}", window.label()))?;
+        return window
+            .set_position(position)
+            .map_err(|e| format!("position {} window: {e}", window.label()));
+    }
+
+    window
+        .set_size(size)
+        .map_err(|e| format!("resize {} window: {e}", window.label()))?;
+    window
+        .set_position(position)
+        .map_err(|e| format!("position {} window: {e}", window.label()))?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let inner = window
+        .inner_position()
+        .map_err(|e| format!("measure {} client position: {e}", window.label()))?
+        .to_logical::<f64>(scale);
+    let outer = window
+        .outer_position()
+        .map_err(|e| format!("measure {} outer position: {e}", window.label()))?
+        .to_logical::<f64>(scale);
+    window
+        .set_position(LogicalPosition::new(
+            position.x - (inner.x - outer.x),
+            position.y - (inner.y - outer.y),
+        ))
+        .map_err(|e| format!("align {} client bounds: {e}", window.label()))
+}
+
+fn arrange_split_screen(app: &tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    let browser = get_window(app).ok_or_else(|| "browser window is unavailable".to_string())?;
+    let monitor = main
+        .current_monitor()
+        .map_err(|e| format!("read main monitor: {e}"))?
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "could not determine a monitor for the split layout".to_string())?;
+    let scale = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let layout = split_screen_layout(
+        work_area.position.to_logical::<f64>(scale),
+        work_area.size.to_logical::<f64>(scale),
+    );
+
+    let _ = main.unmaximize();
+    let _ = browser.unmaximize();
+    set_client_bounds(&main, layout.app_position, layout.app_size)?;
+    set_client_bounds(&browser, layout.browser_position, layout.browser_size)?;
+    Ok(())
+}
+
+/// Place the browser on the right half and OwLLM on the left half of the
+/// usable area of the monitor containing the main window. This is a one-time
+/// initial arrangement: later user moves and resizes are deliberately left
+/// alone.
 #[tauri::command(async)]
 pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, String> {
     if layout.trim() != "right-half" {
@@ -3886,30 +4170,13 @@ pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, 
     }
     let _operation = lock_browser_operation();
     browser_start_inner(&app)?;
-    let browser = get_window(&app).ok_or_else(|| "browser window is unavailable".to_string())?;
-    let monitor = app
-        .get_window("main")
-        .and_then(|window| window.current_monitor().ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten())
-        .ok_or_else(|| "could not determine a monitor for the browser".to_string())?;
-    let scale = monitor.scale_factor();
-    let origin = monitor.position().to_logical::<f64>(scale);
-    let size = monitor.size().to_logical::<f64>(scale);
-    let margin = 12.0;
-    let gap = 8.0;
-    let available_width = (size.width - margin * 2.0 - gap).max(320.0);
-    let half = (available_width / 2.0).max(640.0).min(available_width);
-    let height = (size.height - margin * 2.0).max(320.0);
-    let x = origin.x + size.width - margin - half;
-    let y = origin.y + margin;
-    let _ = browser.unmaximize();
-    browser
-        .set_position(LogicalPosition::new(x, y))
-        .map_err(|e| format!("position browser: {e}"))?;
-    browser
-        .set_size(LogicalSize::new(half, height))
-        .map_err(|e| format!("resize browser: {e}"))?;
-    Ok("browser arranged on the right half of the current monitor".to_string())
+    if let Err(error) = arrange_split_screen(&app) {
+        return Err(error);
+    }
+    Ok(
+        "OwLLM arranged on the left and browser on the right half of the current monitor"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -4082,7 +4349,7 @@ mod tests {
     fn chrome_events_parse() {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode("github.com");
-        let t = format!("{SENTINEL}EVT\u{2063}nav\u{2063}{b64}");
+        let t = format!("{SENTINEL}EVT\u{2063}nav#17\u{2063}{b64}");
         assert_eq!(
             parse_chrome_event(&t),
             Some(("nav".to_string(), "github.com".to_string()))
@@ -4098,6 +4365,19 @@ mod tests {
         assert_eq!(parse_chrome_event(&reply), None);
         assert_eq!(parse_chrome_event("GitHub — where software is built"), None);
         assert_eq!(parse_reply(&t), None);
+
+        let nav: tauri::Url =
+            "http://tauri.localhost/__owllm_browser_event__?action=tabnew&data=&nonce=1"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            parse_chrome_navigation(&nav),
+            Some(("tabnew".to_string(), String::new()))
+        );
+        let ordinary: tauri::Url = "http://tauri.localhost/browser-chrome.html"
+            .parse()
+            .unwrap();
+        assert_eq!(parse_chrome_navigation(&ordinary), None);
     }
 
     #[test]
@@ -4211,6 +4491,50 @@ mod tests {
         assert!(device_by_name("iphone").unwrap().ua.is_some());
         assert!(device_by_name("desktop").unwrap().ua.is_none());
     }
+
+    #[test]
+    fn split_layout_places_matching_edge_to_edge_panes() {
+        let layout = split_screen_layout(
+            LogicalPosition::new(100.0, 20.0),
+            LogicalSize::new(1920.0, 1080.0),
+        );
+        assert_eq!(layout.app_position, LogicalPosition::new(100.0, 20.0));
+        assert_eq!(layout.browser_position.y, 20.0);
+        assert_eq!(layout.app_size.height, 1080.0);
+        assert_eq!(layout.browser_size, layout.app_size);
+        assert_eq!(
+            layout.browser_position.x,
+            layout.app_position.x + layout.app_size.width
+        );
+        assert_eq!(
+            layout.browser_position.x + layout.browser_size.width,
+            2020.0
+        );
+    }
+
+    #[test]
+    fn split_layout_recomputes_both_panes_for_a_resized_monitor() {
+        let wide = split_screen_layout(
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1920.0, 1080.0),
+        );
+        let resized = split_screen_layout(
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1440.0, 900.0),
+        );
+        assert!(resized.app_size.width < wide.app_size.width);
+        assert!(resized.app_size.height < wide.app_size.height);
+        assert_eq!(resized.app_size.height, 900.0);
+        assert_eq!(resized.browser_size.height, 900.0);
+        assert!(resized.browser_position.x > resized.app_position.x);
+        assert_eq!(resized.app_position.x, 0.0);
+        assert_eq!(resized.browser_position.y, 0.0);
+        assert_eq!(
+            resized.browser_position.x + resized.browser_size.width,
+            1440.0
+        );
+    }
+
 }
 
 #[tauri::command(async)]

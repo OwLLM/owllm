@@ -1,0 +1,84 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, "../../../../");
+const browserRs = fs.readFileSync(path.join(root, "src-tauri/src/browser.rs"), "utf8");
+const home = fs.readFileSync(path.join(root, "ui/public/browser-home.html"), "utf8");
+const cargoToml = fs.readFileSync(path.join(root, "src-tauri/Cargo.toml"), "utf8");
+
+let passed = 0;
+let failed = 0;
+function check(name, condition) {
+  if (condition) {
+    passed += 1;
+    console.log(`  ✓ ${name}`);
+  } else {
+    failed += 1;
+    console.error(`  ✗ ${name}`);
+  }
+}
+
+console.log("Browser home regression checks");
+const searchAt = home.indexOf("Search engines");
+const socialAt = home.indexOf("Social");
+const messengerAt = home.indexOf("Messengers");
+const recentAt = home.indexOf("Recently opened");
+check("home replaces the black blank page with a local document", browserRs.includes("BROWSER_HOME_PAGE") && browserRs.includes('"browser-home.html"'));
+// The "+" opened nothing because Tauri returns InvalidWebviewUrl for a data:
+// URL unless the `webview-data-url` feature is on. The start page must be a
+// normal app-origin document so every engine can load it.
+check("start page is NOT a data: URL", !browserRs.includes("data:text/html;base64,") && !/BROWSER_HOME_PREFIX/.test(browserRs));
+check("start page is served from the app origin", /fn app_origin/.test(browserRs) && /app_origin\(app\)\?[\s\S]{0,80}\.join\(BROWSER_HOME_PAGE\)/.test(browserRs));
+check("app does not depend on the webview-data-url feature", !cargoToml.includes("webview-data-url"));
+check("home page is bundled with the frontend so the app origin can serve it", fs.existsSync(path.join(root, "ui/public/browser-home.html")));
+check("recents reach the page as data, not injected HTML", home.includes('URLSearchParams(window.location.search).get("r")') && browserRs.includes("URL_SAFE_NO_PAD"));
+check("recent tiles only ever render http(s) targets", /\^https\?:\\\/\\\//.test(home));
+check("sections retain the requested order", searchAt >= 0 && searchAt < socialAt && socialAt < messengerAt && messengerAt < recentAt);
+check("search engines include Google, DuckDuckGo, Naver, Bing and Brave", ["google.com", "duckduckgo.com", "naver.com", "bing.com", "search.brave.com"].every((site) => home.includes(site)));
+check("social row includes LinkedIn, Facebook, Instagram, X and Reddit", ["linkedin.com", "facebook.com", "instagram.com", "x.com", "reddit.com"].every((site) => home.includes(site)));
+check("messenger row includes WhatsApp, Kakao, LINE, WeChat and Telegram", ["web.whatsapp.com", "accounts.kakao.com", "line.me", "web.wechat.com", "web.telegram.org"].every((site) => home.includes(site)));
+check("shortcut logos are large", home.includes("width: 56px"));
+// Instagram and WhatsApp refuse hotlinked favicons, so the shortcut logos are
+// bundled instead of fetched: remote logos silently render as broken tiles and
+// would leave the start page blank offline.
+const shortcutLogos = [...home.matchAll(/<img src="([^"]+)"/g)].map((m) => m[1]);
+check("shortcut logos are bundled, never hotlinked", shortcutLogos.length >= 15
+  && shortcutLogos.every((src) => src.startsWith("browser-icons/")));
+check("every bundled shortcut logo exists on disk", shortcutLogos.every((src) => {
+  const file = path.join(root, "ui/public", src);
+  return fs.existsSync(file) && fs.statSync(file).size > 256;
+}));
+check("the start page includes direct web search", home.includes('action="https://www.google.com/search"') && home.includes('name="q"'));
+check("recent pages come from persisted closed and live tab history", /session\.closed\.iter\(\)\.rev\(\)\.chain\(session\.tabs\.iter\(\)\.rev\(\)\)/.test(browserRs));
+check("recent URLs are limited and deduplicated", browserRs.includes("seen.insert(safe_url.clone())") && browserRs.includes("recent.len() == 5"));
+check("recent shortcuts strip query strings and fragments", browserRs.includes("url.set_query(None)") && browserRs.includes("url.set_fragment(None)"));
+check("only http(s) session entries can become recent shortcuts", browserRs.includes('matches!(url.scheme(), "http" | "https")'));
+check("fresh browser starts on the home page", /let start_url = browser_home_url\(app\)\?;[\s\S]{0,100}build_window/.test(browserRs));
+check("plus button opens the home page", /"tabnew"[\s\S]{0,250}browser_home_url\(&app\)/.test(browserRs));
+check("plus click crosses the reliable intercepted-navigation channel", home.length > 0
+  && /new URL\("\/__owllm_browser_event__"/.test(fs.readFileSync(path.join(root, "ui/public/browser-chrome.html"), "utf8"))
+  && /\.on_navigation\(move \|url\|[\s\S]{0,500}BrowserUiEvent::ChromeAction/.test(browserRs));
+check("suspended Linux browser resumes on the home page", /browser_is_suspended\(\)[\s\S]{0,120}resume_normal_browser\(app, browser_home_url\(app\)\?\)/.test(browserRs));
+check("internal home URL is hidden from browser APIs", browserRs.includes("fn public_browser_url") && browserRs.includes('"about:blank".to_string()'));
+check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1000}public_browser_url/.test(browserRs) && /fn persist_session[\s\S]{0,1400}tab\.url != "about:blank"/.test(browserRs));
+
+// Cross-platform parity. Linux deliberately runs the decorated-window shape —
+// WebKitGTK mislays and SIGBUSes the stacked child webviews the OwLLM chrome
+// bar is built from — so the bar's "+" simply does not exist there. Every
+// chrome-bar action must therefore also be reachable from BrowserPanel, which
+// is the tab strip all three platforms share.
+const panel = fs.readFileSync(path.join(root, "ui/src/pages/agentic/BrowserPanel.tsx"), "utf8");
+const libRs = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
+check("Linux is routed to the WebKitGTK-safe window shape on purpose", /#\[cfg\(target_os = "linux"\)\]\s*\{\s*build_legacy\(app, url, private_session\)/.test(browserRs));
+check("the framed chrome-bar shape still covers Windows and macOS", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*\{\s*match build_framed\(app, url\.clone\(\), private_session\)/.test(browserRs));
+check("a platform-independent command opens a start-page tab", /pub fn browser_new_tab/.test(browserRs) && /pub fn browser_new_tab[\s\S]{0,200}browser_home_url\(&app\)\?/.test(browserRs));
+check("browser_new_tab is registered with the app", libRs.includes("browser::browser_new_tab"));
+check("the in-app panel carries the + every platform can reach", /invoke\("browser_new_tab"\)/.test(panel));
+check("the in-app panel also carries reopen, back and reload", /invoke\("browser_reopen_closed"\)/.test(panel) && /invoke\("browser_cmd", \{ action/.test(panel));
+check("the panel tab strip shows whenever the browser runs", /!!browserTabs\.length \|\| !!status\?\.running/.test(panel));
+
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);

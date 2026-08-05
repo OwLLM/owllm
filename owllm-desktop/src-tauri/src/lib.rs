@@ -235,12 +235,32 @@ fn fit_macos_main_window(window: &tauri::Window) {
     let screen_x = monitor_position.x as f64 / scale;
     let screen_y = monitor_position.y as f64 / scale;
 
-    // 30px horizontal breathing room per side. Vertically, reserve the menu bar
-    // plus a normal visible Dock; 40px from the top keeps custom chrome clear.
-    let target_w = 1400.0_f64.min((screen_w - 60.0).max(1024.0));
-    let target_h = 840.0_f64.min((screen_h - 170.0).max(640.0));
+    // Fit both axes with ONE scale factor. Scaling width and height independently
+    // changed macOS from the shared 1400x960 shape to 1400x840, which made every
+    // panel look wider/shorter than the Windows and Linux builds. The lower bound
+    // honours Tauri's configured minimum width; on a very small desktop overlap is
+    // preferable to silently distorting the product's proportions.
+    const DEFAULT_MAIN_W: f64 = 1400.0;
+    const DEFAULT_MAIN_H: f64 = 960.0;
+    const MIN_MAIN_W: f64 = 1024.0;
+    const MIN_MAIN_H: f64 = 640.0;
+    let available_w = (screen_w - 60.0).max(MIN_MAIN_W);
+    let available_h = (screen_h - 170.0).max(MIN_MAIN_H);
+    let min_scale = (MIN_MAIN_W / DEFAULT_MAIN_W).max(MIN_MAIN_H / DEFAULT_MAIN_H);
+    let fit_scale = (available_w / DEFAULT_MAIN_W)
+        .min(available_h / DEFAULT_MAIN_H)
+        .clamp(min_scale, 1.0);
+    let target_w = DEFAULT_MAIN_W * fit_scale;
+    let target_h = DEFAULT_MAIN_H * fit_scale;
     let target_x = screen_x + ((screen_w - target_w) / 2.0).max(0.0);
-    let target_y = screen_y + 40.0;
+    // The transparent frame is a child window extending above `main`. Position
+    // the frame—not merely the opaque content—below the macOS menu-bar margin.
+    let frame_headroom = if overlay_frame::enabled() {
+        overlay_frame::content_offset_y()
+    } else {
+        0.0
+    };
+    let target_y = screen_y + 40.0 + frame_headroom;
 
     let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
     let _ = window.set_position(tauri::LogicalPosition::new(target_x, target_y));
@@ -374,11 +394,14 @@ pub fn run() {
                     overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
-                        fit_macos_main_window(&dispatch_window);
                         // Main FIRST, overlay second: the frame arriving a
                         // beat late is invisible; the overlay arriving early
                         // (or unpainted) is the startup white flash.
                         let _ = dispatch_window.show();
+                        // macOS constrains an oversized hidden window when it is
+                        // first mapped. Fit after show so that constraint cannot
+                        // overwrite the shared 1400x960 aspect ratio.
+                        fit_macos_main_window(&dispatch_window);
                         let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });
@@ -539,6 +562,7 @@ pub fn run() {
             browser::browser_list_tabs,
             browser::browser_session_bind,
             browser::browser_session_reopen,
+            browser::browser_new_tab,
             browser::browser_reopen_closed,
             browser::browser_select_tab,
             browser::browser_close_tab,

@@ -79,10 +79,10 @@ try {
       && dialog.includes('data-ui="AssistantServicePicker"')
       && dialog.includes("project_environment: environment"),
     "new-project UI configures and persists the environment");
-  check(dialog.includes('agentNames: ["orchestrator", "coder", "critic", "browser"]')
-      && dialog.includes("const projectAgents = kindAgents(kind, team)")
-      && dialog.includes("focused agents"),
-    "web projects create a focused four-agent team instead of the full generic roster");
+  check(dialog.includes("const projectAgents = kindAgents(kind, team)")
+      && dialog.includes("templateId: team.id")
+      && !dialog.includes("agentNames"),
+    "projects take the template's generic profile roster and persist the template id");
   check(dialog.includes('kind?.key === "assistant"')
       && dialog.includes('{ name: "browser", base: "browser", icon: "owl:owl_webapp" }')
       && dialog.includes('edge.target === "browser"'),
@@ -100,9 +100,14 @@ try {
       && projects.includes('"environment": input.project_environment.clone()'),
     "the portable Project Card carries the non-secret environment recipe");
   check(browser.includes("pub fn browser_arrange")
-      && browser.includes("resize only the browser")
+      && browser.includes("arrange_split_screen")
+      && browser.includes("monitor.work_area()")
+      && browser.includes("set_client_bounds(&main")
+      && browser.includes("set_client_bounds(&browser")
+      && !browser.includes("SPLIT_SCREEN_ACTIVE")
+      && !browser.includes("queue_split_reflow")
       && lib.includes("browser::browser_arrange"),
-    "the cross-platform browser layout command is registered without resizing the main GUI");
+    "the cross-platform browser layout initially splits the usable screen and leaves later moves/resizes alone");
 
   console.log(`OK project environments: ${passed}/${passed} checks passed`);
 } finally {

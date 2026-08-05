@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New tab</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: #eef2ff; background: radial-gradient(circle at 50% -20%, #263456 0, #111827 34%, #090d14 72%); }
+    main { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 54px 0 64px; }
+    .hero { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 34px; }
+    h1 { margin: 0; font-size: clamp(30px, 4vw, 48px); letter-spacing: -.045em; }
+    .subtitle { margin: 9px 0 0; color: #94a3b8; font-size: 15px; }
+    .search { display: flex; width: min(430px, 48%); border: 1px solid #334155; border-radius: 16px; background: rgba(15, 23, 42, .78); box-shadow: 0 18px 50px rgba(0,0,0,.24); overflow: hidden; }
+    .search:focus-within { border-color: #6d8cff; box-shadow: 0 0 0 3px rgba(109,140,255,.15); }
+    .search input { min-width: 0; flex: 1; padding: 14px 16px; border: 0; outline: 0; color: #eef2ff; background: transparent; font: inherit; }
+    .search button { border: 0; padding: 0 18px; color: white; background: #526ee8; font-weight: 700; cursor: pointer; }
+    section { margin-top: 30px; }
+    h2 { margin: 0 0 13px; color: #cbd5e1; font-size: 13px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+    .row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
+    .tile { min-width: 0; min-height: 118px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 15px 10px; border: 1px solid rgba(148,163,184,.17); border-radius: 20px; color: #e8edfa; background: linear-gradient(145deg, rgba(30,41,59,.82), rgba(15,23,42,.72)); text-decoration: none; box-shadow: 0 12px 28px rgba(0,0,0,.16); transition: transform .16s ease, border-color .16s ease, background .16s ease; }
+    .tile:hover, .tile:focus-visible { transform: translateY(-3px); border-color: rgba(129,156,255,.66); background: linear-gradient(145deg, rgba(43,57,83,.94), rgba(21,31,51,.88)); outline: none; }
+    .logo { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 16px; background: white; box-shadow: 0 8px 22px rgba(0,0,0,.24); overflow: hidden; }
+    .logo img { width: 38px; height: 38px; object-fit: contain; }
+    .name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; }
+    .recent .tile { min-height: 105px; align-items: flex-start; padding: 15px; }
+    .recent .logo { width: 42px; height: 42px; border-radius: 12px; }
+    .recent .logo img { width: 28px; height: 28px; }
+    .recent .host { width: 100%; color: #8491a7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .empty { grid-column: 1 / -1; padding: 22px; border: 1px dashed #334155; border-radius: 18px; color: #7f8da4; text-align: center; }
+    @media (max-width: 820px) { main { width: min(100% - 28px, 680px); padding-top: 30px; } .hero { align-items: stretch; flex-direction: column; } .search { width: 100%; } .row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 500px) { .row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hero">
+      <div><h1>Where to?</h1><p class="subtitle">Your web, one click away.</p></div>
+      <form class="search" action="https://www.google.com/search" method="get"><input name="q" type="search" placeholder="Search the web" aria-label="Search the web" autofocus><button type="submit">Search</button></form>
+    </div>
+    <section><h2>Search engines</h2><div class="row">
+      <a class="tile" href="https://www.google.com"><span class="logo"><img src="browser-icons/google.ico" alt=""></span><span class="name">Google</span></a>
+      <a class="tile" href="https://duckduckgo.com"><span class="logo"><img src="browser-icons/duckduckgo.ico" alt=""></span><span class="name">DuckDuckGo</span></a>
+      <a class="tile" href="https://www.naver.com"><span class="logo"><img src="browser-icons/naver.ico" alt=""></span><span class="name">Naver</span></a>
+      <a class="tile" href="https://www.bing.com"><span class="logo"><img src="browser-icons/bing.ico" alt=""></span><span class="name">Bing</span></a>
+      <a class="tile" href="https://search.brave.com"><span class="logo"><img src="browser-icons/brave.png" alt=""></span><span class="name">Brave</span></a>
+    </div></section>
+    <section><h2>Social</h2><div class="row">
+      <a class="tile" href="https://www.linkedin.com"><span class="logo"><img src="browser-icons/linkedin.ico" alt=""></span><span class="name">LinkedIn</span></a>
+      <a class="tile" href="https://www.facebook.com"><span class="logo"><img src="browser-icons/facebook.ico" alt=""></span><span class="name">Facebook</span></a>
+      <a class="tile" href="https://www.instagram.com"><span class="logo"><img src="browser-icons/instagram.png" alt=""></span><span class="name">Instagram</span></a>
+      <a class="tile" href="https://x.com"><span class="logo"><img src="browser-icons/x.png" alt=""></span><span class="name">X</span></a>
+      <a class="tile" href="https://www.reddit.com"><span class="logo"><img src="browser-icons/reddit.png" alt=""></span><span class="name">Reddit</span></a>
+    </div></section>
+    <section><h2>Messengers</h2><div class="row">
+      <a class="tile" href="https://web.whatsapp.com"><span class="logo"><img src="browser-icons/whatsapp.ico" alt=""></span><span class="name">WhatsApp</span></a>
+      <a class="tile" href="https://accounts.kakao.com"><span class="logo"><img src="browser-icons/kakao.png" alt=""></span><span class="name">Kakao</span></a>
+      <a class="tile" href="https://line.me"><span class="logo"><img src="browser-icons/line.png" alt=""></span><span class="name">LINE</span></a>
+      <a class="tile" href="https://web.wechat.com"><span class="logo"><img src="browser-icons/wechat.png" alt=""></span><span class="name">WeChat</span></a>
+      <a class="tile" href="https://web.telegram.org"><span class="logo"><img src="browser-icons/telegram.png" alt=""></span><span class="name">Telegram</span></a>
+    </div></section>
+    <section class="recent"><h2>Recently opened</h2><div class="row" id="recent"></div></section>
+  </main>
+  <script>
+    // Recents are handed over by Rust as base64url JSON in ?r= — the page is a
+    // static app-origin document, so it never reads the session store itself.
+    // Rust already stripped query strings and fragments from these URLs.
+    (function () {
+      var row = document.getElementById("recent");
+      var entries = [];
+      try {
+        var raw = new URLSearchParams(window.location.search).get("r");
+        if (raw) {
+          var b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+          while (b64.length % 4) { b64 += "="; }
+          entries = JSON.parse(decodeURIComponent(escape(atob(b64))));
+        }
+      } catch (e) { entries = []; }
+      if (!Array.isArray(entries) || !entries.length) {
+        row.innerHTML = '<div class="empty">Pages you close will appear here.</div>';
+        return;
+      }
+      entries.forEach(function (entry) {
+        if (!entry || typeof entry.url !== "string") { return; }
+        // Only ever render web links — never a javascript: or data: target.
+        if (!/^https?:\/\//i.test(entry.url)) { return; }
+        var a = document.createElement("a");
+        a.className = "tile";
+        a.href = entry.url;
+        var logo = document.createElement("span");
+        logo.className = "logo";
+        var img = document.createElement("img");
+        img.alt = "";
+        img.src = String(entry.origin || "") + "/favicon.ico";
+        logo.appendChild(img);
+        var name = document.createElement("span");
+        name.className = "name";
+        name.textContent = entry.label || "Recent page";
+        var host = document.createElement("span");
+        host.className = "host";
+        host.textContent = entry.url;
+        a.appendChild(logo);
+        a.appendChild(name);
+        a.appendChild(host);
+        row.appendChild(a);
+      });
+    })();
+  </script>
+</body>
+</html>

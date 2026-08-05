@@ -92,6 +92,28 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     } catch (e) { setErr(String(e)); }
   };
 
+  // The chrome bar's own controls, mirrored here so every platform has them.
+  // The Linux browser window carries no chrome bar — WebKitGTK cannot host the
+  // stacked webviews it is built from — so this panel is its only tab strip.
+  const newBrowserTab = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_new_tab"); await invoke("browser_focus"); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+  const reopenBrowserTab = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_reopen_closed"); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+  const pageCmd = async (action: "back" | "reload") => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_cmd", { action, params: {} }); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
+
   const showWindow = async () => { try { await invoke("browser_start"); await invoke("browser_focus"); await refreshStatus(); } catch (e) { setErr(String(e)); } };
   const setDevice = async (device: string) => {
     if (busy) return;
@@ -187,9 +209,8 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
   const browserTabs = status?.tabs ?? [];
 
   return (
-    <>
-      <style>{`@keyframes owllmBrowserFrameHue { to { filter: hue-rotate(360deg); } }`}</style>
-      <div
+    <div
+      data-ui="BrowserWindowShell"
         ref={boxRef}
         style={inline
           // Inline (Browser agent card): no floating frame — fill the tile.
@@ -199,21 +220,21 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
           // Default 300px up from the bottom-right corner so it doesn't sit on
           // the app's own controls (user spec 2026-07-05).
           ...(pos ? { left: pos.x, top: pos.y } : { right: 24, bottom: 324 }),
-          width: 560, maxWidth: "92vw",
-          // Psychedelic rainbow frame — the same conic-gradient ring as the
-          // Critical Thinker card. The 3px padding shows the gradient, the inner
-          // panel covers the centre, and owllmBrowserFrameHue slowly hue-shifts it.
-          padding: 3, borderRadius: 15,
-          background: "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)",
-          animation: "owllmBrowserFrameHue 8s linear infinite",
+          width: 560, maxWidth: "92vw", boxSizing: "border-box",
+          // Match the main OWLLM window's quiet frame: a standard border and
+          // a small, even inset so the content never touches the shell edge.
+          padding: 4, border: "1px solid var(--border-strong)", borderRadius: 12,
+          background: "var(--bg-panel)",
           boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
         }}
       >
-        <div style={inline
+        <div
+          data-ui="BrowserWindowShellContent"
+          style={inline
           ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", overflow: "hidden" }
           : {
-          display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 6px)",
-          background: "var(--bg-panel)", borderRadius: 12, overflow: "hidden",
+          display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 10px)",
+          background: "var(--bg-panel)", borderRadius: 8, overflow: "hidden",
         }}>
           <div
             onMouseDown={inline ? undefined : onDragStart}
@@ -236,8 +257,8 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
-            {!!browserTabs.length && (
-              <div style={{ display: "flex", gap: 4, marginBottom: 8, overflowX: "auto" }}>
+            {(!!browserTabs.length || !!status?.running) && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8, overflowX: "auto" }}>
                 {browserTabs.map((browserTab) => (
                   <div key={browserTab.id} style={{ display: "flex", alignItems: "center", minWidth: 0, border: "1px solid " + (browserTab.active ? "rgba(var(--accent-rgb),0.45)" : "var(--border)"), borderRadius: 7, background: browserTab.active ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-surface)" }}>
                     <button onClick={() => void selectBrowserTab(browserTab.id)} title={browserTab.url} style={{ maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: 0, background: "transparent", color: browserTab.active ? "var(--accent-ink)" : "var(--fg-muted)", cursor: "pointer", fontSize: 10.5, padding: "4px 7px" }}>
@@ -246,9 +267,19 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                     {browserTabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
                   </div>
                 ))}
+                <button className="ghost-btn" disabled={busy} onClick={() => void newBrowserTab()}
+                  title="New tab — opens the OwLLM start page"
+                  style={{ height: 24, minWidth: 24, padding: "0 6px", fontSize: 13, lineHeight: 1 }}>＋</button>
+                <button className="ghost-btn" disabled={busy} onClick={() => void reopenBrowserTab()}
+                  title="Reopen the page you closed last"
+                  style={{ height: 24, minWidth: 24, padding: "0 6px", fontSize: 12, lineHeight: 1 }}>↺</button>
               </div>
             )}
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <button className="ghost-btn" disabled={busy || !status?.running} onClick={() => void pageCmd("back")}
+                title="Back" style={{ height: 26, width: 26, padding: 0, fontSize: 12 }}>←</button>
+              <button className="ghost-btn" disabled={busy || !status?.running} onClick={() => void pageCmd("reload")}
+                title="Reload this page" style={{ height: 26, width: 26, padding: 0, fontSize: 12 }}>⟳</button>
               <input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void navigate(); }}
                 placeholder="open a URL (e.g. github.com) — agents inherit this session" style={field} />
               <button className="btn" disabled={busy} onClick={() => void navigate()} style={{ fontSize: 11, padding: "3px 10px" }}>Go</button>
@@ -343,6 +374,5 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       </div>
         </div>
       </div>
-    </>
   );
 }

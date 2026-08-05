@@ -6,6 +6,7 @@
 // templates + role definitions from agents.rs, bridge config from
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
@@ -37,7 +38,8 @@ import IconPickerDialog, {
   setAgentIconOverride,
   loadOverridesForProject,
 } from "./IconPickerDialog";
-import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite } from "./ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import {
   OpenAILogo, AnthropicLogo, GeminiLogo, DeepSeekLogo,
   XaiLogo, MoonshotLogo, MistralLogo,
@@ -120,6 +122,7 @@ import { requiresManagedLocalServer } from "./peerCatalogue";
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
+import { runMemoryCurator } from "./memoryCurator";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
@@ -131,7 +134,7 @@ import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomai
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
-import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
+import { resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -155,6 +158,7 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
+import Composer from "../../components/Composer";
 import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -322,6 +326,10 @@ function buildGraphJson(opts: {
   agentSkills: Map<string, string[]>;
   agentToolExtras: Map<string, string[]>;
   previousGraphJson?: string | null;
+  /// Set when the roster is being (re)written FROM a template, so the project
+  /// remembers which template it runs — the generic profile rosters are
+  /// identical across templates, so the id is the only identity that survives.
+  templateId?: string;
 }): string {
   let previous: Record<string, unknown> = {};
   try {
@@ -330,6 +338,7 @@ function buildGraphJson(opts: {
   } catch { /* malformed legacy graph — rebuild the known fields */ }
   return JSON.stringify({
     ...previous,
+    ...(opts.templateId ? { templateId: opts.templateId } : {}),
     edges: opts.edges,
     roster: opts.agents.map(a => ({
       name: a.name,
@@ -408,6 +417,11 @@ type Team = {
   visibility: TeamVisibility;
   workflowRank: number;
   requiredMcp: string[];
+  /// For a project-backed Team ("project:…"): the template id persisted into
+  /// graph_json at creation. The profile conversion gave every bundled team the
+  /// SAME generic roster, so roster-shape matching can no longer tell templates
+  /// apart — the id is the only reliable identity signal.
+  templateId?: string;
 };
 type RoleData = {
   name: string;
@@ -754,9 +768,13 @@ function projectToTeam(p: ProjectRow): Team {
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
   const defaultModelByName = new Map<string, string>();
+  let templateId: string | undefined;
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
+      if (typeof parsed?.templateId === "string" && parsed.templateId.trim()) {
+        templateId = parsed.templateId.trim();
+      }
       if (Array.isArray(parsed?.edges)) {
         edges = parsed.edges
           .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
@@ -799,6 +817,7 @@ function projectToTeam(p: ProjectRow): Team {
     visibility: "custom",
     workflowRank: 999,
     requiredMcp: [],
+    templateId,
     agents,
     edges,
   };
@@ -814,6 +833,14 @@ function projectToTeam(p: ProjectRow): Team {
 function teamTemplateForActive(active: Team | null, teams: Team[]): Team | null {
   if (!active) return null;
   if (!active.id.startsWith("project:")) return active; // already a real template
+  // 0) the template id persisted into graph_json at creation. The profile
+  //    conversion gave every bundled team the SAME generic roster, so the
+  //    roster-shape strategies below can no longer tell converted templates
+  //    apart (they'd all match the alphabetically-first one). The id can.
+  if (active.templateId) {
+    const byId = teams.find(t => t.id === active.templateId || t.name === active.templateId);
+    if (byId) return byId;
+  }
   const projNames = active.agents.map(a => a.name).filter(Boolean);
   if (projNames.length === 0) return null;
   const nameSet = new Set(projNames);
@@ -2493,25 +2520,6 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
-        {isCritic && (
-          <button
-            type="button"
-            aria-pressed={criticEnabled}
-            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
-            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
-            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
-            onKeyDown={(e) => e.stopPropagation()}
-            style={{
-              width: 24, height: 22, padding: 0, flexShrink: 0,
-              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
-              borderRadius: 6,
-              background: criticEnabled ? "rgba(255,184,76,0.18)" : "rgba(0,0,0,0.25)",
-              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
-              cursor: "pointer", fontSize: 13, lineHeight: 1,
-              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
-            }}
-          >✦</button>
-        )}
         {/* The NAME is the editor handle: clicking it opens the per-agent
             model/colour/prompt popup. The clickable element is an inline-block
             sized to the name GLYPHS (not the full-width header row), so the
@@ -2532,6 +2540,38 @@ function AgentChatTile({
             }}
           >{label ?? displayLabel(name)}</span>
         </div>
+        {isCritic && (
+          <button
+            type="button"
+            data-critic-toggle="true"
+            aria-pressed={criticEnabled}
+            aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}
+            title={`${criticEnabled ? "Turn off" : "Turn on"} Critical Thinker reviews`}
+            onClick={(e) => { e.stopPropagation(); onToggleCritic(); }}
+            onKeyDown={(e) => e.stopPropagation()}
+            style={{
+              width: 50, height: 22, padding: "2px 4px 2px 5px", flexShrink: 0,
+              display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 3,
+              border: `1px solid ${criticEnabled ? "rgba(255,184,76,0.75)" : "var(--border)"}`,
+              borderRadius: 999,
+              background: criticEnabled ? "rgba(255,184,76,0.22)" : "rgba(0,0,0,0.30)",
+              color: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+              cursor: "pointer", fontSize: 9, fontWeight: 800, lineHeight: 1,
+              letterSpacing: 0.3,
+              boxShadow: criticEnabled ? "0 0 10px rgba(255,184,76,0.24)" : "none",
+            }}
+          >
+            <span>{criticEnabled ? "ON" : "OFF"}</span>
+            <span
+              aria-hidden="true"
+              style={{
+                width: 14, height: 14, flexShrink: 0, borderRadius: "50%",
+                background: criticEnabled ? "#ffd166" : "var(--fg-subtle)",
+                boxShadow: criticEnabled ? "0 0 5px rgba(255,209,102,0.65)" : "none",
+              }}
+            />
+          </button>
+        )}
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
@@ -2548,8 +2588,8 @@ function AgentChatTile({
                 onChange={onPickModel}
                 models={models}
                 status={accountsStatus}
-                fallbackLabel={modelLabel || "(pick a model)"}
-                compactTitle={`Model: ${modelTitle || modelLabel || "pick a model"}`}
+                fallbackLabel={modelLabel || SELECT_MODEL_LABEL}
+                compactTitle={`Model: ${modelTitle || modelLabel || SELECT_MODEL_LABEL}`}
                 compactTrigger={
                   <span
                     aria-hidden="true"
@@ -4538,10 +4578,15 @@ function GraphCanvas({
   // these to graph_json (they'd just round-trip get filtered out).
   const hasSyntheticCritic = effective.has(CRITIC_AGENT_NAME);
   const baseLive = edges.filter(e => effective.has(e.source) && effective.has(e.target));
+  // The generic profile teams AUTHOR their orchestrator↔critic edges, so only
+  // inject the virtual pair where it isn't already present — otherwise every
+  // converted team drew the same edge twice (one real, one synthetic).
+  const syntheticPair = [
+    { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true },
+    { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true },
+  ].filter(se => !baseLive.some(e => e.source === se.source && e.target === se.target));
   const liveEdges: (Edge & { synthetic?: boolean })[] = hasSyntheticCritic && effective.has(orchName)
-    ? [...baseLive,
-       { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true } as any,
-       { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
+    ? [...baseLive, ...(syntheticPair as any[])]
     : baseLive;
 
   // Click a card to VERIFY its real connections: its incident edges + the
@@ -5273,7 +5318,6 @@ function ChatInputDock({
   // Files for the next team-chat turn. Images retain their bytes; documents are
   // parsed locally and carry extracted text only.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const addDockFiles = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       try {
@@ -5283,12 +5327,6 @@ function ChatInputDock({
         flashNote(String((error as { message?: string })?.message ?? error));
       }
     }
-  };
-  const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    e.preventDefault();
-    void addDockFiles(files);
   };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
@@ -5312,55 +5350,14 @@ function ChatInputDock({
     setPaletteOpen(false);
   };
 
-  // Web Speech API — toggle dictation. Only used on the desktop;
-  // Telegram path uses the bundled whisper.cpp pipeline already.
-  // WebView2 ships SpeechRecognition only when the Edge runtime has
-  // it enabled, which is NOT universal — when it's missing we keep
-  // the button visible but flash a tooltip via dockNote so the user
-  // doesn't think the button is broken.
-  const recogRef = useRef<any>(null);
-  const [recording, setRecording] = useState(false);
+  // Dictation lives in the shared composer (useDictation); when the WebView
+  // has no SpeechRecognition it reports back through onNotice → dockNote, so
+  // the user never sees a silently dead mic button.
   const [dockNote, setDockNote] = useState<string | null>(null);
   const flashNote = (msg: string) => {
     setDockNote(msg);
     setTimeout(() => setDockNote(null), 3500);
   };
-  const toggleMic = () => {
-    if (recording) {
-      try { recogRef.current?.stop?.(); } catch {}
-      setRecording(false);
-      return;
-    }
-    const Ctor = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
-    if (!Ctor) {
-      flashNote("Mic dictation unavailable in this WebView. Use the Telegram bridge for voice messages.");
-      return;
-    }
-    const rec = new Ctor();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = "en-US";
-    const baseline = draft;
-    rec.onresult = (ev: any) => {
-      let partial = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        partial += ev.results[i][0].transcript;
-      }
-      setDraft((baseline ? baseline.trimEnd() + " " : "") + partial);
-    };
-    rec.onend = () => { setRecording(false); };
-    rec.onerror = (ev: any) => {
-      setRecording(false);
-      flashNote(`Mic error: ${ev?.error ?? "unknown"}`);
-    };
-    try { rec.start(); recogRef.current = rec; setRecording(true); }
-    catch (e) {
-      flashNote(`Mic start failed: ${String(e)}`);
-    }
-  };
-
-  const onAttach = () => fileInputRef.current?.click();
-
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
   // listens for to call .abort() on the active dispatch's
@@ -5412,195 +5409,53 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
-      {showPalette && filteredCmds.length > 0 && (
-        <div data-ui="SlashPalette" style={{
-          position:"absolute", left:12, right:12, bottom:"calc(100% - 4px)",
-          background:"var(--bg-panel)",
-          border:"1px solid var(--border-strong)",
-          borderRadius:10,
-          boxShadow:"0 -8px 30px rgba(0,0,0,0.55)",
-          maxHeight:260, overflowY:"auto",
-          zIndex:30, padding:"6px 0",
-        }}>
-          <div style={{ padding:"4px 12px 6px", fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase" }}>
-            Slash commands
-          </div>
-          {filteredCmds.map(c => (
-            <button
-              key={c.name}
-              type="button"
-              onClick={() => runCommand(c)}
-              style={{
-                display:"flex", alignItems:"baseline", gap:10, width:"100%",
-                padding:"6px 12px", background:"transparent", border:"none",
-                color:"var(--fg)", textAlign:"left", cursor:"pointer", fontSize:12,
-              }}
-              onMouseEnter={ev => { (ev.currentTarget as HTMLElement).style.background = "var(--bg-surface)"; }}
-              onMouseLeave={ev => { (ev.currentTarget as HTMLElement).style.background = "transparent"; }}
-            >
-              <span style={{ fontWeight:700, color:"#ffd97a", fontFamily:"Consolas, monospace" }}>{c.name}</span>
-              <span style={{ color:"var(--fg-muted)", fontSize:11 }}>{c.description}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      <div style={{
-        display:"flex", flexDirection:"column",
-        background:"var(--bg-surface)",
-        border:"1px solid rgba(255,200,80,0.40)",
-        borderRadius:12,
-        overflow:"hidden",
-      }}>
-        {attachments.length > 0 && (
-          <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
-            {attachments.map((a, i) => (
-              <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
-                {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
-                <button onClick={() => setAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
-              </span>
-            ))}
-          </div>
-        )}
-        <div style={{ display:"flex", alignItems:"flex-start", padding:"10px 12px 6px", gap:8 }}>
-          <textarea
-            ref={inputRef}
-            data-ui="UserInputArea"
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onPaste={onDockPaste}
-            onKeyDown={e => {
-              if (e.key === "Escape") { setPaletteOpen(false); return; }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                // While a run is active, Enter QUEUES the message to steer the run
-                // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
-                // route around it here; the ■ button remains the way to stop.
-                if (busy && (draft.trim() || attachments.length)) onSend(attachments);
-                else handleSend();
-              }
-            }}
-            placeholder="Queue another message…"
-            rows={1}
-            style={{
-              flex:1, minWidth:0, minHeight:24, maxHeight:240,
-              padding:0,
-              background:"transparent",
-              color:"var(--fg)",
-              border:"none",
-              fontSize:"var(--chat-font-size, 13px)", lineHeight:1.45,
-              fontFamily:"Segoe UI, sans-serif",
-              resize:"none",
-              outline:"none",
-              overflowY:"auto",
-            }}
-          />
-          <button
-            type="button"
-            onClick={toggleMic}
-            title={recording ? "Stop dictation" : "Start dictation (Web Speech)"}
-            style={{
-              flexShrink:0, width:28, height:28,
-              background: recording ? "rgba(255,140,140,0.20)" : "transparent",
-              border:"none", borderRadius:6,
-              color: recording ? "#ff8c8c" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:16,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >🎤</button>
-        </div>
-        {dockNote && (
-          <div style={{
-            padding:"4px 12px",
-            fontSize:11, color:"#ffd97a",
-            background:"rgba(255,217,122,0.08)",
-            borderTop:"1px solid rgba(255,217,122,0.20)",
-          }}>{dockNote}</div>
-        )}
-        <div style={{
-          display:"flex", alignItems:"center", gap:6,
-          padding:"4px 8px 8px",
-          borderTop:"1px solid rgba(255,255,255,0.04)",
-        }}>
-          <button
-            type="button"
-            onClick={onAttach}
-            title="Attach images or documents"
-            style={{
-              width:28, height:28, background:"transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color:"var(--fg-muted)", cursor:"pointer", fontSize:15,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >+</button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={CHAT_ATTACHMENT_ACCEPT}
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => { if (e.target.files) void addDockFiles(e.target.files); e.target.value = ""; }}
-          />
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(v => !v)}
-            title="Slash commands"
-            style={{
-              width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "var(--accent-ink)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
-              display:"flex", alignItems:"center", justifyContent:"center",
-            }}
-          >/</button>
-          <div style={{ flex:1 }} />
-          <button
-            type="button"
-            onClick={onToggleAutoApprove}
-            title={autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval"}
-            style={{
-              height:28, padding:"0 10px",
-              display:"flex", alignItems:"center", gap:6,
-              background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-              border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
-              borderRadius:6,
-              color: autoApprove ? "var(--accent-ink)" : "var(--fg-muted)",
-              cursor:"pointer", fontSize:11, fontWeight:600,
-            }}
-          >
-            <span style={{ fontSize:13 }}>⚡</span>
-            <span>Auto mode</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!busy && !loadingModel && !draft.trim() && attachments.length === 0}
-            title={busy
-              ? "Stop the in-flight dispatch"
-              : loadingModel
-                ? "Loading model into VRAM — click sends as soon as ready"
-                : needsLoad
-                  ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
-                  : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
-            style={{
-              width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() || attachments.length ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
-              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() || attachments.length ? "var(--accent-fg)" : "var(--fg-muted)"),
-              border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
-              borderRadius:6,
-              cursor: (busy || loadingModel || draft.trim() || attachments.length) ? "pointer" : "not-allowed",
-              fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
-              display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
-            }}
-          >
-            {busy
-              ? "■"
-              : loadingModel
-                ? <><span>⏳</span><span>Loading</span></>
-                : needsLoad
-                  ? <><span>⚡</span><span>Load</span></>
-                  : "▶"}
-          </button>
-        </div>
-      </div>
+      <Composer
+        dataUi="UserInput"
+        textareaRef={inputRef}
+        value={draft}
+        onChange={setDraft}
+        onSend={handleSend}
+        onStop={handleSend}
+        busy={busy}
+        placeholder="Queue another message…"
+        minHeight={24}
+        maxHeight={240}
+        onKeyDown={e => {
+          if (e.key === "Enter" && !e.shiftKey && busy && (draft.trim() || attachments.length)) {
+            // While a run is active, Enter QUEUES the message to steer the run
+            // (onSend → onSupSend enqueues). The composer's own Enter would hit
+            // Stop instead, so route around it here; ■ remains the way to stop.
+            e.preventDefault();
+            onSend(attachments);
+            setAttachments([]);
+          }
+        }}
+        attachments={attachments}
+        onAttachFiles={(files) => { void addDockFiles(files); }}
+        onRemoveAttachment={(i) => setAttachments(x => x.filter((_, j) => j !== i))}
+        attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+        notice={dockNote ? { kind: "info", text: dockNote } : null}
+        onNotice={flashNote}
+        mic
+        showCounter
+        slashCommands={slashCommands.map(c => ({ name: c.name, hint: c.description, run: () => runCommand(c) }))}
+        toggles={[{
+          key: "auto",
+          label: "⚡ Auto mode",
+          title: autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval",
+          on: autoApprove,
+          onToggle: onToggleAutoApprove,
+        }]}
+        canSend={loadingModel || !!draft.trim() || attachments.length > 0}
+        sendLabel={loadingModel ? "⏳ Loading" : needsLoad ? "⚡ Load" : "▶"}
+        sendTitle={loadingModel
+          ? "Loading model into VRAM — click sends as soon as ready"
+          : needsLoad
+            ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
+            : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
+        stopLabel=""
+        stopTitle="Stop the in-flight dispatch"
+      />
     </div>
   );
 }
@@ -6978,6 +6833,7 @@ function needsCriticalThinkerReview(text: string): boolean {
   // thinker" (or @critical_thinker) to bring it in.
   return /\b(critical[\s_]+thinker|critic)\b/i.test(text);
 }
+
 function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
   const directivesBlock = formatDirectivesBlock(directives);
   return [
@@ -8498,6 +8354,12 @@ const agentSid = (pid: string | null | undefined): string => `agents:${pid || "n
 // null and couldn't otherwise stop it.
 const agentRunAborts = new Map<string, AbortController>();
 
+// Written into a tab's project binding when the user opened the tab through
+// "＋ New page → New project": the tab must land on the project hub instead of
+// silently adopting projects[0] (which is almost always another tab's project).
+// The binding is overwritten with a real project id as soon as one is picked.
+const AGENTS_PAGE_NEW_PROJECT = "__new-project__";
+
 // One agentic workspace. Multiple instances can be mounted at once (one per
 // tab in the AgentsPages shell below) — each remembers its own selected
 // project per pageId, so two tabs can run teams on the same or different
@@ -8628,6 +8490,10 @@ export function AgentsPage({
   };
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // Rule-based popup for a send with no model picked anywhere. Dispatch no
+  // longer auto-picks the first servable local model, so this is what the
+  // user sees instead of a run on weights they never chose.
+  const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // (The previous `chatSplit` 40/60 layout was removed 2026-05-28 —
   // the per-agent grid is now a CANVAS view mode rather than a side-
@@ -9116,7 +8982,7 @@ export function AgentsPage({
   const [soloMode, setSoloModeState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
-  // top-level so it can be reused later (e.g. from NewProjectDialog).
+  // top-level so other entry points can reuse it later.
   const [brainstormOpen, setBrainstormOpen] = useState(false);
   const [brainstormSeed, setBrainstormSeed] = useState("");
   // Cached "does BRIEF.md exist for this project's location" — drives
@@ -9553,10 +9419,13 @@ export function AgentsPage({
         rawModels.map(x => `${x.model_id}(${x.provider}${x.port == null ? ":no-port" : ""})`).join(", "));
       setProjects(rawProjects);
       setModels(rawModels);
-      if (rawProjects.length > 0) {
+      let stored: string | null = null;
+      try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
+      // A tab opened as "New project" stays unbound so the project hub renders;
+      // auto-adopting projects[0] is what made every new tab look like a clone
+      // of the previous one.
+      if (rawProjects.length > 0 && stored !== AGENTS_PAGE_NEW_PROJECT) {
         // Restore this tab's own project when it still exists; else first.
-        let stored: string | null = null;
-        try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
         const pick = rawProjects.find(p => p.id === stored) ?? rawProjects[0];
         setSelectedProjectId(pick.id);
         setProjectLocationDraft(pick.location || "", pick.id);
@@ -9867,7 +9736,18 @@ export function AgentsPage({
       // fan-out. Per-agent model/voice/skill picks still apply — they're keyed
       // by agent name, which matches. (Names must match for the edges to
       // resolve too; teamTemplateForActive already required a roster match.)
-      if (tmpl && tmpl.agents.length > 0) return { ...proj, agents: tmpl.agents, edges: tmpl.edges };
+      if (tmpl && tmpl.agents.length > 0) {
+        // Keep project agents the template doesn't know about (e.g. the
+        // assistant flow's provisioned `browser` agent) plus their edges —
+        // adopting the template roster verbatim silently dropped them.
+        const tmplNames = new Set(tmpl.agents.map(a => a.name));
+        const extras = proj.agents.filter(a => !tmplNames.has(a.name));
+        const extraEdges = proj.edges.filter(e =>
+          extras.some(x => x.name === e.source || x.name === e.target) &&
+          (tmplNames.has(e.source) || extras.some(x => x.name === e.source)) &&
+          (tmplNames.has(e.target) || extras.some(x => x.name === e.target)));
+        return { ...proj, agents: [...tmpl.agents, ...extras], edges: [...tmpl.edges, ...extraEdges] };
+      }
       return proj;
     }
     return teams[0] ?? null;
@@ -9901,6 +9781,7 @@ export function AgentsPage({
           agentModels: perAgentModel, agentVoices: perAgentVoice,
           agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
           previousGraphJson: selectedProject.graph_json,
+          templateId: tmpl.id,
         }),
       },
     });
@@ -9934,6 +9815,7 @@ export function AgentsPage({
             agentModels: new Map(), agentVoices: new Map(),
             agentSkills: new Map(), agentToolExtras: new Map(),
             previousGraphJson: selectedProject.graph_json,
+            templateId: t.id,
           }),
         },
       });
@@ -11348,23 +11230,25 @@ export function AgentsPage({
         const id = effectiveModelFor(a);
         if (id && isManagedLocalModel(id)) localCandidates.push(id);
       }
-      // Fallback chain so Send always works when local is needed:
+      // Resolution chain — BOTH steps are the user's own choice:
       //   1. Explicit pick (per-agent / team-default / orchestrator).
-      //   2. Whatever the local server is already serving (lets the
-      //      user re-use a model loaded by Chat / Server tabs).
-      //   3. First servable local/tuned model in the registry — auto-
-      //      pick so a fresh team with no model_id assigned still runs.
+      //   2. Whatever the local server is already serving (the user
+      //      started that on the Chat / Server tabs).
+      // There is deliberately no step 3. Falling back to the first servable
+      // model in the registry silently ran weights nobody picked — the run
+      // stops and the rule-based ModelRequiredDialog says so instead.
       let wantedLocal = localCandidates[0]?.trim() || "";
       if (!wantedLocal && serverState.model_id && isManagedLocalModel(serverState.model_id)) {
         wantedLocal = serverState.model_id;
       }
       if (!wantedLocal) {
-        const fallback = models.find(m =>
-          requiresManagedLocalServer(m.model_id, m.provider) && m.port != null);
-        if (fallback) wantedLocal = fallback.model_id;
-      }
-      if (!wantedLocal) {
-        setRunError("This team uses local model(s) but none are installed. Open the Models tab and add a local or tuned model first.");
+        setModelRequired({
+          where: "the team / agent Model picker",
+          detail: models.some(m => requiresManagedLocalServer(m.model_id, m.provider) && m.port != null)
+            ? "This team runs on a local model, but none is assigned."
+            : "This team runs on a local model and none is installed — add one on the Models tab.",
+        });
+        setRunError("No model selected — pick one for the team or the agent before sending.");
         dispatchInFlightRef.current = false;
         releaseRunAbort();
         return;
@@ -11701,10 +11585,18 @@ export function AgentsPage({
           ...(coder.extraSkills ?? []),
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
-        const sBlock = await buildAgentSkillBlock(
+        const { block: sBlock, autoLoaded: sAutoLoaded } = await buildSoloSkillBlock(
           runtimeSkillIds(coder, sIds),
+          text,
           !!coder.runtimePersonal,
         );
+        if (sAutoLoaded.length > 0) {
+          appendThought(coder.name, {
+            role: "system",
+            color: "#7fd4ff",
+            text: `📦 Auto-loaded skill(s): ${sAutoLoaded.join(", ")}`,
+          });
+        }
         // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
         // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
         // Alone, that lock is fatal — it does its slice and hands the rest to agents
@@ -11965,6 +11857,12 @@ export function AgentsPage({
         if (soloMemKey) {
           await appendAgentMemory(soloMemKey, coder.profileRef?.id ?? coder.name, text, sFinal);
           await logScopedTeamWork(soloMemKey, coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
+          // Post-run Memory Curator — fire-and-forget so the answer ships now;
+          // model + on/off are per-project (Team Memory modal), default cheap.
+          void runMemoryCurator({
+            scope: soloMemKey, goal: text, finalAnswer: sFinal, port,
+            onNote: (t) => appendLog("system", { role: "system", color: "#9ad9ff", text: t }),
+          });
         }
         speakAgentReply(coder.name, sText);
         setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now(), seq: nextSeq() }]);
@@ -12015,10 +11913,21 @@ export function AgentsPage({
         ...(orch.extraSkills ?? []),
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
-      const orchSkillBlock = await buildAgentSkillBlock(
+      // Auto-skill selection (same engine as the Solo path): merge the
+      // orchestrator's equipped skills with skills matched from the goal text,
+      // so a relevant procedure loads without the model having to discover it.
+      const { block: orchSkillBlock, autoLoaded: orchAutoLoaded } = await buildSoloSkillBlock(
         runtimeSkillIds(orch, orchSkillIds),
+        text,
         !!orch.runtimePersonal,
       );
+      if (orchAutoLoaded.length > 0) {
+        appendThought(orch.name, {
+          role: "system",
+          color: "#7fd4ff",
+          text: `📦 Auto-loaded skill(s): ${orchAutoLoaded.join(", ")}`,
+        });
+      }
       const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = effectiveModelFor(orch);
@@ -13327,6 +13236,13 @@ export function AgentsPage({
         }
       } catch { /* tracing must never break a run */ }
 
+      // Post-run Memory Curator — fire-and-forget so the run report is not
+      // delayed; model + on/off are per-project (Team Memory modal).
+      void runMemoryCurator({
+        scope: runtimeMemoryKey(orch, selectedProjectId), goal: text, finalAnswer: finalReply, port,
+        onNote: (t) => appendLog("system", { role: "system", color: "#9ad9ff", text: t }),
+      });
+
       setPhase("done");
       notebookRunCompletedCleanly = true;
     } catch (e: any) {
@@ -14171,6 +14087,12 @@ export function AgentsPage({
       })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
       <BrowserPanel open={browserPanelOpen} onClose={() => setBrowserPanelOpen(false)} />
+      <ModelRequiredDialog
+        open={modelRequired !== null}
+        where={modelRequired?.where || "the team / agent Model picker"}
+        detail={modelRequired?.detail}
+        onClose={() => setModelRequired(null)}
+      />
       <RunNotebook
         projectId={selectedProjectId}
         projectName={activeTeam?.display}
@@ -14371,10 +14293,34 @@ const AGENTS_PAGES_KEY = "owllm:agents:pages";
 const AGENTS_ACTIVE_PAGE_KEY = "owllm:agents:activePage";
 function newAgentsPageId(): string { return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function loadAgentsPages(): AgentsPageMeta[] {
+  let pages: AgentsPageMeta[] = [];
   try {
     const a = JSON.parse(localStorage.getItem(AGENTS_PAGES_KEY) || "[]");
-    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
-  } catch { return []; }
+    pages = Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { /* rebuild from the per-page project bindings below */ }
+
+  // The tab catalog and each tab's selected project are separate writes. A
+  // crash/restart can therefore leave a real project conversation behind an
+  // incomplete catalog. Closing a tab deliberately removes its binding, so a
+  // surviving binding is unambiguous recovery evidence and is safe to restore.
+  try {
+    const known = new Set(pages.map((page) => page.id));
+    const recovered: AgentsPageMeta[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const match = key?.match(/^owllm:agents:page:(.+):project$/);
+      const id = match?.[1];
+      if (!id || known.has(id)) continue;
+      const binding = localStorage.getItem(key!);
+      // An unbound "New project" tab is not a conversation worth recovering.
+      if (!binding || binding === AGENTS_PAGE_NEW_PROJECT) continue;
+      known.add(id);
+      recovered.push({ id, title: "Recovered page" });
+    }
+    recovered.sort((a, b) => a.id.localeCompare(b.id));
+    pages = [...pages, ...recovered];
+  } catch { /* one malformed record must not block the Agents page */ }
+  return pages;
 }
 
 export default function AgentsPages() {
@@ -14394,6 +14340,22 @@ export default function AgentsPages() {
   }, [active]);
   // Busy dot per tab — reported up by each instance (dispatch running).
   const [busyById, setBusyById] = useState<Map<string, boolean>>(new Map());
+  const [newPageMenuOpen, setNewPageMenuOpen] = useState(false);
+  // The tab strip scrolls horizontally (overflowX:auto), which per CSS also
+  // makes it clip vertically — an absolutely positioned dropdown inside it is
+  // invisible, so the button looks dead. Portal the menu to <body> and place it
+  // from the trigger's rect, the same way TunedModelCard escapes its card.
+  const newPageBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [newPageMenuPos, setNewPageMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // The active tab's project binding — what "another page on this project"
+  // would clone. Null while the tab is still on the hub.
+  const activeProjectId = (() => {
+    if (!active) return null;
+    try {
+      const bound = localStorage.getItem(`owllm:agents:page:${active.id}:project`);
+      return bound && bound !== AGENTS_PAGE_NEW_PROJECT ? bound : null;
+    } catch { return null; }
+  })();
   useEffect(() => {
     try { localStorage.setItem(AGENTS_PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
   }, [pages]);
@@ -14406,10 +14368,18 @@ export default function AgentsPages() {
   const setBusy = (id: string, b: boolean) =>
     setBusyById((m) => (m.get(id) === b ? m : new Map(m).set(id, b)));
 
-  const newPage = () => {
+  // "＋ New page" is two different intents, so it asks instead of guessing:
+  // another page on THIS project, or a blank page that starts on the project
+  // hub. `boundProject` pre-seeds the new tab's binding, which AgentsPage
+  // restores on mount.
+  const newPage = (boundProject: string | null) => {
     const id = newAgentsPageId();
+    try {
+      if (boundProject) localStorage.setItem(`owllm:agents:page:${id}:project`, boundProject);
+    } catch { /* the tab still opens; it just starts on the hub */ }
     setPages((ps) => [...ps, { id, title: "Agents" }]);
     setActiveId(id);
+    setNewPageMenuOpen(false);
   };
 
   const closePage = (id: string) => {
@@ -14459,11 +14429,63 @@ export default function AgentsPages() {
             </div>
           );
         })}
-        <button
-          onClick={newPage}
-          title="Open another Agents page — run a team on the same or a different project in parallel"
-          style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
-        >＋ New page</button>
+        <div data-ui="AgentsNewPageMenu" style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            ref={newPageBtnRef}
+            onClick={() => {
+              const r = newPageBtnRef.current?.getBoundingClientRect();
+              if (r) setNewPageMenuPos({ top: r.bottom + 4, left: r.left });
+              setNewPageMenuOpen((v) => !v);
+            }}
+            title="Open another Agents page — on this project, or start a new one"
+            style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
+          >＋ New page ▾</button>
+          {newPageMenuOpen && newPageMenuPos && createPortal(
+            <>
+              <div
+                onClick={() => setNewPageMenuOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 9998 }}
+              />
+              <div style={{
+                position: "fixed", top: newPageMenuPos.top, left: newPageMenuPos.left, zIndex: 9999, minWidth: 250,
+                display: "flex", flexDirection: "column", gap: 2, padding: 5,
+                borderRadius: 9, border: "1px solid var(--border-strong)",
+                background: "var(--bg-card)", boxShadow: "0 14px 40px rgba(0,0,0,.35)",
+              }}>
+                <button
+                  onClick={() => newPage(activeProjectId)}
+                  disabled={!activeProjectId}
+                  title={activeProjectId
+                    ? "Run a second team on this same project, in parallel"
+                    : "This page isn't bound to a project yet"}
+                  style={{
+                    textAlign: "left", padding: "7px 9px", borderRadius: 6, border: "1px solid transparent",
+                    background: "transparent", color: activeProjectId ? "var(--fg-strong)" : "var(--fg-subtle)",
+                    fontSize: 12, fontWeight: 700, cursor: activeProjectId ? "pointer" : "default",
+                  }}
+                >
+                  ＋ New page of “{active?.title || "Agents"}”
+                  <small style={{ display: "block", color: "var(--fg-muted)", fontWeight: 500, marginTop: 2 }}>
+                    Same project, a second team in parallel
+                  </small>
+                </button>
+                <button
+                  onClick={() => newPage(AGENTS_PAGE_NEW_PROJECT)}
+                  style={{
+                    textAlign: "left", padding: "7px 9px", borderRadius: 6, border: "1px solid transparent",
+                    background: "transparent", color: "var(--accent-ink)", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  }}
+                >
+                  ⌁ New project
+                  <small style={{ display: "block", color: "var(--fg-muted)", fontWeight: 500, marginTop: 2 }}>
+                    Opens the project hub to create or pick a project
+                  </small>
+                </button>
+              </div>
+            </>,
+            document.body
+          )}
+        </div>
       </div>
       {/* Every visited page stays mounted; only the active one is visible. */}
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>

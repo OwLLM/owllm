@@ -14,33 +14,49 @@
   "mcp_pack": {
     "summary": "Configures local files, fetch, browser automation, and structured reasoning. Add an n8n MCP/API server with your n8n URL and key before direct deployment.",
     "risk": "approval_required",
-    "approval_required": ["workflow activation", "credential use", "external API mutations"],
+    "approval_required": [
+      "workflow activation",
+      "credential use",
+      "external API mutations"
+    ],
     "servers": [
       {
         "name": "filesystem",
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "C:/1_Git"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "fetch",
         "command": "uvx",
-        "args": ["mcp-server-fetch"],
+        "args": [
+          "mcp-server-fetch"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "puppeteer",
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-puppeteer"
+        ],
         "env": {},
         "enabled": false
       },
       {
         "name": "sequential-thinking",
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-sequential-thinking"
+        ],
         "env": {},
         "enabled": true
       }
@@ -50,52 +66,90 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Runs automation discovery, design, implementation planning, and safety review.",
+      "description": "Runs automation discovery, design, implementation planning, and safety review through the generalist and critic.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - process_mapper    : extracts the trigger, inputs, systems, and desired outcome\n  - workflow_arch     : designs the node graph, data mapping, retries, and error handling\n  - node_builder      : produces n8n node specs / JSON fragments / setup steps\n  - credentials_guard : reviews secrets, scopes, and dangerous side effects\n  - runbook_writer    : writes activation, test, rollback, and monitoring notes\n\nArchitecture decision gate: before locking workflow topology, credential scopes, retry policy, or any side-effecting node, brainstorm with credentials_guard as the critical thinker. The guard must challenge assumptions and approve the safer path before node_builder proceeds.\n\nFlow: process_mapper -> workflow_arch -> credentials_guard -> node_builder -> credentials_guard -> runbook_writer. Never activate a workflow or mutate an external service without explicit user approval."
+      "extra_prompt": "Your team for this project — the standard six:\n  - scout            : read-only reconnaissance — gathers the context the workers need (code, sources, inboxes, data) and reports quotable findings; never edits\n  - worker_a         : execution lane A — full capability (files, shell, code, browser, connectors)\n  - worker_b         : execution lane B — identical capability; the second parallel lane\n  - critical_thinker : advisory reviewer — reviews substantive work before you call it done\n  - producer         : rule-based finisher — commits, packages, publishes, sends, or schedules ONLY work the review chain approved, and only when the goal asks for delivery\n\nDISPATCH DISCIPLINE:\n  - Decompose the goal into slices. INDEPENDENT slices go to worker_a AND worker_b in the same round — they run in parallel. Dependent steps stay in one lane.\n  - Give each lane an explicit, non-overlapping scope (files / features / sources). Two lanes must never touch the same files in the same round.\n  - Dispatch scout in parallel with the first work round whenever missing context would slow the workers down; quote its findings verbatim in later dispatches.\n  - A small single-step task takes ONE worker — never fan out for ceremony.\n  - Review chain: worker → critical_thinker on substantive work; on REVISE/REJECT send the exact notes back to the same lane.\n  - Delivery (commit / publish / send / schedule) is the producer's job, dispatched LAST, after review — the producer never creates content and never runs before approval.\n\nPROFILE GUIDANCE — this team's domain rules. Where they say \"the generalist\", read \"the worker lane you dispatch\":\n\nDispatch the generalist for every execution step: process mapping -> workflow design -> node building -> runbook. Architecture decision gate: before locking workflow topology, credential scopes, retry policy, or any side-effecting node, send the design to critical_thinker — it must challenge assumptions and approve the safer path before the generalist builds the final node specs; route the built workflow through critical_thinker again before the runbook. NEVER activate a workflow or mutate an external service without explicit user approval."
     },
     {
-      "name": "process_mapper",
-      "base": "operator",
-      "description": "Turns a vague automation idea into concrete inputs, triggers, outputs, and success criteria.",
-      "extra_prompt": "Focus: interview or parse the user's process. Output: trigger, source systems, destination systems, sample payloads, success criteria, non-goals, and required credentials. If the trigger or destination is ambiguous, ask one focused question."
-    },
-    {
-      "name": "workflow_arch",
+      "name": "scout",
       "base": "researcher",
-      "description": "Designs the n8n node graph and data contract before implementation.",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
-      "extra_prompt": "Focus: design a deterministic workflow graph. Include nodes, edges, expressions, data transformations, idempotency key, retry policy, dead-letter/failure path, and manual approval gates. Do not write final JSON until credentials_guard has reviewed the architecture."
+      "description": "Read-only reconnaissance — gathers the context the workers need and reports quotable findings.",
+      "icon": "owl:owl_researcher",
+      "extra_prompt": "You are the team's scout — read-only reconnaissance, run in parallel with the workers. Focus for this profile: the business process being automated, the systems it touches, and the credentials/scopes each node will need. Report compact, quotable facts (paths, quotes, numbers, links) the orchestrator can hand to the workers verbatim. Never edit files, never take actions with side effects — if a finding demands action, name it and hand it back."
     },
     {
-      "name": "node_builder",
-      "base": "coder",
-      "description": "Builds import-ready node specs, expressions, and local files.",
-      "mcp_allowlist": ["mcp.files.*", "mcp.browser.*", "mcp.n8n.*"],
-      "extra_prompt": "Focus: implement the approved workflow design as n8n-compatible JSON or precise setup steps. Use placeholder credential names rather than secrets. Mark any step that requires the user to create credentials in n8n."
+      "name": "worker_a",
+      "base": "solo_generalist",
+      "description": "Execution lane A — full-capability worker, interchangeable with lane B. Automation generalist — process mapping, workflow architecture, import-ready n8n node specs, and runbook in one agent.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "engineering-craft"
+      ],
+      "extra_prompt": "You are execution lane A (worker_a) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_b's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: n8n workflow building.\n- Process mapping: interview or parse the user's process into trigger, source systems, destination systems, sample payloads, success criteria, non-goals, and required credentials. If the trigger or destination is ambiguous, ask one focused question.\n- Workflow design: design a deterministic workflow graph — nodes, edges, expressions, data transformations, idempotency key, retry policy, dead-letter/failure path, and manual approval gates. Do not write final JSON until the critic has reviewed the architecture.\n- Node building: implement the approved design as n8n-compatible JSON or precise setup steps. Use placeholder credential names rather than secrets. Mark every step that requires the user to create credentials in n8n.\n- Runbook: produce a concise runbook with local test payloads, activation checklist, rollback steps, known failure modes, and monitoring signals. Include exactly which user approvals remain before production use.\n- Never activate a workflow or mutate an external service without explicit user approval."
     },
     {
-      "name": "credentials_guard",
+      "name": "worker_b",
+      "base": "solo_generalist",
+      "description": "Execution lane B — full-capability worker, interchangeable with lane A. Automation generalist — process mapping, workflow architecture, import-ready n8n node specs, and runbook in one agent.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "engineering-craft"
+      ],
+      "extra_prompt": "You are execution lane B (worker_b) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_a's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: n8n workflow building.\n- Process mapping: interview or parse the user's process into trigger, source systems, destination systems, sample payloads, success criteria, non-goals, and required credentials. If the trigger or destination is ambiguous, ask one focused question.\n- Workflow design: design a deterministic workflow graph — nodes, edges, expressions, data transformations, idempotency key, retry policy, dead-letter/failure path, and manual approval gates. Do not write final JSON until the critic has reviewed the architecture.\n- Node building: implement the approved design as n8n-compatible JSON or precise setup steps. Use placeholder credential names rather than secrets. Mark every step that requires the user to create credentials in n8n.\n- Runbook: produce a concise runbook with local test payloads, activation checklist, rollback steps, known failure modes, and monitoring signals. Include exactly which user approvals remain before production use.\n- Never activate a workflow or mutate an external service without explicit user approval."
+    },
+    {
+      "name": "critical_thinker",
       "base": "critic",
-      "description": "Critical thinker for architecture, credentials, side effects, retries, and privacy.",
+      "description": "Advisory reviewer — mandatory critical thinker for architecture, credentials, side effects, retries, and privacy.",
+      "icon": "owl:owl_critic",
       "extra_prompt": "Review the workflow as the mandatory critical thinker. Challenge whether each external permission is necessary, whether side effects are approval-gated, whether retries can duplicate actions, and whether logs could leak secrets or personal data. End with APPROVE / REVISE / REJECT."
     },
     {
-      "name": "runbook_writer",
-      "base": "documentation",
-      "description": "Writes test, activation, rollback, and monitoring instructions.",
-      "extra_prompt": "Focus: produce a concise runbook with local test payloads, activation checklist, rollback steps, known failure modes, and monitoring signals. Include exactly which user approvals remain before production use."
+      "name": "producer",
+      "base": "publisher",
+      "description": "Rule-based finisher — commits, packages, publishes, or sends only review-approved work; never invents work.",
+      "icon": "owl:owl_documentation",
+      "extra_prompt": "You are the producer — the rule-based finishing step. You act ONLY on work the review chain has approved, and only when the goal actually calls for delivery (commit, package, publish, send, schedule). Hard rules: never create or modify content yourself — you package and ship what the workers produced; never fabricate completion — quote the exact command output, message id, or artifact path that proves delivery; report failures verbatim, then stop; anything approval-gated for the user (outbound messages, payments, calendar mutations, publishes) is NEVER executed without the user's explicit approval in the thread. If nothing needs delivering, say so and end your turn."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "process_mapper" },
-      { "source": "process_mapper", "target": "workflow_arch" },
-      { "source": "workflow_arch", "target": "credentials_guard" },
-      { "source": "credentials_guard", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "node_builder" },
-      { "source": "node_builder", "target": "credentials_guard" },
-      { "source": "orchestrator", "target": "runbook_writer" }
+      {
+        "source": "orchestrator",
+        "target": "scout"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_a"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_b"
+      },
+      {
+        "source": "orchestrator",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "orchestrator",
+        "target": "producer"
+      },
+      {
+        "source": "scout",
+        "target": "worker_a"
+      },
+      {
+        "source": "scout",
+        "target": "worker_b"
+      },
+      {
+        "source": "worker_a",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "worker_b",
+        "target": "critical_thinker"
+      }
     ]
   }
 }

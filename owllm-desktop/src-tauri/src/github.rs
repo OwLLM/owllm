@@ -622,6 +622,18 @@ pub async fn github_create_repo(
                 return Err(format!("git remote add failed: {err}"));
             }
         }
+        // A newly created empty project has an unborn branch: `origin` is
+        // correctly wired, but there is no HEAD ref for Git to push yet. That
+        // is a ready repository, not a setup failure. The first Publisher-card
+        // commit will create HEAD and use the normal push path.
+        if !git(&["rev-parse", "--verify", "HEAD"]).0 {
+            return Ok(format!(
+                "✓ {} github.com/{full_name} ({}) — origin wired; the first commit will publish the branch.",
+                if created { "Created" } else { "Reused existing" },
+                if private { "private" } else { "public" },
+            ));
+        }
+
         let (pushed, push_out) = git(&["push", "-u", "origin", "HEAD"]);
         if !pushed {
             return Err(format!("repo {} at github.com/{full_name}, origin wired — but the initial push failed: {push_out}", if created { "created" } else { "reused" }));

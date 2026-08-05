@@ -14,39 +14,89 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans the errand, picks options, hands off to the executor.",
+      "description": "Plans the errand and dispatches the generalist; the user picks the option before anything is booked.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - researcher       : compares options online (price, availability, reviews)\n  - executor         : drives the browser to book / order / submit forms\n  - receipts_archivist: files confirmation emails and receipts to the user's archive\n\nFlow: researcher -> present 2-3 options to user -> wait for pick -> executor -> archivist. Never let the executor act before the user has picked an option."
+      "extra_prompt": "Your team for this project — the standard six:\n  - scout            : read-only reconnaissance — gathers the context the workers need (code, sources, inboxes, data) and reports quotable findings; never edits\n  - worker_a         : execution lane A — full capability (files, shell, code, browser, connectors)\n  - worker_b         : execution lane B — identical capability; the second parallel lane\n  - critical_thinker : advisory reviewer — reviews substantive work before you call it done\n  - producer         : rule-based finisher — commits, packages, publishes, sends, or schedules ONLY work the review chain approved, and only when the goal asks for delivery\n\nDISPATCH DISCIPLINE:\n  - Decompose the goal into slices. INDEPENDENT slices go to worker_a AND worker_b in the same round — they run in parallel. Dependent steps stay in one lane.\n  - Give each lane an explicit, non-overlapping scope (files / features / sources). Two lanes must never touch the same files in the same round.\n  - Dispatch scout in parallel with the first work round whenever missing context would slow the workers down; quote its findings verbatim in later dispatches.\n  - A small single-step task takes ONE worker — never fan out for ceremony.\n  - Review chain: worker → critical_thinker on substantive work; on REVISE/REJECT send the exact notes back to the same lane.\n  - Delivery (commit / publish / send / schedule) is the producer's job, dispatched LAST, after review — the producer never creates content and never runs before approval.\n\nPROFILE GUIDANCE — this team's domain rules. Where they say \"the generalist\", read \"the worker lane you dispatch\":\n\nFlow: research options -> present 2-3 to the user -> WAIT for the user's pick -> execute -> archive the receipt. Never let a booking or order proceed before the user has picked an option."
     },
     {
-      "name": "researcher",
+      "name": "scout",
       "base": "researcher",
-      "description": "Compares booking / shopping options online.",
-      "extra_prompt": "Focus: pull 2-3 candidates for the user's request (flight, restaurant, product). Always include price, link, and a one-line tradeoff. Stop and present — do NOT continue to a booking step."
+      "description": "Read-only reconnaissance — gathers the context the workers need and reports quotable findings.",
+      "icon": "owl:owl_researcher",
+      "extra_prompt": "You are the team's scout — read-only reconnaissance, run in parallel with the workers. Focus for this profile: options, prices, availability, and reviews from the live web for the thing being booked or ordered. Report compact, quotable facts (paths, quotes, numbers, links) the orchestrator can hand to the workers verbatim. Never edit files, never take actions with side effects — if a finding demands action, name it and hand it back."
     },
     {
-      "name": "executor",
-      "base": "operator",
-      "description": "Drives the browser to complete the chosen booking / order.",
+      "name": "worker_a",
+      "base": "solo_generalist",
+      "description": "Execution lane A — full-capability worker, interchangeable with lane B. Errand generalist — compares options, completes the chosen transaction in the browser, and files the receipt.",
       "icon": "owl:owl_operator",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.email.*"],
-      "extra_prompt": "Focus: take the option the user picked and complete the transaction (book, order, RSVP). State the exact action and recipient before each side-effecting tool call. Stop on the payment / confirm step and ask the user to confirm. Never store payment details."
+      "extra_skills": [
+        "research-method"
+      ],
+      "extra_prompt": "You are execution lane A (worker_a) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_b's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: concierge errands.\n- Research: pull 2-3 candidates (flight, restaurant, product) with price, link, and a one-line tradeoff. Present them and STOP — never continue to a booking step before the user picks.\n- Execute: complete the chosen transaction. State the exact action and recipient before each side-effecting step. Stop on the payment / confirm step and ask the user to confirm. Never store payment details.\n- Archive: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
     },
     {
-      "name": "receipts_archivist",
-      "base": "documentation",
-      "description": "Files the confirmation email and receipt into the user's archive.",
-      "mcp_allowlist": ["mcp.email.*", "mcp.files.*"],
-      "extra_prompt": "Focus: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
+      "name": "worker_b",
+      "base": "solo_generalist",
+      "description": "Execution lane B — full-capability worker, interchangeable with lane A. Errand generalist — compares options, completes the chosen transaction in the browser, and files the receipt.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "research-method"
+      ],
+      "extra_prompt": "You are execution lane B (worker_b) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_a's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: concierge errands.\n- Research: pull 2-3 candidates (flight, restaurant, product) with price, link, and a one-line tradeoff. Present them and STOP — never continue to a booking step before the user picks.\n- Execute: complete the chosen transaction. State the exact action and recipient before each side-effecting step. Stop on the payment / confirm step and ask the user to confirm. Never store payment details.\n- Archive: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
+    },
+    {
+      "name": "critical_thinker",
+      "base": "critic",
+      "description": "Advisory reviewer — sanity-checks the chosen option and transaction details before the user confirms.",
+      "icon": "owl:owl_critic"
+    },
+    {
+      "name": "producer",
+      "base": "publisher",
+      "description": "Rule-based finisher — commits, packages, publishes, or sends only review-approved work; never invents work.",
+      "icon": "owl:owl_documentation",
+      "extra_prompt": "You are the producer — the rule-based finishing step. You act ONLY on work the review chain has approved, and only when the goal actually calls for delivery (commit, package, publish, send, schedule). Hard rules: never create or modify content yourself — you package and ship what the workers produced; never fabricate completion — quote the exact command output, message id, or artifact path that proves delivery; report failures verbatim, then stop; anything approval-gated for the user (outbound messages, payments, calendar mutations, publishes) is NEVER executed without the user's explicit approval in the thread. If nothing needs delivering, say so and end your turn."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "researcher" },
-      { "source": "researcher", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "executor" },
-      { "source": "executor", "target": "receipts_archivist" },
-      { "source": "receipts_archivist", "target": "orchestrator" }
+      {
+        "source": "orchestrator",
+        "target": "scout"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_a"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_b"
+      },
+      {
+        "source": "orchestrator",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "orchestrator",
+        "target": "producer"
+      },
+      {
+        "source": "scout",
+        "target": "worker_a"
+      },
+      {
+        "source": "scout",
+        "target": "worker_b"
+      },
+      {
+        "source": "worker_a",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "worker_b",
+        "target": "critical_thinker"
+      }
     ]
   }
 }

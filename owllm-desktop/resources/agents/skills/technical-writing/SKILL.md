@@ -1,6 +1,12 @@
 ---
 name: Technical Writing
 description: How to write clear docs, READMEs, and explanations — structured for the reader, accurate, and free of filler.
+triggers:
+  - readme
+  - documentation
+  - docs
+  - guide
+  - tutorial
 ---
 
 # Technical Writing

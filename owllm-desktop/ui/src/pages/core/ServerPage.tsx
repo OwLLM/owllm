@@ -22,7 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { bumpActivity } from "../../support/activityStats";
 import { LogBox } from "../../components/LogBox";
 import { listen } from "@tauri-apps/api/event";
-import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
 import {
   getServerCtx, setServerCtx, getServerModel, setServerModel,
@@ -853,7 +853,7 @@ function LLMServerColumn({
         models={models}
         status={null}
         localOnly
-        fallbackLabel={models.length === 0 ? "(No READY models - run onboarding first)" : "(pick a model)"}
+        fallbackLabel={models.length === 0 ? "(No READY models - run onboarding first)" : SELECT_MODEL_LABEL}
       />
 
       <div style={{
@@ -1201,12 +1201,12 @@ function LogColumn({ logs, onClear }: { logs: string[]; onClear: () => void }) {
 // ---------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------
-// Logs persist across tab switches by surviving in localStorage. The
-// `server-log` listener stays mounted via SERVER_LOG_HUB (module
-// scope) so the rolling tail accumulates even when ServerPage is
-// unmounted — the user can switch to Chat / Agents and come back to
-// the full Server boot trace.
-const LOG_STORAGE_KEY = "owllm.server.logs";
+// The module-scoped hub keeps the rolling tail alive across tab switches while
+// the application is running. Do not persist this high-frequency stream in
+// localStorage: rewriting the full tail for every line makes WebKitGTK retain
+// enough database/write state to terminate the Linux process under sustained
+// output. Remove the legacy key once; project and account state use other keys.
+const LEGACY_LOG_STORAGE_KEY = "owllm.server.logs";
 const LOG_MAX = 2000;
 type LogListener = (lines: string[]) => void;
 
@@ -1217,12 +1217,10 @@ class ServerLogHub {
   private unlisten: (() => void) | null = null;
 
   constructor() {
-    let stored: string[] = [];
     try {
-      const raw = localStorage.getItem(LOG_STORAGE_KEY);
-      if (raw) stored = JSON.parse(raw);
-    } catch { /* corrupted store — start fresh */ }
-    this.lines = Array.isArray(stored) ? stored : [];
+      localStorage.removeItem(LEGACY_LOG_STORAGE_KEY);
+    } catch { /* unavailable store — the in-memory log still works */ }
+    this.lines = [];
   }
 
   async ensureWired() {
@@ -1243,13 +1241,11 @@ class ServerLogHub {
 
   push(line: string) {
     this.lines = [...this.lines, line].slice(-LOG_MAX);
-    this.persist();
     for (const l of this.listeners) l(this.lines);
   }
 
   clear() {
     this.lines = [];
-    this.persist();
     for (const l of this.listeners) l(this.lines);
   }
 
@@ -1260,12 +1256,6 @@ class ServerLogHub {
   subscribe(fn: LogListener): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
-  }
-
-  private persist() {
-    try {
-      localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(this.lines));
-    } catch { /* quota — just drop persistence */ }
   }
 }
 
@@ -1442,7 +1432,10 @@ export default function ServerPage() {
       if (st.running && st.model_id) {
         if (modelId !== st.model_id) setModelId(st.model_id);
       } else if (!servable.some(m => m.model_id === modelId)) {
-        setModelId(servable[0]?.model_id ?? "");
+        // The saved pick is gone — clear it, but do NOT substitute the first
+        // servable model. Start is disabled while modelId is empty, so the
+        // picker just reads "Select model" until the user chooses.
+        setModelId("");
       }
     } catch (e) {
       setError(String(e));

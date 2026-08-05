@@ -66,9 +66,11 @@ type Props = {
   usageProvider: string;
   /// The inline RunNotebook (CodePage owns its props/wiring).
   notebook: ReactNode;
+  /// Collapse this outer column to its arrow rail. CodePage owns/persists state.
+  onCollapse: () => void;
 };
 
-export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, browserOpen, onToggleBrowser, usageProvider, notebook }: Props) {
+export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, browserOpen, onToggleBrowser, usageProvider, notebook, onCollapse }: Props) {
   // ---- Resizable width: make the Notebook comfortably writable by default. ----
   const [width, setWidth] = useState<number>(() => {
     try {
@@ -150,6 +152,13 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
 
       {/* ---- Tab strip: ⚡ Super User | 📓 Notebook (two PAGES) ---- */}
       <div style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2 }}>
+        <button
+          data-ui="CodeUtilityPanelCollapse"
+          onClick={onCollapse}
+          aria-label="Shrink right utility column"
+          title="Shrink right column"
+          style={{ height: 28, width: 28, padding: 0, flexShrink: 0, cursor: "pointer", fontSize: 18, lineHeight: 1, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-surface)", color: "var(--fg-muted)" }}
+        >›</button>
         {tabBtn("super", "⚡ Super User")}
         {tabBtn("notebook", "📓 Notebook")}
         {sharedWithTeam && (

@@ -11,9 +11,11 @@ import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, t
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import Composer from "../../components/Composer";
 import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import PublishCards from "./PublishCards";
-import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type AccountsStatusLite } from "./ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -46,6 +48,7 @@ import {
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
 import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
+import { projectsRootGet, projectPathUnder, projectFolderSlug } from "./projectsRoot";
 import { openSyncOnboarding } from "../core/AccountSyncModal";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
@@ -97,7 +100,9 @@ const CODING_SYSTEM = (ws: string) =>
   `You are OWLLM's coding agent, working directly inside the user's project at:\n${ws}\n\n` +
   `You have real tools: read_file, grep, glob, list_dir, edit_file, write_file_with_diff, ` +
   `create_dir and shell. Use them — do NOT ask the user to paste files or run commands you can run yourself. ` +
-  `Read and search before you edit. Make the smallest correct change that satisfies the request, keep the ` +
+  `GitHub project actions are first-class tools: github_status, github_repo_url, github_create_repo, ` +
+  `github_clone_project, and github_list_repositories. Use those for repository/account actions; use shell ` +
+  `for ordinary git commands. Read and search before you edit. Make the smallest correct change that satisfies the request, keep the ` +
   `surrounding code's style, and after editing briefly state what you changed and why. Paths may be given ` +
   `relative to the workspace.`;
 
@@ -116,6 +121,9 @@ const sidForPage = (pageId: string) => `code:ws:${pageId}`;
 type CodeState = {
   messages: Msg[];
   tasks: Task[];
+  /// Goal that produced the transient Plan & Build board. Kept so a stopped
+  /// plan can resume without asking the model to invent the goal again.
+  planGoal?: string;
   workspace: string;       // where edits happen — the worktree path when isolated
   modelId: string;
   draft: string;
@@ -145,6 +153,10 @@ type CodeState = {
   // (workspace, worktree, page id) as the primary chat, but with its OWN
   // independent, owner-tagged message history, draft, and model selection.
   secondaryOpen?: boolean;
+  // Outer coding-page columns. Missing values preserve the historical default
+  // (both visible); explicit user choices persist with this page's session.
+  projectRailOpen?: boolean;
+  utilityPanelOpen?: boolean;
   secondaryMessages?: Msg[];
   secondaryDraft?: string;
   /// Selectable last-reply auto-feed between the two panes (per direction):
@@ -167,6 +179,9 @@ type CodeState = {
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
+  secondaryOpen: true,
+  projectRailOpen: true,
+  utilityPanelOpen: true,
 };
 // Hydration migration: older sessions saved page notices (the run timing
 // footer, the auto-feed pause note) as plain assistant answers, which let them
@@ -625,6 +640,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  // Set to the picker the user must visit when a send is blocked for having no
+  // model. Rule-based popup — no auto-pick happens behind it.
+  const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const secondaryAbortRef = useRef<AbortController | null>(null);
 
@@ -713,7 +731,6 @@ function CodeWorkspace({ pageId, onTitle }: {
   // 🧠 button so "it remembered" is visible rather than something you infer.
   const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
-  const chatFileRef = useRef<HTMLInputElement | null>(null);
   const [launchPrompt, setLaunchPrompt] = useState(() => {
     try {
       const value = sessionStorage.getItem("owllm:code-launch-intent") ?? "";
@@ -731,9 +748,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
-  const codeFileRef = useRef<HTMLInputElement | null>(null);
   const [secondaryAttachments, setSecondaryAttachments] = useState<Attachment[]>([]);
-  const secondaryFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
   const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
@@ -838,12 +853,6 @@ function CodeWorkspace({ pageId, onTitle }: {
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
   };
-  const onChatPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return; // let normal text paste through
-    e.preventDefault();
-    void addChatFiles(files);
-  };
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
   // shared chatRuntime store so it survives leaving this page and coming back.
   // Setter shims keep the same signatures as useState so the rest of the file
@@ -913,7 +922,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
   const chatMode: boolean = stx.chatMode ?? false;
-  const secondaryOpen: boolean = stx.secondaryOpen ?? false;
+  // New coding pages show both agent panes initially. Once the user explicitly
+  // collapses or expands the second pane, that persisted choice wins.
+  const secondaryOpen: boolean = stx.secondaryOpen ?? true;
+  const projectRailOpen: boolean = stx.projectRailOpen ?? true;
+  const utilityPanelOpen: boolean = stx.utilityPanelOpen ?? true;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   // BOUNDED RENDERING (WebView2 "Out of Memory" fix) — see components/StreamWindow.tsx.
   // Long Code-page runs appended transcript entries forever; only the tail is put
@@ -1106,6 +1119,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
     setField("messages", (prev) => stampOwner(typeof v === "function" ? v(prev) : v, "primary"));
   const setTasks = (v: Task[] | ((t: Task[]) => Task[])) => setField("tasks", v);
+  const setPlanGoal = (v: string | undefined) => setField("planGoal", v);
   const setWorkspace = (v: string) => setField("workspace", v);
   const setModelId = (v: string | ((s: string) => string)) => setField("modelId", v);
   const setDraft = (v: string | ((s: string) => string)) => setField("draft", v);
@@ -1130,6 +1144,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
   const setChatMode = (v: boolean) => setField("chatMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
+  const setProjectRailOpen = (v: boolean) => setField("projectRailOpen", v);
+  const setUtilityPanelOpen = (v: boolean) => setField("utilityPanelOpen", v);
   const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
     setField("secondaryMessages", (prev) => {
       const base = (prev as Msg[] | undefined) ?? [];
@@ -1152,7 +1168,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         .then((all) => {
           if (dead) return;
           setAvailableModels(all);
-          setModelId((cur) => cur || all.find((m) => m.provider === "local" || m.provider === "tuned")?.model_id || "");
+          // NO auto-pick. A page with nothing saved keeps modelId empty so the
+          // picker reads "Select model"; Send raises ModelRequiredDialog. The
+          // old `cur || first local/tuned` made a fresh page look configured
+          // while running weights the user never chose.
         })
         .catch((e) => setStatus(`Couldn't load models: ${e}`));
       invoke<AccountsStatusLite>("accounts_status")
@@ -1365,8 +1384,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!project.repo_url) return; // stays ghosted with the source-PC guidance.
     setCatalogBusy(true);
     try {
+      const root = await projectsRootGet().catch(() => null);
       const parent = await invoke<string | null>("pick_folder", {
         title: `Choose where to clone ${project.name} on this computer`,
+        startDir: root?.path || null,
       });
       if (!parent) return;
       const location = await invoke<string>("github_clone_project", {
@@ -1667,8 +1688,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     setImportBusy(true);
     setImportMsg("Choose the local parent folder for this clone…");
     try {
+      const root = await projectsRootGet().catch(() => null);
       const parent = await invoke<string | null>("pick_folder", {
         title: selectedRepo ? `Choose where to clone ${selectedRepo.fullName}` : "Choose where to clone this GitHub project",
+        startDir: root?.path || null,
       });
       if (!parent) {
         setImportMsg("Import cancelled — no local folder was changed.");
@@ -1712,7 +1735,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [npOpen, setNpOpen] = useState(false);
   const [npName, setNpName] = useState("");
   const [npIsolate, setNpIsolate] = useState(true);
-  const [npFolder, setNpFolder] = useState("");
+  // Where the new project folder is created: the parent the user picked, else
+  // the per-device projects root chosen at onboarding. The full target path is
+  // always `projectPathUnder(parent, name)` — name and folder can't disagree.
+  const [npRoot, setNpRoot] = useState("");
+  const [npParent, setNpParent] = useState("");
+  const [npErr, setNpErr] = useState("");
   const [npBusy, setNpBusy] = useState(false);
   const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
   // Create a private GitHub repo for the new project (origin wired + pushed).
@@ -1723,11 +1751,18 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openNewProject = (intent = "") => {
     pendingProjectPromptRef.current = intent.trim();
     setNpName(launchProjectName(intent));
-    setNpFolder("");
+    setNpParent("");
+    setNpErr("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(!!gh?.connected);
     setNpBusy(false);
     setNpOpen(true);
+    // Auto-place under the projects root chosen at onboarding, so the location
+    // is already correct when the dialog appears. A parent the user picked
+    // meanwhile is never overwritten.
+    void projectsRootGet()
+      .then((r) => { setNpRoot(r.path); setNpParent((prev) => prev || r.path); })
+      .catch(() => setNpRoot(""));
     // Mirror Accounts logins into the sandbox, THEN show what's available —
     // automatically, no manual button. (No-op/instant if already synced.)
     if (sbox?.available) {
@@ -1740,14 +1775,22 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   const npBrowseFolder = async () => {
     try {
-      const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
-      if (picked) setNpFolder(picked);
-    } catch (e) { setStatus(`Folder pick failed: ${e}`); }
+      const picked = await invoke<string | null>("pick_folder", {
+        title: "Pick the parent folder for the new project",
+        // Open where this user keeps their projects rather than wherever the
+        // OS was last used.
+        startDir: npParent || npRoot || null,
+      });
+      if (picked) { setNpParent(picked); setNpErr(""); }
+    } catch (e) { setNpErr(`Folder pick failed: ${e}`); }
   };
   // Create from the modal: isolated → fresh ~/owllm project in the sandbox;
-  // otherwise open the chosen host folder (NOT isolated).
+  // otherwise a NEW `<parent>\<slug>` folder on the host, through the managed
+  // backend (folder + Project Card + git init). Opening an existing folder is
+  // the launchpad's separate "Local folder" action, not this dialog.
   const createNewProject = async () => {
     if (npBusy) return;
+    setNpErr("");
     setNpBusy(true);
     try {
       let createdPath = "";
@@ -1755,12 +1798,29 @@ function CodeWorkspace({ pageId, onTitle }: {
         const p = await sandboxCreateProject(npName.trim() || "project");
         createdPath = p.path;
         setNpOpen(false);
-      } else if (npFolder.trim()) {
-        createdPath = npFolder.trim();
-        setNpOpen(false);
       } else {
-        setNpBusy(false);
-        return;
+        const parent = (npParent || npRoot).trim();
+        if (!npName.trim()) { setNpErr("Give the project a name."); return; }
+        if (!parent) { setNpErr("Choose where to create the project."); return; }
+        const target = projectPathUnder(parent, npName);
+        const row = await invoke<ProjectCatalogRow>("create_project", {
+          input: {
+            name: npName.trim(),
+            description: pendingProjectPromptRef.current || "Coding workspace",
+            location: target,
+            repo_url: "",
+            create_location: true,
+            project_kind: "coding",
+            team: [],
+            graph_json: "",
+            team_default_model_id: "",
+            trust_writes: true,
+            auto_approve_all: false,
+          },
+        });
+        setCatalogProjects((prev) => [row, ...prev.filter((p) => p.id !== row.id)]);
+        createdPath = target;
+        setNpOpen(false);
       }
       const opening = openWorkspace(createdPath);
       const pendingPrompt = pendingProjectPromptRef.current;
@@ -1771,23 +1831,27 @@ function CodeWorkspace({ pageId, onTitle }: {
         });
       }
       // Opt-in GitHub repo creation — after the workspace exists, so a repo
-      // failure never blocks the project itself. Best-effort with a loud
-      // status either way (the repo-setup popup can retry: same command).
+      // failure never blocks the project itself. Successful background setup
+      // stays out of Agent 1's composer; the Publisher card already shows the
+      // repository state. Real failures remain actionable there and here.
       if (npCreateRepo && createdPath) {
         try {
-          const msg = await invoke<string>("github_create_repo", {
+          await invoke<string>("github_create_repo", {
             cwd: createdPath,
             name: npName.trim() || null,
             private: true,
           });
-          setStatus(`🐙 ${msg}`);
+          setStatus("");
         } catch (e) {
           setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
         }
       }
       if (createdPath) await ensureCatalogProject(createdPath, npName.trim() || undefined);
     } catch (e) {
-      setStatus(`Couldn't create project: ${e}`);
+      // Creation fails only while the dialog is still open (the later GitHub
+      // and catalog steps have their own handling) — keep the error in it,
+      // never in Agent 1's composer.
+      setNpErr(`Couldn't create the project: ${String((e as Error)?.message ?? e)}`);
     } finally {
       setNpBusy(false);
     }
@@ -2203,7 +2267,18 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { blockSend("No model selected — pick one in the Coder header."); return; }
+    if (!modelId) {
+      setModelRequired({ where: "the Coder header" });
+      blockSend("No model selected — pick one in the Coder header.");
+      return;
+    }
+    // This Kanban is the execution state of one Plan & Build run, not a durable
+    // backlog. A new manual Auto/Chat turn supersedes it. Programmatic Notebook
+    // turns leave it alone because that queue owns separate persistent state.
+    if (fromComposer && agentMode !== "plan") {
+      setTasks([]);
+      setPlanGoal(undefined);
+    }
     if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -2375,7 +2450,11 @@ function CodeWorkspace({ pageId, onTitle }: {
       return;
     }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
+    if (!secondaryModelEffective) {
+      setModelRequired({ where: "the second-agent pane", detail: "The second agent falls back to the 1st agent's model — neither is set." });
+      setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
+      return;
+    }
     if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
@@ -2468,29 +2547,35 @@ function CodeWorkspace({ pageId, onTitle }: {
   const addSecondaryFiles = (files: FileList | File[]) => {
     void addProjectComposerFiles(files, setSecondaryAttachments);
   };
-  const renderAttachmentTray = (
-    attachments: Attachment[],
-    setAttachments: (update: (current: Attachment[]) => Attachment[]) => void,
-  ) => attachments.length > 0 && (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-      {attachments.map((attachment, i) => (
-        <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-          {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
-          <button onClick={() => setAttachments((current) => current.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-        </div>
-      ))}
-    </div>
-  );
-  const renderAttachmentPicker = (
+
+  // The two coding agents deliberately share the same composer geometry and
+  // model-picker slot. Their values and callbacks remain separate below, so
+  // visual parity cannot accidentally merge their routing.
+  const CODE_COMPOSER_MIN_HEIGHT = 82;
+  const CODE_COMPOSER_MAX_HEIGHT = 142;
+  const CODE_COMPOSER_MODEL_MIN_WIDTH = 180;
+  const renderCodeModelPicker = (
     owner: "primary" | "secondary",
-    inputRef: { current: HTMLInputElement | null },
-    addFiles: (files: FileList | File[]) => void,
+    value: string,
+    onChange: (next: string | ((current: string) => string)) => void,
+    disabled: boolean,
+    fallbackLabel: string,
   ) => (
-    <>
-      <input data-ui={`Code${owner === "primary" ? "Primary" : "Secondary"}AttachmentInput`} ref={inputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
-             onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
-      <button onClick={() => inputRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
-    </>
+    <div
+      data-ui={owner === "primary" ? "CodePrimaryComposerModelPicker" : "CodeSecondaryComposerModelPicker"}
+      style={{ minWidth: CODE_COMPOSER_MODEL_MIN_WIDTH }}
+    >
+      <ModelPicker
+        value={value}
+        onChange={onChange}
+        models={availableModels}
+        status={accountsStatus}
+        disabled={disabled}
+        fallbackLabel={fallbackLabel}
+        placement="top"
+        appearance="solid-psychedelic"
+      />
+    </div>
   );
 
   // The second agent's composer — ONE definition, rendered in two homes:
@@ -2498,57 +2583,34 @@ function CodeWorkspace({ pageId, onTitle }: {
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div
-      data-ui="CodeSecondaryComposer"
-      onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) e.preventDefault(); }}
-      onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
-      style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}
-    >
-      <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
-        <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
-          <ModelPicker
-            value={secondaryModelId}
-            onChange={setSecondaryModelId}
-            models={availableModels}
-            status={accountsStatus}
-            disabled={secondaryBusy}
-            fallbackLabel="Same as 1st agent"
-            placement="top"
-          />
-        </div>
-        {renderTerminalButton("secondary")}
-      </div>
-      {renderAttachmentTray(secondaryAttachments, setSecondaryAttachments)}
-      <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
-        {renderAttachmentPicker("secondary", secondaryFileRef, addSecondaryFiles)}
-        <textarea
-          ref={secondaryDraftRef}
-          value={secondaryDraft}
-          onChange={(e) => setSecondaryDraft(e.target.value)}
-          onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); addSecondaryFiles(files); } }}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-          placeholder="Message the second agent… (same workspace, its own conversation & model)"
-          rows={2}
-          disabled={secondaryBusy}
-          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
-        />
-        {secondaryBusy ? (
-          <button
-            onClick={() => { secondaryAbortRef.current?.abort(); }}
-            title="Stop the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
-          >Stop</button>
-        ) : (
-          <button
-            onClick={() => { void sendSecondary(); }}
-            disabled={!secondaryDraft.trim() && secondaryAttachments.length === 0}
-            title="Send to the second agent"
-            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: (secondaryDraft.trim() || secondaryAttachments.length) ? 1 : 0.5 }}
-          >Send</button>
-        )}
-      </div>
-    </div>
+    <Composer
+      dataUi="CodeSecondaryComposer"
+      toolbarDataUi="CodeSecondaryComposerToolbar"
+      textareaRef={secondaryDraftRef}
+      value={secondaryDraft}
+      onChange={setSecondaryDraft}
+      onSend={() => { void sendSecondary(); }}
+      onStop={() => { secondaryAbortRef.current?.abort(); }}
+      busy={secondaryBusy}
+      disabled={secondaryBusy}
+      placeholder="Message the second agent… (same workspace, its own conversation & model)"
+      minHeight={CODE_COMPOSER_MIN_HEIGHT}
+      maxHeight={CODE_COMPOSER_MAX_HEIGHT}
+      modelPicker={
+        renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy, "Same as 1st agent")
+      }
+      headerExtra={renderTerminalButton("secondary")}
+      attachments={secondaryAttachments}
+      onAttachFiles={addSecondaryFiles}
+      onRemoveAttachment={(i) => setSecondaryAttachments((current) => current.filter((_, j) => j !== i))}
+      attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+      attachmentInputDataUi="CodeSecondaryAttachmentInput"
+      mic
+      showCounter
+      onNotice={setStatus}
+      sendTitle="Send to the second agent"
+      stopTitle="Stop the second agent"
+    />
   );
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
@@ -2611,7 +2673,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     const attachments = chatAttachments;
     const images = imageAttachments(attachments);
     if ((!text && attachments.length === 0) || chatBusy) return;
-    if (!modelId) { setStatus("Pick a model in the Coder header first."); return; }
+    if (!modelId) {
+      setModelRequired({ where: "the Coder header", detail: "Chat mode uses the same model as the coder." });
+      setStatus("Pick a model in the Coder header first.");
+      return;
+    }
     setChatDraft("");
     setChatAttachments([]);
     setChatBusy(true);
@@ -2684,16 +2750,43 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
+  const executePlanCards = async (goal: string, plan: Task[], ctrl: AbortController) => {
+    for (let i = 0; i < plan.length; i++) {
+      if (plan[i].status === "done" || plan[i].status === "failed") continue;
+      if (ctrl.signal.aborted) break;
+      setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "running" } : t)));
+      setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
+      setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
+      try {
+        const stepReply = await runTurn(
+          CODING_SYSTEM(workspace),
+          `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
+          [], ctrl.signal, { withEvents: true },
+        );
+        await logCodeWork("code", plan[i].title, stepReply);
+        setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "done" } : t)));
+      } catch (e) {
+        const err = e as { name?: string };
+        if (err.name === "AbortError") break;
+        setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "failed" } : t)));
+        setMessages((m) => [...m, { role: "assistant", content: `⚠ Step ${i + 1} failed: ${e}`, ts: Date.now() }]);
+        break;
+      }
+    }
+    setStatus(ctrl.signal.aborted ? "Plan paused." : "Plan complete.");
+  };
+
   // Phase 3: plan the goal into task cards, then execute each step in turn,
   // moving its card pending → running → done/failed on the Kanban board.
   const planAndExecute = async () => {
     const goal = draft.trim();
     if (!goal || busy) return;
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
     setDraft("");
     setBusy(true);
     setTasks([]);
+    setPlanGoal(goal);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
@@ -2720,28 +2813,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       const plan: Task[] = steps.map((title, i) => ({ id: i, title, status: "pending" }));
       setTasks(plan);
       // 2) ACT — run each step through the coding agent in sequence.
-      for (let i = 0; i < plan.length; i++) {
-        if (ctrl.signal.aborted) break;
-        setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "running" } : t)));
-        setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
-        setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
-        try {
-          const stepReply = await runTurn(
-            CODING_SYSTEM(workspace),
-            `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
-            [], ctrl.signal, { withEvents: true },
-          );
-          await logCodeWork("code", plan[i].title, stepReply);
-          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
-        } catch (e) {
-          const err = e as { name?: string };
-          if (err.name === "AbortError") break;
-          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "failed" } : t)));
-          setMessages((m) => [...m, { role: "assistant", content: `⚠ Step ${i + 1} failed: ${e}`, ts: Date.now() }]);
-          break;
-        }
-      }
-      setStatus("Plan complete.");
+      await executePlanCards(goal, plan, ctrl);
     } catch (e) {
       const err = e as { name?: string; message?: string };
       if (err.name !== "AbortError") setMessages((m) => [...m, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
@@ -2758,12 +2830,40 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
+  const resumePlan = async () => {
+    if (busy || tasks.every((t) => t.status === "done" || t.status === "failed")) return;
+    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
+    const marker = "📋 Plan & build: ";
+    const savedGoal = [...messages].reverse().find((m) => m.role === "user" && m.content.startsWith(marker));
+    const goal = (stx.planGoal || savedGoal?.content.slice(marker.length) || "").trim();
+    if (!goal) { setStatus("This older saved plan has no recoverable goal. Clear it and create a new plan."); return; }
+    const resumable = tasks.map((t) => t.status === "running" ? { ...t, status: "pending" as const } : t);
+    setTasks(resumable);
+    setPlanGoal(goal);
+    setBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setRunPhase("resuming plan");
+    try {
+      await executePlanCards(goal, resumable, ctrl);
+    } finally {
+      setRunPhase(null);
+      setLlamaLoading(null);
+      setBusy(false);
+      abortRef.current = null;
+    }
+  };
+
   // Stop = abort the JS side AND kill any spawned CLI child — the abort alone
   // never reached a claude/codex/kimi/gemini process, which kept running to
   // completion while the button looked dead.
   const stop = () => {
     abortRef.current?.abort();
     void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    // A stopped card did not finish. Return it to To do so the persisted board
+    // is honest and the rule-based Resume action can pick it up.
+    setTasks((ts) => ts.map((t) => t.status === "running" ? { ...t, status: "pending" } : t));
     setRunPhase(null);
     setLlamaLoading(null);
     setBusy(false);
@@ -2775,7 +2875,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       // Clear = RUN STATE only (tasks, streaming drafts, run timestamps).
       // BOTH chat transcripts — primary and the second-agent pane — survive;
       // wiping conversations is "Clear history"'s explicitly-confirmed job.
-      return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+      return { ...cur, tasks: [], planGoal: undefined, draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
   // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
@@ -2916,7 +3016,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             </span>
             <div style={{ flex: 1 }} />
             <div style={{ width: 240, maxWidth: "40%" }}>
-              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel={SELECT_MODEL_LABEL} />
             </div>
             {/* 🧠 This conversation's own memory — the SAME viewer and the same
                 team_memory store the projects use, scoped to this thread. */}
@@ -2949,36 +3049,25 @@ function CodeWorkspace({ pageId, onTitle }: {
             </div>
           </div>
           <div style={{ borderTop: "1px solid var(--border)", padding: "10px 18px 12px", display: "flex", flexDirection: "column", gap: 8, maxWidth: CHAT_COLUMN_MAX, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
-          {chatAttachments.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {chatAttachments.map((a, i) => (
-                <div key={i} style={{ position: "relative", minWidth: a.kind === "image" ? 56 : 150, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: a.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
-                  {a.kind === "image" ? <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {a.filename ?? "document"}</span>}
-                  <button onClick={() => setChatAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-                </div>
-              ))}
-            </div>
-          )}
           {/* One composer card rather than a bare edge-to-edge row, aligned to
               the same reading column as the transcript. */}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 14, padding: 6 }}>
-            <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 34, width: 34, justifyContent: "center", padding: 0, fontSize: 15, borderRadius: 10, background: "transparent", border: "none", color: "var(--fg-muted)" }}>📎</button>
-            <textarea
-              value={chatDraft}
-              onChange={(e) => setChatDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-              onPaste={onChatPaste}
-              placeholder="Message…  (paste or attach images/documents, Enter to send)"
-              rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 34, maxHeight: 200, background: "transparent", border: "none", outline: "none", color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "8px 4px", lineHeight: 1.5 }}
-            />
-            {chatBusy ? (
-              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 34, padding: "0 14px", borderRadius: 10, color: "var(--error)" }}>Stop</button>
-            ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 34, padding: "0 16px", borderRadius: 10, fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
-            )}
-          </div>
+          <Composer
+            dataUi="CodeJustChatComposer"
+            value={chatDraft}
+            onChange={setChatDraft}
+            onSend={sendChat}
+            onStop={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }}
+            busy={chatBusy}
+            placeholder="Message…  (paste or attach images/documents, Enter to send)"
+            minHeight={34}
+            maxHeight={200}
+            attachments={chatAttachments}
+            onAttachFiles={(files) => { void addChatFiles(files); }}
+            onRemoveAttachment={(i) => setChatAttachments((x) => x.filter((_, j) => j !== i))}
+            attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+            mic
+            showCounter
+          />
           </div>
         </div>
         {/* This branch returns EARLY, so the project-scoped modal further down
@@ -3094,7 +3183,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       task, chatting is the daily one. */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
                     {([
-                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: () => openNewProject() },
+                      { icon: "✦", label: "New project", detail: "Create a new project folder under your projects root, optionally isolated and with a GitHub repository.", onClick: () => openNewProject() },
                       { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
                     ]).map((a) => (
                       <button key={a.label} onClick={a.onClick}
@@ -3286,27 +3375,52 @@ function CodeWorkspace({ pageId, onTitle }: {
               <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
                 {/* LEFT — name/folder, model, info */}
                 <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
-                  {npIsolate && sbox?.available ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Project name</label>
-                      <input autoFocus value={npName} onChange={(e) => setNpName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createNewProject(); }} placeholder="e.g. my-app"
-                        style={{ height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
-                      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>Created inside {engineLabel(sbox.kind)} at ~/owllm/{npName.trim() || "…"}</div>
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Folder</label>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <input value={npFolder} onChange={(e) => setNpFolder(e.target.value)} placeholder="Pick a folder on your drive…"
-                          style={{ flex: 1, minWidth: 0, height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
-                        <button onClick={npBrowseFolder} style={{ ...btn, height: 38, padding: "0 14px" }}>Browse…</button>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Project name</label>
+                    <input autoFocus value={npName} onChange={(e) => { setNpName(e.target.value); setNpErr(""); }} onKeyDown={(e) => { if (e.key === "Enter") createNewProject(); }} placeholder="e.g. my-app"
+                      style={{ height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
+                  </div>
+
+                  {/* One location contract for both modes: the project is
+                      always CREATED as <parent> ▸ <slug>, the slug following
+                      the name live. Opening an existing folder is the
+                      launchpad's separate "Local folder" action. */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Created at</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div
+                        title={npIsolate && sbox?.available ? `~/owllm/${projectFolderSlug(npName)}` : (projectPathUnder(npParent || npRoot, npName) || "Choose where to create the project")}
+                        style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", border: "1px solid var(--border)", fontSize: 13, overflow: "hidden", whiteSpace: "nowrap" }}
+                      >
+                        {npIsolate && sbox?.available ? (
+                          <>
+                            <span>🛡</span>
+                            <span style={{ color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{engineLabel(sbox.kind)} ▸ ~/owllm/</span>
+                            <b style={{ color: "var(--fg-strong)" }}>{projectFolderSlug(npName)}</b>
+                          </>
+                        ) : (npParent || npRoot) ? (
+                          <>
+                            <span>📁</span>
+                            <span style={{ color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{npParent || npRoot}</span>
+                            <span style={{ color: "var(--fg-muted)" }}>▸</span>
+                            <b style={{ color: "var(--fg-strong)" }}>{projectFolderSlug(npName)}</b>
+                          </>
+                        ) : (
+                          <span style={{ color: "var(--fg-muted)" }}>📁 Choose where to create the project…</span>
+                        )}
                       </div>
+                      {!(npIsolate && sbox?.available) && <button onClick={npBrowseFolder} style={{ ...btn, height: 38, padding: "0 14px" }}>Change…</button>}
                     </div>
-                  )}
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                      {npIsolate && sbox?.available
+                        ? <>Created inside {engineLabel(sbox.kind)} — isolated from your {isWsl ? "Windows" : "host"} files.</>
+                        : <>A new folder is created here, with git ready{npCreateRepo && gh?.connected ? " and a GitHub repository" : ""}.</>}
+                    </div>
+                  </div>
 
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Model</label>
-                    <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+                    <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel={SELECT_MODEL_LABEL} />
                   </div>
 
                   <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.6, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
@@ -3379,15 +3493,18 @@ function CodeWorkspace({ pageId, onTitle }: {
                 </div>
               </div>
 
+              {npErr && (
+                <div style={{ fontSize: 12, color: "var(--danger, #ff7a7a)", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px" }}>{npErr}</div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <button onClick={() => setNpOpen(false)} disabled={npBusy} style={{ ...btn, height: 38, padding: "0 14px" }}>Cancel</button>
                 <div style={{ flex: 1 }} />
                 <button
                   onClick={createNewProject}
-                  disabled={npBusy || (!npIsolate && !npFolder.trim())}
-                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || (!npIsolate && !npFolder.trim()) ? 0.6 : 1 }}
+                  disabled={npBusy || !npName.trim()}
+                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || !npName.trim() ? 0.6 : 1 }}
                 >
-                  {npBusy ? "Creating…" : (npIsolate ? "Create isolated project" : "Open folder")}
+                  {npBusy ? "Creating…" : (npIsolate && sbox?.available ? "Create isolated project" : "Create project")}
                 </button>
               </div>
             </div>
@@ -3490,6 +3607,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
+        {!busy && tasks.some((t) => t.status === "pending" || t.status === "running") && (
+          <button onClick={() => { void resumePlan(); }} title="Continue the remaining cards in this Plan & Build run" style={btn}>▶ Resume plan</button>
+        )}
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
         {/* Clear history is now PER AGENT — each pane's own button lives in that
             pane's header (below), with an independent ↩ Undo. */}
@@ -3546,35 +3666,67 @@ function CodeWorkspace({ pageId, onTitle }: {
       {/* Body: file-tree rail + transcript */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
         {workspace && (
-          <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
-            <button
-              data-ui="CodeProjectMemory"
-              onClick={() => { void openProjectMemory(); }}
-              title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
-              style={{ ...btn, width: "100%", height: 30, marginBottom: 4, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
-            >
-              🧠 Project Memory
-            </button>
-            <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
-            <PublishCards
-              repoDir={projectRoot || workspace}
-              gitDir={workspace}
-              branch={branch}
-              projectRoot={projectRoot}
-              isolated={isolated}
-              disabled={busy}
-              // Failed release actions become a coder task; send() queues it
-              // as a ⚡ steer when a run is already in flight. Pre-check the
-              // guards send() would trip so the card reports the truth instead
-              // of claiming "sent" while the task was silently dropped.
-              onFixIssues={(task) => {
-                if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
-                if (!workspace) return "no-workspace";
-                if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
-                void sendRef.current?.(task);
-                return "sent";
-              }}
-            />
+          <div
+            data-ui="CodeProjectRail"
+            data-state={projectRailOpen ? "expanded" : "collapsed"}
+            style={{ width: projectRailOpen ? 220 : 40, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: projectRailOpen ? "stretch" : "center", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: projectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: projectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
+          >
+            {projectRailOpen ? (
+              <>
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  <button
+                    data-ui="CodeProjectMemory"
+                    onClick={() => { void openProjectMemory(); }}
+                    title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
+                    style={{ ...btn, flex: 1, minWidth: 0, height: 30, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
+                  >
+                    🧠 Project Memory
+                  </button>
+                  <button
+                    data-ui="CodeProjectRailCollapse"
+                    onClick={() => setProjectRailOpen(false)}
+                    aria-label="Shrink left project column"
+                    title="Shrink left column"
+                    style={{ ...btn, width: 28, height: 30, padding: 0, flexShrink: 0, fontSize: 18, lineHeight: 1 }}
+                  >‹</button>
+                </div>
+                <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
+                <PublishCards
+                  repoDir={projectRoot || workspace}
+                  gitDir={workspace}
+                  branch={branch}
+                  projectRoot={projectRoot}
+                  isolated={isolated}
+                  disabled={busy}
+                  // Failed release actions become a coder task; send() queues it
+                  // as a ⚡ steer when a run is already in flight. Pre-check the
+                  // guards send() would trip so the card reports the truth instead
+                  // of claiming "sent" while the task was silently dropped.
+                  onFixIssues={(task) => {
+                    if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
+                    if (!workspace) return "no-workspace";
+                    if (!modelId) {
+                      setModelRequired({ where: "the Coder header", detail: "The release fix was not queued." });
+                      setStatus("No model selected — pick one in the Coder header.");
+                      return "no-model";
+                    }
+                    void sendRef.current?.(task);
+                    return "sent";
+                  }}
+                />
+              </>
+            ) : (
+              <button
+                data-ui="CodeProjectRailExpand"
+                onClick={() => setProjectRailOpen(true)}
+                aria-label="Expand left project column"
+                title="Expand left column"
+                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ff78b7", background: "rgba(255, 82, 160, 0.16)", borderColor: "rgba(255, 105, 180, 0.68)", lineHeight: 1 }}
+              >
+                <span data-ui="CodeProjectRailCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>🧠</span>
+                <span aria-hidden="true" style={{ fontSize: 19 }}>›</span>
+              </button>
+            )}
           </div>
         )}
       {/* Center column: chat panes on top, status + composer at the bottom of
@@ -3823,62 +3975,48 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={secondaryOpen && wideView
         ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end", flexShrink: 0 }
         : { flexShrink: 0 }}>
-      <div
-        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
-        onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
-        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
-      >
-        {/* Each agent owns a toolbar immediately above — and exactly aligned
-            with — its own textarea. Both Terminal buttons address the same
-            workspace shell; the model selections remain independent. */}
-        <div data-ui="CodePrimaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <div style={status.includes("\n")
-            ? { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
-            : { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
-          <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
-          <div data-ui="CodePrimaryComposerModelPicker" style={{ width: "min(300px, 48%)", minWidth: 180 }}>
-            <ModelPicker
-              value={modelId}
-              onChange={setModelId}
-              models={availableModels}
-              status={accountsStatus}
-              disabled={busy}
-              fallbackLabel="(pick a model)"
-              placement="top"
-            />
-          </div>
-          {renderTerminalButton("primary")}
-        </div>
-        {renderAttachmentTray(codeAttachments, setCodeAttachments)}
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          {renderAttachmentPicker("primary", codeFileRef, addCodeFiles)}
-          <textarea
-            ref={codeDraftRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
-            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
-            rows={3}
-            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
-          />
-          {busy ? (
-            <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
-          ) : (
-            /* One primary button — what it does follows the right-column MODE:
-               plan → Kanban plan/act, auto → act directly, chat → discuss only. */
-            <button
-              onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
-              disabled={(!draft.trim() && (agentMode === "plan" || codeAttachments.length === 0)) || preparing}
-              title={preparing ? "Preparing the workspace — unlocks in a moment"
-                : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
-                : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
-                : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeAttachments.length)) && !preparing) ? 1 : 0.5 }}
-            >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
-          )}
-        </div>
-      </div>
+      {/* Each agent owns a toolbar immediately above — and exactly aligned
+          with — its own textarea. Both Terminal buttons address the same
+          workspace shell; the model selections remain independent. */}
+      <Composer
+        dataUi="CodePrimaryComposer"
+        toolbarDataUi="CodePrimaryComposerToolbar"
+        textareaRef={codeDraftRef}
+        value={draft}
+        onChange={setDraft}
+        onSend={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
+        onStop={stop}
+        busy={busy}
+        placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
+        minHeight={CODE_COMPOSER_MIN_HEIGHT}
+        maxHeight={CODE_COMPOSER_MAX_HEIGHT}
+        status={status}
+        modelPicker={renderCodeModelPicker("primary", modelId, setModelId, busy, SELECT_MODEL_LABEL)}
+        headerExtra={renderTerminalButton("primary")}
+        attachments={codeAttachments}
+        onAttachFiles={addCodeFiles}
+        onRemoveAttachment={(i) => setCodeAttachments((current) => current.filter((_, j) => j !== i))}
+        attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
+        attachmentInputDataUi="CodePrimaryAttachmentInput"
+        mic
+        showCounter
+        onNotice={setStatus}
+        /* One primary button — what it does follows the MODE segment, which is
+           also mirrored by the right-hand side panel (same agentMode state). */
+        modes={[
+          { key: "plan", label: "📋 Plan", title: "Break the goal into ordered steps, then build them one by one (Kanban)" },
+          { key: "auto", label: "Auto", title: "Act directly — read, edit and run in the workspace" },
+          { key: "chat", label: "💬 Chat", title: "Discuss/review only — no edits, no state-changing commands" },
+        ]}
+        mode={agentMode}
+        onModeChange={(k) => setAgentMode(k as typeof agentMode)}
+        canSend={(!!draft.trim() || (agentMode !== "plan" && codeAttachments.length > 0)) && !preparing}
+        sendLabel={preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}
+        sendTitle={preparing ? "Preparing the workspace — unlocks in a moment"
+          : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
+          : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
+          : "Act directly — read, edit and run in the workspace"}
+      />
       {/* Right cell of the divided composer row — the second agent's input,
           aligned under its pane. (In narrow view it lives inside the pane.) */}
       {secondaryOpen && wideView && (
@@ -3891,31 +4029,51 @@ function CodeWorkspace({ pageId, onTitle }: {
             with the team) and 📓 Notebook (the shared RunNotebook, inline).
             User spec 2026-07-04. */}
         {workspace && ruleScope.id && (
-          <CodeSidePanel
-            scopeId={ruleScope.id}
-            sharedWithTeam={ruleScope.shared}
-            directives={directives}
-            onDirectivesChanged={reloadDirectives}
-            mode={agentMode}
-            onModeChange={setAgentMode}
-            browserOpen={browserOpen}
-            onToggleBrowser={() => setBrowserOpen((v) => !v)}
-            usageProvider={providerFor(modelId, availableModels)}
-            notebook={
-              <RunNotebook
-                inline
-                projectId={ruleScope.id || null}
-                surfaceId={notebookSurfaceId}
-                projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
-                running={busy}
-                onFeed={feedFromNotebook}
-                modelId={modelId}
-                port={srvPort}
-                models={availableModels}
-                accountsStatus={accountsStatus}
-              />
-            }
-          />
+          utilityPanelOpen ? (
+            <CodeSidePanel
+              scopeId={ruleScope.id}
+              sharedWithTeam={ruleScope.shared}
+              directives={directives}
+              onDirectivesChanged={reloadDirectives}
+              mode={agentMode}
+              onModeChange={setAgentMode}
+              browserOpen={browserOpen}
+              onToggleBrowser={() => setBrowserOpen((v) => !v)}
+              usageProvider={providerFor(modelId, availableModels)}
+              onCollapse={() => setUtilityPanelOpen(false)}
+              notebook={
+                <RunNotebook
+                  inline
+                  projectId={ruleScope.id || null}
+                  surfaceId={notebookSurfaceId}
+                  projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
+                  running={busy}
+                  onFeed={feedFromNotebook}
+                  modelId={modelId}
+                  port={srvPort}
+                  models={availableModels}
+                  accountsStatus={accountsStatus}
+                />
+              }
+            />
+          ) : (
+            <div
+              data-ui="CodeUtilityPanelRail"
+              data-state="collapsed"
+              style={{ width: 40, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
+            >
+              <button
+                data-ui="CodeUtilityPanelExpand"
+                onClick={() => setUtilityPanelOpen(true)}
+                aria-label="Expand right utility column"
+                title="Expand right column"
+                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ffad42", background: "rgba(255, 153, 51, 0.17)", borderColor: "rgba(255, 166, 64, 0.7)", lineHeight: 1 }}
+              >
+                <span data-ui="CodeUtilityPanelCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>📓</span>
+                <span aria-hidden="true" style={{ fontSize: 19 }}>‹</span>
+              </button>
+            </div>
+          )
         )}
       </div>
 
@@ -3956,6 +4114,16 @@ function CodeWorkspace({ pageId, onTitle }: {
           (a real OwLLM WebviewWindow) the agents drive with the browser_* tools.
           Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
+
+      {/* 🧠 No model selected — every send path on this page routes its
+          blocked-for-no-model case here instead of only writing a status line
+          the user never looks at. */}
+      <ModelRequiredDialog
+        open={modelRequired !== null}
+        where={modelRequired?.where || "the Coder header"}
+        detail={modelRequired?.detail}
+        onClose={() => setModelRequired(null)}
+      />
 
       {/* 🧠 Project Memory — the SAME shared surface the Agents page opens,
           scoped by the SAME id both code agents use for memory (memoryScope():

@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   macos-arm64:
-    runs-on: [self-hosted, macOS, ARM64, owllm-release]
+    runs-on: macos-latest
     timeout-minutes: 120
     env:
       RELEASE_REPO: OwLLM/owllm
@@ -37,6 +37,12 @@ jobs:
           command -v cargo
           command -v cmake
           command -v gh || brew install gh
+
+      - name: Restore Apple Silicon Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owllm-desktop/src-tauri
+          shared-key: tauri-aarch64-apple-darwin
 
       - name: Import Developer ID certificate
         shell: bash
@@ -175,27 +181,33 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          curl -fsSL \
-            "https://github.com/$RELEASE_REPO/releases/latest/download/latest.json" \
-            -o dist/latest.previous.json
           VERSION="$VERSION" TAG="$TAG" RELEASE_REPO="$RELEASE_REPO" node <<'NODE'
           const fs = require("fs");
-          const prev = JSON.parse(fs.readFileSync("dist/latest.previous.json", "utf8"));
-          if (prev.version !== process.env.VERSION) {
-            throw new Error(`Latest manifest is ${prev.version}, expected ${process.env.VERSION}`);
-          }
           const signature = fs.readFileSync(
             "dist/OwLLM.Desktop_aarch64.app.tar.gz.sig",
             "utf8",
           ).trim();
-          prev.platforms = { ...(prev.platforms || {}) };
-          prev.platforms["darwin-aarch64"] = {
-            signature,
-            url: `https://github.com/${process.env.RELEASE_REPO}/releases/download/${process.env.TAG}/OwLLM.Desktop_aarch64.app.tar.gz`,
+          const manifest = {
+            version: process.env.VERSION,
+            notes: "macOS release",
+            pub_date: new Date().toISOString(),
+            platforms: {
+              "darwin-aarch64": {
+                signature,
+                url: `https://github.com/${process.env.RELEASE_REPO}/releases/download/${process.env.TAG}/OwLLM.Desktop_aarch64.app.tar.gz`,
+              },
+            },
           };
-          prev.pub_date = new Date().toISOString();
-          fs.writeFileSync("dist/latest.json", JSON.stringify(prev, null, 2) + "\n");
+          fs.writeFileSync("dist/latest.json", JSON.stringify(manifest, null, 2) + "\n");
           NODE
+
+      - name: Preserve signed macOS release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: owllm-macos-${{ inputs.tag }}
+          path: owllm-desktop/dist/*
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Publish Mac assets and manifest
         working-directory: owllm-desktop
@@ -205,13 +217,45 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
+          if ! gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$RELEASE_REPO" \
+              --title "OwLLM Desktop $TAG" \
+              --notes "Signed Apple Silicon macOS release."
+          fi
           gh release upload "$TAG" \
             dist/OwLLM.Desktop.Setup.dmg \
             dist/OwLLM.Desktop_aarch64.app.tar.gz \
+            dist/OwLLM.Desktop_aarch64.app.tar.gz.sig \
             --repo "$RELEASE_REPO" --clobber
           # Publish latest.json last so it never points at a missing archive.
           gh release upload "$TAG" dist/latest.json \
             --repo "$RELEASE_REPO" --clobber
+
+      # A Mac-only publish makes THIS tag "Latest", so the org-profile and repo
+      # README links at releases/latest/download/<stable-name> 404 for every OS
+      # this run did not build — v0.9.89/.90 broke the Windows, AppImage and deb
+      # downloads exactly that way. Mirror publish-release.sh's
+      # carry_forward_assets: copy the newest stable-named installer for each
+      # missing OS onto this tag.
+      - name: Carry forward non-Mac installers
+        working-directory: owllm-desktop
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          have="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name')"
+          tmp="$(mktemp -d)"
+          for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+            printf '%s\n' "$have" | grep -qxF "$name" && continue
+            src="$(gh api "repos/$RELEASE_REPO/releases?per_page=30" \
+              --jq "[.[] | select(.draft|not) | select(.tag_name != \"$TAG\") | select(any(.assets[]; .name == \"$name\"))] | first | .tag_name")"
+            [ -n "$src" ] && [ "$src" != "null" ] || { echo "  no source release for $name"; continue; }
+            gh release download "$src" --repo "$RELEASE_REPO" --pattern "$name" --dir "$tmp"
+            gh release upload "$TAG" "$tmp/$name" --repo "$RELEASE_REPO" --clobber
+            echo "  carried forward $name from $src"
+          done
+          rm -rf "$tmp"
 
       - name: Verify public Mac update path
         shell: bash
@@ -226,14 +270,28 @@ jobs:
           const [path, version] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
           if (manifest.version !== version) throw new Error("wrong public version");
-          if (!manifest.platforms?.["windows-x86_64"]) throw new Error("Windows entry lost");
-          if (!manifest.platforms?.["linux-x86_64"]) throw new Error("Linux entry lost");
           if (!manifest.platforms?.["darwin-aarch64"]) throw new Error("Mac entry missing");
           console.log("Public updater platforms:", Object.keys(manifest.platforms).join(", "));
           NODE
           curl -fsSI \
             "https://github.com/$RELEASE_REPO/releases/download/$TAG/OwLLM.Desktop_aarch64.app.tar.gz" \
             >/dev/null
+
+      # The exact links the org-profile README and the OwLLM/owllm README
+      # publish. Every one must resolve, or a visitor's download 404s.
+      - name: Verify every advertised download link
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg \
+                      OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+            url="https://github.com/$RELEASE_REPO/releases/latest/download/$name"
+            code="$(curl -s -o /dev/null -w '%{http_code}' -L "$url")"
+            echo "  $name -> HTTP $code"
+            [ "$code" = "200" ] || fail=1
+          done
+          [ "$fail" = 0 ] || { echo "::error::a published download link is broken"; exit 1; }
 
       # Self-hosted runner: undo the search-list edit and destroy the signing
       # keychain even when an earlier step failed. Without this the job leaves

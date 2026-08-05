@@ -17,7 +17,8 @@
 // shows every pair for review before training.
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ModelPicker, { type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, type AccountsStatusLite } from "../agentic/ModelPicker";
+import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import { getServerCtx } from "../core/serverContext";
 import { streamChatCompletion, providerFor, abortable, isAbortError, sleepAbortable, type ModelInfo } from "../agentic/dispatch";
 import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
@@ -96,7 +97,6 @@ function parsePairs(text: string): Pair[] {
 }
 
 const newId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const SERVABLE = new Set(["local", "tuned", "gguf"]);
 
 export default function DatasetBuilderPage() {
   const sess = useChatSession<DSState>(SID);
@@ -117,13 +117,19 @@ export default function DatasetBuilderPage() {
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [accounts, setAccounts] = useState<AccountsStatusLite | null>(null);
+  // Rule-based "you never picked a model" popup — raised by Generate, never
+  // resolved behind the user's back.
+  const [modelRequired, setModelRequired] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let dead = false;
     const reload = () => {
       invoke<ModelInfo[]>("list_models")
-        .then((all) => { if (!dead) { setModels(all); if (!modelId) set("modelId", all.find((m) => SERVABLE.has(m.provider))?.model_id || all[0]?.model_id || ""); } })
+        // NO auto-pick: an unset picker reads "Select model" and Build raises
+        // ModelRequiredDialog, so generation can't silently run a model the
+        // user never chose.
+        .then((all) => { if (!dead) setModels(all); })
         .catch(() => {});
       invoke<AccountsStatusLite>("accounts_status").then((s) => { if (!dead) setAccounts(s); }).catch(() => {});
     };
@@ -198,7 +204,7 @@ export default function DatasetBuilderPage() {
   const generate = async () => {
     if (busy) return;
     if (sources.length === 0) { setStatus("Add at least one document or URL first."); return; }
-    if (!modelId) { setStatus("Pick a model to generate the pairs."); return; }
+    if (!modelId) { setModelRequired(true); setStatus("Pick a model to generate the pairs."); return; }
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     set("busy", true);
@@ -339,7 +345,7 @@ export default function DatasetBuilderPage() {
           <div style={{ background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", letterSpacing: 0.4 }}>GENERATION</div>
             <label style={rowStyle}><span>Model</span></label>
-            <ModelPicker value={modelId} onChange={(id) => set("modelId", id)} models={models} status={accounts} disabled={busy} fallbackLabel="(pick a model)" />
+            <ModelPicker value={modelId} onChange={(id) => set("modelId", id)} models={models} status={accounts} disabled={busy} fallbackLabel={SELECT_MODEL_LABEL} />
             <label style={rowStyle}><span title="Max characters per chunk">Chunk size</span><input type="number" min={200} max={8000} value={chunkSize} disabled={busy} onChange={(e) => set("chunkSize", Math.max(200, +e.target.value || 1200))} style={numStyle} /></label>
             <label style={rowStyle}><span title="Characters carried between chunks">Overlap</span><input type="number" min={0} max={2000} value={chunkOverlap} disabled={busy} onChange={(e) => set("chunkOverlap", Math.max(0, +e.target.value || 0))} style={numStyle} /></label>
             <label style={rowStyle}><span title="How many pairs to ask the model for per chunk">Pairs / chunk</span><input type="number" min={1} max={10} value={pairsPerChunk} disabled={busy} onChange={(e) => set("pairsPerChunk", Math.min(10, Math.max(1, +e.target.value || 3)))} style={numStyle} /></label>
@@ -393,6 +399,13 @@ export default function DatasetBuilderPage() {
 
       {/* Status */}
       <div style={{ flexShrink: 0, fontSize: 11.5, color: "var(--fg-muted)", whiteSpace: "pre-line" }}>{status}</div>
+
+      <ModelRequiredDialog
+        open={modelRequired}
+        where="the Model picker above"
+        detail="Nothing was generated."
+        onClose={() => setModelRequired(false)}
+      />
     </div>
   );
 }

@@ -53,15 +53,16 @@ pin("forward control skips trailing meta notices",
 pin("legacy sessions are migrated at hydration",
   codePageSrc.includes("stampLegacyMetaNotices(loadPageSession(pageId)"));
 pin("primary composer owns its model picker above its textarea",
-  codePageSrc.includes('data-ui="CodePrimaryComposerToolbar"')
-  && codePageSrc.indexOf('data-ui="CodePrimaryComposerToolbar"') < codePageSrc.indexOf("ref={codeDraftRef}"));
+  codePageSrc.includes('toolbarDataUi="CodePrimaryComposerToolbar"')
+  && codePageSrc.indexOf('toolbarDataUi="CodePrimaryComposerToolbar"') < codePageSrc.indexOf("textareaRef={codeDraftRef}"));
 pin("second composer owns its independent model picker above its textarea",
-  codePageSrc.includes('data-ui="CodeSecondaryComposerToolbar"')
-  && codePageSrc.indexOf('data-ui="CodeSecondaryComposerToolbar"') < codePageSrc.indexOf("ref={secondaryDraftRef}"));
+  codePageSrc.includes('toolbarDataUi="CodeSecondaryComposerToolbar"')
+  && codePageSrc.indexOf('toolbarDataUi="CodeSecondaryComposerToolbar"') < codePageSrc.indexOf("textareaRef={secondaryDraftRef}"));
 pin("both composer pickers open upward and share a Terminal control",
-  codePageSrc.includes('data-ui="CodePrimaryComposerModelPicker"')
-  && codePageSrc.includes('data-ui="CodeSecondaryComposerModelPicker"')
-  && (codePageSrc.match(/placement="top"/g) || []).length >= 2
+  codePageSrc.includes('owner === "primary" ? "CodePrimaryComposerModelPicker" : "CodeSecondaryComposerModelPicker"')
+  && codePageSrc.includes('renderCodeModelPicker("primary", modelId, setModelId, busy')
+  && codePageSrc.includes('renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy')
+  && codePageSrc.includes('placement="top"')
   && codePageSrc.includes('renderTerminalButton("primary")')
   && codePageSrc.includes('renderTerminalButton("secondary")'));
 pin("model pickers are absent from both crowded chat headers",
@@ -84,8 +85,11 @@ pin("both project-agent composers reuse one attachment parser and picker",
   codePageSrc.includes("const addProjectComposerFiles = async")
   && codePageSrc.includes("void addProjectComposerFiles(files, setCodeAttachments)")
   && codePageSrc.includes("void addProjectComposerFiles(files, setSecondaryAttachments)")
-  && codePageSrc.includes('renderAttachmentPicker("primary"')
-  && codePageSrc.includes('renderAttachmentPicker("secondary"'));
+  // The picker/tray themselves now live in the ONE shared <Composer/>, so both
+  // agents get the identical control by construction rather than by convention.
+  && codePageSrc.includes('attachmentInputDataUi="CodePrimaryAttachmentInput"')
+  && codePageSrc.includes('attachmentInputDataUi="CodeSecondaryAttachmentInput"')
+  && (codePageSrc.match(/attachmentAccept=\{CHAT_ATTACHMENT_ACCEPT\}/g) ?? []).length >= 2);
 pin("second agent accepts attachment-only sends and clears only its own tray",
   codePageSrc.includes("const attachments = fromComposer ? secondaryAttachments : []")
   && codePageSrc.includes("if (!text && attachments.length === 0) return")

@@ -130,6 +130,46 @@ find_makensis() {
   return 1
 }
 
+# ---- cargo target dir -----------------------------------------------------
+# build-release.bat redirects CARGO_TARGET_DIR to a SHORT path (%SystemDrive%\owllm-t,
+# falling back to %LOCALAPPDATA%\owllm-t) because a deep checkout overruns CMake's
+# 250-char object-path limit. The Windows signing step reads the built binaries
+# straight off disk, so it MUST resolve the same directory the build wrote to.
+# Hardcoding the in-tree src-tauri/target is what shipped v0.9.92: the freshly
+# built 0.9.92 binaries went to C:\owllm-t while the publisher signed, repacked
+# and uploaded the stale 0.9.85 binaries the last in-tree build had left behind,
+# so every user installed 0.9.85 and was re-prompted to update forever.
+resolve_target_dir() {
+  local dir
+  if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    to_posix_path "$CARGO_TARGET_DIR"
+    return 0
+  fi
+  for dir in "${SystemDrive:-C:}\\owllm-t" "${LOCALAPPDATA:-}\\owllm-t"; do
+    case "$dir" in \\owllm-t) continue ;; esac
+    dir="$(to_posix_path "$dir")"
+    [ -d "$dir" ] && { printf '%s' "$dir"; return 0; }
+  done
+  printf '%s' "src-tauri/target"
+}
+
+# Windows FileVersion of a built .exe, as Tauri stamps it from tauri.conf.json.
+exe_file_version() {
+  powershell.exe -NoProfile -Command \
+    "(Get-Item -LiteralPath \"$(to_windows_path "$1")\").VersionInfo.FileVersion" 2>/dev/null \
+    | tr -d '\r' | tail -1
+}
+
+# The one invariant that makes a stale artifact unshippable, whatever its origin.
+assert_installer_version() {
+  local where="$1" got
+  [ "$HOST_OS" = "windows" ] || return 0
+  got="$(exe_file_version "$INSTALLER")"
+  [ -n "$got" ] || fail "could not read the version of '$INSTALLER' ($where) — refusing to publish an unverifiable installer"
+  [ "$got" = "$VERSION" ] || fail "installer version mismatch after $where: '$INSTALLER' is $got but this release is $VERSION. The build output and the artifact being published are not the same build (check CARGO_TARGET_DIR / stale target dir)."
+  echo "  ✓ installer reports version $got ($where)"
+}
+
 # ---- per-platform artifact map -------------------------------------------
 # One script, three OSes. INSTALLER = the human-download asset (stable name),
 # UPDATER_ARTIFACT = what minisign signs and latest.json points at.
@@ -349,6 +389,7 @@ case "$HOST_OS" in
 esac
 [ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER (build step did not run or failed)"
 [ -f "$UPDATER_ARTIFACT" ] || fail "no updater artifact at $UPDATER_ARTIFACT"
+assert_installer_version "build"
 
 step "1a/5 windows payload signing (exe/dll before installer)"
 case "$HOST_OS" in
@@ -371,7 +412,11 @@ case "$HOST_OS" in
           || fail "payload verify failed after signing: $src"
       }
 
-      RELEASE_DIR="src-tauri/target/x86_64-pc-windows-gnu/release"
+      RELEASE_DIR="$(resolve_target_dir)/x86_64-pc-windows-gnu/release"
+      echo "  release dir: $RELEASE_DIR"
+      BUILT_VERSION="$(exe_file_version "$RELEASE_DIR/owllm-desktop.exe")"
+      [ "$BUILT_VERSION" = "$VERSION" ] \
+        || fail "built exe is $BUILT_VERSION but this release is $VERSION — '$RELEASE_DIR' holds a stale build, so signing it would ship the wrong version (set CARGO_TARGET_DIR to the dir build-release.bat used)"
       sign_payload "$RELEASE_DIR/owllm-desktop.exe" "main exe"
       sign_payload "$RELEASE_DIR/WebView2Loader.dll" "WebView2 loader"
 
@@ -395,6 +440,7 @@ case "$HOST_OS" in
       cp -f "$NSIS_OUT" "$BUNDLED_INSTALLER"
       cp -f "$BUNDLED_INSTALLER" "$INSTALLER"
       echo "  ✓ payloads signed and NSIS installer rebuilt"
+      assert_installer_version "payload signing"
     else
       echo "  (skipped — no OWLLM_SIGN_THUMBPRINT / OWLLM_SIGN_SUBJECT / $THUMB_FILE; payloads may be unsigned)"
     fi

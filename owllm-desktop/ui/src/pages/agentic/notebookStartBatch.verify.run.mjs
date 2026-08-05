@@ -86,6 +86,17 @@ fs.writeFileSync(path.join(TMP, "RunTimer.js"), `
     useTick: () => {},
   };
 `);
+fs.writeFileSync(path.join(TMP, "renderingPolicy.js"), `
+  module.exports = { continuousUiAnimation: (animation) => animation };
+`);
+fs.writeFileSync(path.join(TMP, "notebookDigestAura.js"), `
+  module.exports = {
+    notebookDigestCardStyle: (active, animation) => active
+      ? { border: "1px solid transparent", background: "var(--notebook-digest-aura)", boxShadow: "0 0 10px rgba(176,124,255,.20)", animation }
+      : { border: "1px solid var(--border)", background: "var(--bg-card)", boxShadow: undefined, animation: undefined },
+    notebookDigestVisualState: (busy, error, hasReply) => busy ? "active" : error.trim() ? "interrupted" : hasReply ? "completed" : "idle",
+  };
+`);
 fs.writeFileSync(path.join(TMP, "localization.js"), `
   module.exports = { __esModule: true, translateUiText: (text) => text };
 `);
@@ -105,6 +116,8 @@ out = out
   .replace(/require\("\.\/dispatch"\)/g, 'require("./dispatch.js")')
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")')
+  .replace(/require\("\.\.\/\.\.\/runtime\/renderingPolicy"\)/g, 'require("./renderingPolicy.js")')
+  .replace(/require\("\.\/notebookDigestAura"\)/g, 'require("./notebookDigestAura.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./localization.js")')
   .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")')
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./tauri.js")');

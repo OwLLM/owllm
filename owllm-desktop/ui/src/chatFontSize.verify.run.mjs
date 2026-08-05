@@ -39,21 +39,21 @@ function makeStorage(initial = {}) {
   };
 }
 
-// Defaults + bounds. Range now runs -1 (one step smaller) up to +6.
-check(pref.CHAT_FONT_MIN_STEP === -1 && pref.CHAT_FONT_MAX_STEP === 6 && pref.CHAT_FONT_BASE_PX === 13,
-  "range is -1..+6 around the current 13px size, in +1 steps");
+// Defaults + bounds. Range now runs -3 (three steps smaller) up to +9.
+check(pref.CHAT_FONT_MIN_STEP === -3 && pref.CHAT_FONT_MAX_STEP === 9 && pref.CHAT_FONT_BASE_PX === 13,
+  "range is -3..+9 around the current 13px size, in +1 steps");
 check(pref.readChatFontStep(makeStorage()) === 0 && pref.CHAT_FONT_DEFAULT_STEP === 0,
   "missing preference falls back to the default (0 = shipped) size");
 check(pref.readChatFontStep(makeStorage({ [pref.CHAT_FONT_STEP_KEY]: "not-a-number" })) === 0,
   "corrupt preference fails safely to the default size");
 
 // Clamp both ends and round fractional values.
-check(pref.clampChatFontStep(-3) === -1 && pref.clampChatFontStep(9) === 6 && pref.clampChatFontStep(2.4) === 2,
-  "steps clamp to [-1,6] and snap to whole increments");
+check(pref.clampChatFontStep(-7) === -3 && pref.clampChatFontStep(14) === 9 && pref.clampChatFontStep(2.4) === 2,
+  "steps clamp to [-3,9] and snap to whole increments");
 
-// px mapping: 12 (at -1) .. 19 (at +6).
-check(pref.chatFontSizePx(-1) === 12 && pref.chatFontSizePx(0) === 13 && pref.chatFontSizePx(6) === 19 && pref.chatFontSizePx(99) === 19,
-  "each step maps to +1px (12..19), never past the +6 ceiling or -1 floor");
+// px mapping: 10 (at -3) .. 22 (at +9).
+check(pref.chatFontSizePx(-3) === 10 && pref.chatFontSizePx(0) === 13 && pref.chatFontSizePx(9) === 22 && pref.chatFontSizePx(99) === 22,
+  "each step maps to +1px (10..22), never past the +9 ceiling or -3 floor");
 
 // Round-trip + persisted restore.
 const saved = makeStorage();
@@ -61,9 +61,9 @@ pref.saveChatFontStep(3, saved);
 check(saved.dump()[pref.CHAT_FONT_STEP_KEY] === "3" && pref.readChatFontStep(saved) === 3,
   "the selected step persists and restores at startup");
 pref.saveChatFontStep(50, saved);
-check(pref.readChatFontStep(saved) === 6, "an out-of-range saved value restores clamped to the ceiling");
-pref.saveChatFontStep(-9, saved);
-check(pref.readChatFontStep(saved) === -1, "an under-range saved value restores clamped to the floor");
+check(pref.readChatFontStep(saved) === 9, "an out-of-range saved value restores clamped to the ceiling");
+pref.saveChatFontStep(-40, saved);
+check(pref.readChatFontStep(saved) === -3, "an under-range saved value restores clamped to the floor");
 
 // Chat renderers read the CSS variable (with a 13px fallback) — every chat
 // surface reuses these shared bodies.
@@ -79,14 +79,19 @@ check(agents.includes("var(--chat-font-size, 13px)"),
 const notebook = readSource("pages/agentic/RunNotebook.tsx");
 check((notebook.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
   "RunNotebook step text (active + archived) applies --chat-font-size");
-check((agents.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
-  "AgentsPage user composer input applies --chat-font-size");
-const codePage = readSource("pages/agentic/CodePage.tsx");
-check((codePage.match(/fontSize: "var\(--chat-font-size, 13px\)"|fontSize:"var\(--chat-font-size, 13px\)"/g) || []).length >= 3,
-  "CodePage user input boxes apply --chat-font-size");
-const ftChat = readSource("pages/finetuning/ChatPage.tsx");
-check((ftChat.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
-  "fine-tuning ChatPage composers apply --chat-font-size");
+// Every chat surface now renders the ONE shared composer, so the input font
+// size is a single CSS rule instead of a copy per page. Assert the rule, and
+// that each page really goes through that component.
+const composerCss = readSource("styles.css");
+check(/\.owc__input textarea \{[\s\S]{0,400}?var\(--chat-font-size, 13px\)/.test(composerCss),
+  "the shared composer textarea applies --chat-font-size");
+for (const [label, rel] of [
+  ["AgentsPage user composer input", "pages/agentic/AgentsPage.tsx"],
+  ["CodePage user input boxes", "pages/agentic/CodePage.tsx"],
+  ["fine-tuning ChatPage composers", "pages/finetuning/ChatPage.tsx"],
+]) {
+  check(readSource(rel).includes('from "../../components/Composer"'), `${label} apply --chat-font-size via the shared composer`);
+}
 
 // Icons + Settings control.
 const icons = readSource("components/ActionIcon.tsx");

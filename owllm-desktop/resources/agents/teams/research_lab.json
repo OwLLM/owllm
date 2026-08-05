@@ -18,21 +18,29 @@
       {
         "name": "duckduckgo",
         "command": "uvx",
-        "args": ["duckduckgo-mcp-server"],
+        "args": [
+          "duckduckgo-mcp-server"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "fetch",
         "command": "uvx",
-        "args": ["mcp-server-fetch"],
+        "args": [
+          "mcp-server-fetch"
+        ],
         "env": {},
         "enabled": true
       },
       {
         "name": "filesystem",
         "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "C:/1_Git"
+        ],
         "env": {},
         "enabled": true
       }
@@ -42,52 +50,90 @@
     {
       "name": "orchestrator",
       "base": "orchestrator",
-      "description": "Plans the research and assigns sources.",
+      "description": "Plans the research, dispatches the generalist, and gates the final answer on the fact-check.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - librarian      : finds and lists candidate sources\n  - deep_reader    : extracts claims and quotes from a single source\n  - synthesizer    : combines extracted claims into a single narrative\n  - fact_checker   : reviews the synthesized output against the underlying sources\n  - citer          : adds citations and renders the final formatted output\n\nFlow: librarian -> for each source: deep_reader -> synthesizer -> fact_checker -> if approved, citer; otherwise back to synthesizer with the critic's notes."
+      "extra_prompt": "Your team for this project — the standard six:\n  - scout            : read-only reconnaissance — gathers the context the workers need (code, sources, inboxes, data) and reports quotable findings; never edits\n  - worker_a         : execution lane A — full capability (files, shell, code, browser, connectors)\n  - worker_b         : execution lane B — identical capability; the second parallel lane\n  - critical_thinker : advisory reviewer — reviews substantive work before you call it done\n  - producer         : rule-based finisher — commits, packages, publishes, sends, or schedules ONLY work the review chain approved, and only when the goal asks for delivery\n\nDISPATCH DISCIPLINE:\n  - Decompose the goal into slices. INDEPENDENT slices go to worker_a AND worker_b in the same round — they run in parallel. Dependent steps stay in one lane.\n  - Give each lane an explicit, non-overlapping scope (files / features / sources). Two lanes must never touch the same files in the same round.\n  - Dispatch scout in parallel with the first work round whenever missing context would slow the workers down; quote its findings verbatim in later dispatches.\n  - A small single-step task takes ONE worker — never fan out for ceremony.\n  - Review chain: worker → critical_thinker on substantive work; on REVISE/REJECT send the exact notes back to the same lane.\n  - Delivery (commit / publish / send / schedule) is the producer's job, dispatched LAST, after review — the producer never creates content and never runs before approval.\n\nPROFILE GUIDANCE — this team's domain rules. Where they say \"the generalist\", read \"the worker lane you dispatch\":\n\nDispatch the generalist to gather sources, read them, and synthesise. Send the synthesis to critical_thinker before the final cited output; if it returns REVISE/REJECT with unsupported or misattributed claims, send the notes back to the generalist and re-synthesise. Only render the final cited answer from an approved synthesis."
     },
     {
-      "name": "librarian",
+      "name": "scout",
       "base": "researcher",
-      "description": "Finds candidate sources for the question.",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
-      "extra_prompt": "Focus: produce a numbered list of 5-10 candidate sources for the orchestrator's question. Each entry: title, URL or path, one-line relevance note. Do not summarise the content — that's the deep_reader's job."
+      "description": "Read-only reconnaissance — gathers the context the workers need and reports quotable findings.",
+      "icon": "owl:owl_researcher",
+      "extra_prompt": "You are the team's scout — read-only reconnaissance, run in parallel with the workers. Focus for this profile: candidate sources — search broadly, rank by credibility, and hand over links plus the key quotes. Report compact, quotable facts (paths, quotes, numbers, links) the orchestrator can hand to the workers verbatim. Never edit files, never take actions with side effects — if a finding demands action, name it and hand it back."
     },
     {
-      "name": "deep_reader",
-      "base": "researcher",
-      "description": "Extracts claims and quotes from a single source.",
-      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
-      "extra_prompt": "Focus: given ONE source, produce a structured extract: 5-10 atomic claims with verbatim quotes and locator (page / section / URL fragment). No paraphrasing of the source's wording in quoted material."
+      "name": "worker_a",
+      "base": "solo_generalist",
+      "description": "Execution lane A — full-capability worker, interchangeable with lane B. Research generalist — source finding, careful extraction, synthesis, and cited output with full claim provenance.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "research-method"
+      ],
+      "extra_prompt": "You are execution lane A (worker_a) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_b's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: deep research.\n- Sources: produce a numbered list of 5-10 candidate sources for the question. Each entry: title, URL or path, one-line relevance note.\n- Extraction: for each source read, produce a structured extract of 5-10 atomic claims with verbatim quotes and a locator (page / section / URL fragment). No paraphrasing of the source's wording inside quoted material.\n- Synthesis: weave the extracts into a coherent answer to the user's question. Keep claim provenance: every claim must trace to a specific source id from the numbered list.\n- Final output: after the fact-check passes, emit the final formatted answer with inline citations (numbered footnotes) plus a sources block. Citation style: APA unless the user asks otherwise."
     },
     {
-      "name": "synthesizer",
-      "base": "documentation",
-      "description": "Combines extracted claims into a single narrative.",
-      "extra_prompt": "Focus: weave the deep_reader's extracts into a coherent answer to the user's question. Keep claim provenance: every claim must trace to a specific source id from the librarian's list."
+      "name": "worker_b",
+      "base": "solo_generalist",
+      "description": "Execution lane B — full-capability worker, interchangeable with lane A. Research generalist — source finding, careful extraction, synthesis, and cited output with full claim provenance.",
+      "icon": "owl:owl_operator",
+      "extra_skills": [
+        "research-method"
+      ],
+      "extra_prompt": "You are execution lane B (worker_b) — one of two interchangeable workers. Do exactly the slice the orchestrator dispatched to you; never expand into worker_a's scope, and never touch files outside your slice — the lanes run in parallel and overlapping edits collide.\n\nProfile: deep research.\n- Sources: produce a numbered list of 5-10 candidate sources for the question. Each entry: title, URL or path, one-line relevance note.\n- Extraction: for each source read, produce a structured extract of 5-10 atomic claims with verbatim quotes and a locator (page / section / URL fragment). No paraphrasing of the source's wording inside quoted material.\n- Synthesis: weave the extracts into a coherent answer to the user's question. Keep claim provenance: every claim must trace to a specific source id from the numbered list.\n- Final output: after the fact-check passes, emit the final formatted answer with inline citations (numbered footnotes) plus a sources block. Citation style: APA unless the user asks otherwise."
     },
     {
-      "name": "fact_checker",
+      "name": "critical_thinker",
       "base": "critic",
-      "description": "Reviews the synthesized output against the underlying sources.",
-      "extra_prompt": "Focus: for each claim in the synthesizer's output, verify it against the deep_reader's extracts. Reply APPROVE / REVISE / REJECT with a list of unsupported or misattributed claims."
+      "description": "Advisory reviewer — verifies every synthesised claim against the source extracts before the final output is rendered.",
+      "icon": "owl:owl_critic",
+      "extra_prompt": "Focus: for each claim in the synthesis, verify it against the source extracts (verbatim quotes + locators). Reply APPROVE / REVISE / REJECT with a list of unsupported or misattributed claims."
     },
     {
-      "name": "citer",
-      "base": "documentation",
-      "description": "Adds citations and renders the final output.",
-      "extra_prompt": "Focus: take the approved synthesis and emit final formatted output with inline citations (numbered footnotes) plus a sources block. Citation style: APA unless the user asks otherwise."
+      "name": "producer",
+      "base": "publisher",
+      "description": "Rule-based finisher — commits, packages, publishes, or sends only review-approved work; never invents work.",
+      "icon": "owl:owl_documentation",
+      "extra_prompt": "You are the producer — the rule-based finishing step. You act ONLY on work the review chain has approved, and only when the goal actually calls for delivery (commit, package, publish, send, schedule). Hard rules: never create or modify content yourself — you package and ship what the workers produced; never fabricate completion — quote the exact command output, message id, or artifact path that proves delivery; report failures verbatim, then stop; anything approval-gated for the user (outbound messages, payments, calendar mutations, publishes) is NEVER executed without the user's explicit approval in the thread. If nothing needs delivering, say so and end your turn."
     }
   ],
   "graph": {
     "edges": [
-      { "source": "orchestrator", "target": "librarian" },
-      { "source": "librarian", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "deep_reader" },
-      { "source": "deep_reader", "target": "synthesizer" },
-      { "source": "synthesizer", "target": "fact_checker" },
-      { "source": "fact_checker", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "citer" }
+      {
+        "source": "orchestrator",
+        "target": "scout"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_a"
+      },
+      {
+        "source": "orchestrator",
+        "target": "worker_b"
+      },
+      {
+        "source": "orchestrator",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "orchestrator",
+        "target": "producer"
+      },
+      {
+        "source": "scout",
+        "target": "worker_a"
+      },
+      {
+        "source": "scout",
+        "target": "worker_b"
+      },
+      {
+        "source": "worker_a",
+        "target": "critical_thinker"
+      },
+      {
+        "source": "worker_b",
+        "target": "critical_thinker"
+      }
     ]
   }
 }

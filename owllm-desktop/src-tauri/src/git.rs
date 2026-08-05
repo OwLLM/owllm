@@ -31,10 +31,16 @@ fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> 
 /// Run a git command in `dir`, capturing stdout/stderr/success. Self-heals a
 /// corrupt `.git/index` (rebuild from HEAD, retry once) so the Code page's git
 /// panel doesn't stay stuck on "index file corrupt" — shares the vault.rs helper.
+/// Same for a zeroed branch ref ("current branch appears to be broken"), which
+/// otherwise makes every command in the repo fail forever.
 fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let r = git_once(dir, args)?;
     if !r.0 && crate::vault::is_corrupt_index(&r.2) {
         crate::vault::repair_index(Some(Path::new(dir)));
+        return git_once(dir, args);
+    }
+    if !r.0 && crate::vault::is_broken_ref(&r.2) {
+        crate::vault::repair_broken_ref(Some(Path::new(dir)));
         return git_once(dir, args);
     }
     Ok(r)

@@ -43,15 +43,41 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
+- **No surface ever auto-picks a model.** With nothing saved the picker reads
+  **“Select model”** (`SELECT_MODEL_LABEL`) and Send/Generate/Run is blocked by
+  the rule-based `components/ModelRequiredDialog` — so a run can't use (or bill)
+  weights the user never chose. The one non-explicit source still allowed is a
+  local server the user started themselves, shown as “(use server model · …)”.
+  Guarded by `modelSelectionNoAutopick.verify.run.mjs`.
 - **Tool-calling is NATIVE GGUF ONLY**: OpenAI `tools` array → model's own chat
   template → structured `delta.tool_calls`. No XML protocol (see CLAUDE.md).
 
 ## Agentic teams (`ui/src/pages/agentic/`)
 
-- **Orchestrator + specialists**: plan → parallel `@agent` dispatch → integrate.
-  Edges on the canvas are a REAL execution graph (allow-list + handoff).
-  ~20 bundled team templates; 12 role archetypes; Brainstorm assembles a
-  bespoke team from a brief (and can deep-research first, writes BRIEF.md).
+- **One standard team + profiles**: every bundled template is a PROFILE over
+  the same 6-slot roster — orchestrator (read-only planner) + scout
+  (`researcher`, parallel read-only recon) + worker_a/worker_b
+  (`solo_generalist`, all tools, two interchangeable parallel execution lanes
+  carrying the profile's skill seeds + domain rules) + critical_thinker
+  (advisory, ON/OFF toggle on its card) + producer (`publisher`, rule-based
+  delivery: commit/publish/send only review-approved work; hosts the
+  `[PUBLISH]` protocol for owllm_team). What makes "Chief of Staff" different
+  from "Dev Squad" is data: `required_mcp` / `mcp_pack` (connectors + approval
+  policy), `extra_skills` seeds, and prompt hints
+  (`resources/agents/teams/*.json`; gate: `teamProfiles.verify.run.mjs`).
+  Projects persist `templateId` in graph_json — rosters are identical across
+  profiles, so the id is the template identity. Solo mode collapses to
+  worker_a + Critic + Publisher. The one exemption is
+  `product_studio_classic` (category Custom): the full 10-agent hierarchical
+  studio (product_owner design sub-team → whitepaper.json → parallel FE/BE
+  lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
+  through the same graph machinery.
+- **Auto-skill selection**: before the first model token, the goal text is
+  matched against installed skills' `triggers:`/keywords and the best 1–2 are
+  injected automatically (Solo, team orchestrator, and bridge paths;
+  `selectRelevantSkillIds`/`buildSoloSkillBlock` in `skillRuntime.ts`, gate:
+  `autoSkillSelection.verify.run.mjs`). Auto-loads are surfaced in the thought
+  log (`📦 Auto-loaded skill(s): …`).
 - **Solo-Loop vs Team**: header toggle; Solo = one coder in an edit→verify→fix
   loop with Critic + Publisher; Team = full orchestration.
 - **Lean prompt profile**: solo and ≤3-agent runs get the trimmed injection
@@ -103,7 +129,12 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
   viewer, 📌 promote worklog→fact. Retrieved memory is framed as a
   current-task context pack so stale completed work cannot masquerade as the
-  active result. Design note: `docs/MEMORY_RAG_DESIGN.md`.
+  active result. A post-run **Memory Curator** (`memoryCurator.ts`) makes one
+  bounded pass after every solo/team/bridge run and saves at most 2 novel
+  durable facts (author `curator`); its model is a per-project setting in the
+  Team Memory modal (default Auto · Cheapest → free local model first, or Off)
+  so curation never silently inflates token spend. Design note:
+  `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
   prompt (and every Code-page coder turn). Editable from the Super User card
@@ -177,11 +208,18 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   overlays site content. The bar wears the app header's colour — the same
   `--bg-header` recipe (70% accent over `#1c2244`) resolved live from the
   shared localStorage accent key. Its buttons/drag/URL entry/tab events report
-  over the same title channel tagged `EVT` (`parse_chrome_event`) — no IPC
-  grant to any webview. If the multi-webview build fails on some platform, it
-  falls back to the previous decorated single-webview window (`build_legacy`)
-  so agent browsing never breaks. `browser_set_chrome` still paints the DWM
-  border (and the fallback's caption) in the app accent.
+  over a reserved same-origin navigation (`/__owllm_browser_event__`) that
+  `on_navigation` intercepts and cancels before any load — no IPC grant to any
+  webview. `browser_set_chrome` still paints the DWM border (and the fallback's
+  caption) in the app accent.
+- **Platform shapes**: the framed chrome-bar window above is **Windows and
+  macOS**. **Linux runs `build_legacy`** — one decorated top-level WebView per
+  tab — because WebKitGTK mislays stacked child webviews and SIGBUSes the web
+  process when they resize (seen on Jetson/Tegra), and it does so *without*
+  returning an error, so a runtime fallback never fires. Linux therefore has no
+  chrome bar and no `+` inside the browser window; `BrowserPanel` is its tab
+  strip, and carries the same actions (`＋` new tab → `browser_new_tab`, `↺`
+  reopen, `←` back, `⟳` reload) on every platform.
 - **Tabs (multiple pages at once)**: the chrome bar's tab strip opens any
   number of pages side by side, like a normal browser — `+` for a new tab,
   pills to switch, `✕` to close (closing the last tab closes the window). Each
@@ -217,13 +255,16 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   decryption is Windows-only in this build; macOS/Linux Chromium key stores
   (Keychain / Secret Service) are the next step.
 - **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, Code + Agents pages) —
-  Browse / Passwords / Import tabs.
+  Browse / Passwords / Import tabs. Browse carries the tab strip plus the
+  chrome-bar actions (`＋` new tab, `↺` reopen, `←`, `⟳`), so the browser is
+  fully drivable on Linux, where the window itself has no chrome bar.
 - **Browser agent** (role `resources/agents/roles/browser.yaml`, base `browser`):
   a dedicated team member that owns the non-isolated web work — localhost
   previews, live sites, form filling/testing, cross-device checks. Its team card
   swaps the chat preview for the SAME `BrowserPanel` mounted `inline`
   (`isBrowser` in `AgentsPage.tsx`, mirroring the Publisher's rule-based card),
-  so the card IS the browser remote. Included in the `dev_squad` template.
+  so the card IS the browser remote. Provisioned automatically for Personal
+  Assistant projects (`kindAgents` in `ProjectSettingsDialog.tsx`).
   Card controls fire host-side (the window + gateway are host objects), so they
   work even when the rest of the team is sandboxed.
 - **Reachable by ALL agent kinds**: local + API agents call `browser_*` through
@@ -412,6 +453,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   vault. The Signing page's **Web logins** card manages that vault (add /
   delete / open-signed-in / import from installed browsers via
   `browser_import`), so "renew the cert" never starts with a password reset.
+- **Browser start page**: the chrome bar's **＋** opens `browser-home.html` —
+  big-icon rows for search engines, social, messengers, plus the five most
+  recent project pages (query/fragment stripped) and a direct web-search box.
+  It is served from the app origin like `browser-chrome.html`, never as a
+  `data:` URL: Tauri rejects `data:` webviews unless the `webview-data-url`
+  feature is on, which made **＋** silently open nothing. Rust passes the
+  recents to the page as base64url JSON in `?r=` (`browser.rs::browser_home_url`).
 
 ## Sync, vault & publishing
 
@@ -445,6 +493,22 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   preserved; only disposable app runtime files auto-resolve.
 
 ## Support & UX
+
+- **One shared chat composer** (`components/Composer.tsx` + `.owc-*` in
+  `styles.css`): every chat surface — Agents dock, Code agent 1 / agent 2 /
+  just-chat, fine-tuning chat — renders the same component, the same way
+  `ChatBubble` owns message rendering and `LogBox` owns logs. Before this each
+  page hand-rolled its own textarea, Send/Stop and picker, so capabilities
+  differed per page (only the dock had a mic, only Code had a model picker or
+  Terminal, only fine-tuning had modes and slash commands). The container holds
+  header (status · badge · **model picker top-right** · Terminal slot), trays
+  (image thumbs, document chips, `#` mentions, error/notice), the autosizing
+  textarea with the 🎤 dictation button, and an action bar (attach · slash ·
+  mention · mode segment · capability toggles · hint · draft counter ·
+  Send↔Stop in one fixed slot). Paste and drag-drop both attach; the palette
+  drops up; dictation degrades honestly where the WebView has no
+  SpeechRecognition. Pages pass only the capabilities they actually have, so
+  nothing is faked. Pinned by `sharedComposer.verify.run.mjs`.
 
 - **Bounded stream rendering** (`components/StreamWindow.tsx`, v0.9.60): the run
   views append forever, so rendering every entry grew the DOM monotonically with

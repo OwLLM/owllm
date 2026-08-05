@@ -45,6 +45,10 @@ import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { formatDuration, formatClock, useTick } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import ActionIcon from "../../components/ActionIcon";
+import { continuousUiAnimation } from "../../runtime/renderingPolicy";
+import { notebookDigestCardStyle, notebookDigestVisualState } from "./notebookDigestAura";
+
+const NOTEBOOK_DIGEST_AURA_ANIMATION = continuousUiAnimation("owllm-aura-spin 4s linear infinite");
 
 export type NotebookStep = {
   id: string;
@@ -1054,6 +1058,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     const raw = (modelId || "").trim();
     return raw ? (raw.split(/[\\/]/).pop() || raw) : "server model";
   }, [modelId]);
+  const digestVisualState = notebookDigestVisualState(
+    digestBusy,
+    digestError,
+    nb.digest.some((message) => message.role === "digest"),
+  );
   if (!inline && !open) return null;
 
   const card: React.CSSProperties = {
@@ -1082,6 +1091,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
         background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 12,
         boxShadow: "0 18px 60px rgba(0,0,0,0.55)", overflow: "hidden",
       }}>
+        <style>{`
+          @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+          @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+        `}</style>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: inline ? "8px 12px" : "12px 16px", borderBottom: "1px solid var(--border)", flexWrap: "wrap", flexShrink: 0 }}>
           <span style={{ fontSize: inline ? 15 : 18 }}>📓</span>
@@ -1147,7 +1160,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
         {/* Body: scrollable column of cards */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "12px 14px" }}>
           {/* Working notes and digest controls */}
-          <div style={card}>
+          <div
+            data-ui="NotebookWorkingNotes"
+            data-digest-state={digestVisualState}
+            aria-busy={digestBusy}
+            style={{ ...card, ...notebookDigestCardStyle(digestBusy, NOTEBOOK_DIGEST_AURA_ANIMATION) }}
+          >
             <div style={sectionHeader}>
               <ActionIcon name="note" size={15} />
               <span>Working notes</span>

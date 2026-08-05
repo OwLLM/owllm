@@ -84,31 +84,17 @@ const SYSTEM_OVERVIEW_DISTANCE = 245;
 const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
 const OS_DISPLAY_ORDER: PresenceOs[] = ["Windows", "macOS", "Linux", "Other"];
-const PLANET_BASE_LIGHT_INTENSITY = 1;
-const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15 * 1.25;
-
-// Direction of the subsolar point (where the sun is directly overhead right now)
-// in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
-// real UTC clock. The equirectangular Earth map places longitude 0 at +X and the
-// north pole at +Y (standard Three.js SphereGeometry UVs), giving:
-//   dir = (cosφ·cosλ, sinφ, -cosφ·sinλ)   where φ = solar declination, λ = subsolar longitude.
-function subsolarLocalDir(now: Date, target: THREE.Vector3): THREE.Vector3 {
-  const dayMs = 86_400_000;
-  const yearStart = Date.UTC(now.getUTCFullYear(), 0, 0);
-  const dayOfYear = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - yearStart) / dayMs;
-  // Seasonal declination (±23.44°), simple axial-tilt approximation.
-  const decl = -23.44 * Math.cos((2 * Math.PI / 365) * (dayOfYear + 10));
-  const utcHours = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
-  // Subsolar longitude (east positive): sun over 0° at 12:00 UTC, +15°/hour westward.
-  const subsolarLon = -(utcHours - 12) * 15;
-  const phi = decl * Math.PI / 180;
-  const lam = subsolarLon * Math.PI / 180;
-  return target.set(
-    Math.cos(phi) * Math.cos(lam),
-    Math.sin(phi),
-    -Math.cos(phi) * Math.sin(lam),
-  );
-}
+const PLANET_BASE_LIGHT_INTENSITY = 1.35;
+const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.25;
+// The bundled Blue Marble day map is far darker than every other planet map:
+// mean sRGB luminance 94 with 35% of pixels (the oceans) under 40, versus
+// means of 80–194 and zero near-black pixels on the other seven. Under the
+// shared lights Earth therefore reads darkest. This shadow-weighted gamma
+// (applied to the decoded linear albedo) lifts the oceans ~10× while moving
+// bright land under 2×, equalising Earth with the rest of the system
+// (rendered disc means measured: planets 62–160, Earth 41 at gamma 0.7 —
+// 0.5 lands the ocean-dominated disc in the planets' range without clipping).
+const EARTH_ALBEDO_GAMMA = 0.5;
 
 function hashNumber(value: string): number {
   let hash = 2166136261;
@@ -471,19 +457,29 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const earthGroup = new THREE.Group();
     earthGroup.rotation.z = -0.14;
     earthAnchor.add(earthGroup);
-    const globe = new THREE.Mesh(
-      new THREE.SphereGeometry(2.35, 128, 64),
-      new THREE.MeshPhongMaterial({
-        map: earthMap,
-        normalMap: earthNormal,
-        normalScale: new THREE.Vector2(0.48, 0.48),
-        specularMap: earthSpecular,
-        // Disable additive specular/emissive peaks: the shared 1.0 baseline and
-        // 0.15 sun term below are the complete surface-lighting budget.
-        specular: new THREE.Color(0x000000),
-        shininess: 0,
-      }),
-    );
+    const globeMaterial = new THREE.MeshPhongMaterial({
+      map: earthMap,
+      normalMap: earthNormal,
+      normalScale: new THREE.Vector2(0.48, 0.48),
+      specularMap: earthSpecular,
+      // Disable additive specular/emissive peaks: the shared ambient baseline
+      // and the bounded sun term are the complete surface-lighting budget.
+      specular: new THREE.Color(0x000000),
+      shininess: 0,
+    });
+    // Albedo equalisation (see EARTH_ALBEDO_GAMMA): brighten the decoded map in
+    // linear space so the dark photographic oceans match the other planets'
+    // brightness under the exact same lights.
+    globeMaterial.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <map_fragment>",
+        [
+          "#include <map_fragment>",
+          `diffuseColor.rgb = pow(diffuseColor.rgb, vec3(${EARTH_ALBEDO_GAMMA}));`,
+        ].join("\n"),
+      );
+    };
+    const globe = new THREE.Mesh(new THREE.SphereGeometry(2.35, 128, 64), globeMaterial);
     earthGroup.add(globe);
 
     const clouds = new THREE.Mesh(
@@ -533,12 +529,18 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       sizeAttenuation: true,
     })));
 
-    // Every planet receives one neutral baseline. Direct sunlight adds at most
-    // 18.75% at the subsolar point, so textures remain readable on both sides
-    // without the sun-facing hemisphere washing out.
+    // Every planet receives a lifted neutral baseline. Direct sunlight adds at
+    // most 25% at the subsolar point, so the real map stays readable without
+    // the sun-facing hemisphere washing out.
     scene.add(new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY));
-    const sunLocal = new THREE.Vector3();
-    const sunQuat = new THREE.Quaternion();
+    // One real sun: a non-decaying point light at the system origin lights the
+    // sun-facing hemisphere of every planet, Earth included. (Per-planet
+    // layer-scoped lights are a trap here: the renderer collects lights by
+    // CAMERA layers, so lights parked on layers the camera never enables are
+    // silently ignored and the whole scene falls back to flat ambient.)
+    const sunLight = new THREE.PointLight(0xffffff, PLANET_SUNLIGHT_INTENSITY, 0, 0);
+    sunLight.position.set(0, 0, 0);
+    scene.add(sunLight);
 
     // ---- Solar System bodies ----------------------------------------------
     // The Sun is the visual and orbital center. Its emissive surface and two
@@ -653,21 +655,6 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       });
     }
 
-    // One layer-scoped light per planet prevents the eight directions from
-    // stacking. Each surface therefore receives exactly one 18.75% sun term above
-    // the shared baseline. Earth retains its real-UTC terminator; every other
-    // planet is lit from the rendered Sun at the system origin.
-    const planetSunLights = planetMeshes.map(({ spec, anchor, mesh }, index) => {
-      const layer = index + 1;
-      mesh.layers.enable(layer);
-      if (spec.id === "earth") clouds.layers.enable(layer);
-      const light = new THREE.DirectionalLight(0xffffff, PLANET_SUNLIGHT_INTENSITY);
-      light.layers.set(layer);
-      light.target = anchor;
-      scene.add(light);
-      return { spec, anchor, light };
-    });
-
     // Focus/zoom: reuses the Earth behavior (OrbitControls + calibrated
     // distance clamps) for every planet. A focus request tweens the controls
     // target and camera to the planet, then hands control back to the user with
@@ -757,7 +744,10 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const pulseMeshes: THREE.Mesh[] = [];
     const orbitRings: { line: THREE.LineLoop; node: GlobeNode }[] = [];
     const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; label?: THREE.Sprite; node: GlobeNode; baseScale: number }[] = [];
-    let hasFleet = false;
+    // null forces the initial population through the Earth reframe. Previously
+    // an empty/world node set compared false === false and left this page in the
+    // distant solar-system overview instead of showing the geographic map.
+    let hasFleet: boolean | null = null;
 
     const disposeNodeObject = (object: any) => {
       object.parent?.remove(object);
@@ -801,7 +791,11 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.userData.node = node;
-        earthAnchor.add(mesh);
+        // Geographic markers are local children of the Earth mesh so the same
+        // axial tilt and rotation keep them over their latitude/longitude.
+        // Fleet satellites remain outside that surface transform by design.
+        const nodeParent = node.kind === "world" ? globe : earthAnchor;
+        nodeParent.add(mesh);
         clickable.push(mesh);
 
         const halo = new THREE.Mesh(
@@ -809,7 +803,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
           new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
         );
         halo.userData.offset = index * 0.63;
-        earthAnchor.add(halo);
+        nodeParent.add(halo);
         pulseMeshes.push(halo);
 
         const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
@@ -913,17 +907,6 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       clouds.rotation.y = elapsed * 0.024 - 0.34;
       atmosphere.rotation.y = elapsed * 0.018;
       outerGlow.rotation.y = -elapsed * 0.006;
-
-      planetSunLights.forEach(({ spec, anchor, light }) => {
-        if (spec.id === "earth") {
-          // Real-clock Earth: express the subsolar point in the globe's current
-          // world orientation, then offset from Earth's live orbital position.
-          subsolarLocalDir(new Date(), sunLocal).applyQuaternion(globe.getWorldQuaternion(sunQuat));
-          light.position.copy(anchor.position).addScaledVector(sunLocal, 10);
-        } else {
-          light.position.set(0, 0, 0);
-        }
-      });
 
       // Planets spin on their own axes (Venus/Uranus retrograde via sign).
       planetMeshes.forEach(({ spec, mesh }) => {
@@ -1266,7 +1249,7 @@ export default function WorldMapPage() {
         </header>
 
         <div className="world-map-layout" style={{ display: "grid", gap: 14, flex: 1, minHeight: 450 }}>
-          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #142b50 0%, #081326 38%, #020713 72%, #01030a 100%)" }}>
+          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #315d89 0%, #183a5e 38%, #0c2440 72%, #07172b 100%)" }}>
             <Globe
               nodes={nodes}
               accent={colors.accentInk}

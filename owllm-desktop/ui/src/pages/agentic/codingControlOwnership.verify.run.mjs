@@ -17,14 +17,16 @@ const check = (label, ok) => {
   else { failures += 1; console.error(`FAIL ${label}`); }
 };
 
-const primaryToolbar = code.slice(code.indexOf('data-ui="CodePrimaryComposerToolbar"'), code.indexOf("{codeAttachments.length"));
-const secondaryToolbar = code.slice(code.indexOf('data-ui="CodeSecondaryComposerToolbar"'), code.indexOf("<textarea", code.indexOf('data-ui="CodeSecondaryComposerToolbar"')));
+// Both Code composers are now the ONE shared <Composer/> (components/Composer.tsx);
+// the header slot still carries that agent's model picker and Terminal button.
+const primaryToolbar = code.slice(code.indexOf('dataUi="CodePrimaryComposer"'), code.indexOf("attachments={codeAttachments}"));
+const secondaryToolbar = code.slice(code.indexOf('dataUi="CodeSecondaryComposer"'), code.indexOf("attachments={secondaryAttachments}"));
 const publisher = publish.slice(publish.indexOf('data-ui="GitPublisherContainer"'), publish.indexOf("{/* Commit popup"));
 
 check("Project Memory remains visible in the left project rail", code.includes('data-ui="CodeProjectMemory"'));
-check("primary model and Terminal share the toolbar aligned above its composer", primaryToolbar.includes("<ModelPicker") && primaryToolbar.includes('renderTerminalButton("primary")'));
-check("second-agent model and Terminal share the toolbar aligned above its composer", secondaryToolbar.includes("<ModelPicker") && secondaryToolbar.includes('renderTerminalButton("secondary")'));
-check("both composer pickers explicitly open upward", primaryToolbar.includes('placement="top"') && secondaryToolbar.includes('placement="top"') && picker.includes('placement?: "auto" | "top" | "bottom"'));
+check("primary model and Terminal share the toolbar aligned above its composer", primaryToolbar.includes('toolbarDataUi="CodePrimaryComposerToolbar"') && code.includes('renderCodeModelPicker("primary", modelId, setModelId, busy') && primaryToolbar.includes('renderTerminalButton("primary")'));
+check("second-agent model and Terminal share the toolbar aligned above its composer", secondaryToolbar.includes('toolbarDataUi="CodeSecondaryComposerToolbar"') && code.includes('renderCodeModelPicker("secondary", secondaryModelId, setSecondaryModelId, secondaryBusy') && secondaryToolbar.includes('renderTerminalButton("secondary")'));
+check("both composer pickers explicitly open upward", code.includes('placement="top"') && code.includes('renderCodeModelPicker("primary"') && code.includes('renderCodeModelPicker("secondary"') && picker.includes('placement?: "auto" | "top" | "bottom"'));
 check("publisher activity renders before the first Git facts row",
   publisher.indexOf('data-ui="PublisherActivity"') >= 0
     && publisher.indexOf('data-ui="PublisherActivity"') < publisher.indexOf("Live repo facts"));

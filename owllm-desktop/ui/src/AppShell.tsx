@@ -209,6 +209,21 @@ function WindowControls() {
   );
 }
 
+// Keep the local inference key in sync at startup, independently of whether the
+// header status block is rendered. ServerPage refreshes it again whenever the
+// user changes the network-exposure setting.
+function useLocalServerKeySync() {
+  useEffect(() => {
+    if (!isTauri()) return;
+    // Mirror the local server's required api-key (set when the user EXPOSES the
+    // server on the network — llama-server then enforces --api-key on 127.0.0.1
+    // too) so local inference attaches it instead of 401-ing.
+    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get")
+      .then((c) => setLocalServerKey(c.enabled ? c.apiKey : ""))
+      .catch(() => {});
+  }, []);
+}
+
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
 // can't disagree.
@@ -225,7 +240,7 @@ type VramStatusLite = { gpus: VramGpu[] };
 // Keeping the tail is useful because it usually carries the quant, while a
 // middle ellipsis prevents one unusually descriptive id from taking over the
 // header. The full id remains available on hover in SysInfoBlock.
-function abbreviateModelId(modelId: string, maxLength = 42): string {
+function abbreviateModelId(modelId: string, maxLength = 36): string {
   if (modelId.length <= maxLength) return modelId;
   const tailLength = Math.min(14, Math.floor((maxLength - 1) / 2));
   const headLength = maxLength - tailLength - 1;
@@ -250,12 +265,6 @@ function useLiveSysInfo() {
       } catch { /* keep last good values */ }
     };
     tick();
-    // Mirror the local server's required api-key (set when the user EXPOSES the
-    // server on the network — llama-server then enforces --api-key on 127.0.0.1
-    // too) so local inference attaches it instead of 401-ing.
-    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get")
-      .then((c) => setLocalServerKey(c.enabled ? c.apiKey : ""))
-      .catch(() => {});
     const id = window.setInterval(tick, 2000);
     return () => { dead = true; window.clearInterval(id); };
   }, []);
@@ -591,7 +600,7 @@ function MiniFrameReplica({ width, active, children }: {
 
 // ---------------------------------------------------------------------
 // ModeBar — top dark-blue header with theme controls, mode toggles,
-// title, and SysInfo. Mode toggles drive the active mode state.
+// title, SysInfo, and window controls. Mode toggles drive the active mode state.
 // ---------------------------------------------------------------------
 type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
@@ -1269,14 +1278,11 @@ function ModeBar({
   );
 }
 
-// Header right-block — live status. Replaces the hardcoded Qt
-// mock-up that pretended a "Quagenmed-K4" server was always
-// running and VRAM was "N/A".
-// Clicking the block opens the Server modal (same trigger as the
-// "Server" tab) so the user can spin a model up/down from anywhere.
+// Header right-block — live status. Clicking it opens the Server modal
+// (same trigger as the "Server" tab) so the user can spin a model up/down
+// from anywhere. Laid out for the 88px header: two compact lines.
 function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   const { server, vram } = useLiveSysInfo();
-  // Mirrors Qt main.py:28564/28573 — pluralised "Servers", count-based.
   // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
   // ServerStatusLite carries only one server, so N is 0 or 1.
   const fullModelId = server.model_id ?? "?";
@@ -1296,14 +1302,14 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         ? `Model: ${fullModelId}\nOpen Server Control`
         : "Open Server Control"}
       style={{
-        width: "min(420px, 31vw)", minWidth: 0, height: 60,
+        // Narrower and shorter than the pre-0.9.90 block so it fits the
+        // 88px header without crowding the mode toggles. overflow:hidden +
+        // text-overflow on the children keeps long model ids from pushing
+        // the layout.
+        width: "min(340px, 26vw)", minWidth: 0, height: 44,
         display: "flex", flexDirection: "column",
-        alignItems: "stretch", justifyContent: "center", gap: 3,
-        fontSize: 12, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
-        // Trimmed from the Qt-port's hard 543px to free room for the
-        // inline WindowControls 4th grid column. overflow:hidden +
-        // text-overflow on the children below keeps long model ids
-        // from pushing the layout.
+        alignItems: "stretch", justifyContent: "center", gap: 2,
+        fontSize: 11, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
         overflow: "hidden",
         cursor: "pointer",
       }}
@@ -1610,6 +1616,7 @@ const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.use
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
+  useLocalServerKeySync();
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
   // straight to the page it wants to diff (e.g. ?page=train).
   const initialDeep = useMemo(() => {

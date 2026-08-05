@@ -1,6 +1,13 @@
 ---
 name: Engineering Craft
 description: How to make minimal, correct, idiomatic code changes that fit the codebase and are verified before you call them done.
+triggers:
+  - implement
+  - refactor
+  - fix
+  - feature
+  - rewrite
+  - patch
 ---
 
 # Engineering Craft

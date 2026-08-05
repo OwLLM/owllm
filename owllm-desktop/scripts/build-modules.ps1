@@ -212,7 +212,42 @@ function Build-Zip {
         Write-Sub "cache hit: $(Split-Path $outZip -Leaf)"
     } else {
         if (Test-Path $outZip) { Remove-Item -Force $outZip }
-        Compress-Archive -Path (Join-Path $srcDir "*") -DestinationPath $outZip -CompressionLevel Optimal
+        # Compress-Archive buffers each entry through a MemoryStream and dies
+        # with "Stream was too long" on entries >2 GB (e.g. ggml-large-v3.bin).
+        # ZipArchive in Create mode streams entries straight to disk and emits
+        # Zip64 headers on its own when an entry or the archive exceeds the
+        # 32-bit limits, so building the archive by hand lifts that ceiling.
+        Add-Type -AssemblyName System.IO.Compression
+        $srcDir = (Resolve-Path $srcDir).Path
+        $srcLen = $srcDir.Length + 1
+        $zipStream = $null
+        $archive = $null
+        try {
+            $zipStream = [System.IO.FileStream]::new($outZip, [System.IO.FileMode]::Create)
+            $archive = [System.IO.Compression.ZipArchive]::new(
+                $zipStream,
+                [System.IO.Compression.ZipArchiveMode]::Create,
+                $true
+            )
+            foreach ($file in (Get-ChildItem -Recurse -File $srcDir)) {
+                $entryName = $file.FullName.Substring($srcLen).Replace('\', '/')
+                $entry = $archive.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entryStream = $entry.Open()
+                try {
+                    $fileStream = [System.IO.FileStream]::new($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+                    try {
+                        $fileStream.CopyTo($entryStream)
+                    } finally {
+                        $fileStream.Dispose()
+                    }
+                } finally {
+                    $entryStream.Dispose()
+                }
+            }
+        } finally {
+            if ($archive) { $archive.Dispose() }
+            if ($zipStream) { $zipStream.Dispose() }
+        }
     }
     $hash = (Get-FileHash -Algorithm SHA256 $outZip).Hash.ToLower()
     $size = (Get-Item $outZip).Length

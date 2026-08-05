@@ -1,6 +1,12 @@
 ---
 name: Planning & Decomposition
 description: How an orchestrator turns a goal into a clear plan — decompose into the right tasks, parallelise safely, dispatch with crisp instructions, and integrate.
+triggers:
+  - plan
+  - planning
+  - roadmap
+  - breakdown
+  - milestones
 ---
 
 # Planning & Decomposition

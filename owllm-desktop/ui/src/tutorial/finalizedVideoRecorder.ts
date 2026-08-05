@@ -42,10 +42,11 @@ const VIDEO_CANDIDATES: readonly VideoCandidate[] = [
  * sample tables before the Blob is returned.
  */
 export async function createFinalizedVideoRecorder(
-  track: MediaStreamVideoTrack,
+  track: MediaStreamTrack,
   fps: number,
   bitrate: number,
 ): Promise<FinalizedVideoRecorder | null> {
+  if (track.kind !== "video") return null;
   const settings = track.getSettings();
   const width = settings.width;
   const height = settings.height;
@@ -67,15 +68,19 @@ export async function createFinalizedVideoRecorder(
       ? new Mp4OutputFormat({ fastStart: "in-memory" })
       : new WebMOutputFormat();
     const output = new Output({ format, target });
-    const source = new MediaStreamVideoTrackSource(track, {
-      codec: candidate.codec,
-      bitrate,
-      bitrateMode: "variable",
-      latencyMode: "quality",
-      contentHint: "detail",
-      keyFrameInterval: 2,
-      sizeChangeBehavior: "deny",
-    }, { frameRate: fps });
+    const source = new MediaStreamVideoTrackSource(
+      track as ConstructorParameters<typeof MediaStreamVideoTrackSource>[0],
+      {
+        codec: candidate.codec,
+        bitrate,
+        bitrateMode: "variable",
+        latencyMode: "quality",
+        contentHint: "detail",
+        keyFrameInterval: 2,
+        sizeChangeBehavior: "deny",
+      },
+      { frameRate: fps },
+    );
     let encoderError: unknown = null;
     void source.errorPromise.catch((error) => {
       encoderError = error;

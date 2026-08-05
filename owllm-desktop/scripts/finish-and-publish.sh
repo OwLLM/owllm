@@ -31,6 +31,7 @@ fi
 NOTES=""
 PRERELEASE=""
 REPO_DIR=""
+ALLOW_STALE="${OWLLM_ALLOW_STALE:-}"
 # Build-mode resolution: explicit --mode > Project Card release.mode > host.
 # MODE_SET tracks whether the caller CHOSE — an empty default here would
 # otherwise be indistinguishable from an explicit host pick, and the card
@@ -44,6 +45,9 @@ while [ $# -gt 0 ]; do
     # so the auto-updater skips it). The "test before you promote" path — nothing
     # reaches users until the release is flipped to Latest.
     --prerelease) PRERELEASE=1; shift ;;
+    # Platforms knowingly shipping an older build — forwarded to the platform
+    # coverage gate in publish-release.sh (also settable via OWLLM_ALLOW_STALE).
+    --allow-stale) ALLOW_STALE="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-host}"; MODE_SET=1; shift 2 ;;
     # The repo to release. Passed by the app when running its BUNDLED copy of
     # this script (the target repo usually doesn't carry the script itself).
@@ -205,6 +209,9 @@ fi
 # publish-release.sh understands --prerelease; a card override that doesn't will
 # ignore it or error clearly). The generic gh-release path handles it itself.
 [ -n "$PRERELEASE" ] && [ "$MODE" = "host" ] && [ -n "$PUBLISH_CMD" ] && PUBLISH_CMD="$PUBLISH_CMD --prerelease"
+# Same for the acknowledged-stale platform list; exported too so a card override
+# that doesn't know the flag still honours it via the environment.
+[ -n "$ALLOW_STALE" ] && export OWLLM_ALLOW_STALE="$ALLOW_STALE"
 [ -n "$VERSION_FILE" ] || fail "no version file found (tauri.conf.json / package.json) — set release.versionFile in .owllm/project.json"
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"

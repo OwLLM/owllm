@@ -6,20 +6,29 @@
 > assets but **cannot** sign the auto-update manifest. This is the reminder /
 > checklist for finishing Linux auto-updates when DESKTOP-FKSSKS3 is online.
 
-## Current status (v0.8.48)
+## Current status — ask the tooling, never this file
 
-| Platform | Download asset on `OwLLM/owllm` v0.8.48 | In `latest.json`? |
-|---|---|---|
-| windows-x86_64 | `OwLLM.Desktop.Setup.exe` ✅ | ✅ signed |
-| linux-aarch64  | `OwLLM.Desktop_0.8.48_aarch64.AppImage` / `.deb` / `.rpm` ✅ (built on thor, uploaded) | ❌ **pending — needs minisign sig** |
-| linux-x86_64   | ❌ **not built yet** (this box builds it) | ❌ **pending** |
+A hand-written status table here went 40+ releases stale and told people Linux
+was fine when it was not. Don't add another one. The live answer, for every OS
+at once:
 
-Downloads work for ARM Linux **now**. Auto-update for *any* Linux arch is **off**
-until `latest.json` gets `linux-*` entries signed with the updater key below.
+```bash
+gh api "repos/OwLLM/owllm/releases?per_page=100" --paginate --slurp > /tmp/rel.json
+node scripts/platform-coverage.mjs --releases /tmp/rel.json \
+  --version "$(node -e 'process.stdout.write(require("./src-tauri/tauri.conf.json").version)')" \
+  --platform none
+```
+
+It prints, per platform, the version that release actually ships and how many
+releases behind it is. `publish-release.sh` runs the same check before every
+build and **refuses to publish** a platform more than `OWLLM_STALE_BUDGET`
+(default 2) releases stale unless you pass `--allow-stale <keys>`; either way
+the table lands in the GitHub release body where users can see it. `--platform
+none` above just means "assume nothing was built" — a read-only view.
 
 ## Facts you need
 
-- Release repo: **`OwLLM/owllm`**, tag **`v0.8.48`** (the current "latest" release).
+- Release repo: **`OwLLM/owllm`**.
 - Updater endpoint (baked into the app): `https://github.com/OwLLM/owllm/releases/latest/download/latest.json`
 - Baked-in pubkey (the private key you sign with **must** match this):
   `minisign public key: B3FF6147 45768DDF` (base64 in `tauri.conf.json` → `plugins.updater.pubkey`).

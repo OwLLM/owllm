@@ -11,6 +11,7 @@
 #   scripts/publish-release.sh --dry-run                       # build + sign + latest.json, NO gh release (safe rehearsal)
 #   scripts/publish-release.sh --draft                         # publish as a DRAFT (human flips public)
 #   scripts/publish-release.sh --prerelease                    # publish as a PRE-RELEASE: public + downloadable, but NOT /latest (auto-updater skips it) — the "test before you promote" channel
+#   scripts/publish-release.sh --allow-stale darwin            # ship knowing macOS carries an older build (see the platform-coverage gate)
 #
 # Version is read from src-tauri/tauri.conf.json (bump + commit + tag BEFORE
 # calling this). Requires on PATH: cargo+mingw (build), node/npx (sign), gh (publish).
@@ -38,9 +39,14 @@ NOTES=""
 DRY_RUN=0
 DRAFT=0
 PRERELEASE=0
+# Platforms this publish is knowingly shipping an OLDER build for (see the
+# platform-coverage gate below). Comma-separated keys: darwin, linux-x86_64,
+# linux-aarch64, windows-x86_64.
+ALLOW_STALE="${OWLLM_ALLOW_STALE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) NOTES="${2:-}"; shift 2 ;;
+    --allow-stale) ALLOW_STALE="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --draft) DRAFT=1; shift ;;
     --prerelease) PRERELEASE=1; shift ;;
@@ -264,6 +270,58 @@ fi
 [ -f "$KEY_FILE" ] || fail "signing key not found at $KEY_FILE (host-only secret — run on the host, not a sandbox)"
 command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
 [ "$DRY_RUN" = 1 ] || have_gh || fail "gh not on PATH (needed to publish)"
+
+# ---- platform coverage (staleness gate) -----------------------------------
+# This build produces ONE platform; carry_forward_assets() below fills the rest
+# from older tags so download links never 404. That was silent, so macOS shipped
+# the v0.9.91 dmg for 13 straight releases and nobody knew. Now: resolve what
+# every OS really gets BEFORE building, disclose it in the release body, and
+# refuse to publish a platform past the staleness budget unless it is named on
+# the command line. See scripts/platform-coverage.mjs for how carried assets are
+# dated. BODY is the GitHub release body; NOTES stays clean for latest.json,
+# whose text renders in the in-app update popup.
+BODY="$NOTES"
+COVERAGE_MD="dist/platform-coverage.md"
+COVERAGE_JSON="dist/platform-coverage.json"
+RELEASES_JSON="dist/releases.json"
+mkdir -p dist
+if [ "${OWLLM_SKIP_PLATFORM_GATE:-0}" = "1" ]; then
+  echo "⚠ platform coverage gate SKIPPED (OWLLM_SKIP_PLATFORM_GATE=1) — stale OS builds may ship undisclosed"
+else
+  step "0a/5 platform coverage (what every OS actually gets)"
+  : > "$RELEASES_JSON"
+  if have_gh; then
+    # --slurp yields an array of pages; older gh lacks it, so fall back to a
+    # single page. platform-coverage.mjs accepts either shape.
+    gh api "repos/$REPO/releases?per_page=100" --paginate --slurp > "$RELEASES_JSON" 2>/dev/null \
+      || gh api "repos/$REPO/releases?per_page=100" > "$RELEASES_JSON" 2>/dev/null \
+      || : > "$RELEASES_JSON"
+  fi
+  if [ ! -s "$RELEASES_JSON" ]; then
+    # Can't verify => can't ship. A dry run has nothing to mislead users with,
+    # so it only warns.
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "  (release history unavailable — coverage not computed for this dry run)"
+    else
+      fail "could not read release history from $REPO, so what macOS/Linux would actually ship is unknown. Retry, or OWLLM_SKIP_PLATFORM_GATE=1 to publish blind."
+    fi
+  else
+    COVERAGE_RC=0
+    node "$APP/scripts/platform-coverage.mjs" \
+      --releases "$RELEASES_JSON" --version "$VERSION" --tag "$TAG" \
+      --platform "$PLATFORM_KEY" --allow-stale "$ALLOW_STALE" \
+      --out-json "$COVERAGE_JSON" --out-md "$COVERAGE_MD" || COVERAGE_RC=$?
+    if [ "$COVERAGE_RC" = 3 ]; then
+      fail "platform coverage gate: this release would ship a stale build for the platform(s) listed above. Build them, or re-run with --allow-stale <keys>."
+    elif [ "$COVERAGE_RC" != 0 ]; then
+      fail "platform coverage check errored (rc=$COVERAGE_RC)"
+    fi
+    # Disclosure rides in the release body for every publish, acknowledged or not.
+    [ -s "$COVERAGE_MD" ] && BODY="$NOTES
+
+$(cat "$COVERAGE_MD")"
+  fi
+fi
 
 # Resolve the Authenticode cert once, up front — used by the payload-sign step
 # below AND the installer-sign step 1b. Priority: env thumbprint · env subject ·
@@ -529,14 +587,14 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   # only overwrite when the existing body is empty or just the tag/version.
   EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null | tr -d ' \r\n')"
   if [ -z "$EXISTING_BODY" ] || [ "$EXISTING_BODY" = "$TAG" ] || [ "$EXISTING_BODY" = "$VERSION" ] || [ "$EXISTING_BODY" = "Release$VERSION" ]; then
-    gh release edit "$TAG" --repo "$REPO" --notes "$NOTES"
+    gh release edit "$TAG" --repo "$REPO" --notes "$BODY"
   fi
   if [ "$DRAFT" = 1 ]; then :
   elif [ "$PRERELEASE" = 1 ]; then gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
   else gh release edit "$TAG" --repo "$REPO" --draft=false --latest
   fi
 else
-  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "${UPLOADS[@]}"
+  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$BODY" $LATEST_FLAG "${UPLOADS[@]}"
 fi
 
 # Carry-forward: the release marked "Latest" must offer a working installer for
@@ -554,7 +612,10 @@ carry_forward_assets() {
   tmp="$(mktemp -d)"
   for name in $names; do
     printf '%s\n' "$have" | grep -qxF "$name" && continue   # already on this tag
-    src="$(gh api "repos/$repo/releases?per_page=30" \
+    # per_page=100, not 30: GitHub's list endpoint returns DRAFTS first
+    # regardless of date, so a short page can be consumed entirely by drafts and
+    # find no published release to carry from.
+    src="$(gh api "repos/$repo/releases?per_page=100" \
       --jq "[.[] | select(.draft|not) | select(.tag_name != \"$tag\") | select(any(.assets[]; .name == \"$name\")) ] | first | .tag_name" 2>/dev/null || true)"
     [ -n "$src" ] && [ "$src" != "null" ] || continue       # no OS build to carry
     if gh release download "$src" --repo "$repo" --pattern "$name" --dir "$tmp" 2>/dev/null; then

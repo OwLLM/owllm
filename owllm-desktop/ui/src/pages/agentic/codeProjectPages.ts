@@ -9,6 +9,37 @@ function normalizedLocalProjectPath(path: unknown): string {
     : "";
 }
 
+type CatalogLocation = { id: string; location: string; repo_url?: string };
+type CatalogBoundPage = {
+  workspace?: string;
+  projectRoot?: string;
+  projectId?: string;
+  repoUrl?: string;
+  isolated?: boolean;
+  busy?: boolean;
+  preparing?: boolean;
+};
+
+/**
+ * Keep a direct Coding page attached to the stable project it was opened from.
+ * The catalog and page session are persisted independently, so changing a
+ * project's local checkout used to leave an already-open page operating on the
+ * obsolete folder forever. Isolated/running pages are deliberately left alone:
+ * their worktree cannot be moved safely underneath an active agent.
+ */
+export function reconcileCatalogProjectLocation<T extends CatalogBoundPage>(
+  state: T,
+  project: CatalogLocation | null | undefined,
+): T {
+  const location = project?.location?.trim() || "";
+  if (!location || !state.projectId || state.projectId !== project?.id ||
+      state.isolated || state.busy || state.preparing) return state;
+  const samePath = normalizedLocalProjectPath(state.workspace) === normalizedLocalProjectPath(location);
+  const repoUrl = project?.repo_url || state.repoUrl;
+  if (samePath && repoUrl === state.repoUrl && !state.projectRoot) return state;
+  return { ...state, workspace: location, projectRoot: undefined, repoUrl };
+}
+
 function hasSavedProjectPageContent(state: Record<string, unknown>): boolean {
   return Boolean(
     state.workspace

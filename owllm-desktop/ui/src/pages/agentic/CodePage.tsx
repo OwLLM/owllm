@@ -35,7 +35,7 @@ import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFee
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
-import { chooseProjectOpenTarget, savedPageIdsForLocalProject } from "./codeProjectPages";
+import { chooseProjectOpenTarget, reconcileCatalogProjectLocation, savedPageIdsForLocalProject } from "./codeProjectPages";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -940,6 +940,23 @@ function CodeWorkspace({ pageId, onTitle }: {
   // The model the second agent actually runs — its own pick, or the primary
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
+
+  // Project rows and Coding sessions are separate durable records. If another
+  // surface moves this stable project id to a new local checkout, repair a
+  // direct page as soon as it is idle instead of continuing to run Git and
+  // agent tools against the obsolete folder forever.
+  useEffect(() => {
+    const project = stx.projectId
+      ? catalogProjects.find((row) => row.id === stx.projectId)
+      : undefined;
+    const rebound = reconcileCatalogProjectLocation(stx, project);
+    if (rebound === stx || !rebound.workspace) return;
+    chatRuntime.setPayload(SID, (current) =>
+      reconcileCatalogProjectLocation((current as CodeState) ?? DEFAULT_CODE_STATE, project));
+    setRecents(rememberCodeProject(rebound.workspace));
+  }, [SID, catalogProjects, stx.projectId, stx.workspace, stx.projectRoot,
+    stx.repoUrl, stx.isolated, stx.busy, stx.preparing]);
+
   const [secondaryBusy, setSecondaryBusy] = useState(false);
   // `chatBusy` belongs to the global no-project Just Chat surface. Including it
   // here made every project chat glow while an unrelated chat was running (and

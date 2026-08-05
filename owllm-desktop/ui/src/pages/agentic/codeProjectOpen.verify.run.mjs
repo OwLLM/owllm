@@ -25,7 +25,30 @@ const helperJs = ts.transpileModule(helperSource, {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-code-project-open-"));
 const helperPath = path.join(temp, "codeProjectPages.js");
 fs.writeFileSync(helperPath, helperJs);
-const { chooseProjectOpenTarget, savedPageIdsForLocalProject } = require(helperPath);
+const { chooseProjectOpenTarget, reconcileCatalogProjectLocation, savedPageIdsForLocalProject } = require(helperPath);
+
+const staleBoundPage = {
+  workspace: "C:\\OwLLM",
+  projectId: "owllm-project",
+  repoUrl: "https://github.com/ruigro/OwLLM.git",
+  isolated: false,
+};
+const reboundPage = reconcileCatalogProjectLocation(staleBoundPage, {
+  id: "owllm-project",
+  location: "C:\\OwLLM\\app-source",
+  repo_url: "https://github.com/ruigro/LLM-Studio.git",
+});
+check(reboundPage.workspace === "C:\\OwLLM\\app-source" &&
+      reboundPage.repoUrl === "https://github.com/ruigro/LLM-Studio.git",
+  "a non-isolated Coding page follows its stable catalog project when that checkout path changes");
+check(reconcileCatalogProjectLocation({ ...staleBoundPage, isolated: true }, {
+  id: "owllm-project", location: "C:\\OwLLM\\app-source", repo_url: "",
+}).workspace === "C:\\OwLLM",
+  "an isolated worktree is never rebound underneath a running page");
+check(reconcileCatalogProjectLocation(staleBoundPage, {
+  id: "another-project", location: "C:\\OwLLM\\app-source", repo_url: "",
+}) === staleBoundPage,
+  "a catalog row cannot rebind a page owned by another project id");
 
 const values = new Map([
   ["owllm:code:page:linux", JSON.stringify({
@@ -77,6 +100,10 @@ check(
   "a project without saved pages opens in the current page");
 
 const code = read(path.join(HERE, "CodePage.tsx"));
+check(code.includes("reconcileCatalogProjectLocation(stx, project)") &&
+      code.includes("catalogProjects.find((row) => row.id === stx.projectId)") &&
+      code.includes("chatRuntime.setPayload(SID"),
+  "the live Coding page applies catalog-location reconciliation to its runtime session");
 check(code.includes("savedPageMetasForLocalProject(detail.project)") &&
       code.includes("chooseProjectOpenTarget(saved.map((page) => page.id), detail.currentPageIsBlank)") &&
       code.includes("setActiveId(target.pageId)"),

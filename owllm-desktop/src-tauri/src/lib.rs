@@ -373,9 +373,9 @@ pub fn run() {
             // EXPERIMENT (branch-only, removed before shipping): open the agent
             // browser at startup so the Linux window shape can be tested on a
             // headless-driven desktop without clicking through the GUI. Gated by
-            // the same env knob that picks the shape.
+            // OWLLM_BROWSER_AUTOSTART.
             #[cfg(target_os = "linux")]
-            if std::env::var("OWLLM_LINUX_BROWSER_SHAPE").is_ok() {
+            if std::env::var("OWLLM_BROWSER_AUTOSTART").is_ok() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(8));

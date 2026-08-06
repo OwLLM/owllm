@@ -83,14 +83,7 @@ const BROWSER_FRAME_T: f64 = 3.0;
 /// Linux the two are TILED instead — bar owns the top CHROME_H strip, page owns
 /// everything below, never overlapping.
 fn chrome_overlaps_page() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("OWLLM_LINUX_BROWSER_SHAPE").unwrap_or_default() == "stacked"
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
+    !cfg!(target_os = "linux")
 }
 
 /// Accent edge left exposed around the page webview. Only meaningful when the
@@ -1069,42 +1062,13 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
 fn linux_pin_chrome_bar(pw: tauri::webview::PlatformWebview) {
     use gtk::prelude::*;
     let widget: gtk::Widget = pw.inner().clone().upcast();
-    // EXPERIMENT (branch-only): which mechanism pins the bar. `packing` was the
-    // first attempt (correct geometry, dead input); the others isolate whether
-    // the size request or the packing change is what kills hit-testing.
-    let variant = std::env::var("OWLLM_LINUX_PIN").unwrap_or_else(|_| "vexpand".to_string());
-    let parent = widget.parent();
-    eprintln!(
-        "[experiment] pin variant={variant} widget={} parent={:?}",
-        widget.type_().name(),
-        parent.as_ref().map(|p| p.type_().name().to_string()),
-    );
-    match variant.as_str() {
-        "none" => {}
-        "sizereq" => widget.set_size_request(-1, CHROME_H as i32),
-        "packing" => {
-            widget.set_size_request(-1, CHROME_H as i32);
-            if let Some(vbox) = parent.as_ref().and_then(|p| p.downcast_ref::<gtk::Box>()) {
-                vbox.set_child_packing(&widget, false, true, 0, gtk::PackType::Start);
-            }
-        }
-        // Default: ask GTK for the height and let the PAGE take the slack, which
-        // leaves the box packing (and therefore the input regions) untouched.
-        _ => {
-            widget.set_size_request(-1, CHROME_H as i32);
-            widget.set_vexpand(false);
-            widget.set_valign(gtk::Align::Start);
-        }
+    widget.set_size_request(-1, CHROME_H as i32);
+    // wry packs every child webview with expand=TRUE, and that packing property
+    // outranks the widget's own vexpand — clearing it here is what actually stops
+    // the box from handing the bar half the window.
+    if let Some(vbox) = widget.parent().as_ref().and_then(|p| p.downcast_ref::<gtk::Box>()) {
+        vbox.set_child_packing(&widget, false, true, 0, gtk::PackType::Start);
     }
-    let alloc = widget.allocation();
-    eprintln!(
-        "[experiment] pin done alloc={}x{}+{}+{} visible={}",
-        alloc.width(),
-        alloc.height(),
-        alloc.x(),
-        alloc.y(),
-        widget.is_visible(),
-    );
 }
 
 /// Let the active page take every pixel the bar does not, so the two tile
@@ -1916,9 +1880,6 @@ fn parse_chrome_navigation(url: &tauri::Url) -> Option<(String, String)> {
 /// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
 /// by `browser_ui_worker`, never directly by a native WebView callback.
 fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
-    // EXPERIMENT (branch-only): proves whether a chrome-bar click reached Rust
-    // at all, which is the difference between dead input and a failing action.
-    eprintln!("[experiment] chrome event action={action} data={data}");
     let Some(win) = get_window(app) else { return };
     match action {
         "drag" => {
@@ -2439,7 +2400,7 @@ fn on_tab_title(app: &tauri::AppHandle, id: u64, title: &str) {
         let url = app
             .get_webview(&tab_label(id))
             .and_then(|wv| wv.url().ok())
-            .map(|u| u.to_string())
+            .map(|u| public_browser_url(u.as_str()))
             .unwrap_or_default();
         update_chrome_bar(app, Some(&url), Some(title));
     }
@@ -2536,32 +2497,14 @@ fn build_window(
     url: tauri::Url,
     private_session: bool,
 ) -> Result<(), String> {
-    // Linux/WebKitGTK — notably the Jetson/Tegra GL stack — mislays stacked child
-    // webviews (the chrome bar ends up floating mid-window over a blank strip) and
-    // SIGBUSes the WebKitWebProcess when they are resized, taking the whole app
-    // down. The framed multi-webview shape build_framed() builds is therefore
-    // unusable there, and it "succeeds" without erroring so the runtime fallback
-    // below never triggers. Use independent decorated top-level tab WebViews on
-    // Linux; keep the OwLLM-chrome framed shape on Windows/macOS where it works.
-    #[cfg(target_os = "linux")]
-    {
-        // EXPERIMENT (uncommitted to main): OWLLM_LINUX_BROWSER_SHAPE picks the
-        // shape so one build can compare tiled vs stacked chrome on WebKitGTK.
-        match std::env::var("OWLLM_LINUX_BROWSER_SHAPE").unwrap_or_default().as_str() {
-            "tiled" | "stacked" => match build_framed(app, url.clone(), private_session) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    eprintln!("[browser] framed shape failed ({e}); using the decorated fallback");
-                    if let Some(w) = get_window(app) {
-                        let _ = w.destroy();
-                    }
-                    build_legacy(app, url, private_session)
-                }
-            },
-            _ => build_legacy(app, url, private_session),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
+    // Every platform gets the same app-styled window. Linux used to be routed to
+    // build_legacy because the STACKED shape mislays child webviews on WebKitGTK:
+    // Tauri packs them into the window's GtkBox (tauri-runtime-wry lib.rs
+    // build_gtk(default_vbox) → wry pack_start), where set_position/set_size are
+    // no-ops and the box splits the window between them. That is a layout
+    // mismatch, not a broken engine — with the bar TILED above the page
+    // (chrome_overlaps_page() == false) the same chrome bar works, verified on
+    // Jetson/Tegra WebKitGTK 2.52: `+`, tab strip, URL bar and resize all behave.
     {
         match build_framed(app, url.clone(), private_session) {
             Ok(()) => Ok(()),
@@ -2692,7 +2635,7 @@ fn build_framed(
     });
 
     apply_chrome(&win);
-    update_chrome_bar(app, Some(&start_url), None);
+    update_chrome_bar(app, Some(&public_browser_url(&start_url)), None);
     sync_tabs(app);
     Ok(())
 }

@@ -68,15 +68,33 @@ check("home pages are excluded from persisted sessions", /fn list_tabs[\s\S]{0,1
 // that would hand agents and the panel the raw app-origin start-page URL.
 check("browser_view masks the start page like every other surface", /fn browser_view[\s\S]{0,900}public_browser_url\(url\)/.test(browserRs));
 
-// Cross-platform parity. Linux deliberately runs the decorated-window shape —
-// WebKitGTK mislays and SIGBUSes the stacked child webviews the OwLLM chrome
-// bar is built from — so the bar's "+" simply does not exist there. Every
-// chrome-bar action must therefore also be reachable from BrowserPanel, which
-// is the tab strip all three platforms share.
+// The address bar is fed by two channels — the tab strip (push_tabs) and the
+// url/title channel (update_chrome_bar). Every one of them must mask the
+// internal start-page URL, or a fresh tab shows
+// "tauri://localhost/browser-home.html?r=..." instead of an empty box.
+check("the chrome bar opens on a masked start-page URL",
+  /update_chrome_bar\(app, Some\(&public_browser_url\(&start_url\)\), None\)/.test(browserRs));
+check("a title change never re-fills the bar with the internal URL",
+  /is_active_tab\(id\)[\s\S]{0,400}public_browser_url\(u\.as_str\(\)\)[\s\S]{0,200}update_chrome_bar/.test(browserRs));
+check("no chrome-bar update passes a raw webview URL",
+  !/\.map\(\|u\| u\.to_string\(\)\)[\s\S]{0,200}update_chrome_bar/.test(browserRs));
+
+// Cross-platform parity. Every platform now gets the same app-styled chrome
+// bar: WebKitGTK only mislaid it because Tauri packs child webviews into the
+// window's GtkBox, so the bar is TILED above the page on Linux instead of
+// stacked behind it. The bar's actions must still also be reachable from
+// BrowserPanel, the tab strip all three platforms share.
 const panel = fs.readFileSync(path.join(root, "ui/src/pages/agentic/BrowserPanel.tsx"), "utf8");
 const libRs = fs.readFileSync(path.join(root, "src-tauri/src/lib.rs"), "utf8");
-check("Linux is routed to the WebKitGTK-safe window shape on purpose", /#\[cfg\(target_os = "linux"\)\]\s*\{\s*build_legacy\(app, url, private_session\)/.test(browserRs));
-check("the framed chrome-bar shape still covers Windows and macOS", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*\{\s*match build_framed\(app, url\.clone\(\), private_session\)/.test(browserRs));
+check("every platform builds the framed chrome-bar shape",
+  /fn build_window[\s\S]{0,1200}match build_framed\(app, url\.clone\(\), private_session\)/.test(browserRs)
+  && !/#\[cfg\(target_os = "linux"\)\]\s*\{\s*build_legacy\(app, url, private_session\)/.test(browserRs));
+check("Linux tiles the bar above the page instead of stacking it",
+  /fn chrome_overlaps_page\(\) -> bool \{\s*!cfg!\(target_os = "linux"\)/.test(browserRs));
+check("the bar's height is pinned in the GTK box that would otherwise halve it",
+  /fn linux_pin_chrome_bar[\s\S]{0,600}set_child_packing\(&widget, false, true, 0, gtk::PackType::Start\)/.test(browserRs));
+check("the decorated window stays available as a runtime fallback",
+  /app-styled window failed[\s\S]{0,200}build_legacy\(app, url, private_session\)/.test(browserRs));
 check("a platform-independent command opens a start-page tab", /pub fn browser_new_tab/.test(browserRs) && /pub fn browser_new_tab[\s\S]{0,200}browser_home_url\(&app\)\?/.test(browserRs));
 check("browser_new_tab is registered with the app", libRs.includes("browser::browser_new_tab"));
 check("the in-app panel carries the + every platform can reach", /invoke\("browser_new_tab"\)/.test(panel));

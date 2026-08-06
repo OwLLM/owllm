@@ -73,7 +73,11 @@ check("saved captures are validated as real PNGs before hitting the filesystem",
   support.includes('capture did not produce a valid PNG'));
 check("release CI compiles the capture code on Windows, macOS, and Linux",
   releaseWorkflow.includes("rust_target: 'x86_64-pc-windows-msvc'") &&
-  releaseWorkflow.includes("rust_target: 'aarch64-apple-darwin'") &&
+  // macOS is built universal, so its rust_target is the lipo target and the two
+  // real slices are listed separately.
+  (releaseWorkflow.includes("rust_target: 'aarch64-apple-darwin'")
+    || (releaseWorkflow.includes("rust_target: 'universal-apple-darwin'")
+      && releaseWorkflow.includes("aarch64-apple-darwin,x86_64-apple-darwin"))) &&
   releaseWorkflow.includes("rust_target: 'x86_64-unknown-linux-gnu'") &&
   releaseWorkflow.includes('run: npm run build'));
 check("vision readback is restricted to browser-created PNGs",

@@ -77,6 +77,32 @@ const CHROME_H: f64 = 96.0;
 /// The chrome webview paints it; page webviews leave this narrow edge exposed.
 const BROWSER_FRAME_T: f64 = 3.0;
 
+/// True when the chrome-bar webview spans the whole window and the page webview
+/// is stacked on top of it (Windows/macOS), so browser-chrome.html can paint the
+/// accent frame around the page. WebKitGTK mislays stacked child webviews, so on
+/// Linux the two are TILED instead — bar owns the top CHROME_H strip, page owns
+/// everything below, never overlapping.
+fn chrome_overlaps_page() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("OWLLM_LINUX_BROWSER_SHAPE").unwrap_or_default() == "stacked"
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Accent edge left exposed around the page webview. Only meaningful when the
+/// chrome webview is behind it; a tiled bar has nothing to show through.
+fn frame_t() -> f64 {
+    if chrome_overlaps_page() {
+        BROWSER_FRAME_T
+    } else {
+        0.0
+    }
+}
+
 /// X where parked (inactive) tab webviews live. Tauri has no cross-platform
 /// hide() for child webviews, so inactive tabs are simply moved far offscreen
 /// and slid back on activation. Linux uses hidden top-level tab windows because
@@ -2048,14 +2074,15 @@ fn attach_tab(
         .inner_size()
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
-    let x = if active { BROWSER_FRAME_T } else { PARK_X };
+    let inset = frame_t();
+    let x = if active { inset } else { PARK_X };
     let _webview = win
         .add_child(
             content,
             LogicalPosition::new(x, CHROME_H),
             LogicalSize::new(
-                (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
-                (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+                (ls.width - (inset * 2.0)).max(50.0),
+                (ls.height - CHROME_H - inset).max(50.0),
             ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
@@ -2142,7 +2169,7 @@ fn new_tab(
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
     validate_provider_auth_url(&parsed)?;
     #[cfg(target_os = "linux")]
-    if !private_session {
+    if !private_session && !framed {
         if let Some(id) = reuse_retired_linux_tab(app, parsed.clone(), activate)? {
             return Ok(id);
         }
@@ -2449,7 +2476,21 @@ fn build_window(
     // Linux; keep the OwLLM-chrome framed shape on Windows/macOS where it works.
     #[cfg(target_os = "linux")]
     {
-        build_legacy(app, url, private_session)
+        // EXPERIMENT (uncommitted to main): OWLLM_LINUX_BROWSER_SHAPE picks the
+        // shape so one build can compare tiled vs stacked chrome on WebKitGTK.
+        match std::env::var("OWLLM_LINUX_BROWSER_SHAPE").unwrap_or_default().as_str() {
+            "tiled" | "stacked" => match build_framed(app, url.clone(), private_session) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    eprintln!("[browser] framed shape failed ({e}); using the decorated fallback");
+                    if let Some(w) = get_window(app) {
+                        let _ = w.destroy();
+                    }
+                    build_legacy(app, url, private_session)
+                }
+            },
+            _ => build_legacy(app, url, private_session),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -2528,7 +2569,10 @@ fn build_framed(
     win.add_child(
         chrome,
         LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(win_w, win_h),
+        LogicalSize::new(
+            win_w,
+            if chrome_overlaps_page() { win_h } else { CHROME_H },
+        ),
     )
     .map_err(|e| format!("chrome bar webview: {e}"))?;
 
@@ -2582,13 +2626,21 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     let Some(win) = get_window(app) else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
     let ls = size.to_logical::<f64>(scale);
+    let inset = frame_t();
     if let Some(chrome) = app.get_webview(CHROME_LABEL) {
         let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = chrome.set_size(LogicalSize::new(ls.width, ls.height));
+        let _ = chrome.set_size(LogicalSize::new(
+            ls.width,
+            if chrome_overlaps_page() {
+                ls.height
+            } else {
+                CHROME_H
+            },
+        ));
     }
     let page = LogicalSize::new(
-        (ls.width - (BROWSER_FRAME_T * 2.0)).max(50.0),
-        (ls.height - CHROME_H - BROWSER_FRAME_T).max(50.0),
+        (ls.width - (inset * 2.0)).max(50.0),
+        (ls.height - CHROME_H - inset).max(50.0),
     );
     let (order, active) = {
         let guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
@@ -2599,18 +2651,14 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     };
     for id in order {
         if let Some(content) = app.get_webview(&tab_label(id)) {
-            let x = if id == active {
-                BROWSER_FRAME_T
-            } else {
-                PARK_X
-            };
+            let x = if id == active { inset } else { PARK_X };
             let _ = content.set_position(LogicalPosition::new(x, CHROME_H));
             let _ = content.set_size(page);
         }
     }
     // Legacy single-webview shape (no tab state).
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
-        let _ = content.set_position(LogicalPosition::new(BROWSER_FRAME_T, CHROME_H));
+        let _ = content.set_position(LogicalPosition::new(inset, CHROME_H));
         let _ = content.set_size(page);
     }
 }

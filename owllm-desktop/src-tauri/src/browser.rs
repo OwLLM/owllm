@@ -2086,6 +2086,13 @@ fn attach_tab(
             ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
+    // GTK packs child webviews into the window's vbox, where set_position is a
+    // no-op (see layout_children), so a tiled bar cannot park a tab offscreen —
+    // inactive tabs are hidden instead and the vbox gives their space to the
+    // active one.
+    if !chrome_overlaps_page() && !active {
+        let _ = _webview.hide();
+    }
     #[cfg(windows)]
     if !private_session {
         let _ = _webview.with_webview(win_enable_web_credentials);
@@ -2651,6 +2658,18 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     };
     for id in order {
         if let Some(content) = app.get_webview(&tab_label(id)) {
+            // GTK (tiled bar): child webviews live in the window's vbox, which
+            // ignores set_position/set_size — the box itself tiles them in the
+            // order they were added. Switch tabs by visibility instead, so the
+            // active page takes the whole area under the bar.
+            if !chrome_overlaps_page() {
+                let _ = if id == active {
+                    content.show()
+                } else {
+                    content.hide()
+                };
+                continue;
+            }
             let x = if id == active { inset } else { PARK_X };
             let _ = content.set_position(LogicalPosition::new(x, CHROME_H));
             let _ = content.set_size(page);

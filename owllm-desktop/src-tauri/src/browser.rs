@@ -1069,12 +1069,52 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
 fn linux_pin_chrome_bar(pw: tauri::webview::PlatformWebview) {
     use gtk::prelude::*;
     let widget: gtk::Widget = pw.inner().clone().upcast();
-    widget.set_size_request(-1, CHROME_H as i32);
-    if let Some(parent) = widget.parent() {
-        if let Some(vbox) = parent.downcast_ref::<gtk::Box>() {
-            vbox.set_child_packing(&widget, false, true, 0, gtk::PackType::Start);
+    // EXPERIMENT (branch-only): which mechanism pins the bar. `packing` was the
+    // first attempt (correct geometry, dead input); the others isolate whether
+    // the size request or the packing change is what kills hit-testing.
+    let variant = std::env::var("OWLLM_LINUX_PIN").unwrap_or_else(|_| "vexpand".to_string());
+    let parent = widget.parent();
+    eprintln!(
+        "[experiment] pin variant={variant} widget={} parent={:?}",
+        widget.type_().name(),
+        parent.as_ref().map(|p| p.type_().name().to_string()),
+    );
+    match variant.as_str() {
+        "none" => {}
+        "sizereq" => widget.set_size_request(-1, CHROME_H as i32),
+        "packing" => {
+            widget.set_size_request(-1, CHROME_H as i32);
+            if let Some(vbox) = parent.as_ref().and_then(|p| p.downcast_ref::<gtk::Box>()) {
+                vbox.set_child_packing(&widget, false, true, 0, gtk::PackType::Start);
+            }
+        }
+        // Default: ask GTK for the height and let the PAGE take the slack, which
+        // leaves the box packing (and therefore the input regions) untouched.
+        _ => {
+            widget.set_size_request(-1, CHROME_H as i32);
+            widget.set_vexpand(false);
+            widget.set_valign(gtk::Align::Start);
         }
     }
+    let alloc = widget.allocation();
+    eprintln!(
+        "[experiment] pin done alloc={}x{}+{}+{} visible={}",
+        alloc.width(),
+        alloc.height(),
+        alloc.x(),
+        alloc.y(),
+        widget.is_visible(),
+    );
+}
+
+/// Let the active page take every pixel the bar does not, so the two tile
+/// instead of splitting the window evenly.
+#[cfg(target_os = "linux")]
+fn linux_expand_page(pw: tauri::webview::PlatformWebview) {
+    use gtk::prelude::*;
+    let widget: gtk::Widget = pw.inner().clone().upcast();
+    widget.set_vexpand(true);
+    widget.set_valign(gtk::Align::Fill);
 }
 
 #[cfg(target_os = "linux")]
@@ -1876,6 +1916,9 @@ fn parse_chrome_navigation(url: &tauri::Url) -> Option<(String, String)> {
 /// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
 /// by `browser_ui_worker`, never directly by a native WebView callback.
 fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
+    // EXPERIMENT (branch-only): proves whether a chrome-bar click reached Rust
+    // at all, which is the difference between dead input and a failing action.
+    eprintln!("[experiment] chrome event action={action} data={data}");
     let Some(win) = get_window(app) else { return };
     match action {
         "drag" => {
@@ -2105,6 +2148,10 @@ fn attach_tab(
     // no-op (see layout_children), so a tiled bar cannot park a tab offscreen —
     // inactive tabs are hidden instead and the vbox gives their space to the
     // active one.
+    #[cfg(target_os = "linux")]
+    if !chrome_overlaps_page() {
+        let _ = _webview.with_webview(linux_expand_page);
+    }
     if !chrome_overlaps_page() && !active {
         let _ = _webview.hide();
     }

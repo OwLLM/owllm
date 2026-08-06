@@ -370,6 +370,20 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("[owllm] ModuleManager init failed: {e}"),
             }
+            // EXPERIMENT (branch-only, removed before shipping): open the agent
+            // browser at startup so the Linux window shape can be tested on a
+            // headless-driven desktop without clicking through the GUI. Gated by
+            // the same env knob that picks the shape.
+            #[cfg(target_os = "linux")]
+            if std::env::var("OWLLM_LINUX_BROWSER_SHAPE").is_ok() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    if let Err(e) = browser::browser_start(handle) {
+                        eprintln!("[experiment] browser autostart failed: {e}");
+                    }
+                });
+            }
             Ok(())
         })
         .on_page_load(|webview, payload| {

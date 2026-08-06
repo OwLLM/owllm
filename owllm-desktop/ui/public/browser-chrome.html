@@ -47,6 +47,24 @@
         border: 3px solid var(--accent); box-sizing: border-box;
         pointer-events: none;
       }
+      /* Resize grips. The window is undecorated on every OS, so the only pixels
+         an OS resize border can live in are the ones the page webview leaves
+         exposed — the accent ring (browser.rs BROWSER_FRAME_T) plus the top of
+         this bar. Windows only hit-tests SOME of them (measured: right/bottom
+         resize, left/top do not), so the ring drives the resize itself via
+         start_resize_dragging. --grip is the ring thickness; corners reach
+         further along each edge, and the top corners stay short so they never
+         cover the ─ ▢ ✕ buttons. */
+      :root { --grip: 3px; --grip-corner: 22px; }
+      .grip { position: fixed; z-index: 1001; }
+      .grip.n { top: 0; left: 8px; right: 8px; height: 4px; cursor: ns-resize; }
+      .grip.s { bottom: 0; left: var(--grip-corner); right: var(--grip-corner); height: var(--grip); cursor: ns-resize; }
+      .grip.w { left: 0; top: 8px; bottom: var(--grip-corner); width: var(--grip); cursor: ew-resize; }
+      .grip.e { right: 0; top: 8px; bottom: var(--grip-corner); width: var(--grip); cursor: ew-resize; }
+      .grip.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+      .grip.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+      .grip.sw { bottom: 0; left: 0; width: var(--grip-corner); height: var(--grip-corner); cursor: nesw-resize; }
+      .grip.se { bottom: 0; right: 0; width: var(--grip-corner); height: var(--grip-corner); cursor: nwse-resize; }
       /* The identity row is 30px taller than a plain tab bar so the open
          page's real logo reads as the page's identity, not a decoration
          alongside a URL (user spec 2026-07-29). */
@@ -150,6 +168,16 @@
   </head>
   <body>
     <div id="windowFrame" aria-hidden="true"></div>
+    <div id="grips" aria-hidden="true">
+      <div class="grip n" data-dir="n"></div>
+      <div class="grip s" data-dir="s"></div>
+      <div class="grip w" data-dir="w"></div>
+      <div class="grip e" data-dir="e"></div>
+      <div class="grip nw" data-dir="nw"></div>
+      <div class="grip ne" data-dir="ne"></div>
+      <div class="grip sw" data-dir="sw"></div>
+      <div class="grip se" data-dir="se"></div>
+    </div>
     <div id="rows">
       <div id="tabsrow">
         <img id="logo" src="app-icon.png" alt="" />
@@ -213,6 +241,16 @@
         el.addEventListener("dblclick", function () { evt("maximize"); });
       }
       draggy($("drag")); draggy($("logo")); draggy($("ttl"));
+      // Edge/corner grips → native resize drag. Same envelope as "drag": Rust
+      // hands the gesture to the window manager, so the pointer keeps working
+      // after it leaves this webview.
+      Array.prototype.forEach.call(document.querySelectorAll(".grip"), function (el) {
+        el.addEventListener("mousedown", function (e) {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          evt("resize", el.getAttribute("data-dir"));
+        });
+      });
       // Real brand marks, COPIED VERBATIM from src/utils/siteLogos.ts. This
       // webview is app-origin but outside the bundle, so it cannot import from
       // src/ — siteLogos.verify.run.mjs fails the build if the two ever drift.

@@ -655,7 +655,6 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       });
     }
 
-
     // Focus/zoom: reuses the Earth behavior (OrbitControls + calibrated
     // distance clamps) for every planet. A focus request tweens the controls
     // target and camera to the planet, then hands control back to the user with

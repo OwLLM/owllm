@@ -5765,6 +5765,27 @@ function OrchestratorPane({
             );
           })}
         </div>
+        {runError ? (
+          <div
+            data-ui="AgentRunError"
+            role="alert"
+            style={{
+              flexShrink: 0,
+              margin: "8px 10px 0",
+              padding: "8px 10px",
+              border: "1px solid rgba(255,140,140,0.45)",
+              borderRadius: 8,
+              background: "rgba(255,107,107,0.10)",
+              color: "#ffb3b3",
+              fontSize: 12,
+              lineHeight: 1.45,
+              whiteSpace: "pre-wrap",
+              userSelect: "text",
+            }}
+          >
+            ⚠ {runError}
+          </div>
+        ) : null}
         {/* Rules — first sub-tab; project directives with inline CRUD.
             Mirrors the previous SuperUserCard rules face but lives in
             the chat container per user spec 2026-05-28. */}

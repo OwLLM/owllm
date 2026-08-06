@@ -267,6 +267,26 @@ pub fn run_in_distro_script_user(
 /// distributions". An empty list WITHOUT that signal means a transient/cold
 /// result (the WSL service is still warming up), which the retry loop handles.
 /// wsl.exe emits UTF-16LE, so we strip nulls.
+fn parse_distro_list_output(success: bool, stdout: &[u8], stderr: &[u8]) -> (Vec<String>, bool) {
+    let err = decode_wsl(stderr).to_lowercase();
+    // Some Windows builds print the wsl.exe help banner to stdout when `-q`
+    // is unsupported, then exit non-zero. Parsing that banner as distro names
+    // produced paths such as `\\wsl.localhost\Copyright (c) Microsoft...` and
+    // stopped every agent before dispatch. A failed probe has no trustworthy
+    // list output; treat it as unavailable instead of consuming stdout.
+    if !success {
+        return (Vec::new(), true);
+    }
+    let raw: Vec<u8> = stdout.iter().copied().filter(|&b| b != 0).collect();
+    let names: Vec<String> = String::from_utf8_lossy(&raw)
+        .lines()
+        .map(|l| l.trim().trim_end_matches('\r').to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let definitive_none = err.contains("no installed distribution");
+    (names, definitive_none)
+}
+
 fn list_distros_once() -> (Vec<String>, bool) {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-l").arg("-q");
@@ -280,15 +300,7 @@ fn list_distros_once() -> (Vec<String>, bool) {
     let Ok(out) = cmd.output() else {
         return (Vec::new(), true);
     };
-    let raw: Vec<u8> = out.stdout.iter().copied().filter(|&b| b != 0).collect();
-    let names: Vec<String> = String::from_utf8_lossy(&raw)
-        .lines()
-        .map(|l| l.trim().trim_end_matches('\r').to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-    let err = decode_wsl(&out.stderr).to_lowercase();
-    let definitive_none = err.contains("no installed distribution");
-    (names, definitive_none)
+    parse_distro_list_output(out.status.success(), &out.stdout, &out.stderr)
 }
 
 /// Robust distro list. The first wsl.exe calls right after a reboot OR an app
@@ -447,15 +459,16 @@ pub fn wsl_restart() -> Result<(), String> {
 
 #[tauri::command]
 pub fn wsl_isolation_get() -> WslIsolation {
-    isolation_path()
+    let cfg = isolation_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    normalize_isolation_distro(cfg)
 }
 
 #[tauri::command]
 pub fn wsl_isolation_set(enabled: bool, distro: Option<String>) -> Result<WslIsolation, String> {
-    let cfg = WslIsolation { enabled, distro };
+    let cfg = normalize_isolation_distro(WslIsolation { enabled, distro });
     let p = isolation_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -463,6 +476,30 @@ pub fn wsl_isolation_set(enabled: bool, distro: Option<String>) -> Result<WslIso
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
     std::fs::write(&p, json).map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(cfg)
+}
+
+/// Reject stale/corrupt preferred distros loaded from disk or supplied by the
+/// UI. `None` intentionally keeps the "use current best distro" preference;
+/// an explicit value must still appear in the live WSL list and be a real
+/// Linux environment. Otherwise fall back to the detected best distro.
+fn normalize_isolation_distro(mut cfg: WslIsolation) -> WslIsolation {
+    let Some(requested) = cfg
+        .distro
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    else {
+        cfg.distro = None;
+        return cfg;
+    };
+    let status = wsl_status();
+    cfg.distro = status
+        .distros
+        .iter()
+        .find(|d| d.eq_ignore_ascii_case(requested) && !is_system_distro(d))
+        .cloned()
+        .or(status.best_distro);
+    cfg
 }
 
 /// Create (idempotently) an isolated project inside the distro and return both
@@ -706,6 +743,25 @@ mod tests {
             None
         );
         assert_eq!(pick_best_distro(&None, &s(&["rancher-desktop"])), None);
+    }
+
+    #[test]
+    fn failed_distro_probe_never_parses_help_banner_as_a_distro() {
+        let help = b"\0C\0o\0p\0y\0r\0i\0g\0h\0t\0 \0(\0c\0)\0 \0M\0i\0c\0r\0o\0s\0o\0f\0t\0 \0C\0o\0r\0p\0o\0r\0a\0t\0i\0o\0n\0.\0\r\0\n\0U\0s\0a\0g\0e\0:\0 \0w\0s\0l\0.\0e\0x\0e\0";
+        let (distros, definitive_none) = parse_distro_list_output(false, help, &[]);
+        assert!(distros.is_empty(), "help text became distros: {distros:?}");
+        assert!(
+            definitive_none,
+            "a failed probe should not be retried as a cold empty"
+        );
+    }
+
+    #[test]
+    fn successful_distro_probe_decodes_utf16le_names() {
+        let stdout = b"U\0b\0u\0n\0t\0u\0\r\0\n\0";
+        let (distros, definitive_none) = parse_distro_list_output(true, stdout, &[]);
+        assert_eq!(distros, vec!["Ubuntu"]);
+        assert!(!definitive_none);
     }
 
     #[test]

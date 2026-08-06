@@ -1201,12 +1201,12 @@ function LogColumn({ logs, onClear }: { logs: string[]; onClear: () => void }) {
 // ---------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------
-// Logs persist across tab switches by surviving in localStorage. The
-// `server-log` listener stays mounted via SERVER_LOG_HUB (module
-// scope) so the rolling tail accumulates even when ServerPage is
-// unmounted — the user can switch to Chat / Agents and come back to
-// the full Server boot trace.
-const LOG_STORAGE_KEY = "owllm.server.logs";
+// The module-scoped hub keeps the rolling tail alive across tab switches while
+// the application is running. Do not persist this high-frequency stream in
+// localStorage: rewriting the full tail for every line makes WebKitGTK retain
+// enough database/write state to terminate the Linux process under sustained
+// output. Remove the legacy key once; project and account state use other keys.
+const LEGACY_LOG_STORAGE_KEY = "owllm.server.logs";
 const LOG_MAX = 2000;
 type LogListener = (lines: string[]) => void;
 
@@ -1217,12 +1217,10 @@ class ServerLogHub {
   private unlisten: (() => void) | null = null;
 
   constructor() {
-    let stored: string[] = [];
     try {
-      const raw = localStorage.getItem(LOG_STORAGE_KEY);
-      if (raw) stored = JSON.parse(raw);
-    } catch { /* corrupted store — start fresh */ }
-    this.lines = Array.isArray(stored) ? stored : [];
+      localStorage.removeItem(LEGACY_LOG_STORAGE_KEY);
+    } catch { /* unavailable store — the in-memory log still works */ }
+    this.lines = [];
   }
 
   async ensureWired() {
@@ -1243,13 +1241,11 @@ class ServerLogHub {
 
   push(line: string) {
     this.lines = [...this.lines, line].slice(-LOG_MAX);
-    this.persist();
     for (const l of this.listeners) l(this.lines);
   }
 
   clear() {
     this.lines = [];
-    this.persist();
     for (const l of this.listeners) l(this.lines);
   }
 
@@ -1260,12 +1256,6 @@ class ServerLogHub {
   subscribe(fn: LogListener): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
-  }
-
-  private persist() {
-    try {
-      localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(this.lines));
-    } catch { /* quota — just drop persistence */ }
   }
 }
 

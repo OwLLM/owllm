@@ -86,6 +86,65 @@ check(
   repack > 0 && signAssert > repack && signAssert < upload,
 );
 
+// macOS shipped single-arch (aarch64) for its whole history, so latest.json
+// never carried a darwin-x86_64 key: Intel Macs could download the dmg but were
+// never offered an update, on any version. One universal bundle serves both, and
+// both keys must point at it.
+check(
+  "the mac bundle is built universal (arm64 + x86_64)",
+  /npm run tauri -- build --target universal-apple-darwin/.test(sh),
+);
+check(
+  "the mac bundle is read from the universal target dir",
+  /BUNDLE="src-tauri\/target\/universal-apple-darwin\/release\/bundle"/.test(sh),
+);
+check(
+  "a non-universal mac bundle fails the publish instead of shipping",
+  /lipo -archs/.test(sh) && /fail "mac bundle is not universal/.test(sh),
+);
+check(
+  "both Apple platform keys are served by the one universal artifact",
+  /PLATFORM_KEY="darwin-aarch64"/.test(sh)
+    && /EXTRA_PLATFORM_KEYS="darwin-x86_64"/.test(sh)
+    && /OwLLM\.Desktop_universal\.app\.tar\.gz/.test(sh),
+);
+check(
+  "every platform key in the manifest gets the signature and url",
+  /for\s*\(const k of keys\) platforms\[k\]=\{signature:process\.env\.SIG,url:process\.env\.URL\}/.test(sh),
+);
+// modules::Platform::host() refuses to guess (compile_error! on an unknown
+// target), so shipping an arch it does not know is a hard build failure. Every
+// platform key the publisher advertises must have a matching host() arm.
+{
+  const modulesRs = fs.readFileSync(
+    path.resolve(HERE, "../../../../src-tauri/src/modules.rs"),
+    "utf8",
+  );
+  const keys = [
+    ...new Set(
+      [...sh.matchAll(/PLATFORM_KEYS?="([^"]+)"/g)]
+        .flatMap((m) => m[1].split(/\s+/))
+        .filter((k) => k && !k.includes("$")),
+    ),
+  ];
+  const OS = { darwin: "macos", linux: "linux", windows: "windows" };
+  const missing = keys.filter((key) => {
+    const [os, arch] = [key.slice(0, key.indexOf("-")), key.slice(key.indexOf("-") + 1)];
+    const re = new RegExp(
+      `target_os = "${OS[os] || os}", target_arch = "${arch}"`,
+    );
+    return !re.test(modulesRs);
+  });
+  check(
+    `every published platform key is known to modules::Platform::host() (${keys.join(", ")})`,
+    keys.length > 0 && missing.length === 0,
+  );
+}
+check(
+  "the dmg is stapled so offline Gatekeeper does not have to phone Apple",
+  /xcrun stapler validate "\$DMG"/.test(sh) && /xcrun stapler staple "\$DMG"/.test(sh),
+);
+
 // Behavioural check: run the real function, don't just read it. Skipped where no
 // POSIX shell exists, so the static pins above stay the portable floor.
 let bash = "";

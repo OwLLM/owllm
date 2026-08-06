@@ -102,6 +102,12 @@ pub enum Platform {
     LinuxAarch64,
     #[serde(rename = "macos-aarch64")]
     MacOsAarch64,
+    /// Intel Macs. Reachable since the mac bundle became universal — the
+    /// x86_64 slice runs natively there, so it must resolve x64 modules and
+    /// never the arm64 ones. No macos-x86_64 module variants are published
+    /// yet, so the resolver reports "not published" instead of guessing.
+    #[serde(rename = "macos-x86_64")]
+    MacOsX86_64,
     /// Forward-compat catch-all: a platform string this build doesn't know
     /// yet (the registry is fetched live from main, so it can gain new
     /// platforms before every installed app updates). Deserializing it must
@@ -136,6 +142,10 @@ impl Platform {
         {
             Platform::MacOsAarch64
         }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            Platform::MacOsX86_64
+        }
         // No silent fallback: claiming another platform makes the resolver
         // hand out binaries that can't run here (an aarch64 build used to
         // masquerade as windows-x86_64 and download Windows llama-server).
@@ -146,6 +156,7 @@ impl Platform {
             all(target_os = "linux", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
         )))]
         {
             compile_error!(
@@ -163,13 +174,14 @@ impl Platform {
             Platform::LinuxX86_64 => "linux-x86_64",
             Platform::LinuxAarch64 => "linux-aarch64",
             Platform::MacOsAarch64 => "macos-aarch64",
+            Platform::MacOsX86_64 => "macos-x86_64",
             Platform::Unknown => "unknown",
         }
     }
 
     pub fn arch_label(&self) -> &'static str {
         match self {
-            Platform::WindowsX86_64 | Platform::LinuxX86_64 => "x64",
+            Platform::WindowsX86_64 | Platform::LinuxX86_64 | Platform::MacOsX86_64 => "x64",
             Platform::WindowsAarch64 | Platform::LinuxAarch64 | Platform::MacOsAarch64 => "ARM64",
             Platform::Unknown => "unknown arch",
         }

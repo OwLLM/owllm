@@ -189,6 +189,8 @@ case "$UNAME_S" in
 esac
 ARCH="$(uname -m)"
 case "$ARCH" in arm64|aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
+# Extra latest.json keys served by the SAME updater artifact (macOS universal).
+EXTRA_PLATFORM_KEYS=""
 case "$HOST_OS" in
   windows)
     PLATFORM_KEY="windows-x86_64"
@@ -197,11 +199,16 @@ case "$HOST_OS" in
     URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
     ;;
   macos)
-    PLATFORM_KEY="darwin-$ARCH"
+    # macOS ships ONE universal (arm64 + x86_64) bundle, so both Apple platform
+    # keys point at the same artifact. Building a single-arch mac binary strands
+    # the other architecture with no updater entry at all — Intel Macs sat on an
+    # un-updatable build for months that way.
+    PLATFORM_KEY="darwin-aarch64"
+    EXTRA_PLATFORM_KEYS="darwin-x86_64"
     INSTALLER="dist/OwLLM.Desktop.Setup.dmg"
     # Tauri's macOS updater consumes a .app tar.gz, not the dmg.
-    UPDATER_ARTIFACT="dist/OwLLM.Desktop_$ARCH.app.tar.gz"
-    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop_$ARCH.app.tar.gz"
+    UPDATER_ARTIFACT="dist/OwLLM.Desktop_universal.app.tar.gz"
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop_universal.app.tar.gz"
     ;;
   linux)
     PLATFORM_KEY="linux-$ARCH"
@@ -424,15 +431,41 @@ case "$HOST_OS" in
     fi
     ;;
   *)
-    npm run tauri -- build || fail "tauri build failed"
+    if [ "$HOST_OS" = "macos" ]; then
+      npm run tauri -- build --target universal-apple-darwin || fail "tauri build failed"
+    else
+      npm run tauri -- build || fail "tauri build failed"
+    fi
     mkdir -p dist
     BUNDLE="src-tauri/target/release/bundle"
     if [ "$HOST_OS" = "macos" ]; then
+      BUNDLE="src-tauri/target/universal-apple-darwin/release/bundle"
       DMG="$(ls "$BUNDLE"/dmg/*.dmg 2>/dev/null | head -1 || true)"
       [ -n "$DMG" ] || fail "no .dmg under $BUNDLE/dmg — tauri bundle step failed"
-      cp -f "$DMG" "$INSTALLER"
       APPB="$(ls -d "$BUNDLE"/macos/*.app 2>/dev/null | head -1 || true)"
       [ -n "$APPB" ] || fail "no .app under $BUNDLE/macos — tauri bundle step failed"
+      # A single-arch bundle here would silently strand every Intel Mac: the
+      # updater entry promises universal but the binary refuses to launch.
+      MACHO="$APPB/Contents/MacOS/$(basename "$APPB" .app)"
+      [ -f "$MACHO" ] || MACHO="$(ls "$APPB"/Contents/MacOS/* 2>/dev/null | head -1)"
+      SLICES="$(lipo -archs "$MACHO" 2>/dev/null || true)"
+      case "$SLICES" in
+        *arm64*) case "$SLICES" in *x86_64*) : ;; *) fail "mac bundle is not universal (arches: $SLICES)" ;; esac ;;
+        *) fail "mac bundle is not universal (arches: ${SLICES:-none})" ;;
+      esac
+      echo "  ✓ universal bundle ($SLICES)"
+      # tauri notarizes and staples the .app but leaves the .dmg UNSTAPLED, so an
+      # offline Gatekeeper check on the download has to phone Apple.
+      if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+        if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" --wait 2>&1 | tail -3
+          xcrun stapler staple "$DMG" 2>&1 | tail -1
+        fi
+        xcrun stapler validate "$DMG" >/dev/null 2>&1 \
+          || echo "  ! dmg is not stapled — offline Gatekeeper will warn on install"
+      fi
+      cp -f "$DMG" "$INSTALLER"
       tar -czf "$UPDATER_ARTIFACT" -C "$(dirname "$APPB")" "$(basename "$APPB")"
     else
       AI="$(ls "$BUNDLE"/appimage/*.AppImage 2>/dev/null | head -1 || true)"
@@ -558,11 +591,13 @@ step "3/5 latest.json (merge platform keys)"
 # that leaves the app on the old version — an infinite update loop.
 EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)"
 SIG="$SIG" NOTES="$NOTES" VERSION="$VERSION" URL="$URL" \
-PLATFORM_KEY="$PLATFORM_KEY" EXISTING_LATEST="$EXISTING_LATEST" node -e '
+PLATFORM_KEY="$PLATFORM_KEY" EXTRA_PLATFORM_KEYS="$EXTRA_PLATFORM_KEYS" \
+EXISTING_LATEST="$EXISTING_LATEST" node -e '
   const fs=require("fs");
   let prev={}; try{ prev=JSON.parse(process.env.EXISTING_LATEST||"{}"); }catch{}
   const platforms=(prev.version===process.env.VERSION && prev.platforms)?{...prev.platforms}:{};
-  platforms[process.env.PLATFORM_KEY]={signature:process.env.SIG,url:process.env.URL};
+  const keys=[process.env.PLATFORM_KEY,...(process.env.EXTRA_PLATFORM_KEYS||"").split(/\s+/)].filter(Boolean);
+  for(const k of keys) platforms[k]={signature:process.env.SIG,url:process.env.URL};
   const m={version:process.env.VERSION,notes:process.env.NOTES||("Release "+process.env.VERSION),
     pub_date:new Date().toISOString(),platforms};
   fs.writeFileSync("dist/latest.json",JSON.stringify(m,null,2));

@@ -9,7 +9,9 @@ const required = (name) => {
 
 const version = required("UPDATER_VERSION");
 const releaseTag = required("UPDATER_RELEASE_TAG");
-const platform = required("UPDATER_PLATFORM");
+// One artifact can serve several platform keys: the macOS bundle is universal
+// (arm64 + x86_64), so both Apple keys point at the same .app.tar.gz.
+const platforms = required("UPDATER_PLATFORM").split(/[\s,]+/).filter(Boolean);
 const asset = required("UPDATER_ASSET");
 const signatureFile = required("UPDATER_SIGNATURE_FILE");
 const output = required("UPDATER_OUTPUT");
@@ -40,13 +42,16 @@ const manifest = {
   version,
   notes: process.env.UPDATER_NOTES?.trim() || `OwLLM Desktop v${version}`,
   pub_date: process.env.UPDATER_PUB_DATE?.trim() || new Date().toISOString(),
-  platforms: {
-    [platform]: {
-      signature,
-      url: `https://github.com/${repository}/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(asset)}`,
-    },
-  },
+  platforms: Object.fromEntries(
+    platforms.map((platform) => [
+      platform,
+      {
+        signature,
+        url: `https://github.com/${repository}/releases/download/${encodeURIComponent(releaseTag)}/${encodeURIComponent(asset)}`,
+      },
+    ]),
+  ),
 };
 
 fs.writeFileSync(output, `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(`Generated ${output} for ${platform}`);
+console.log(`Generated ${output} for ${platforms.join(", ")}`);

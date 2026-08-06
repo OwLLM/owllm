@@ -100,20 +100,22 @@ jobs:
             updater_platform: 'windows-x86_64'
             updater_pattern: '*-setup.exe'
             updater_asset: 'OwLLM.Desktop.Setup.exe'
-          - label: 'macOS Apple Silicon'
+          # ONE universal bundle serves both Apple architectures, so both
+          # darwin-* updater keys point at it. Building a single-arch mac binary
+          # is what stranded every Intel Mac with no updater entry at all.
+          - label: 'macOS universal'
             os: 'macos-latest'
-            rust_target: 'aarch64-apple-darwin'
-            tauri_args: '--target aarch64-apple-darwin'
-            artifact: 'owllm-desktop-macos-arm64'
-            updater_platform: 'darwin-aarch64'
+            rust_target: 'universal-apple-darwin'
+            extra_rust_targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            tauri_args: '--target universal-apple-darwin'
+            artifact: 'owllm-desktop-macos-universal'
+            updater_platform: 'darwin-aarch64 darwin-x86_64'
             updater_pattern: '*.app.tar.gz'
-            updater_asset: 'OwLLM.Desktop_aarch64.app.tar.gz'
+            updater_asset: 'OwLLM.Desktop_universal.app.tar.gz'
           # NOTE: the 'macOS Intel' (macos-13 / x86_64-apple-darwin) entry was
           # removed 2026-07: GitHub retired the macos-13 runner image, so the
-          # job queued forever and blocked every release (the queued job also
-          # ate a concurrency slot for 24h until force-cancelled). Restoring
-          # Intel Mac support requires a paid larger runner (e.g.
-          # macos-15-large) or building a universal binary on macos-latest.
+          # job queued forever and blocked every release. Intel is now covered by
+          # the universal bundle above rather than by its own runner.
           - label: 'Linux x64'
             os: 'ubuntu-22.04'
             rust_target: 'x86_64-unknown-linux-gnu'
@@ -147,10 +149,12 @@ jobs:
           cache: npm
           cache-dependency-path: owllm-desktop/package-lock.json
 
+      # universal-apple-darwin is a tauri lipo target, not a rustup one: install
+      # the two real slices it is built from instead.
       - name: Set up Rust + ${{ matrix.rust_target }}
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_target }}
+          targets: ${{ matrix.extra_rust_targets || matrix.rust_target }}
 
       - name: Cache cargo registry + target/
         uses: Swatinem/rust-cache@v2
@@ -631,6 +635,7 @@ jobs:
           const requiredPlatforms = [
             "windows-x86_64",
             "darwin-aarch64",
+            "darwin-x86_64",
             "linux-x86_64",
             "linux-aarch64",
           ];

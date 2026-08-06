@@ -1062,6 +1062,21 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
     }
 }
 
+/// Give the chrome bar a fixed height inside the window's GTK box. Tauri packs
+/// every child webview into that box with expand=true, so without this the bar
+/// and the page each get half the window and set_size cannot correct it.
+#[cfg(target_os = "linux")]
+fn linux_pin_chrome_bar(pw: tauri::webview::PlatformWebview) {
+    use gtk::prelude::*;
+    let widget: gtk::Widget = pw.inner().clone().upcast();
+    widget.set_size_request(-1, CHROME_H as i32);
+    if let Some(parent) = widget.parent() {
+        if let Some(vbox) = parent.downcast_ref::<gtk::Box>() {
+            vbox.set_child_packing(&widget, false, true, 0, gtk::PackType::Start);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_configure_browser_webview(
     pw: tauri::webview::PlatformWebview,
@@ -2573,15 +2588,23 @@ fn build_framed(
         .on_page_load(|wv, _payload| {
             queue_browser_ui(&wv.app_handle().clone(), BrowserUiEvent::PushTabs);
         });
-    win.add_child(
-        chrome,
-        LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(
-            win_w,
-            if chrome_overlaps_page() { win_h } else { CHROME_H },
-        ),
-    )
-    .map_err(|e| format!("chrome bar webview: {e}"))?;
+    let _chrome_webview = win
+        .add_child(
+            chrome,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(
+                win_w,
+                if chrome_overlaps_page() { win_h } else { CHROME_H },
+            ),
+        )
+        .map_err(|e| format!("chrome bar webview: {e}"))?;
+    // GTK ignores the geometry above (see layout_children), so pin the bar's
+    // height in the box itself — otherwise the box splits the window evenly
+    // between the bar and the page.
+    #[cfg(target_os = "linux")]
+    if !chrome_overlaps_page() {
+        let _ = _chrome_webview.with_webview(linux_pin_chrome_bar);
+    }
 
     // First tab. Further tabs come from the chrome bar's "+" (tabnew event).
     let first = NEXT_TAB.fetch_add(1, Ordering::SeqCst);

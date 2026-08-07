@@ -190,6 +190,23 @@ fn next_active_after_close(order: &[u64], closed: u64, active: u64) -> Option<u6
         .or_else(|| idx.checked_sub(1).and_then(|i| order.get(i).copied()))
 }
 
+/// Move `id` to position `to` in the strip order (chrome-bar drag-reorder).
+/// Pure so the rule is testable without a window. Out-of-range indices clamp to
+/// the ends rather than dropping the gesture: a pill dragged past the last one
+/// belongs at the end. Returns whether the order actually changed.
+fn move_tab_order(order: &mut Vec<u64>, id: u64, to: usize) -> bool {
+    let Some(from) = order.iter().position(|t| *t == id) else {
+        return false;
+    };
+    let to = to.min(order.len().saturating_sub(1));
+    if from == to {
+        return false;
+    }
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    true
+}
+
 /// The app's chrome colour (resolved `--bg-header`), pushed by the UI via
 /// `browser_set_chrome` on boot and on every accent change. The agent-browser
 /// window paints its NATIVE title bar / border with it so the popup reads as
@@ -2079,6 +2096,26 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
                 std::thread::spawn(move || close_tab(&app, id));
             }
         }
+        // Drag-reorder from the chrome strip: "<tab id>:<new index>". Only the
+        // order changes — no webview is created, moved or destroyed — so this
+        // runs inline instead of on a worker thread.
+        "tabmove" => {
+            let mut parts = data.split(':');
+            let id = parts.next().and_then(|s| s.trim().parse::<u64>().ok());
+            let to = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+            if let (Some(id), Some(to)) = (id, to) {
+                let changed = {
+                    let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+                    guard
+                        .as_mut()
+                        .map(|tabs| move_tab_order(&mut tabs.order, id, to))
+                        .unwrap_or(false)
+                };
+                if changed {
+                    sync_tabs(app);
+                }
+            }
+        }
         "tabreopen" => {
             let app = app.clone();
             std::thread::spawn(move || {
@@ -2699,7 +2736,16 @@ fn build_framed(
     // an event envelope. We intercept and cancel it before any document load;
     // no IPC grant to this webview is needed.
     let chrome_navigation_app = app.clone();
-    let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
+    // `overlay` tells the bar whether it spans the whole window. Only then do
+    // its edge grips sit on the window's real edges; where the bar is TILED
+    // (Linux) its bottom is the middle of the window, so a "south" grip there
+    // would resize from the wrong edge — that shape uses the GTK resize edge
+    // (linux_expose_resize_edges) instead.
+    let chrome_url = format!(
+        "browser-chrome.html?overlay={}",
+        if chrome_overlaps_page() { "1" } else { "0" }
+    );
+    let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App(chrome_url.into()))
         .background_color(OWLLM_BG)
         .on_navigation(move |url| {
             let Some((action, data)) = parse_chrome_navigation(url) else {
@@ -4617,6 +4663,21 @@ mod tests {
         assert_eq!(next_active_after_close(&[1, 2, 3], 1, 3), Some(3));
         // Closing the last tab → None (the window closes with it).
         assert_eq!(next_active_after_close(&[7], 7, 7), None);
+    }
+
+    #[test]
+    fn tab_drag_reorders_the_strip() {
+        let mut order = vec![1, 2, 3, 4];
+        assert!(move_tab_order(&mut order, 4, 0));
+        assert_eq!(order, vec![4, 1, 2, 3]);
+        // Dropping past the last pill lands at the end, never dropped.
+        assert!(move_tab_order(&mut order, 4, 99));
+        assert_eq!(order, vec![1, 2, 3, 4]);
+        // A drop back onto its own slot, or an id that is no longer open, is
+        // not a change — the strip must not be re-pushed for nothing.
+        assert!(!move_tab_order(&mut order, 2, 1));
+        assert!(!move_tab_order(&mut order, 77, 0));
+        assert_eq!(order, vec![1, 2, 3, 4]);
     }
 
     #[test]

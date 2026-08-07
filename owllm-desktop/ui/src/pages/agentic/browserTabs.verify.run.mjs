@@ -157,6 +157,46 @@ check(/paintMark\(mark,\s*t\.url/.test(chromeHtml),
 // strip sideways under the user's cursor between clicks.
 check(/#site\s*\{[^}]*width:\s*\d+px/.test(chromeHtml),
   "the identity block is fixed width so the strip never reflows");
+// --- chrome bar space + reachability (user report 2026-08-07) -------------
+// The app name used to be ONE long line, and together with a 250px identity
+// block it pushed the open page and the whole strip off to the right.
+check(/#ttl\s*\{[^}]*white-space:\s*normal/.test(chromeHtml) &&
+      /#ttl\s*\{[^}]*width:\s*\d\dpx/.test(chromeHtml),
+  "the app name wraps to two short lines instead of one long one");
+const siteWidth = Number((chromeHtml.match(/#site\s*\{[^}]*width:\s*(\d+)px/) || [])[1]);
+check(siteWidth > 0 && siteWidth <= 170,
+  "the open page's identity block is narrow enough to leave the strip room");
+// A pill pushed past the right edge was CLIPPED, so its ✕ could never be
+// clicked. The strip scrolls instead, and the padding keeps that overhanging
+// ✕ inside the scroll box.
+check(/#tabs\s*\{[^}]*overflow-x:\s*auto/.test(chromeHtml) &&
+      !/#tabs\s*\{[^}]*overflow:\s*hidden/.test(chromeHtml) &&
+      /#tabs\s*\{[^}]*padding:/.test(chromeHtml),
+  "the tab strip scrolls rather than clipping tabs out of reach");
+check(/querySelector\("\.tab\.active"\)[\s\S]{0,200}scrollIntoView/.test(chromeHtml),
+  "the active tab is scrolled into view when it is selected from outside the strip");
+check(/addEventListener\("wheel"[\s\S]{0,220}scrollLeft/.test(chromeHtml),
+  "a wheel over the strip scrolls it sideways");
+// Drag-reorder. The click that follows a drop must NOT also select the tab.
+check(chromeHtml.includes("function makeReorderable(") &&
+      /makeReorderable\(pill, t\.id\)/.test(chromeHtml) &&
+      /evt\("tabmove", id \+ ":" \+ to\)/.test(chromeHtml),
+  "tab pills can be dragged sideways to reorder the strip");
+check(/if \(suppressClick\) \{ suppressClick = false; return; \}/.test(chromeHtml),
+  "the click ending a drag reorders without also selecting the dropped tab");
+check(/"tabmove"\s*=>/.test(browserRs) && browserRs.includes("fn move_tab_order("),
+  "Rust applies the dragged order to the live strip");
+check(/fn move_tab_order[\s\S]{0,600}to\.min\(order\.len\(\)\.saturating_sub\(1\)\)/.test(browserRs),
+  "a pill dropped past the last one lands at the end instead of being dropped");
+// Sites with no bundled brand mark must still show THEIR OWN logo: one
+// well-known path is not enough (many answer /favicon.ico with an HTML 404).
+const faviconPaths = (chromeHtml.match(/var FAVICON_PATHS = \[([\s\S]*?)\]/) || [])[1] || "";
+check((faviconPaths.match(/"\//g) || []).length >= 3 &&
+      faviconPaths.includes("/favicon.ico") && faviconPaths.includes("/apple-touch-icon.png"),
+  "the mark falls back through several first-party logo paths, not just favicon.ico");
+check(!/icons\.duckduckgo|google\.com\/s2\/favicons|favicone|besticon/.test(chromeHtml),
+  "logos are fetched from the site itself, never a third-party icon proxy");
+
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");

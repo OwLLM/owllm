@@ -50,6 +50,7 @@ for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
   check(chrome.includes(`data-dir="${dir}"`), `chrome bar exposes a "${dir}" resize grip`);
 }
 check(/\.grip\b/.test(chrome) && chrome.includes('evt("resize"'), "resize grips report the gesture to Rust");
+check(/browser-chrome\.html\?overlay=\{\}/.test(browser) && chrome.includes('searchParams.get("overlay") === "1"'), "grips are armed only where the bar spans the whole window, so a tiled bar never resizes from a mid-window edge");
 check(chrome.includes("cursor: ns-resize") && chrome.includes("cursor: ew-resize") && chrome.includes("cursor: nwse-resize") && chrome.includes("cursor: nesw-resize"), "resize grips show a resize cursor so the edge is discoverable");
 check(/"resize" => \{\s*if let Some\(direction\) = parse_resize_direction\(data\)\s*\{\s*let _ = win\.start_resize_dragging\(direction\)/.test(browser), "Rust turns a grip gesture into a native resize drag");
 check(/"nw" => D::NorthWest/.test(browser) && /"se" => D::SouthEast/.test(browser), "grip ids map onto the runtime's resize directions");

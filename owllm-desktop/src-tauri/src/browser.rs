@@ -2687,9 +2687,9 @@ fn build_window(
 }
 
 /// The app-styled browser: frameless Window + chrome-bar webview + page webview.
-/// Windows/macOS only — build_window() routes Linux to build_legacy() because
-/// stacked child webviews are broken on WebKitGTK/Jetson (see build_window).
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+/// Every platform uses this shape; build_legacy() is only the fallback when it
+/// fails to build. On Linux the bar is TILED above the page rather than stacked
+/// over it, because Tauri packs child webviews into a GtkBox (see build_window).
 fn build_framed(
     app: &tauri::AppHandle,
     url: tauri::Url,

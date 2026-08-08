@@ -56,6 +56,7 @@ import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, abortable, isAbortError, sleepAbortable, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
 import { chatRuntime } from "../../runtime/chatRuntime";
+import { notify } from "../../components/Toast";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
 import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
@@ -260,15 +261,15 @@ export default function ChatPage() {
   // cloud / CLI / API models receive them (vision); local models ignore them.
   // Same shared fileToImageAttachment + Attachment shape as the Code/agentic chats.
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
-  const [attachmentError, setAttachmentError] = useState("");
   const addComposerFiles = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       try {
         const attachment = await fileToChatAttachment(file);
         setChatAttachments((current) => [...current, attachment]);
-        setAttachmentError("");
       } catch (error) {
-        setAttachmentError(String((error as { message?: string })?.message ?? error));
+        // Surfaced as a toast — an attachment failure must never be silent,
+        // and must never grow the composer container.
+        notify(String((error as { message?: string })?.message ?? error), "error");
       }
     }
   };
@@ -1750,7 +1751,6 @@ Tools run in: ${scratchDir}`}
             attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
             mentions={contextTokens}
             onMention={() => setDraft((d) => `${d}${d.endsWith(" ") || !d ? "" : " "}#file `)}
-            notice={attachmentError ? { kind: "error", text: attachmentError } : null}
             slashCommands={slashCommands.map((cmd) => ({ name: cmd.name, hint: cmd.desc, run: () => runSlashCommand(cmd) }))}
             modes={[{ key: "ask", label: "ask" }, { key: "edit", label: "edit" }, { key: "agent", label: "agent" }]}
             mode={chatMode}

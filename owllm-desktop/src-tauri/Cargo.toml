@@ -34,6 +34,10 @@ tauri-build = { version = "2", features = [] }
 # page webview (browser.rs). "Unstable" gates API stability, not runtime
 # stability — pin-checked by cargo against the tauri 2.11 line we build.
 tauri = { version = "2.11", features = ["macos-private-api", "unstable"] }
+# Already in the tree as tauri's own dependency — named directly only because
+# `Window::start_resize_dragging` takes `tauri_runtime::ResizeDirection` and
+# tauri does not re-export that type. Adds no new crate to the build.
+tauri-runtime = "2.11"
 # Shell auto-update — checks a signed endpoint, downloads delta, swaps
 # the binary on next launch. See data/modules/SCHEMA.md "update flow"
 # for how this complements per-module updates.

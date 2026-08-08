@@ -47,6 +47,8 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
+// Page notices go to the shared toast stack — never into the composer header.
+import { notify } from "../../components/Toast";
 import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
 import { projectsRootGet, projectPathUnder, projectFolderSlug } from "./projectsRoot";
 import { openSyncOnboarding } from "../core/AccountSyncModal";
@@ -128,7 +130,6 @@ type CodeState = {
   modelId: string;
   draft: string;
   busy: boolean;
-  status: string;
   /// Portable project identity + origin label. The absolute workspace remains
   /// local to this device and is denied from vault sync.
   projectId?: string;
@@ -178,7 +179,6 @@ type CodeState = {
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
-  status: "Pick a folder and a local model, then describe what to build or fix.",
   secondaryOpen: true,
   projectRailOpen: true,
   utilityPanelOpen: true,
@@ -192,13 +192,11 @@ function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
     m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
       ? { ...m, kind: "meta" as const }
       : m);
-  // Publisher results used to be persisted in the composer status. Clear the
-  // exact stale sync-success message during hydration now that PublisherCards
-  // owns it in the left Git container.
-  const status = s.status === "✓ Up to date. Local and origin/main are already the same commit."
-    ? (s.workspace ? `Coding in ${s.workspace}` : DEFAULT_CODE_STATE.status)
-    : s.status;
-  return { ...s, status, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
+  // Page notices are no longer persisted at all — they are transient toasts
+  // (components/Toast.tsx). Drop the field a pre-toast session saved so a
+  // months-old notice can never be resurrected.
+  const { status: _retired, ...rest } = s as CodeState & { status?: string };
+  return { ...rest, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
 }
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
@@ -841,7 +839,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // modal, same store the project/team memory uses — only the scope differs.
   const openChatMemory = (): void => {
     const scope = chatMemoryScope(chatId);
-    if (!scope) { setStatus("Send a message first — the conversation's memory starts with it."); return; }
+    if (!scope) { notify("Send a message first — the conversation's memory starts with it."); return; }
     window.dispatchEvent(new CustomEvent("owllm:open-code-memory", { detail: { projectId: scope } }));
   };
 
@@ -850,7 +848,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const addChatFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
       try { const a = await fileToChatAttachment(f); setChatAttachments((x) => [...x, a]); }
-      catch (e: any) { setStatus(String(e?.message ?? e)); }
+      catch (e: any) { notify(String(e?.message ?? e)); }
     }
   };
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
@@ -919,7 +917,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // True on Windows, where the WSL-specific toolchain probe + installer apply.
   const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
-  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
+  const { messages, tasks, workspace, modelId, draft, busy, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
   const chatMode: boolean = stx.chatMode ?? false;
   // New coding pages show both agent panes initially. Once the user explicitly
@@ -1157,7 +1155,6 @@ function CodeWorkspace({ pageId, onTitle }: {
       return { ...cur, busy: false, runEndedAt: live ? Date.now() : cur.runEndedAt };
     });
   };
-  const setStatus = (v: string) => setField("status", v);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
   const setChatMode = (v: boolean) => setField("chatMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
@@ -1190,7 +1187,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           // old `cur || first local/tuned` made a fresh page look configured
           // while running weights the user never chose.
         })
-        .catch((e) => setStatus(`Couldn't load models: ${e}`));
+        .catch((e) => notify(`Couldn't load models: ${e}`));
       invoke<AccountsStatusLite>("accounts_status")
         .then((s) => { if (!dead) setAccountsStatus(s); })
         .catch(() => { /* leave null */ });
@@ -1316,8 +1313,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       pageRename: keepRename,
       busy: false,
       preparing: true,
-      status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
+    notify(`⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`);
     setRecents(rememberCodeProject(dir));
     const t0 = Date.now();
     let outcome: WtCreate;
@@ -1338,27 +1335,27 @@ function CodeWorkspace({ pageId, onTitle }: {
         ...((p as CodeState) ?? DEFAULT_CODE_STATE),
         workspace: outcome.path, projectRoot: dir, branch: outcome.branch, baseSha: outcome.baseSha,
         isolated: true, preparing: false,
-        status: `On branch ${outcome.branch} — a private copy (ready in ${secs}s). Your edits stay in this page until you Merge to ${name}.`,
       }));
+      notify(`On branch ${outcome.branch} — a private copy (ready in ${secs}s). Your edits stay in this page until you Merge to ${name}.`);
     } else if (outcome.status === "notAGitRepo") {
       chatRuntime.setPayload(SID, (p) => ({
         ...((p as CodeState) ?? DEFAULT_CODE_STATE),
         workspace: dir, projectRoot: undefined, branch: undefined, baseSha: undefined,
         isolated: false, preparing: false,
-        status: `Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`,
       }));
+      notify(`Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`);
     } else if (outcome.status === "dirtyWorkingTree") {
       chatRuntime.setPayload(SID, (p) => ({
         ...((p as CodeState) ?? base),
         preparing: false,
-        status: `"${name}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`,
       }));
+      notify(`"${name}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`, "error");
     } else {
       chatRuntime.setPayload(SID, (p) => ({
         ...((p as CodeState) ?? base),
         preparing: false,
-        status: `Couldn't create the worktree: ${outcome.message}`,
       }));
+      notify(`Couldn't create the worktree: ${outcome.message}`, "error");
     }
   };
 
@@ -1380,7 +1377,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       const dir = await open({ directory: true, multiple: false, title: translateUiText("Pick a project folder") });
       if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
-      setStatus(`Folder picker failed: ${e}`);
+      notify(`Folder picker failed: ${e}`);
     }
   };
 
@@ -1504,11 +1501,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   // Install WSL itself (elevated; needs reboot) for PCs without it.
   const installWsl = async () => {
     try {
-      setStatus("Launching WSL install — accept the UAC prompt, then reboot…");
+      notify("Launching WSL install — accept the UAC prompt, then reboot…");
       const msg = await wslInstall();
-      setStatus(msg);
+      notify(msg);
     } catch (e) {
-      setStatus(`Couldn't launch WSL install: ${e}`);
+      notify(`Couldn't launch WSL install: ${e}`);
     }
   };
 
@@ -1518,7 +1515,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (provisionLog === "running") return;
     const eng = sbox ? engineLabel(sbox.kind) : "the sandbox";
     setProvisionLog("running");
-    setStatus(`Installing agent tools in ${eng} (node, uv, git, CLIs)… this can take a few minutes.`);
+    notify(`Installing agent tools in ${eng} (node, uv, git, CLIs)… this can take a few minutes.`);
     try {
       const log = await sandboxProvision();
       setProvisionLog("done");
@@ -1527,24 +1524,24 @@ function CodeWorkspace({ pageId, onTitle }: {
       // the sandbox without a separate login (best-effort, WSL only for now).
       try {
         const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
-        setStatus(r.synced.length
+        notify(r.synced.length
           ? `Agent tools installed; synced logins: ${r.synced.join(", ")}.`
           : r.found_on_host.length
             ? `Agent tools installed. Found ${r.found_on_host.join(", ")} on Windows but couldn't copy into the sandbox — click 'Sync logins' to retry.`
             : (log && !isWsl ? log : "Agent tools installed. Log in via Accounts, then click 'Sync logins'."));
       } catch {
-        setStatus(log && !isWsl ? log : `Agent tools installed in ${eng}.`);
+        notify(log && !isWsl ? log : `Agent tools installed in ${eng}.`);
       }
     } catch (e) {
       setProvisionLog("");
-      setStatus(`Tool install failed: ${e}`);
+      notify(`Tool install failed: ${e}`);
     }
   };
 
   // Mirror host CLI logins (codex/claude/gemini) into the sandbox so isolated
   // cloud agents are authenticated — no separate in-WSL login needed.
   const syncLogins = async () => {
-    setStatus("Mirroring your Windows logins into the sandbox…");
+    notify("Mirroring your Windows logins into the sandbox…");
     try {
       const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
       // Per-credential report (P1-2): every provider's mirror status + why,
@@ -1555,9 +1552,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         : r.found_on_host.length
           ? `⚠ Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox.`
           : "Nothing to sync — no CLI is logged in and no API keys are saved on this PC's Windows side (Accounts → Connect).";
-      setStatus(lines.length ? `${summary}\n${lines.join("\n")}` : summary);
+      notify(lines.length ? `${summary}\n${lines.join("\n")}` : summary);
     } catch (e) {
-      setStatus(`Login sync failed: ${e}`);
+      notify(`Login sync failed: ${e}`);
     }
   };
 
@@ -1574,13 +1571,13 @@ function CodeWorkspace({ pageId, onTitle }: {
     );
     if (!ok) return;
     setConvertBusy(true);
-    setStatus(toIso ? "Copying into the sandbox…" : "Copying out of the sandbox…");
+    notify(toIso ? "Copying into the sandbox…" : "Copying out of the sandbox…");
     try {
       const p = await sandboxConvertProject(workspace);
-      setStatus(`Converted — opened ${p.name}.`);
+      notify(`Converted — opened ${p.name}.`);
       openWorkspace(p.path);
     } catch (e) {
-      setStatus(`Convert failed: ${e}`);
+      notify(`Convert failed: ${e}`);
     } finally {
       setConvertBusy(false);
     }
@@ -1593,7 +1590,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       refreshWslProjects(iso, wslStat);
       refreshSboxProjects(iso, sbox);
     } catch (e) {
-      setStatus(`Couldn't change isolation: ${e}`);
+      notify(`Couldn't change isolation: ${e}`);
     }
   };
 
@@ -1858,9 +1855,9 @@ function CodeWorkspace({ pageId, onTitle }: {
             name: npName.trim() || null,
             private: true,
           });
-          setStatus("");
+          // Success is deliberately silent — the Publisher card shows the repo.
         } catch (e) {
-          setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
+          notify(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`, "error");
         }
       }
       if (createdPath) await ensureCatalogProject(createdPath, npName.trim() || undefined);
@@ -1889,7 +1886,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     autoSyncedRef.current = true;
     sandboxSyncLogins(wslStat?.defaultDistro ?? null)
       .then((r) => {
-        if (r.synced.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${r.synced.join(", ")}.`);
+        if (r.synced.length) notify(`🔑 Synced cloud logins into the sandbox: ${r.synced.join(", ")}.`);
         // Refresh the dialog's status if it's open.
         sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => {});
       })
@@ -1907,7 +1904,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   async function ensureServer(id: string, signal?: AbortSignal): Promise<number | null> {
     const s = await invoke<ServerStatus>("server_status").catch(() => null);
     if (s && s.running && s.model_id === id && s.port) return s.port;
-    setStatus(`Starting ${id}…`);
+    notify(`Starting ${id}…`);
     // An abort propagates out as an AbortError rather than becoming a null
     // port: callers turn "no port" into a red "engine didn't come up" bubble,
     // which is a lie when the user simply pressed Stop. Their existing
@@ -2108,7 +2105,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openProjectMemory = async (): Promise<void> => {
     const scope = await resolveMemoryScope();
     if (!scope) {
-      setStatus("Open a project before viewing Project Memory.");
+      notify("Open a project before viewing Project Memory.");
       return;
     }
     window.dispatchEvent(new CustomEvent("owllm:open-code-memory", {
@@ -2280,7 +2277,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     // invisible when the user isn't watching the composer, and a silently
     // dropped task looks like "the agent ignored me".
     const blockSend = (why: string) => {
-      setStatus(why);
+      notify(why);
       if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
@@ -2323,7 +2320,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       // Workspace path now lives at the top of the PublishCards rail — no need
       // to echo it in the composer status line every turn.
-      setStatus("Coding…");
+      notify("Coding…");
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code", text || "(read the attached file)", reply);
       replyText = reply;
@@ -2466,10 +2463,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏸ Second agent is mid-turn — this message was not delivered. Wait or press Stop, then resend.", ts: Date.now() }]);
       return;
     }
-    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
+    if (!workspace) { notify(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) {
       setModelRequired({ where: "the second-agent pane", detail: "The second agent falls back to the 1st agent's model — neither is set." });
-      setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
+      notify("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
       return;
     }
     if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
@@ -2494,7 +2491,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     let aborted = false;
     let replyText = "";
     try {
-      setStatus("Second agent working…");
+      notify("Second agent working…");
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
@@ -2554,7 +2551,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         const attachment = await fileToChatAttachment(file);
         setAttachments((current) => [...current, attachment]);
       } catch (e: any) {
-        setStatus(String(e?.message ?? e));
+        notify(String(e?.message ?? e));
       }
     }
   };
@@ -2624,7 +2621,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       attachmentInputDataUi="CodeSecondaryAttachmentInput"
       mic
       showCounter
-      onNotice={setStatus}
+      onNotice={notify}
       sendTitle="Send to the second agent"
       stopTitle="Stop the second agent"
     />
@@ -2692,7 +2689,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if ((!text && attachments.length === 0) || chatBusy) return;
     if (!modelId) {
       setModelRequired({ where: "the Coder header", detail: "Chat mode uses the same model as the coder." });
-      setStatus("Pick a model in the Coder header first.");
+      notify("Pick a model in the Coder header first.");
       return;
     }
     setChatDraft("");
@@ -2772,7 +2769,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (plan[i].status === "done" || plan[i].status === "failed") continue;
       if (ctrl.signal.aborted) break;
       setTasks((ts) => ts.map((t) => (t.id === plan[i].id ? { ...t, status: "running" } : t)));
-      setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
+      notify(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
       setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
       try {
         const stepReply = await runTurn(
@@ -2790,7 +2787,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         break;
       }
     }
-    setStatus(ctrl.signal.aborted ? "Plan paused." : "Plan complete.");
+    notify(ctrl.signal.aborted ? "Plan paused." : "Plan complete.");
   };
 
   // Phase 3: plan the goal into task cards, then execute each step in turn,
@@ -2798,8 +2795,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   const planAndExecute = async () => {
     const goal = draft.trim();
     if (!goal || busy) return;
-    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
+    if (!workspace) { notify(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
     setDraft("");
     setBusy(true);
     setTasks([]);
@@ -2813,7 +2810,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     setRunPhase("planning");
     try {
       // 1) PLAN — ordered step list (silent; no tool execution / streaming).
-      setStatus("Planning…");
+      notify("Planning…");
       const planReply = await runTurn(PLAN_SYSTEM(workspace, goal), "Return the JSON array of steps now.", [], ctrl.signal, { silent: true });
       const steps = parseSteps(planReply);
       // Remove the planning placeholder now that real state exists.
@@ -2849,12 +2846,12 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   const resumePlan = async () => {
     if (busy || tasks.every((t) => t.status === "done" || t.status === "failed")) return;
-    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected — pick one in the Coder header."); return; }
+    if (!workspace) { notify("Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
     const marker = "📋 Plan & build: ";
     const savedGoal = [...messages].reverse().find((m) => m.role === "user" && m.content.startsWith(marker));
     const goal = (stx.planGoal || savedGoal?.content.slice(marker.length) || "").trim();
-    if (!goal) { setStatus("This older saved plan has no recoverable goal. Clear it and create a new plan."); return; }
+    if (!goal) { notify("This older saved plan has no recoverable goal. Clear it and create a new plan."); return; }
     const resumable = tasks.map((t) => t.status === "running" ? { ...t, status: "pending" as const } : t);
     setTasks(resumable);
     setPlanGoal(goal);
@@ -2892,7 +2889,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       // Clear = RUN STATE only (tasks, streaming drafts, run timestamps).
       // BOTH chat transcripts — primary and the second-agent pane — survive;
       // wiping conversations is "Clear history"'s explicitly-confirmed job.
-      return { ...cur, tasks: [], planGoal: undefined, draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+      return { ...cur, tasks: [], planGoal: undefined, draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined };
     });
   };
   // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
@@ -3724,7 +3721,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                     if (!workspace) return "no-workspace";
                     if (!modelId) {
                       setModelRequired({ where: "the Coder header", detail: "The release fix was not queued." });
-                      setStatus("No model selected — pick one in the Coder header.");
+                      notify("No model selected — pick one in the Coder header.");
                       return "no-model";
                     }
                     void sendRef.current?.(task);
@@ -4007,7 +4004,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
         minHeight={CODE_COMPOSER_MIN_HEIGHT}
         maxHeight={CODE_COMPOSER_MAX_HEIGHT}
-        status={status}
         modelPicker={renderCodeModelPicker("primary", modelId, setModelId, busy, SELECT_MODEL_LABEL)}
         headerExtra={renderTerminalButton("primary")}
         attachments={codeAttachments}
@@ -4017,7 +4013,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         attachmentInputDataUi="CodePrimaryAttachmentInput"
         mic
         showCounter
-        onNotice={setStatus}
+        onNotice={notify}
         /* One primary button — what it does follows the MODE segment, which is
            also mirrored by the right-hand side panel (same agentMode state). */
         modes={[

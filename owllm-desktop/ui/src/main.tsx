@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import AppShell from "./AppShell";
 import ErrorBoundary from "./ErrorBoundary";
 import UpdateController from "./UpdatePrompt";
+import { ToastHost } from "./components/Toast";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
@@ -108,6 +109,8 @@ async function boot() {
         </LocalizationProvider>
       </ErrorBoundary>
       <UpdateController />
+      {/* Every page's transient notices land here — outside any composer. */}
+      <ToastHost />
       <BootCover />
     </React.StrictMode>,
   );

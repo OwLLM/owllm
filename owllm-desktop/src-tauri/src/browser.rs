@@ -77,6 +77,18 @@ const CHROME_H: f64 = 96.0;
 /// The chrome webview paints it; page webviews leave this narrow edge exposed.
 const BROWSER_FRAME_T: f64 = 3.0;
 
+/// Width of the edge strip the user can grab to resize the window.
+///
+/// The window is undecorated on every OS, so nothing but this strip is left for
+/// the resize hit test — and a webview that covers it makes the window
+/// unresizable, which is exactly what happened on Linux (tao's own
+/// `connect_button_press_event` edge handler never fired because the
+/// WebKitWebView consumed every press) and on the Windows top edge. tao uses a
+/// 5px border for its Linux hit test, so the exposed strip must be at least
+/// that wide to be reachable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const RESIZE_EDGE: i32 = 5;
+
 /// True when the chrome-bar webview spans the whole window and the page webview
 /// is stacked on top of it (Windows/macOS), so browser-chrome.html can paint the
 /// accent frame around the page. WebKitGTK mislays stacked child webviews, so on
@@ -178,6 +190,23 @@ fn next_active_after_close(order: &[u64], closed: u64, active: u64) -> Option<u6
         .or_else(|| idx.checked_sub(1).and_then(|i| order.get(i).copied()))
 }
 
+/// Move `id` to position `to` in the strip order (chrome-bar drag-reorder).
+/// Pure so the rule is testable without a window. Out-of-range indices clamp to
+/// the ends rather than dropping the gesture: a pill dragged past the last one
+/// belongs at the end. Returns whether the order actually changed.
+fn move_tab_order(order: &mut Vec<u64>, id: u64, to: usize) -> bool {
+    let Some(from) = order.iter().position(|t| *t == id) else {
+        return false;
+    };
+    let to = to.min(order.len().saturating_sub(1));
+    if from == to {
+        return false;
+    }
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    true
+}
+
 /// The app's chrome colour (resolved `--bg-header`), pushed by the UI via
 /// `browser_set_chrome` on boot and on every accent change. The agent-browser
 /// window paints its NATIVE title bar / border with it so the popup reads as
@@ -227,8 +256,77 @@ fn apply_chrome(win: &Window) {
     let _ = set(DWMWA_TEXT_COLOR, &white);
 }
 
-#[cfg(not(windows))]
+/// Linux analog: the exposed resize edge (see `linux_expose_resize_edges`) is
+/// the GTK window's own background showing through, so paint it in the same
+/// chrome colour the bar uses — otherwise the ring reads as a stray grey
+/// border from the system theme instead of OwLLM's accent edge.
+#[cfg(target_os = "linux")]
+fn apply_chrome(win: &Window) {
+    use gtk::prelude::*;
+    let (r, g, b) = CHROME_BG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .unwrap_or((OWLLM_BG.0, OWLLM_BG.1, OWLLM_BG.2));
+    let Ok(gtk_win) = win.gtk_window() else { return };
+    let css = gtk::CssProvider::new();
+    if css
+        .load_from_data(format!("window {{ background-color: rgb({r},{g},{b}); }}").as_bytes())
+        .is_err()
+    {
+        return;
+    }
+    // Per-widget, NOT add_provider_for_screen: a screen-wide provider would
+    // repaint the main app window too.
+    gtk_win
+        .style_context()
+        .add_provider(&css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn apply_chrome(_win: &Window) {}
+
+/// macOS: keep the undecorated window natively resizable.
+///
+/// tao maps `decorations(false)` to an NSWindow styleMask of
+/// `Borderless | Resizable`, and AppKit only installs frame-view resize
+/// tracking for a TITLED window — a borderless one ignores edge drags. There is
+/// no software fallback either: tao's `drag_resize_window` returns
+/// `NotSupported` on macOS, so `start_resize_dragging` (what the chrome bar's
+/// edge strips use on Windows) does nothing here. Re-add
+/// `Titled | FullSizeContentView` and hide every titlebar element instead: the
+/// window still looks frameless — our chrome bar is the bar — but AppKit
+/// resizes it like any other window.
+#[cfg(target_os = "macos")]
+fn mac_enable_native_resize(win: &Window) {
+    use objc2::runtime::AnyObject;
+    const TITLED: usize = 1 << 0;
+    const RESIZABLE: usize = 1 << 3;
+    const FULL_SIZE_CONTENT_VIEW: usize = 1 << 15;
+    /// `NSWindowTitleVisibility::Hidden`.
+    const TITLE_HIDDEN: isize = 1;
+    let Ok(ptr) = win.ns_window() else { return };
+    if ptr.is_null() {
+        return;
+    }
+    let ns_window = ptr as *mut AnyObject;
+    unsafe {
+        let mask: usize = objc2::msg_send![ns_window, styleMask];
+        let _: () = objc2::msg_send![
+            ns_window,
+            setStyleMask: mask | TITLED | RESIZABLE | FULL_SIZE_CONTENT_VIEW
+        ];
+        let _: () = objc2::msg_send![ns_window, setTitlebarAppearsTransparent: true];
+        let _: () = objc2::msg_send![ns_window, setTitleVisibility: TITLE_HIDDEN];
+        // Our chrome bar carries its own ─ ▢ ✕, so the traffic lights the
+        // titled style brings back would be a SECOND set of window buttons.
+        for kind in 0usize..3 {
+            let button: *mut AnyObject = objc2::msg_send![ns_window, standardWindowButton: kind];
+            if !button.is_null() {
+                let _: () = objc2::msg_send![button, setHidden: true];
+            }
+        }
+    }
+}
 
 /// UI → backend: the resolved app chrome colour (`--bg-header`). Stored for
 /// every future agent-browser window build and applied live if one is open.
@@ -1055,6 +1153,26 @@ fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
     }
 }
 
+/// Make the undecorated window resizable on Linux by leaving its outer
+/// `RESIZE_EDGE` pixels uncovered.
+///
+/// tao ALREADY hit-tests the edges of an undecorated resizable window and calls
+/// `begin_resize_drag` (linux/event_loop.rs `connect_button_press_event`), but
+/// it listens on the GtkWindow — and Tauri packs every webview into that
+/// window's box edge to edge, so WebKitWebView swallowed the press and the
+/// handler never ran. Measured on THOR (Jetson, GTK 2.52): dragging the right
+/// edge of the window left it at exactly its old size. Insetting the box hands
+/// those pixels back to the toplevel, which is all tao needs.
+#[cfg(target_os = "linux")]
+fn linux_expose_resize_edges(win: &Window) {
+    use gtk::prelude::*;
+    let Ok(vbox) = win.default_vbox() else { return };
+    vbox.set_margin_start(RESIZE_EDGE);
+    vbox.set_margin_end(RESIZE_EDGE);
+    vbox.set_margin_top(RESIZE_EDGE);
+    vbox.set_margin_bottom(RESIZE_EDGE);
+}
+
 /// Give the chrome bar a fixed height inside the window's GTK box. Tauri packs
 /// every child webview into that box with expand=true, so without this the bar
 /// and the page each get half the window and set_size cannot correct it.
@@ -1877,6 +1995,24 @@ fn parse_chrome_navigation(url: &tauri::Url) -> Option<(String, String)> {
         .map(|value| (value, data))
 }
 
+/// Map a chrome-bar edge/corner id onto the runtime's resize direction. Unknown
+/// ids are dropped rather than guessed — a wrong direction would resize the
+/// window from the opposite side under the user's cursor.
+fn parse_resize_direction(data: &str) -> Option<tauri_runtime::ResizeDirection> {
+    use tauri_runtime::ResizeDirection as D;
+    Some(match data {
+        "n" => D::North,
+        "s" => D::South,
+        "e" => D::East,
+        "w" => D::West,
+        "ne" => D::NorthEast,
+        "nw" => D::NorthWest,
+        "se" => D::SouthEast,
+        "sw" => D::SouthWest,
+        _ => return None,
+    })
+}
+
 /// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
 /// by `browser_ui_worker`, never directly by a native WebView callback.
 fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
@@ -1884,6 +2020,17 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
     match action {
         "drag" => {
             let _ = win.start_dragging();
+        }
+        // Edge/corner strips of the chrome webview. The window is undecorated,
+        // so the only pixels an OS resize border could live in are the ones the
+        // page webview leaves exposed — and on Windows the OS only hit-tests
+        // some of them (measured: right/bottom resize, left/top return
+        // HTNOWHERE or sit under the webview's own HWND). Driving the resize
+        // ourselves makes all eight directions behave the same everywhere.
+        "resize" => {
+            if let Some(direction) = parse_resize_direction(data) {
+                let _ = win.start_resize_dragging(direction);
+            }
         }
         "minimize" => {
             let _ = win.minimize();
@@ -1947,6 +2094,26 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
             if let Ok(id) = data.trim().parse::<u64>() {
                 let app = app.clone();
                 std::thread::spawn(move || close_tab(&app, id));
+            }
+        }
+        // Drag-reorder from the chrome strip: "<tab id>:<new index>". Only the
+        // order changes — no webview is created, moved or destroyed — so this
+        // runs inline instead of on a worker thread.
+        "tabmove" => {
+            let mut parts = data.split(':');
+            let id = parts.next().and_then(|s| s.trim().parse::<u64>().ok());
+            let to = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+            if let (Some(id), Some(to)) = (id, to) {
+                let changed = {
+                    let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+                    guard
+                        .as_mut()
+                        .map(|tabs| move_tab_order(&mut tabs.order, id, to))
+                        .unwrap_or(false)
+                };
+                if changed {
+                    sync_tabs(app);
+                }
             }
         }
         "tabreopen" => {
@@ -2556,13 +2723,29 @@ fn build_framed(
     let win = builder
         .build()
         .map_err(|e| format!("browser window: {e}"))?;
+    // An undecorated window is resizable only where something still hit-tests
+    // its edges. Both of these run before the webviews exist so the very first
+    // frame is already resizable.
+    #[cfg(target_os = "macos")]
+    mac_enable_native_resize(&win);
+    #[cfg(target_os = "linux")]
+    linux_expose_resize_edges(&win);
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
     // buttons/drag/URL box/tab strip use a reserved same-origin navigation as
     // an event envelope. We intercept and cancel it before any document load;
     // no IPC grant to this webview is needed.
     let chrome_navigation_app = app.clone();
-    let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
+    // `overlay` tells the bar whether it spans the whole window. Only then do
+    // its edge grips sit on the window's real edges; where the bar is TILED
+    // (Linux) its bottom is the middle of the window, so a "south" grip there
+    // would resize from the wrong edge — that shape uses the GTK resize edge
+    // (linux_expose_resize_edges) instead.
+    let chrome_url = format!(
+        "browser-chrome.html?overlay={}",
+        if chrome_overlaps_page() { "1" } else { "0" }
+    );
+    let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App(chrome_url.into()))
         .background_color(OWLLM_BG)
         .on_navigation(move |url| {
             let Some((action, data)) = parse_chrome_navigation(url) else {
@@ -4480,6 +4663,21 @@ mod tests {
         assert_eq!(next_active_after_close(&[1, 2, 3], 1, 3), Some(3));
         // Closing the last tab → None (the window closes with it).
         assert_eq!(next_active_after_close(&[7], 7, 7), None);
+    }
+
+    #[test]
+    fn tab_drag_reorders_the_strip() {
+        let mut order = vec![1, 2, 3, 4];
+        assert!(move_tab_order(&mut order, 4, 0));
+        assert_eq!(order, vec![4, 1, 2, 3]);
+        // Dropping past the last pill lands at the end, never dropped.
+        assert!(move_tab_order(&mut order, 4, 99));
+        assert_eq!(order, vec![1, 2, 3, 4]);
+        // A drop back onto its own slot, or an id that is no longer open, is
+        // not a change — the strip must not be re-pushed for nothing.
+        assert!(!move_tab_order(&mut order, 2, 1));
+        assert!(!move_tab_order(&mut order, 77, 0));
+        assert_eq!(order, vec![1, 2, 3, 4]);
     }
 
     #[test]

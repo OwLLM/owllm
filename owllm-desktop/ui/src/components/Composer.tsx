@@ -6,7 +6,7 @@
 // Shape (the container the design review approved):
 //
 //   ┌ .owc ────────────────────────────────────────────────────────┐
-//   │ status · badge                        Model [picker ▾] [Term]│  header
+//   │ badge                                 Model [picker ▾] [Term]│  header
 //   ├──────────────────────────────────────────────────────────────┤
 //   │ [img][img] [📄 doc ×] [#file.ts]                             │  trays
 //   │ ┌ textarea ─────────────────────────────────────────┐  [🎤]  │  input
@@ -49,7 +49,10 @@ export type ComposerProps = {
   onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
 
   // ── header ────────────────────────────────────────────────────────
-  status?: React.ReactNode;
+  // NO status / notice slot, deliberately: notifications go to the shared
+  // toast surface (components/Toast.tsx). Prose here wraps to several lines,
+  // grows the container and shoves the model picker off screen. Pinned by
+  // composerNoNotifications.verify.run.mjs.
   badge?: React.ReactNode;
   modelPicker?: React.ReactNode;
   modelLabel?: string;
@@ -66,8 +69,6 @@ export type ComposerProps = {
   /** `#file.ts` style context mentions parsed out of the draft by the page. */
   mentions?: string[];
   onMention?: () => void;
-
-  notice?: { kind: "error" | "info"; text: string } | null;
 
   // ── action bar ────────────────────────────────────────────────────
   slashCommands?: ComposerSlashCommand[];
@@ -152,9 +153,9 @@ export default function Composer(props: ComposerProps) {
   const {
     dataUi, toolbarDataUi, value, onChange, onSend, onStop, busy = false, disabled = false,
     placeholder, textareaRef, rows = 1, minHeight = 40, maxHeight = 200, autosize = true, onKeyDown,
-    status, badge, modelPicker, modelLabel = "Model", headerExtra,
+    badge, modelPicker, modelLabel = "Model", headerExtra,
     attachments = [], onAttachFiles, onRemoveAttachment, attachmentAccept, attachmentInputDataUi,
-    mentions = [], onMention, notice,
+    mentions = [], onMention,
     slashCommands = [], modes, mode, onModeChange, toggles = [], barExtra, hint, showCounter = false,
     sendLabel = "Send", sendTitle, stopLabel = "Stop", stopTitle = "Stop generating", canSend,
     mic = false, onNotice,
@@ -213,9 +214,8 @@ export default function Composer(props: ComposerProps) {
       }}
       onDrop={(e) => { if (takeFiles(e.dataTransfer?.files)) e.preventDefault(); }}
     >
-      {(status || badge || modelPicker || headerExtra) && (
+      {(badge || modelPicker || headerExtra) && (
         <div className="owc__header" data-ui={toolbarDataUi}>
-          {status !== undefined && <div className="owc__status">{status}</div>}
           {badge}
           {modelPicker && (
             <>
@@ -245,12 +245,6 @@ export default function Composer(props: ComposerProps) {
       {mentions.length > 0 && (
         <div className="owc__tray owc__tray--mentions">
           {mentions.map((m) => <span key={m} className="owc__mention">{m}</span>)}
-        </div>
-      )}
-
-      {notice && (
-        <div className={`owc__notice owc__notice--${notice.kind}`} role={notice.kind === "error" ? "alert" : undefined}>
-          {notice.text}
         </div>
       )}
 

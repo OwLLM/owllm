@@ -4330,6 +4330,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tauri-runtime",
  "tempfile",
  "thiserror 1.0.69",
  "tiny_http",

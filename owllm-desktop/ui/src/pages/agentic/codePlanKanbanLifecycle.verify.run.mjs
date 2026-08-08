@@ -42,7 +42,7 @@ check("older saved boards recover their goal from the visible transcript",
 check("Clear removes both cards and their saved goal",
   code.includes("tasks: [], planGoal: undefined, draft:"));
 check("Plan mode with no model uses the shared rule-based model popup",
-  code.includes('if (!modelId) { setModelRequired({ where: "the Coder header" }); setStatus("No model selected'));
+  code.includes('if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected'));
 
 console.log(`\n${10 - failed}/10 checks passed`);
 process.exit(failed ? 1 : 0);

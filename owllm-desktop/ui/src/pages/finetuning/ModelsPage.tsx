@@ -25,6 +25,10 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import * as downloadStore from "./downloadStore";
 import { chip, INPUT, BUTTON, banner } from "../../theme/styles";
 
+// Browser mode (vite dev / TwinForge / the website's embedded demo) has no
+// Tauri IPC — mount-time invokes would surface a raw TypeError banner.
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 type SubTab = "browse" | "downloaded" | "tuned" | "cache";
 
 // Mirrors Rust HfModelHit in src-tauri/src/huggingface.rs.
@@ -728,9 +732,10 @@ export default function ModelsPage() {
     }
   }, [sortBy]);
 
-  // Load the curated recommendations on first browse mount.
+  // Load the curated recommendations on first browse mount. Skipped in
+  // browser mode — user-triggered searches still fail loudly there.
   React.useEffect(() => {
-    if (tab === "browse" && recommended.length === 0 && !loadingRecommended) {
+    if (isTauri && tab === "browse" && recommended.length === 0 && !loadingRecommended) {
       setLoadingRecommended(true);
       invoke<RecommendedModel[]>("models_recommended")
         .then((r) => setRecommended(r))

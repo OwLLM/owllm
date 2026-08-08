@@ -480,6 +480,9 @@ function groupChatsByDate(list: ChatThread[]): Array<{ label: string; items: Cha
   }
   return out.filter((g) => g.items.length > 0);
 }
+// Browser mode (vite dev / TwinForge / the website's embedded demo) has no
+// Tauri IPC — mount-time invokes would otherwise toast a raw TypeError.
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const CHAT_SIDEBAR_KEY = "owllm:code:chat-sidebar";
 /// Reading-column width for the chat transcript and composer. Full-bleed text
 /// on a wide window is hard to read and left the empty state adrift in a void.
@@ -1187,7 +1190,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           // old `cur || first local/tuned` made a fresh page look configured
           // while running weights the user never chose.
         })
-        .catch((e) => notify(`Couldn't load models: ${e}`));
+        .catch((e) => { if (isTauri) notify(`Couldn't load models: ${e}`); });
       invoke<AccountsStatusLite>("accounts_status")
         .then((s) => { if (!dead) setAccountsStatus(s); })
         .catch(() => { /* leave null */ });

@@ -1,71 +1,279 @@
 ---
+import { Image } from "astro:assets";
 import Layout from "../layouts/Layout.astro";
-import Card from "../components/Card.astro";
+import Button from "../components/Button.astro";
+// Real screenshots of the shipping interface (scripts/capture-app-shots.mjs).
+import appModels from "../assets/app/models.png";
+import appAgents from "../assets/app/agents.png";
+import appCode from "../assets/app/code.png";
+import appChat from "../assets/app/chat.png";
 
-const sections = [
+interface FeatureGroup {
+  id: string;
+  emoji: string;
+  title: string;
+  intro: string;
+  points: { title: string; body: string }[];
+  image?: ImageMetadata;
+  imageAlt?: string;
+}
+
+const groups: FeatureGroup[] = [
   {
-    title: "Split inference across machines",
-    description:
-      "Run the GPU model server on your Windows machine and the agents on a Linux box, WSL sandbox, or another PC. Agents talk to the model over a plain OpenAI-compatible HTTP API, so you get native CUDA speed plus real isolation.",
+    id: "models",
+    emoji: "📦",
+    title: "Models & inference",
+    intro:
+      "Local models are the default, cloud models are first-class peers, and nothing ever picks a model for you.",
+    image: appModels,
+    imageAlt: "The real OWLLM Models page with VRAM-fit color coding",
+    points: [
+      {
+        title: "Local serving that manages itself",
+        body: "llama.cpp (llama-server) starts on your first message, sizes its context window to your VRAM, and is shared across every OWLLM window and instance — one server, adopted by all.",
+      },
+      {
+        title: "VRAM-aware model browsing",
+        body: "Search all of HuggingFace or use curated recommendations. Every result is color-coded against your GPU: green fits inference + fine-tuning, amber is tight, red is search-only. Interrupted downloads resume from where they stopped via HTTP range requests.",
+      },
+      {
+        title: "Vision without ceremony",
+        body: "Vision-capable GGUF models just work — OWLLM auto-downloads the matching image projector (--mmproj) and wires it in.",
+      },
+      {
+        title: "Cloud models as peers",
+        body: "Anthropic, OpenAI, Gemini and Kimi via API keys, or subscription CLIs (Claude Code, Codex, Gemini, Kimi) — all in the same model picker as your local models, everywhere in the app.",
+      },
+      {
+        title: "No auto-picked models, ever",
+        body: "Until you explicitly choose, every picker reads “Select model” and Send/Generate/Run stays blocked. A run can never silently use — or bill — weights you never chose.",
+      },
+      {
+        title: "Native GGUF tool-calling",
+        body: "Tools go to the model as a native OpenAI tools array rendered through the model's own chat template, and come back as structured tool_calls. No XML protocols, no prompt hacks.",
+      },
+    ],
   },
   {
-    title: "True OS-level Linux sandbox",
-    description:
-      "Autonomous agents that edit files and run shell commands are powerful and risky. OwLLM runs tool execution inside a real Linux sandbox: WSL2 on Windows, Lima on macOS, and bubblewrap on Linux. Your real drive and home stay untouched.",
+    id: "agents",
+    emoji: "🤖",
+    title: "Agentic teams",
+    intro:
+      "One proven six-slot team, specialized by profiles — with verification, steering, memory, and rules built in.",
+    image: appAgents,
+    imageAlt: "The real OWLLM Agents page — the agentic creation launchpad",
+    points: [
+      {
+        title: "One standard team, many profiles",
+        body: "Every template — Dev Squad, Chief of Staff, Research — is a profile over the same roster: an orchestrator that plans, a read-only scout, two parallel workers, an advisory critic, and a producer that only delivers review-approved work. Solo mode collapses to one coder with critic and producer.",
+      },
+      {
+        title: "The Verification Gate",
+        body: "“Done” is never the model's opinion. A real command — your test suite, your build — must exit 0 before work counts as finished, with per-agent verify-fix loops.",
+      },
+      {
+        title: "Mid-run steering",
+        body: "Type while a run is going and your message queues as a ⚡ steer, injected at the next agent boundary — or between tool calls on local models. Never dropped.",
+      },
+      {
+        title: "Memory that stays useful",
+        body: "Per-agent episodic history plus shared team memory: durable, vault-synced FACTS and auto-captured WORKLOG, retrieved with scoped BM25-lite and framed as a current-task context pack. A post-run curator saves at most two novel facts, so memory never silently bloats.",
+      },
+      {
+        title: "Rules and skills per project",
+        body: "Must / prefer / avoid directives are auto-seeded with native best practices and injected into every agent's prompt. Skill packs auto-equip by role, and the goal text auto-selects the one or two most relevant skills before the first token.",
+      },
+      {
+        title: "Run Notebook",
+        body: "A per-project brainstorm pane with a NEXT-STEPS queue and a 🪄 digest agent that turns raw notes into implementable steps. Auto-feed walks the queue at each clean run end — and the notebook syncs across your machines.",
+      },
+    ],
   },
   {
-    title: "Native GGUF tool-calling",
-    description:
-      "Tool-calling uses the model's own chat template through llama-server with native tools arrays and structured tool_calls. No XML hacks, no dialect parsing. MCP servers auto-start with a master switch, per-tool toggles, and a schema-safety gate.",
+    id: "coding",
+    emoji: "💻",
+    title: "Coding",
+    intro:
+      "A private AI workspace per folder — multi-page, multi-branch, persistent.",
+    image: appCode,
+    imageAlt: "The real OWLLM Coding page — private AI workspace launchpad",
+    points: [
+      {
+        title: "Projects that come back",
+        body: "Each Coding page is its own chat, plan board, and private git worktree on its own branch — close OWLLM and everything returns when you reopen the project. Merge back from the header when ready.",
+      },
+      {
+        title: "Plan / Act phases with live diffs",
+        body: "Watch edits as diffs, open files in an editable viewer, paste images into the conversation, and optionally run a second agent pane with its own transcript and model.",
+      },
+      {
+        title: "Super User column",
+        body: "Project rules (shared with the team when the folder is a team project) and the Notebook with auto-feed sit beside the chat. Mid-run messages become steers.",
+      },
+    ],
   },
   {
-    title: "Cloud models as first-class peers",
-    description:
-      "Mix local and cloud models freely in one team. Add an API key for Anthropic, OpenAI, Gemini, DeepSeek, Groq, and more, or use subscription CLIs like Claude Code, Codex, and Gemini. Subscription agents stream their activity live instead of going dark.",
+    id: "safety",
+    emoji: "🛡️",
+    title: "Isolation & safety",
+    intro:
+      "Autonomous agents that edit files and run commands are powerful and risky — so the dangerous parts run in a real sandbox.",
+    points: [
+      {
+        title: "OS-level Linux sandbox",
+        body: "Tool execution runs inside bubblewrap in WSL2 on Windows, Lima on macOS, and bwrap on Linux. Agents see only the project folder — the real folder, no copy. Cloud CLIs run inside too, with logins mirrored in automatically.",
+      },
+      {
+        title: "Graduated trust",
+        body: "Sandbox is the default; full host access is a deliberate per-project opt-out, never a silent upgrade.",
+      },
+      {
+        title: "Split across machines",
+        body: "The model server and the agents don't have to share a machine: run llama-server where your GPU is and let agents call it over an OpenAI-compatible HTTP API from a Linux box or sandbox.",
+      },
+      {
+        title: "Zero embedded secrets",
+        body: "Installers and releases ship with no credentials. API keys and logins live only in your local, encrypted vault.",
+      },
+    ],
   },
   {
-    title: "Memory that stays useful",
-    description:
-      "Agentic teams keep per-agent episodic history and shared project memory for facts, decisions, and worklog. Retrieval is scoped to the current project and framed as a current-task context pack, so old work is reference material instead of stale context.",
+    id: "finetuning",
+    emoji: "🎯",
+    title: "Fine-tuning & model surgery",
+    intro:
+      "From documents to a custom model, on your own GPU.",
+    image: appChat,
+    imageAlt: "The real OWLLM Chat page — test your models where you tuned them",
+    points: [
+      {
+        title: "Dataset Builder",
+        body: "Turn PDFs, DOCX files, and web pages into instruction/output training pairs, review them, and export — no notebook required.",
+      },
+      {
+        title: "LoRA training with a live loss curve",
+        body: "The Python training environment installs itself on demand (it's only needed for Train). Watch the loss curve live, then export to GGUF — your custom model appears in the same picker as everything else.",
+      },
+      {
+        title: "Chat, right there",
+        body: "The Chat tab shares the same model picker and server, so the loop is Models → Dataset → Train → Chat, left to right.",
+      },
+    ],
   },
   {
-    title: "Code page with per-project persistence",
-    description:
-      "Your local model codes directly in a folder with a conversation, plan, and model that come back when you reopen the project. Open it isolated in WSL or as a plain folder — your choice, per project.",
+    id: "connect",
+    emoji: "🌐",
+    title: "Bridges, devices & MCP",
+    intro:
+      "Drive your workstation from anywhere, extend it with tools, and pair your other machines.",
+    points: [
+      {
+        title: "Messaging bridges",
+        body: "Text your own computer from WhatsApp or Telegram and the message becomes an agent-team run, with results streaming back into the chat.",
+      },
+      {
+        title: "Remote devices, no SSH",
+        body: "Pair your machines over an end-to-end encrypted channel (Ed25519-signed, X25519-sealed). Run commands, see screens, or let your laptop borrow the gaming PC's GPU.",
+      },
+      {
+        title: "MCP with a safety gate",
+        body: "MCP servers auto-start with a master switch, per-tool toggles, and a schema-safety gate — agents get exactly the tools you approve, no more.",
+      },
+      {
+        title: "In-app agent browser",
+        body: "A real browser agents can drive — open pages, read them, click and fill — with role-gated access and an approval boundary for consequential actions like sending or deleting.",
+      },
+    ],
   },
   {
-    title: "Signed auto-updater",
-    description:
-      "Updates ship with a branded, plain-language changelog and a signed installer path so you always know what changed and that it came from us.",
+    id: "platform",
+    emoji: "⚙️",
+    title: "Platform & updates",
+    intro:
+      "Cross-platform by commitment, honest about hardware, and updatable without waiting for an installer.",
+    points: [
+      {
+        title: "Windows, Linux, macOS — and ARM",
+        body: "Per-platform engine variants: CUDA/Vulkan/CPU on Windows x64, Vulkan/CPU on Linux x64, CUDA on Jetson-class Linux ARM64, Metal on Apple Silicon (one universal bundle). Unsupported combos degrade honestly instead of offering a foreign binary.",
+      },
+      {
+        title: "Signed auto-updates",
+        body: "Updates ship with a branded, plain-language changelog over a signed installer path, so you always know what changed and that it came from us.",
+      },
+      {
+        title: "Marketplace",
+        body: "Community team profiles, skill packs, and MCP connector packs install straight into the app. Browse without an account; only reviewed listings are published.",
+      },
+    ],
   },
 ];
 ---
 
 <Layout
   title="Features"
-  description="Explore OwLLM features: split inference, Linux sandbox, native GGUF tool-calling, cloud peers, memory, Code page, and signed updates."
+  description="The full OWLLM feature map: local models with VRAM-aware browsing, agentic teams with a verification gate, sandboxed coding, fine-tuning, bridges, remote devices, and MCP."
 >
   <section class="page-header" aria-labelledby="features-title">
     <div class="container">
       <h1 id="features-title">Features</h1>
-      <p class="subtitle">Everything that makes OwLLM a local-first AI workstation.</p>
+      <p class="subtitle">
+        The full map of what OWLLM does — organized the way the app is: models, agents, coding,
+        safety, fine-tuning, connectivity, and platform. Every screenshot is the real interface.
+      </p>
+      <nav class="group-nav" aria-label="Feature groups">
+        {groups.map((g) => <a href={`#${g.id}`}>{g.emoji} {g.title}</a>)}
+      </nav>
     </div>
   </section>
 
-  <section class="section" aria-label="Feature list">
+  <section class="section" aria-label="Feature groups">
     <div class="container">
-      <div class="feature-list">
-        {
-          sections.map((section, index) => (
-            <Card as="article" class="feature-card">
-              <span class="feature-number" aria-hidden="true">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-              <h2>{section.title}</h2>
-              <p>{section.description}</p>
-            </Card>
-          ))
-        }
+      {
+        groups.map((group, index) => (
+          <article class="group" id={group.id}>
+            <header class="group-head">
+              <span class="group-num" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+              <div>
+                <h2>
+                  <span aria-hidden="true">{group.emoji}</span> {group.title}
+                </h2>
+                <p class="group-intro">{group.intro}</p>
+              </div>
+            </header>
+            {group.image && (
+              <Image
+                src={group.image}
+                alt={group.imageAlt || ""}
+                widths={[640, 1024, 1440]}
+                sizes="(max-width: 900px) 100vw, 900px"
+                loading="lazy"
+                decoding="async"
+                class="group-shot"
+              />
+            )}
+            <div class="point-grid">
+              {group.points.map((point) => (
+                <div class="point">
+                  <h3>{point.title}</h3>
+                  <p>{point.body}</p>
+                </div>
+              ))}
+            </div>
+          </article>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="section cta" aria-label="Try it">
+    <div class="container cta-inner">
+      <h2>See it before you install it</h2>
+      <p class="cta-lead">
+        The How-to-use guide embeds the real interface, clickable, in your browser.
+      </p>
+      <div class="cta-buttons">
+        <Button href="/how-to-use" size="lg">▶ Try the real app in your browser</Button>
+        <Button href="/download" variant="outline" size="lg">⬇ Download OwLLM</Button>
       </div>
     </div>
   </section>
@@ -73,7 +281,7 @@ const sections = [
 
 <style>
   .container {
-    max-width: 1200px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 0 1rem;
   }
@@ -92,29 +300,57 @@ const sections = [
   .subtitle {
     color: var(--fg-muted);
     font-size: 1.125rem;
-    max-width: 60ch;
+    max-width: 70ch;
     margin: 0 auto;
   }
 
-  .section {
-    padding: 3rem 0 5rem;
-  }
-
-  .feature-list {
+  .group-nav {
     display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+    margin-top: 1.5rem;
   }
 
-  .feature-card {
-    position: relative;
-    padding-left: 4.5rem;
+  .group-nav a {
+    border: 1px solid var(--border-strong);
+    background: var(--ghost-bg);
+    color: var(--ghost-fg);
+    border-radius: 999px;
+    padding: 0.35rem 0.85rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background 0.15s ease;
   }
 
-  .feature-number {
-    position: absolute;
-    left: 1.5rem;
-    top: 1.5rem;
+  .group-nav a:hover {
+    background: var(--ghost-hover-bg);
+    color: var(--ghost-hover-fg);
+  }
+
+  .section {
+    padding: 3rem 0 4rem;
+  }
+
+  .group {
+    padding: 2.5rem 0;
+    border-bottom: 1px solid var(--border);
+    scroll-margin-top: 5rem;
+  }
+
+  .group:last-of-type {
+    border-bottom: none;
+  }
+
+  .group-head {
+    display: flex;
+    gap: 1rem;
+    align-items: baseline;
+    margin-bottom: 1.25rem;
+  }
+
+  .group-num {
     font-size: 1.75rem;
     font-weight: 800;
     color: var(--accent);
@@ -122,25 +358,68 @@ const sections = [
     line-height: 1;
   }
 
-  .feature-card h2 {
-    margin-bottom: 0.5rem;
-    font-size: 1.35rem;
+  .group-head h2 {
+    font-size: 1.6rem;
+    margin: 0 0 0.35rem;
   }
 
-  .feature-card p {
+  .group-intro {
     color: var(--fg-muted);
     margin: 0;
+    max-width: 70ch;
   }
 
-  @media (max-width: 640px) {
-    .feature-card {
-      padding-left: 1.5rem;
-      padding-top: 3.5rem;
-    }
+  .group-shot {
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--border-accent);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    margin-bottom: 1.5rem;
+  }
 
-    .feature-number {
-      top: 1rem;
-      left: 1.5rem;
-    }
+  .point-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    gap: 1rem;
+  }
+
+  .point {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.1rem 1.25rem;
+  }
+
+  .point h3 {
+    font-size: 1.02rem;
+    margin: 0 0 0.4rem;
+  }
+
+  .point p {
+    color: var(--fg-muted);
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  .cta {
+    text-align: center;
+  }
+
+  .cta h2 {
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    margin-bottom: 0.5rem;
+  }
+
+  .cta-lead {
+    color: var(--fg-muted);
+    margin-bottom: 1.5rem;
+  }
+
+  .cta-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
   }
 </style>

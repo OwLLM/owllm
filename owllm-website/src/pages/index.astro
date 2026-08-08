@@ -4,12 +4,14 @@ import Layout from "../layouts/Layout.astro";
 import Button from "../components/Button.astro";
 import Card from "../components/Card.astro";
 import heroOwl from "../assets/hero-owl.png";
-import heroWorkstation from "../assets/hero-workstation.jpg";
 import featureAgents from "../assets/feature-agents.png";
-import teamCollaboration from "../assets/team-collaboration.jpg";
-import privacyLock from "../assets/privacy-lock.jpg";
-import dataDashboard from "../assets/data-dashboard.jpg";
-import developerWorkspace from "../assets/developer-workspace.jpg";
+// Real screenshots of the actual app UI, captured by
+// scripts/capture-app-shots.mjs — never stock imagery.
+import appHome from "../assets/app/home.png";
+import appModels from "../assets/app/models.png";
+import appChat from "../assets/app/chat.png";
+import appAgents from "../assets/app/agents.png";
+import appCode from "../assets/app/code.png";
 
 const features = [
   {
@@ -54,34 +56,36 @@ const features = [
   },
 ];
 
+// Every image below is a real screenshot of the shipping interface,
+// captured from the browser build by scripts/capture-app-shots.mjs.
 const demos = [
   {
-    title: "Split inference across machines",
+    title: "One launchpad for everything",
     description:
-      "The model server and agent runtime don't have to live on the same machine. Run llama-server where your GPU is, and let agents call it over a plain OpenAI-compatible HTTP API — so a lightweight Linux sandbox can host the agents while CUDA stays native on Windows.",
-    image: heroWorkstation,
-    alt: "Developer workstation showing code and terminal windows",
+      "The Home screen probes your GPU, VRAM, and software setup on startup, then puts every module one click away: local models and fine-tuning, the agentic team, and the experimental Gamify world. What your machine can run is visible before you commit to anything.",
+    image: appHome,
+    alt: "The real OWLLM Home page: module cards, System Status hardware probe, and Software Requirements checklist",
   },
   {
     title: "Agent teams with isolated workspaces",
     description:
-      "Each specialist in a team gets its own git worktree on a dedicated branch. They run in parallel, then merge back with conflict detection — safe rollback, no deadlocks.",
-    image: teamCollaboration,
-    alt: "Team of people collaborating around a laptop",
+      "Describe the outcome you want in plain language and a standard six-slot team goes to work — orchestrator, scout, two parallel workers, critic, and producer. Each specialist works in its own git worktree on a dedicated branch, then merges back with conflict detection.",
+    image: appAgents,
+    alt: "The real OWLLM Agents page: the agentic creation launchpad where you describe a goal and prepare a project",
   },
   {
-    title: "Memory that stays useful",
+    title: "Every model, sized against your GPU",
     description:
-      "Project-scoped facts and worklog live in durable SQLite storage. Retrieval is framed as a current-task context pack, so old work is reference material instead of stale context.",
-    image: dataDashboard,
-    alt: "Dashboard with charts and data visualizations",
+      "Search all of HuggingFace or pick from curated recommendations — every result is color-coded against your actual VRAM: green fits, amber is tight, red is search-only. Interrupted downloads resume where they stopped, and fine-tuned artifacts get their own Tuned tab.",
+    image: appModels,
+    alt: "The real OWLLM Models page: HuggingFace browser with VRAM-fit color coding and filter chips",
   },
   {
     title: "Code page with project persistence",
     description:
-      "Open any folder as a project and the model keeps coding across sessions — conversation, plan, and chosen model come back when you reopen it.",
-    image: developerWorkspace,
-    alt: "MacBook with code on screen on a busy desk",
+      "Open any folder as a project and the model keeps coding across sessions — conversation, plan, and chosen model come back when you reopen it. Tool execution runs inside a real Linux sandbox, so your host files stay untouched.",
+    image: appCode,
+    alt: "The real OWLLM Coding page: the private AI workspace launchpad with Build with Code, Just chat, and Agent team options",
   },
 ];
 
@@ -134,18 +138,13 @@ const socialProof = [
   description="A local-first AI workstation: run LLMs on your own hardware, orchestrate multi-agent teams, and keep the dangerous parts sandboxed."
 >
   <section class="hero" aria-labelledby="hero-heading">
+    {/* App-native backdrop: the same light-grid + aurora-orb treatment the
+        app draws on its creation launchpads (owllm-desktop styles.css),
+        rebuilt here in CSS — no stock photography anywhere on this site. */}
     <div class="hero-background" aria-hidden="true">
-      <Image
-        src={heroWorkstation}
-        alt=""
-        widths={[640, 1280, 1920]}
-        sizes="100vw"
-        loading="eager"
-        decoding="async"
-        priority
-        class="hero-bg-image"
-      />
-      <div class="hero-overlay"></div>
+      <div class="hero-grid"></div>
+      <div class="hero-orb hero-orb--one"></div>
+      <div class="hero-orb hero-orb--two"></div>
     </div>
     <div class="hero-content container">
       <div class="hero-text">
@@ -257,11 +256,11 @@ const socialProof = [
       <div class="explore-grid">
         <article class="explore-card">
           <span class="explore-emoji" aria-hidden="true">🖱️</span>
-          <h3>Click through the app — right in your browser</h3>
+          <h3>Click through the real app — right in your browser</h3>
           <p>
-            The How-to-use guide embeds a live, clickable mock of OwLLM: every module, every tab,
-            with plain-language captions for each screen. Seven steps take you from install to
-            your first agent team.
+            The How-to-use guide embeds the actual OwLLM interface — the same React application
+            that ships in the desktop app, running in your browser. Every module, every tab, every
+            dialog, plus a step-by-step guide from install to your first agent team.
           </p>
           <Button href="/how-to-use" variant="outline">▶ Take the interactive tour</Button>
         </article>
@@ -336,8 +335,8 @@ const socialProof = [
       </div>
       <div class="privacy-media">
         <Image
-          src={privacyLock}
-          alt="Smartphone and laptop on a desk representing device-local privacy"
+          src={appChat}
+          alt="The real OWLLM Chat page — conversations run against your own model server and never leave your machine"
           widths={[400, 800, 1200]}
           sizes="(max-width: 768px) 100vw, 50vw"
           loading="lazy"
@@ -385,21 +384,45 @@ const socialProof = [
     z-index: 0;
   }
 
-  .hero-bg-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+  /* Same visual grammar as the app's creation launchpads: accent-tinted
+     light grid fading downward, plus two blurred aurora orbs. */
+  .hero-background {
+    background:
+      radial-gradient(circle at 50% -14%, rgba(var(--accent-rgb), 0.32), transparent 47%),
+      linear-gradient(145deg, color-mix(in srgb, var(--bg-panel) 82%, var(--accent) 18%), var(--bg) 72%);
   }
 
-  .hero-overlay {
+  .hero-grid {
     position: absolute;
     inset: 0;
-    background: linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--bg) 92%, transparent) 0%,
-      color-mix(in srgb, var(--bg) 75%, transparent) 50%,
-      color-mix(in srgb, var(--bg) 60%, transparent) 100%
-    );
+    opacity: 0.22;
+    background-image:
+      linear-gradient(rgba(var(--accent-rgb), 0.23) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(var(--accent-rgb), 0.23) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.8), transparent 82%);
+  }
+
+  .hero-orb {
+    position: absolute;
+    width: 420px;
+    height: 420px;
+    border-radius: 50%;
+    filter: blur(80px);
+    pointer-events: none;
+    opacity: 0.28;
+  }
+
+  .hero-orb--one {
+    top: -260px;
+    left: -100px;
+    background: var(--accent);
+  }
+
+  .hero-orb--two {
+    right: -220px;
+    bottom: -270px;
+    background: color-mix(in srgb, var(--accent) 50%, #9878ff);
   }
 
   .hero-content {

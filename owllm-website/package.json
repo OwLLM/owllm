@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "predev": "npm run sync:release",
-    "prebuild": "npm run sync:release",
+    "predev": "npm run sync:release && npm run build:demo",
+    "prebuild": "npm run sync:release && npm run build:demo",
     "build": "astro build",
+    "build:demo": "node scripts/build-app-demo.mjs",
+    "test:demo": "node scripts/probe-app-demo.mjs",
     "preview": "astro preview",
     "lint": "astro check",
     "format": "prettier --write .",

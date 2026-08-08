@@ -1,70 +1,200 @@
 ---
 import Layout from "../layouts/Layout.astro";
-import Card from "../components/Card.astro";
+import Button from "../components/Button.astro";
 
-const docs = [
+/*
+ * Documentation lives ON this page. Deep-dive .md files exist only in the
+ * private source repository — never link to them here (they 404 publicly).
+ * The public repo (github.com/OwLLM/owllm) hosts releases and issues.
+ */
+
+const quickstart = [
   {
-    title: "Getting Started",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/GETTING_STARTED.md",
-    description: "Download, install, and run your first model and agentic team.",
+    title: "Install",
+    body: "Download the installer for Windows, macOS, or Linux from the Download page and run it. There is no account and no sign-up: OWLLM is local-first. On first launch a wizard offers GitHub sign-in for cross-device sync and lets you pick where projects live — you can skip all of it with “Set up later”.",
   },
   {
-    title: "Architecture",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/ARCHITECTURE.md",
-    description:
-      "Deep-dive into the split, safety tiers, native tool-calling, and runtime modules.",
+    title: "Get a model",
+    body: "Open 🛠 Fine Tuning → 📦 Models. Search HuggingFace or pick a curated recommendation — results are color-coded against your VRAM so you can't download something your GPU can't hold. Prefer cloud? Add an API key or sign in with a subscription CLI under Accounts instead.",
   },
   {
-    title: "Cross-Platform",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/CROSS_PLATFORM.md",
-    description: "Windows, Linux, and macOS support matrix plus sandbox engines.",
+    title: "Chat",
+    body: "Open 💬 Chat, choose your model in the picker, and type. The local server (llama.cpp) starts itself on your first message and sizes its context window to your VRAM.",
   },
   {
-    title: "Build Plan",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/BUILD_PLAN_FOR_FABLE5.md",
-    description: "Current roadmap and build milestones for the OwLLM stack.",
+    title: "Run an agent team",
+    body: "Open 🎭 Agentic Team, describe the outcome you want in plain language, and a six-slot team plans, executes in parallel, reviews, and only delivers work that passed the Verification Gate — a real command's exit code, never the model's opinion.",
+  },
+];
+
+const requirements = [
+  {
+    platform: "Windows (x64)",
+    detail: "CUDA, Vulkan, or CPU inference. The agent sandbox uses WSL2 — OWLLM guides the setup and falls back to host Python where WSL is unavailable.",
   },
   {
-    title: "Android OwLLM",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/ANDROID_OWLLM.md",
-    description: "Mobile companion architecture and constraints.",
+    platform: "Linux (x64)",
+    detail: "Vulkan or CPU inference; bubblewrap sandbox. Ships as an AppImage with signed auto-updates.",
   },
   {
-    title: "OwLLM Node",
-    href: "https://github.com/OwLLM/owllm/blob/main/docs/OWLLM_NODE.md",
-    description: "Headless node setup for remote inference and agent backends.",
+    platform: "Linux (ARM64)",
+    detail: "CUDA on Jetson-class devices (JetPack 7+, the CUDA module bundles its own runtime libraries) or CPU on Pi-class boards and ARM servers.",
+  },
+  {
+    platform: "macOS (Apple Silicon)",
+    detail: "Metal inference, one universal bundle. The sandbox engine is Lima (beta).",
+  },
+];
+
+const answers = [
+  {
+    q: "How big a GPU do I need?",
+    a: "Any — including none. The Models page color-codes every model against your actual VRAM (green fits inference + fine-tuning, amber is tight, red is search-only), and hardware is probed on startup so the app only offers what your machine can run. CPU-only works; it's just slower.",
+  },
+  {
+    q: "Is my data sent anywhere?",
+    a: "Not by default. Models run on your hardware, chats and memory live in a local SQLite database, and tool execution happens in a local Linux sandbox. Cloud models are available as explicit, opt-in peers — and no surface ever auto-selects a model, so nothing can silently route your data (or your bill) to a provider you didn't pick.",
+  },
+  {
+    q: "What exactly is sandboxed?",
+    a: "Agent tool execution — file edits, shell commands, and cloud CLIs — runs inside a real Linux sandbox (bubblewrap in WSL2 on Windows, Lima on macOS, bwrap on Linux) that can see only the project folder. Full host access is a deliberate per-project opt-out.",
+  },
+  {
+    q: "How do updates work?",
+    a: "The app checks the public release channel and offers signed updates with a plain-language changelog. Releases are published for all three platforms; you can also download installers directly from GitHub Releases.",
+  },
+  {
+    q: "Can I use my existing AI subscription?",
+    a: "Yes — Claude Code, Codex, Gemini, and Kimi subscription CLIs sign in under Accounts and appear in the same model picker as local and API-key models. OWLLM never turns a consumer subscription into an API key or pretends one provider's plan works with another.",
+  },
+  {
+    q: "Where do I report a bug?",
+    a: "On the public issue tracker (link below). Include your OS, GPU, and the app version from the Info tab.",
+  },
+];
+
+const links = [
+  {
+    title: "How-to-use guide + live demo",
+    href: "/how-to-use",
+    description: "Seven steps from install to your first agent team — with the real app interface embedded and clickable.",
+  },
+  {
+    title: "Feature map",
+    href: "/features",
+    description: "The full tour: models, agents, coding, safety, fine-tuning, bridges, devices, MCP.",
+  },
+  {
+    title: "Download",
+    href: "/download",
+    description: "Installers for Windows, macOS, and Linux — latest release, all platforms.",
+  },
+  {
+    title: "GitHub Releases",
+    href: "https://github.com/OwLLM/owllm/releases",
+    description: "Every published version with its changelog and installer artifacts.",
+  },
+  {
+    title: "Issue tracker",
+    href: "https://github.com/OwLLM/owllm/issues",
+    description: "Report bugs and request features on the public tracker.",
+  },
+  {
+    title: "Marketplace",
+    href: "/marketplace",
+    description: "Team profiles, skill packs, and MCP connector packs that install straight into the app.",
   },
 ];
 ---
 
 <Layout
   title="Docs"
-  description="OwLLM documentation and roadmap: getting started, architecture, cross-platform support, and more."
+  description="OWLLM documentation: quickstart, system requirements per platform, privacy and sandbox answers, and where to get help."
 >
   <section class="page-header" aria-labelledby="docs-title">
     <div class="container">
       <h1 id="docs-title">Documentation</h1>
       <p class="subtitle">
-        Learn how OwLLM works and how to get the most out of your local AI workstation.
+        Everything you need to go from download to a working local AI workstation — and straight
+        answers to the questions that matter.
       </p>
     </div>
   </section>
 
-  <section class="section" aria-label="Documentation links">
+  <section class="section" aria-labelledby="quickstart-title">
     <div class="container">
-      <div class="docs-grid">
+      <h2 id="quickstart-title" class="section-title">Quickstart</h2>
+      <ol class="quickstart">
         {
-          docs.map((doc) => (
-            <Card as="article" class="doc-card">
-              <h2>
-                <a href={doc.href} target="_blank" rel="noopener noreferrer">
-                  {doc.title}
-                </a>
-              </h2>
-              <p>{doc.description}</p>
-            </Card>
+          quickstart.map((step, i) => (
+            <li class="qstep">
+              <span class="qnum" aria-hidden="true">{i + 1}</span>
+              <div>
+                <h3>{step.title}</h3>
+                <p>{step.body}</p>
+              </div>
+            </li>
           ))
         }
+      </ol>
+      <p class="quickstart-more">
+        Want to see each step on the real interface first?
+        <a href="/how-to-use">The How-to-use guide embeds the actual app, clickable →</a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section alt" aria-labelledby="requirements-title">
+    <div class="container">
+      <h2 id="requirements-title" class="section-title">Platforms & requirements</h2>
+      <div class="req-grid">
+        {
+          requirements.map((req) => (
+            <div class="req">
+              <h3>{req.platform}</h3>
+              <p>{req.detail}</p>
+            </div>
+          ))
+        }
+      </div>
+      <p class="req-note">
+        Unsupported platform/arch combinations are named honestly in the setup wizard instead of
+        being offered a binary that won't work.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="answers-title">
+    <div class="container">
+      <h2 id="answers-title" class="section-title">Straight answers</h2>
+      <div class="qa-list">
+        {
+          answers.map((item) => (
+            <details class="qa">
+              <summary>{item.q}</summary>
+              <p>{item.a}</p>
+            </details>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section alt" aria-labelledby="links-title">
+    <div class="container">
+      <h2 id="links-title" class="section-title">Go deeper</h2>
+      <div class="links-grid">
+        {
+          links.map((link) => (
+            <a class="link-card" href={link.href}>
+              <h3>{link.title}</h3>
+              <p>{link.description}</p>
+            </a>
+          ))
+        }
+      </div>
+      <div class="docs-cta">
+        <Button href="/download" size="lg">⬇ Download OwLLM</Button>
       </div>
     </div>
   </section>
@@ -72,7 +202,7 @@ const docs = [
 
 <style>
   .container {
-    max-width: 1200px;
+    max-width: 1000px;
     margin: 0 auto;
     padding: 0 1rem;
   }
@@ -91,36 +221,171 @@ const docs = [
   .subtitle {
     color: var(--fg-muted);
     font-size: 1.125rem;
-    max-width: 60ch;
+    max-width: 65ch;
     margin: 0 auto;
   }
 
   .section {
-    padding: 3rem 0 5rem;
+    padding: 3rem 0;
   }
 
-  .docs-grid {
+  .section.alt {
+    background: var(--bg-panel);
+    border-block: 1px solid var(--border);
+  }
+
+  .section-title {
+    text-align: center;
+    font-size: clamp(1.5rem, 3.5vw, 2.1rem);
+    margin-bottom: 1.75rem;
+  }
+
+  .quickstart {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .qstep {
+    display: flex;
+    gap: 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.4rem;
+  }
+
+  .qnum {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1.5rem;
-  }
-
-  .doc-card h2 {
-    font-size: 1.25rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .doc-card a {
+    place-items: center;
+    border-radius: 50%;
+    background: var(--accent-soft);
     color: var(--accent-ink);
-    text-decoration: none;
+    font-weight: 800;
   }
 
-  .doc-card a:hover {
-    text-decoration: underline;
+  .qstep h3 {
+    margin: 0.2rem 0 0.4rem;
+    font-size: 1.1rem;
   }
 
-  .doc-card p {
+  .qstep p {
     color: var(--fg-muted);
     margin: 0;
+  }
+
+  .quickstart-more {
+    text-align: center;
+    color: var(--fg-muted);
+    margin-top: 1.5rem;
+  }
+
+  .quickstart-more a {
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  .req-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+  }
+
+  .req {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.1rem 1.25rem;
+  }
+
+  .req h3 {
+    margin: 0 0 0.4rem;
+    font-size: 1.02rem;
+  }
+
+  .req p {
+    color: var(--fg-muted);
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  .req-note {
+    text-align: center;
+    color: var(--fg-subtle);
+    font-size: 0.9rem;
+    margin-top: 1.25rem;
+  }
+
+  .qa-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 820px;
+    margin: 0 auto;
+  }
+
+  .qa {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.9rem 1.25rem;
+  }
+
+  .qa summary {
+    cursor: pointer;
+    font-weight: 700;
+  }
+
+  .qa[open] summary {
+    color: var(--accent-ink);
+  }
+
+  .qa p {
+    color: var(--fg-muted);
+    margin: 0.75rem 0 0.25rem;
+  }
+
+  .links-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+
+  .link-card {
+    display: block;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.1rem 1.25rem;
+    text-decoration: none;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .link-card:hover {
+    border-color: var(--border-accent);
+    transform: translateY(-2px);
+  }
+
+  .link-card h3 {
+    margin: 0 0 0.4rem;
+    font-size: 1.05rem;
+    color: var(--accent-ink);
+  }
+
+  .link-card p {
+    color: var(--fg-muted);
+    margin: 0;
+    font-size: 0.92rem;
+  }
+
+  .docs-cta {
+    text-align: center;
+    margin-top: 2rem;
   }
 </style>

@@ -1,0 +1,155 @@
+---
+/**
+ * The REAL OWLLM interface, embedded. This is not a mock: the iframe loads
+ * the actual owllm-desktop React app, compiled for the browser by
+ * scripts/build-app-demo.mjs into public/app-demo/. The app officially
+ * supports running without Tauri (browser mode), so every page, tab and
+ * dialog here is the shipping UI — just with no local backend attached.
+ */
+---
+
+<div class="demo" id="app-demo">
+  <div class="demo-bar">
+    <span class="demo-live" aria-hidden="true"></span>
+    <strong>The real OWLLM interface</strong>
+    <span class="demo-hint" id="demo-hint" aria-live="polite"></span>
+    <span class="demo-actions">
+      <button type="button" id="demo-restart" title="Reload the demo from scratch">⟳ Restart</button>
+      <button type="button" id="demo-fullscreen" title="View full screen">⛶ Full screen</button>
+      <a href="/app-demo/index.html" target="_blank" rel="noopener" title="Open the demo in its own tab">↗ Own tab</a>
+    </span>
+  </div>
+  <iframe
+    id="demo-frame"
+    src="/app-demo/index.html"
+    title="Interactive demo of the real OWLLM desktop interface"
+    loading="lazy"
+  ></iframe>
+  <p class="demo-note">
+    This is the same React application that ships inside the desktop app —
+    compiled for the web, running with no local backend. Hardware readouts,
+    model lists and projects are therefore empty (one or two panels say so
+    with an error note); on your machine they show your GPU, your models and
+    your work. It opens on the real first-run wizard — press
+    <em>Set up later</em> and explore.
+  </p>
+</div>
+
+<style>
+  .demo {
+    max-width: 1200px;
+    margin: 0 auto;
+    /* Clear the sticky site nav when guide steps scroll here. */
+    scroll-margin-top: 5.5rem;
+  }
+
+  .demo-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    padding: 0.5rem 0.9rem;
+    border: 1px solid var(--border-accent);
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+    background: var(--bg-elevated);
+    font-size: 0.9rem;
+  }
+
+  .demo-live {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 8px rgba(var(--ok-rgb), 0.8);
+    animation: demo-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes demo-pulse {
+    50% { opacity: 0.45; }
+  }
+
+  .demo-hint {
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  .demo-hint:empty {
+    display: none;
+  }
+
+  .demo-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .demo-actions button,
+  .demo-actions a {
+    border: 1px solid var(--border-strong);
+    background: var(--ghost-bg);
+    color: var(--ghost-fg);
+    border-radius: 8px;
+    padding: 0.25rem 0.6rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  .demo-actions button:hover,
+  .demo-actions a:hover {
+    background: var(--ghost-hover-bg);
+    color: var(--ghost-hover-fg);
+  }
+
+  #demo-frame {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    min-height: 540px;
+    border: 1px solid var(--border-accent);
+    border-radius: 0 0 12px 12px;
+    background: #06080d;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .demo-note {
+    color: var(--fg-muted);
+    font-size: 0.9rem;
+    max-width: 80ch;
+    margin: 0.9rem auto 0;
+    text-align: center;
+  }
+</style>
+
+<script>
+  const frame = document.getElementById("demo-frame") as HTMLIFrameElement;
+  const hint = document.getElementById("demo-hint")!;
+
+  document.getElementById("demo-restart")?.addEventListener("click", () => {
+    // Wipe the demo's persisted state (same-origin) so the first-run
+    // wizard shows again, then reload the iframe.
+    try {
+      frame.contentWindow?.localStorage.clear();
+      frame.contentWindow?.sessionStorage.clear();
+    } catch {
+      /* cross-origin or sandboxed: plain reload still restarts the UI */
+    }
+    frame.src = frame.src;
+    hint.textContent = "";
+  });
+
+  document.getElementById("demo-fullscreen")?.addEventListener("click", () => {
+    frame.requestFullscreen?.();
+  });
+
+  // Guide steps scroll here and show "where to click" in the real app.
+  document.querySelectorAll<HTMLElement>("[data-demo-hint]").forEach((el) => {
+    el.addEventListener("click", () => {
+      hint.textContent = el.dataset.demoHint || "";
+      document.getElementById("app-demo")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+</script>

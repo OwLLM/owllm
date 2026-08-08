@@ -1491,8 +1491,16 @@ pub async fn accounts_refresh_sandbox_creds(cwd: Option<String>) -> Result<bool,
     let fut = tokio::task::spawn_blocking(|| {
         // Re-mirror Windows → distro (claude/codex/gemini/kimi creds + keys). The
         // distro is resolved inside (best_linux_distro). Best-effort.
-        let _ = crate::sandbox::sandbox_sync_logins(None);
-        true
+        //
+        // MUST be the *_blocking entry point: `sandbox_sync_logins` is async, so
+        // calling it here only built a future that was dropped — the re-mirror
+        // never ran and the sandbox token stayed expired (the recurring 401).
+        // Report whether creds ACTUALLY landed, so a failed sync can't read as a
+        // successful refresh.
+        match crate::sandbox::sandbox_sync_logins_blocking(None) {
+            Ok(r) => !r.synced.is_empty(),
+            Err(_) => false,
+        }
     });
     // BOUND IT: a cold / unresponsive WSL (classically right after a PC reboot) made
     // this WSL round-trip hang with no timeout — which blocked the warm-up, which

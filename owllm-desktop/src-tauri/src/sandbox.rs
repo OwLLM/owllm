@@ -2206,6 +2206,19 @@ fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())
 }
 
+/// Blocking mirror of host logins into the sandbox, for callers that are ALREADY
+/// on a blocking thread (spawn_blocking) and must not build a nested runtime.
+///
+/// This exists because `sandbox_sync_logins` is `async`: calling it from a
+/// blocking closure as `let _ = sandbox_sync_logins(None);` compiles cleanly
+/// (`let _` suppresses the `#[must_use]` future warning) but only CONSTRUCTS a
+/// future and drops it — the credential re-mirror never runs. That silent no-op
+/// is what made the agentic-team 401 recur after it was "fixed". Blocking
+/// callers must use THIS function; the gate enforces it.
+pub(crate) fn sandbox_sync_logins_blocking(distro: Option<String>) -> Result<SyncResult, String> {
+    sync_logins_impl(distro)
+}
+
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
 #[tauri::command]

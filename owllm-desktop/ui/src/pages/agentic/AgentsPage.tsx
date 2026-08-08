@@ -8057,7 +8057,7 @@ async function streamGemini(
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-    })).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
+    }), projectCwd ?? null).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
     if (reply) onDelta(reply);
     return reply;
   }

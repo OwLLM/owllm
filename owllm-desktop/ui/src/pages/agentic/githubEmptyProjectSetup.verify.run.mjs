@@ -45,8 +45,12 @@ check("successful automatic setup does not populate Agent 1's composer status", 
   const setupBlock = codePageSource.slice(setupStart, setupEnd);
   assert.ok(setupStart >= 0 && setupEnd > setupStart);
   assert.ok(setupBlock.includes('await invoke<string>("github_create_repo"'));
-  assert.ok(setupBlock.includes('setStatus("")'));
-  assert.ok(!setupBlock.includes('setStatus(`🐙 ${msg}`)'));
+  // Composer notices are gone entirely (composerNoNotifications.verify.run.mjs).
+  // What must still hold: a SUCCESSFUL setup stays silent, and only the
+  // failure path raises a notification.
+  assert.ok(setupBlock.includes("// Success is deliberately silent"));
+  assert.ok(!/notify\(""\)/.test(setupBlock));
+  assert.ok(setupBlock.includes("the GitHub repo could not be set up"));
 });
 
 // Instrument the real Git executable so this gate proves the mechanism instead

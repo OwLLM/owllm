@@ -153,6 +153,7 @@ import {
 } from "./personalAgentConfig";
 import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
+import { notify } from "../../components/Toast";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { bundleOffsets } from "./edgeRouter";
@@ -5351,13 +5352,10 @@ function ChatInputDock({
   };
 
   // Dictation lives in the shared composer (useDictation); when the WebView
-  // has no SpeechRecognition it reports back through onNotice → dockNote, so
-  // the user never sees a silently dead mic button.
-  const [dockNote, setDockNote] = useState<string | null>(null);
-  const flashNote = (msg: string) => {
-    setDockNote(msg);
-    setTimeout(() => setDockNote(null), 3500);
-  };
+  // has no SpeechRecognition it reports back through onNotice, so the user
+  // never sees a silently dead mic button. It surfaces as a toast — notices
+  // never render inside the composer container.
+  const flashNote = (msg: string) => notify(msg);
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
   // listens for to call .abort() on the active dispatch's
@@ -5434,7 +5432,6 @@ function ChatInputDock({
         onAttachFiles={(files) => { void addDockFiles(files); }}
         onRemoveAttachment={(i) => setAttachments(x => x.filter((_, j) => j !== i))}
         attachmentAccept={CHAT_ATTACHMENT_ACCEPT}
-        notice={dockNote ? { kind: "info", text: dockNote } : null}
         onNotice={flashNote}
         mic
         showCounter

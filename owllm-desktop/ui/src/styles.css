@@ -277,16 +277,6 @@
   border-bottom: 1px solid var(--border);
 }
 
-.owc__status {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: pre-line;
-  color: var(--fg-muted);
-  font-size: 11px;
-}
-
 .owc__model-label {
   flex-shrink: 0;
   color: var(--fg-subtle);
@@ -419,22 +409,49 @@
   font-weight: 750;
 }
 
-.owc__notice {
-  margin: 8px 10px 0;
-  border-radius: 7px;
-  padding: 5px 9px;
-  font-size: 11px;
-  font-weight: 650;
+/* Notifications live in their own floating stack (components/Toast.tsx) —
+   never inside the composer container, whose header is reserved for the model
+   picker and the page's own buttons. */
+.owl-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
 }
 
-.owc__notice--error {
+.owl-toast {
+  pointer-events: auto;
+  max-width: 100%;
+  text-align: left;
+  white-space: pre-line;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.45;
+  cursor: pointer;
+  color: var(--fg-strong);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.34);
+  animation: owl-toast-in 140ms ease-out;
+}
+
+.owl-toast--error {
   background: rgba(var(--error-rgb), 0.14);
+  border-color: rgba(var(--error-rgb), 0.55);
   color: var(--error);
 }
 
-.owc__notice--info {
-  background: rgba(var(--accent-rgb), 0.12);
-  color: var(--accent-ink);
+@keyframes owl-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .owc__input {

@@ -16,6 +16,7 @@ const ui = resolve(here, "../..");
 const read = (p) => readFileSync(resolve(ui, p), "utf8");
 
 const composer = read("components/Composer.tsx");
+const toast = read("components/Toast.tsx");
 const css = read("styles.css");
 const codePage = read("pages/agentic/CodePage.tsx");
 const agentsPage = read("pages/agentic/AgentsPage.tsx");
@@ -56,8 +57,13 @@ check("context mentions render as chips", composer.includes("owc__mention") && c
 check("mode segment and capability toggles live in the action bar",
   composer.includes("owc__modes") && composer.includes("owc__toggle") && composer.includes('aria-pressed={t.on}'));
 check("terminal / header extras have a slot", composer.includes("headerExtra"));
+// Notices used to render INSIDE the composer (owc__notice). They now go to the
+// shared toast surface — the invariant is unchanged (a failure is never
+// silent), only the surface moved. See composerNoNotifications.verify.run.mjs.
 check("errors and notices surface instead of failing silently",
-  composer.includes("owc__notice") && composer.includes('role={notice.kind === "error" ? "alert" : undefined}'));
+  composer.includes("onNotice")
+    && toast.includes("export function notify(")
+    && toast.includes('role={t.kind === "error" ? "alert" : "status"}'));
 check("the counter reports draft length only — no invented token estimate",
   composer.includes("{value.length}") && !composer.includes("tokenEstimate"));
 check("chat font zoom still drives the textarea", css.includes("var(--chat-font-size, 13px)"));

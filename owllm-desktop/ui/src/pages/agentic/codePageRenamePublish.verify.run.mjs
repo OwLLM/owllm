@@ -132,7 +132,7 @@ anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and stee
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",
   'detail: "The release fix was not queued."');
 anchor("CodePage.tsx", codePage, "onFixIssues still reports no-model to the card",
-  'setStatus("No model selected — pick one in the Coder header.");\n                      return "no-model";');
+  'notify("No model selected — pick one in the Coder header.");\n                      return "no-model";');
 anchor("CodePage.tsx", codePage, "programmatic sends surface guard failures in the transcript",
   "if (!fromComposer) setMessages((msgs) => [...msgs, { role: \"assistant\", content: `⚠ ${why}");
 

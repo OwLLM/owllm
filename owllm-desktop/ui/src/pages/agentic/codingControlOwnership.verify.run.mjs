@@ -32,9 +32,12 @@ check("publisher activity renders before the first Git facts row",
     && publisher.indexOf('data-ui="PublisherActivity"') < publisher.indexOf("Live repo facts"));
 check("publisher results no longer leak into the composer status",
   !publish.includes("onStatus") && !publish.includes("status(`✓") && !publish.includes("status(`✗"));
-check("persisted Up-to-date text is removed from the composer during hydration",
-  code.includes('s.status === "✓ Up to date. Local and origin/main are already the same commit."')
-    && code.includes("PublisherCards"));
+// Stronger than the old check: rather than scrubbing one known stale string,
+// hydration now drops the persisted notice field outright — page notices are
+// transient toasts, so none can be resurrected from an old session.
+check("persisted composer notices are dropped during hydration",
+  code.includes("const { status: _retired, ...rest } = s as CodeState & { status?: string };")
+    && !/^\s*status: string;/m.test(code));
 check("ordinary completed runs are not promoted to durable facts",
   !memory.includes("autoCurateScopedTeamFact") && !memory.includes("auto-curated,implementation"));
 check("legacy generated facts are archived outside graph/search instead of deleted",

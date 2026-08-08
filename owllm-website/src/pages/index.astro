@@ -251,6 +251,33 @@ const socialProof = [
     </div>
   </section>
 
+  <section class="section explore-section" aria-labelledby="explore-heading">
+    <div class="container">
+      <h2 id="explore-heading" class="section-title">Explore before you install</h2>
+      <div class="explore-grid">
+        <article class="explore-card">
+          <span class="explore-emoji" aria-hidden="true">🖱️</span>
+          <h3>Click through the app — right in your browser</h3>
+          <p>
+            The How-to-use guide embeds a live, clickable mock of OwLLM: every module, every tab,
+            with plain-language captions for each screen. Seven steps take you from install to
+            your first agent team.
+          </p>
+          <Button href="/how-to-use" variant="outline">▶ Take the interactive tour</Button>
+        </article>
+        <article class="explore-card">
+          <span class="explore-emoji" aria-hidden="true">🛒</span>
+          <h3>Shop the Marketplace</h3>
+          <p>
+            Community-built team profiles, skill packs, MCP connector packs, and project templates
+            that install straight into the app. Browse the catalog without an account.
+          </p>
+          <Button href="/marketplace" variant="outline">Browse the Marketplace</Button>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <section class="section comparison-section" aria-labelledby="comparison-heading">
     <div class="container">
       <h2 id="comparison-heading" class="section-title">Built for control, not lock-in</h2>
@@ -732,7 +759,58 @@ const socialProof = [
     }
   }
 
+  .explore-section {
+    background: var(--bg-panel);
+    border-block: 1px solid var(--border);
+  }
+
+  .explore-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  .explore-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-accent);
+    border-radius: 16px;
+    padding: 1.75rem;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    box-shadow: var(--shadow-sm);
+    transition:
+      transform 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .explore-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 24px var(--accent-glow-soft);
+  }
+
+  .explore-emoji {
+    font-size: 2rem;
+  }
+
+  .explore-card h3 {
+    font-size: 1.25rem;
+    margin: 0;
+  }
+
+  .explore-card p {
+    color: var(--fg-muted);
+    margin: 0 0 0.5rem;
+  }
+
   @media (max-width: 768px) {
+    .explore-grid {
+      grid-template-columns: 1fr;
+    }
+
     .hero {
       padding: 4rem 0;
     }

@@ -1,0 +1,295 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+import AppMock from "../components/AppMock.astro";
+
+interface GuideStep {
+  emoji: string;
+  title: string;
+  mockPage: string;
+  mockLabel: string;
+  body: string[];
+  callout?: string;
+}
+
+const steps: GuideStep[] = [
+  {
+    emoji: "⬇️",
+    title: "Install and pick your modules",
+    mockPage: "home",
+    mockLabel: "See the Home screen",
+    body: [
+      "Download the installer for Windows, macOS, or Linux and run it. There is no account, no sign-up, and no cloud requirement — OWLLM is local-first by design.",
+      "On first launch you choose which modules to install: Core is always there; add Fine-tuning if you want to train models, Agentic Team for AI agent squads, and Advanced for MCP, cloud accounts, and device pairing. Anything you skip can be added later, and heavyweight pieces (like the Python training environment) install themselves only when actually needed.",
+    ],
+    callout: "OWLLM probes your GPU, VRAM, and RAM on startup and adapts — it will never offer you a model or a build your machine can't run.",
+  },
+  {
+    emoji: "📦",
+    title: "Get a model",
+    mockPage: "models",
+    mockLabel: "See the Models page",
+    body: [
+      "Open Fine Tuning → Models. Search all of HuggingFace or pick from curated recommendations. Every result is color-coded against your actual VRAM: green fits, amber is tight, red won't fit — so you can't accidentally download a model your GPU can't hold.",
+      "Prefer cloud? Skip the download entirely: add an API key (Anthropic, OpenAI, Gemini, …) or sign in with a subscription CLI like Claude Code under Advanced → Accounts. Local and cloud models appear side by side in the same model picker everywhere in the app.",
+    ],
+    callout: "Interrupted downloads resume where they stopped — a 15 GB model at 70% picks up at 70%, never from zero.",
+  },
+  {
+    emoji: "💬",
+    title: "Chat with it",
+    mockPage: "chat",
+    mockLabel: "See the Chat page",
+    body: [
+      "Open Chat, pick your model from the picker, and type. That's the whole setup: the local model server (llama.cpp) starts itself on your first message, sizes its context window to your VRAM, and is shared across every OWLLM window.",
+      "Vision models just work — OWLLM auto-downloads the matching image projector. And no page ever auto-selects a model for you: until you explicitly choose one, the picker reads “Select model” and Send stays blocked, so nothing can silently run (or bill) weights you never chose.",
+    ],
+  },
+  {
+    emoji: "🤖",
+    title: "Run an agent team",
+    mockPage: "agents",
+    mockLabel: "See the Agents page",
+    body: [
+      "Open Agentic Team → Agents, create a project, and give it a goal in plain language. A standard six-slot team goes to work: an orchestrator plans, a scout does read-only recon, two workers execute in parallel, a critic reviews, and a producer commits or publishes only work that passed review. Team templates like “Dev Squad” or “Chief of Staff” are profiles over that same roster — different skills, connectors, and rules, same proven machinery.",
+      "You stay in the loop the whole time. Type while the run is going and your message queues as a ⚡ steer, injected at the next agent boundary — never dropped. Prefer something lighter? Flip the header toggle to Solo and one coder works in an edit → verify → fix loop with just the critic and producer.",
+    ],
+    callout: "“Done” is never the model's opinion. The Verification Gate runs a real command — your test suite, your build — and only exit code 0 counts.",
+  },
+  {
+    emoji: "💻",
+    title: "Let it code — safely",
+    mockPage: "code",
+    mockLabel: "See the Coding page",
+    body: [
+      "The Coding page points a model directly at a project folder. The conversation, plan, and chosen model persist per project, so you can close OWLLM and pick up exactly where you left off.",
+      "Autonomous agents that edit files and run shell commands are powerful and risky — so tool execution runs inside a real Linux sandbox: WSL2 on Windows, Lima on macOS, bubblewrap on Linux. Your real drive and home directory stay untouched unless you explicitly grant a project full access.",
+    ],
+  },
+  {
+    emoji: "🎯",
+    title: "Fine-tune your own model",
+    mockPage: "dataset",
+    mockLabel: "See the Dataset Builder",
+    body: [
+      "The Dataset Builder turns documents you already have — PDFs, DOCX, web pages — into instruction/output training pairs. Review the generated pairs, export, and move to the Train tab.",
+      "Training runs LoRA fine-tuning on your own GPU with a live loss curve. When it finishes, export to GGUF and your custom model appears in the same picker as everything else — chat with it, serve it, or hand it to an agent team.",
+    ],
+    callout: "Try the Train tab in the mock too — the whole pipeline is Models → Dataset → Train → Chat, left to right.",
+  },
+  {
+    emoji: "📱",
+    title: "Drive it from anywhere",
+    mockPage: "bridges",
+    mockLabel: "See the Bridges page",
+    body: [
+      "Bridges connect messaging apps to your agent teams: text your own computer from WhatsApp or Telegram and the message becomes a team run, with results streaming back to the chat.",
+      "Under Advanced, MCP servers add new tools your agents can call (with per-tool toggles and a schema-safety gate), and Devices pairs your other machines over an end-to-end encrypted channel — your laptop can borrow the gaming PC's GPU, no SSH required.",
+    ],
+  },
+  {
+    emoji: "🛒",
+    title: "Extend it from the Marketplace",
+    mockPage: "mcp",
+    mockLabel: "See the MCP page",
+    body: [
+      "When you want a team that already knows your kind of work, the OWLLM Marketplace has community-built team profiles, skill packs, and MCP connector packs. Browse without an account; creators sign in with GitHub, and only reviewed, approved listings are published.",
+    ],
+    callout: "The Marketplace has its own page on this site — see what's available before you even install.",
+  },
+];
+---
+
+<Layout
+  title="How to use OWLLM"
+  description="A step-by-step guide to OWLLM: install, get a model, chat, run agent teams, fine-tune, and connect bridges — with a clickable mock of every page in the app."
+>
+  <section class="page-header" aria-labelledby="howto-title">
+    <div class="container">
+      <h1 id="howto-title">How to use OWLLM</h1>
+      <p class="subtitle">
+        From install to your first agent team in seven steps — and a clickable mock of the real
+        app, so you can explore every page before you download anything.
+      </p>
+    </div>
+  </section>
+
+  <section class="section mock-section" aria-labelledby="mock-title">
+    <div class="container">
+      <h2 id="mock-title" class="section-title">Explore the app — right here</h2>
+      <p class="section-lead">
+        This is a faithful, interactive mock of OWLLM's interface: the same modules, the same
+        tabs, the same layout. Click the header toggles to switch modules and the tabs to visit
+        every page. The caption below the window explains what you're looking at.
+      </p>
+      <AppMock />
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="steps-title">
+    <div class="container">
+      <h2 id="steps-title" class="section-title">The guide, step by step</h2>
+      <ol class="steps">
+        {
+          steps.map((step, i) => (
+            <li class="step">
+              <Card as="article" class="step-card">
+                <div class="step-head">
+                  <span class="step-num" aria-hidden="true">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  <h3>
+                    <span aria-hidden="true">{step.emoji}</span> {step.title}
+                  </h3>
+                </div>
+                {step.body.map((p) => (
+                  <p>{p}</p>
+                ))}
+                {step.callout && <p class="callout">⚡ {step.callout}</p>}
+                <button type="button" class="mock-link" data-mock-go={step.mockPage}>
+                  ▶ {step.mockLabel} in the live mock
+                </button>
+              </Card>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+  </section>
+
+  <section class="section cta" aria-label="Download call to action">
+    <div class="container cta-inner">
+      <h2>Seen enough?</h2>
+      <p class="section-lead">The real thing is one download away — no account, no cloud, your hardware.</p>
+      <div class="cta-buttons">
+        <Button href="/download" size="lg">⬇ Download OWLLM</Button>
+        <Button href="/marketplace" variant="outline" size="lg">🛒 Browse the Marketplace</Button>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .page-header {
+    padding: 4rem 0 2rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .page-header h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    max-width: 65ch;
+    margin: 0 auto;
+  }
+
+  .section {
+    padding: 3rem 0;
+  }
+
+  .section-title {
+    text-align: center;
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .section-lead {
+    text-align: center;
+    color: var(--fg-muted);
+    max-width: 70ch;
+    margin: 0 auto 2rem;
+  }
+
+  .mock-section {
+    background: var(--bg-panel);
+    border-block: 1px solid var(--border);
+  }
+
+  .steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    max-width: 860px;
+    margin-inline: auto;
+  }
+
+  .step-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.9rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .step-num {
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--accent);
+    opacity: 0.6;
+    line-height: 1;
+  }
+
+  .step-head h3 {
+    font-size: 1.3rem;
+    margin: 0;
+  }
+
+  .step-card p {
+    color: var(--fg-muted);
+  }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 0.6rem 0.9rem;
+    border-radius: 0 8px 8px 0;
+    color: var(--fg) !important;
+  }
+
+  .mock-link {
+    align-self: flex-start;
+    border: 1px solid var(--border-accent);
+    background: transparent;
+    color: var(--accent-ink);
+    border-radius: 8px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: background 0.15s ease;
+  }
+
+  .mock-link:hover {
+    background: var(--accent-soft);
+  }
+
+  .cta {
+    text-align: center;
+    padding-bottom: 5rem;
+  }
+
+  .cta h2 {
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    margin-bottom: 0.5rem;
+  }
+
+  .cta-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+</style>

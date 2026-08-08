@@ -1,0 +1,379 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+
+const marketplaceUrl = import.meta.env.PUBLIC_MARKETPLACE_URL || "https://marketplace.owllm.com";
+
+const offerings = [
+  {
+    emoji: "🎭",
+    title: "Team profiles",
+    description:
+      "Pre-configured agent teams for a kind of work — a dev squad, a research desk, a chief of staff. Each profile brings its skill seeds, connector requirements, and rules to the same battle-tested six-slot roster.",
+  },
+  {
+    emoji: "📜",
+    title: "Skill packs",
+    description:
+      "Reusable know-how your agents load on demand: coding conventions, review checklists, domain playbooks. Skills are auto-selected per goal — install a pack and the right skills activate when the work matches.",
+  },
+  {
+    emoji: "🧩",
+    title: "MCP connector packs",
+    description:
+      "Bundles of Model Context Protocol servers with a sane approval policy, so a team that needs a browser, a database, or an issue tracker gets its tools wired in one click.",
+  },
+  {
+    emoji: "🧪",
+    title: "Project templates",
+    description:
+      "Complete starting points — a Project Card with verify commands, a team profile, and workspace recipes — so a new project opens ready to run instead of ready to configure.",
+  },
+];
+
+const sampleListings = [
+  {
+    emoji: "🛠",
+    title: "Dev Squad Pro",
+    category: "Team profile",
+    blurb: "Full-stack team with strict verification: lint + tests + build must pass before the producer commits.",
+    creator: "owllm-core",
+  },
+  {
+    emoji: "📰",
+    title: "Research Desk",
+    category: "Team profile",
+    blurb: "Scout-heavy profile for deep research runs with sourced, citation-first output rules.",
+    creator: "owllm-core",
+  },
+  {
+    emoji: "🐍",
+    title: "Python Craftsman",
+    category: "Skill pack",
+    blurb: "Idiomatic Python patterns, pytest discipline, and packaging know-how, loaded only when the goal is Python.",
+    creator: "community",
+  },
+  {
+    emoji: "🌐",
+    title: "Web Toolbelt",
+    category: "MCP pack",
+    blurb: "Browser + fetch + screenshot MCP servers with a conservative approval policy for web-facing teams.",
+    creator: "community",
+  },
+  {
+    emoji: "📊",
+    title: "Data Wrangler",
+    category: "Skill pack",
+    blurb: "CSV/SQL hygiene, sanity-check habits, and chart conventions for analysis-heavy projects.",
+    creator: "community",
+  },
+  {
+    emoji: "✍️",
+    title: "Longform Studio",
+    category: "Project template",
+    blurb: "Writing-room setup: drafting surfaces, style rules, and a critic tuned for structure over nitpicks.",
+    creator: "community",
+  },
+];
+
+const howItWorks = [
+  {
+    title: "Browse freely",
+    description:
+      "The marketplace is public — search, filter by category, and read every listing without an account. Only reviewed, approved listings are published.",
+  },
+  {
+    title: "Install into OWLLM",
+    description:
+      "A listing drops straight into the app: team profiles appear in the team picker, skill packs join the skill library, MCP packs register their servers — no manual wiring.",
+  },
+  {
+    title: "Publish your own",
+    description:
+      "Sign in with GitHub and become a creator. You keep ownership of your repository; the marketplace links to it and shows your listing page once it's approved.",
+  },
+];
+---
+
+<Layout
+  title="Marketplace"
+  description="The OWLLM Marketplace: community-built agent team profiles, skill packs, MCP connector packs, and project templates — browse free, install straight into the app."
+>
+  <section class="page-header" aria-labelledby="market-title">
+    <div class="container">
+      <p class="eyebrow">🛒 OWLLM Marketplace</p>
+      <h1 id="market-title">Teams, skills, and tools — built by the community</h1>
+      <p class="subtitle">
+        Don't start from a blank roster. Install a team that already knows your kind of work,
+        give your agents new skills, and wire up connectors in one click.
+      </p>
+      <div class="header-buttons">
+        <Button href={marketplaceUrl} size="lg">Browse the Marketplace ↗</Button>
+        <Button href="/how-to-use" variant="outline" size="lg">See how it fits the app</Button>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="offerings-title">
+    <div class="container">
+      <h2 id="offerings-title" class="section-title">What's on the shelves</h2>
+      <div class="grid grid-4">
+        {
+          offerings.map((o) => (
+            <Card as="article" class="offer-card">
+              <span class="offer-emoji" aria-hidden="true">
+                {o.emoji}
+              </span>
+              <h3>{o.title}</h3>
+              <p>{o.description}</p>
+            </Card>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section listings" aria-labelledby="listings-title">
+    <div class="container">
+      <h2 id="listings-title" class="section-title">A taste of the catalog</h2>
+      <p class="section-lead">Example listings — browse the live marketplace for the full, growing catalog.</p>
+      <div class="grid grid-3">
+        {
+          sampleListings.map((l) => (
+            <Card as="article" class="listing-card">
+              <div class="listing-head">
+                <span class="listing-emoji" aria-hidden="true">
+                  {l.emoji}
+                </span>
+                <span class="listing-category">{l.category}</span>
+              </div>
+              <h3>{l.title}</h3>
+              <p>{l.blurb}</p>
+              <span class="listing-creator">by {l.creator}</span>
+            </Card>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="how-title">
+    <div class="container">
+      <h2 id="how-title" class="section-title">How it works</h2>
+      <div class="grid grid-3">
+        {
+          howItWorks.map((step, i) => (
+            <Card as="article" class="how-card">
+              <span class="how-num" aria-hidden="true">
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <h3>{step.title}</h3>
+              <p>{step.description}</p>
+            </Card>
+          ))
+        }
+      </div>
+      <p class="trust-note">
+        🔐 Web identity is separate from the app by design: the marketplace uses its own GitHub
+        sign-in with server-side sessions and never sees the tokens or keys stored in your desktop
+        vault.
+      </p>
+    </div>
+  </section>
+
+  <section class="section cta" aria-label="Marketplace call to action">
+    <div class="container">
+      <h2>Open the doors</h2>
+      <p class="section-lead">Browse without an account — or bring your own creation to the community.</p>
+      <div class="header-buttons">
+        <Button href={marketplaceUrl} size="lg">Browse the Marketplace ↗</Button>
+        <Button href="/download" variant="ghost" size="lg">⬇ Get OWLLM first</Button>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .page-header {
+    padding: 4rem 0 3rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .eyebrow {
+    color: var(--accent-ink);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .page-header h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin-bottom: 0.75rem;
+    max-width: 24ch;
+    margin-inline: auto;
+  }
+
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    max-width: 60ch;
+    margin: 0 auto 1.75rem;
+  }
+
+  .header-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .section {
+    padding: 3rem 0;
+  }
+
+  .section-title {
+    text-align: center;
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    margin-bottom: 1.5rem;
+  }
+
+  .section-lead {
+    text-align: center;
+    color: var(--fg-muted);
+    max-width: 70ch;
+    margin: -0.5rem auto 2rem;
+  }
+
+  .grid {
+    display: grid;
+    gap: 1.25rem;
+  }
+
+  .grid-3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .grid-4 {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .offer-emoji {
+    font-size: 1.8rem;
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  .offer-card h3,
+  .listing-card h3,
+  .how-card h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.4rem;
+  }
+
+  .offer-card p,
+  .listing-card p,
+  .how-card p {
+    color: var(--fg-muted);
+    font-size: 0.92rem;
+    margin: 0;
+  }
+
+  .listings {
+    background: var(--bg-panel);
+    border-block: 1px solid var(--border);
+  }
+
+  .listing-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .listing-emoji {
+    font-size: 1.6rem;
+  }
+
+  .listing-category {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    border: 1px solid var(--border-accent);
+    border-radius: 999px;
+    padding: 0.15rem 0.6rem;
+  }
+
+  .listing-card p {
+    margin-bottom: 0.6rem;
+  }
+
+  .listing-creator {
+    color: var(--fg-subtle);
+    font-size: 0.8rem;
+  }
+
+  .how-card {
+    position: relative;
+  }
+
+  .how-num {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--accent);
+    opacity: 0.6;
+    line-height: 1;
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+
+  .trust-note {
+    text-align: center;
+    color: var(--fg-muted);
+    max-width: 75ch;
+    margin: 2rem auto 0;
+    padding: 0.9rem 1.2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .cta {
+    text-align: center;
+    padding-bottom: 5rem;
+  }
+
+  .cta h2 {
+    font-size: clamp(1.5rem, 3.5vw, 2.25rem);
+    margin-bottom: 0.5rem;
+  }
+
+  @media (max-width: 960px) {
+    .grid-4 {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 640px) {
+    .grid-3,
+    .grid-4 {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

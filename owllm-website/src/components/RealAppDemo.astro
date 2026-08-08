@@ -117,6 +117,14 @@
     color-scheme: dark;
   }
 
+  /* The site's global :focus-visible outline would otherwise draw a
+     second, site-colored frame around the iframe on top of the app's
+     own window chrome as soon as it receives focus (e.g. a click inside). */
+  #demo-frame:focus,
+  #demo-frame:focus-visible {
+    outline: none;
+  }
+
   .demo-note {
     color: var(--fg-muted);
     font-size: 0.9rem;

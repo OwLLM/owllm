@@ -28,6 +28,18 @@ describe("app imagery has no site-side frame", () => {
     assert.match(frameRule, /color-scheme:\s*dark/, "color-scheme matches the embedded app");
   });
 
+  it("RealAppDemo suppresses the site's global focus outline on the iframe", () => {
+    // The site applies a global `:focus-visible` accent-colored outline to
+    // every focusable element. Without an override, focusing the iframe
+    // (e.g. clicking into the embedded app) draws that outline around the
+    // whole demo box — a second, site-colored frame on top of the app's own
+    // window chrome.
+    const source = read("src", "components", "RealAppDemo.astro");
+    const outlineRule = source.match(/#demo-frame:focus[^{]*\{[^}]*\}/)?.[0];
+    assert.ok(outlineRule, "#demo-frame:focus rule exists");
+    assert.match(outlineRule, /outline:\s*none/, "no focus outline drawn around the app");
+  });
+
   it("screenshot containers have no rounded corners or border frame", () => {
     for (const [file, selector] of [
       [["src", "pages", "index.astro"], ".demo-image"],

@@ -167,6 +167,12 @@ stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.
+Both outer columns shrink independently to a 46px rail (`CodeColumnRails.tsx`)
+that keeps one large icon per feature the column holds — left 🧠 memory /
+📁 files / 🐙 GitHub, right 📓 notebook / 📊 usage / ⚡ rules / 🌐 browser.
+Notebook and rules open the column straight onto their page; the 🌐 icon works
+**while shrunk** — it opens the browser on its welcome page and arranges OwLLM
+and the browser half/half, the same split the personal-assistant recipe uses.
 
 ## Isolation & sandboxing
 

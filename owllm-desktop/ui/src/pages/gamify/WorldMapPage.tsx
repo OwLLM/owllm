@@ -340,6 +340,13 @@ function atmosphereMaterial(accent: string) {
   });
 }
 
+// Presence dots read as status, not as theme: gold = live right now, purple =
+// recorded but offline. The previous offline slate at 0.1 emissive was
+// effectively invisible against the blue map backdrop, so whole populations of
+// recorded installs looked absent. Both are shared by the globe and the lists.
+export const PRESENCE_ONLINE_COLOR = "#ffc43d";
+export const PRESENCE_OFFLINE_COLOR = "#a071f5";
+
 function useThemeColors() {
   const read = () => {
     const style = getComputedStyle(document.documentElement);
@@ -767,7 +774,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
 
       const list = nodesRef.current;
       list.forEach((node, index) => {
-        const color = node.online ? accent : 0x718096;
+        const color = node.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR;
         const baseScale = node.kind === "fleet" ? 1 : 1;
 
         if (node.kind === "fleet" && node.orbit) {
@@ -775,7 +782,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
           const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
             orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
           ));
-          const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
+          const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.24 }));
           earthAnchor.add(ring);
           orbitRings.push({ line: ring, node });
         }
@@ -785,7 +792,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
           : new THREE.SphereGeometry(0.07, 20, 16);
         const material = new THREE.MeshStandardMaterial({
           color,
-          emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.1),
+          emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.42),
           roughness: 0.3,
           metalness: 0.4,
         });
@@ -800,7 +807,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
 
         const halo = new THREE.Mesh(
           new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
-          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
+          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.20, depthWrite: false, blending: THREE.AdditiveBlending }),
         );
         halo.userData.offset = index * 0.63;
         nodeParent.add(halo);
@@ -1197,7 +1204,7 @@ export default function WorldMapPage() {
         label: node.region
           ? `${regionWithFlag(node.region)} · ${presenceServerCode(node.id)}`
           : `${t("Anonymous OWLLM node")} · ${presenceServerCode(node.id)}`,
-        detail: `${node.os === "Other" ? t("Other") : node.os} · ${node.online ? t("Online") : t("Offline")}`,
+        detail: `${node.os === "Other" ? t("Other") : node.os} · ${node.appVersion ? `v${node.appVersion}` : t("Version unknown")} · ${node.online ? t("Online") : t("Offline")}`,
         latitude: node.latitude,
         longitude: node.longitude,
         online: node.online,
@@ -1211,7 +1218,7 @@ export default function WorldMapPage() {
         return {
           id: device.device_id,
           label: device.is_self || device.device_id === selfId ? t("This device") : device.name,
-          detail: `${device.os} · ${online ? t("Online") : t("Offline")}`,
+          detail: `${device.os} · ${device.app_version ? `v${device.app_version}` : t("Version unknown")} · ${online ? t("Online") : t("Offline")}`,
           online,
           kind: "fleet" as const,
           orbit: fleetOrbit(device.device_id),
@@ -1501,13 +1508,13 @@ export default function WorldMapPage() {
                                 color: "var(--fg)", cursor: "pointer",
                               }}
                             >
-                              <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: publicNode.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: publicNode.online ? "0 0 9px var(--accent)" : "none" }} />
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: publicNode.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR, boxShadow: `0 0 9px ${publicNode.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR}` }} />
                               <span style={{ minWidth: 0 }}>
                                 <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                   {countryName} · {t("Server")} {presenceServerCode(publicNode.id)}
                                 </span>
                                 <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {city} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.online ? t("Online") : t("Offline")}
+                                  {city} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.appVersion ? `v${publicNode.appVersion}` : t("Version unknown")} · {publicNode.online ? t("Online") : t("Offline")}
                                 </span>
                               </span>
                             </button>
@@ -1519,7 +1526,7 @@ export default function WorldMapPage() {
                 );
               }) : [...nodes].sort((a, b) => Number(b.online) - Number(a.online)).map((node) => (
                 <button key={node.id} onClick={() => handleNodeSelect(node)} style={{ width: "100%", display: "grid", gridTemplateColumns: "9px minmax(0,1fr)", gap: 9, textAlign: "left", padding: "9px 7px", border: "none", borderBottom: "1px solid var(--border)", background: selected?.id === node.id ? "rgba(var(--accent-rgb),.10)" : "transparent", color: "var(--fg)", cursor: "pointer" }}>
-                  <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: node.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: node.online ? "0 0 9px var(--accent)" : "none" }} />
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: node.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR, boxShadow: `0 0 9px ${node.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR}` }} />
                   <span style={{ minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 12.5, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.label}</span>
                     <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.detail}</span>

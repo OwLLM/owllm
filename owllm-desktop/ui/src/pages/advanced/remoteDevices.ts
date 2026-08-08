@@ -20,6 +20,9 @@ export const READ_ONLY_POLICY: PermissionPolicy = {
 
 export type DeviceIdentity = {
   device_id: string;
+  /// Anonymous World Map token, `hex(SHA-256(domain || device_id))`, derived in
+  /// Rust so it never depends on the webview exposing `crypto.subtle`.
+  presence_id?: string;
   name: string;
   os: string;
   arch: string;

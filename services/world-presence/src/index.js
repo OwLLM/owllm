@@ -12,9 +12,11 @@
 // or stored, only Cloudflare's deliberately coarse edge lat/lon is used (then
 // rounded to a coarse geographic grid). The only client attribute exposed is a
 // normalized OS
-// family (Windows/macOS/Linux/Other); no account or workspace data is accepted.
-// The stable node id is an opaque, per-installation random string supplied by
-// the client; it identifies nothing but "the same anonymous dot across visits".
+// family (Windows/macOS/Linux/Other) plus the release string; no account or
+// workspace data is accepted. The stable node id is an opaque one-way hash of
+// the client's own device key; it identifies nothing but "the same anonymous
+// dot across visits", and a client that cannot produce one sends no id at all
+// rather than inventing a random one (which recorded one install many times).
 
 const MAX_NODES = 20_000; // recorded-forever cap; oldest offline node is evicted past this.
 const MAX_ONLINE = 10_000; // concurrent presence sockets on the single global object.
@@ -51,6 +53,11 @@ function randomId(cryptoApi = crypto) {
 /** Opaque, device-local node id supplied by the client. Identifies nothing. */
 export function sanitizeNodeId(raw) {
   return String(raw ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64);
+}
+
+/** Release string only — never a build path, user agent, or free-form text. */
+export function sanitizeAppVersion(raw) {
+  return String(raw ?? "").trim().replace(/[^0-9A-Za-z.+-]/g, "").slice(0, 24);
 }
 
 /** Reduce platform data to the four anonymous families shown on the map. */
@@ -94,6 +101,7 @@ export function publicNode(row, online) {
     id: String(row.id ?? "").slice(0, 96),
     region: String(row.region ?? "").slice(0, 80),
     os: normalizeOsFamily(row.os),
+    appVersion: sanitizeAppVersion(row.appVersion ?? row.app_version),
     latitude: finite(row.latitude),
     longitude: finite(row.longitude),
     firstSeen: String(row.firstSeen ?? row.first_seen ?? ""),
@@ -157,6 +165,12 @@ export class WorldPresence {
       // Older rows remain truthfully "Other" until that installation reconnects.
       this.sql.exec("ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'");
     }
+    if (!nodeColumns.some((column) => String(column.name) === "app_version")) {
+      // Added without a schema_version bump on purpose: bumping wipes the table,
+      // and every recorded install must survive gaining a column. Rows written
+      // by older clients stay truthfully blank until that install reconnects.
+      this.sql.exec("ALTER TABLE nodes ADD COLUMN app_version TEXT NOT NULL DEFAULT ''");
+    }
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     // v1 recorded a server-random id for every connection that arrived without a
     // stable client id, so each reconnect of a pre-stable-id client became a new
@@ -191,26 +205,28 @@ export class WorldPresence {
     return ids;
   }
 
-  /** Normalized OS family for each live installation. */
+  /** Normalized OS family and release for each live installation. */
   onlineOs(excludedSocket) {
-    const operatingSystems = new Map();
+    const live = new Map();
     for (const socket of this.presenceSockets()) {
       if (socket === excludedSocket) continue;
       const data = attachment(socket);
-      if (data?.role === PRESENCE_TAG && data.id) operatingSystems.set(String(data.id), normalizeOsFamily(data.os));
+      if (data?.role === PRESENCE_TAG && data.id) {
+        live.set(String(data.id), { os: normalizeOsFamily(data.os), appVersion: sanitizeAppVersion(data.appVersion) });
+      }
     }
-    return operatingSystems;
+    return live;
   }
 
   storedRows() {
     return this.sql
-      .exec("SELECT id, region, os, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
+      .exec("SELECT id, region, os, app_version AS appVersion, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
       .toArray();
   }
 
   storedRow(id) {
     return this.sql
-      .exec("SELECT id, region, os, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes WHERE id = ?", id)
+      .exec("SELECT id, region, os, app_version AS appVersion, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes WHERE id = ?", id)
       .toArray()[0] ?? null;
   }
 
@@ -226,11 +242,11 @@ export class WorldPresence {
     // Recorded rows plus live ephemeral (no stable id) connections. Ephemerals
     // render as online dots but are never persisted, so `total` stays honest:
     // it counts recorded installations only, while `online` counts live sockets.
-    const onlineOs = this.onlineOs(excludedSocket);
-    const rows = this.storedRows().map((row) => ({
-      ...row,
-      os: onlineOs.get(String(row.id ?? "")) ?? row.os,
-    }));
+    const live = this.onlineOs(excludedSocket);
+    const rows = this.storedRows().map((row) => {
+      const now = live.get(String(row.id ?? ""));
+      return { ...row, os: now?.os ?? row.os, appVersion: now?.appVersion || row.appVersion };
+    });
     const seen = new Set(rows.map((row) => String(row.id ?? "")));
     for (const socket of this.presenceSockets()) {
       if (socket === excludedSocket) continue;
@@ -249,12 +265,12 @@ export class WorldPresence {
   }
 
   /** Record a first sighting or refresh its anonymous city, OS, and map point. */
-  recordNode(id, location, os, now) {
+  recordNode(id, location, os, appVersion, now) {
     this.sql.exec(
-      "INSERT INTO nodes (id, region, os, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET region = excluded.region, os = excluded.os, " +
+      "INSERT INTO nodes (id, region, os, app_version, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET region = excluded.region, os = excluded.os, app_version = excluded.app_version, " +
       "latitude = excluded.latitude, longitude = excluded.longitude, last_seen = excluded.last_seen",
-      id, location.region, os, location.latitude, location.longitude, now, now,
+      id, location.region, os, appVersion, location.latitude, location.longitude, now, now,
     );
     // Bounded footprint: past the cap, drop the oldest offline nodes.
     const overflow = this.totalCount() - MAX_NODES;
@@ -291,6 +307,7 @@ export class WorldPresence {
       // fallback classifies older releases so the country breakdown works
       // immediately without exposing browser/version details to viewers.
       const os = normalizeOsFamily(url.searchParams.get("os") || request.headers.get("User-Agent"));
+      const appVersion = sanitizeAppVersion(url.searchParams.get("v"));
       const location = coarseLocation({
         country: request.headers.get("X-OWLLM-Country"),
         city: request.headers.get("X-OWLLM-City"),
@@ -305,9 +322,9 @@ export class WorldPresence {
       // new permanent node and the total would grow without bound.
       const ephemeral = !stableId;
       const row = ephemeral
-        ? { id, region: location.region, os, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
-        : this.recordNode(id, location, os, now);
-      server.serializeAttachment({ role, id, os, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
+        ? { id, region: location.region, os, appVersion, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
+        : this.recordNode(id, location, os, appVersion, now);
+      server.serializeAttachment({ role, id, os, appVersion, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
       this.state.acceptWebSocket(server, [role]);
       this.broadcast({ type: "upsert", node: publicNode(row, true), counts: this.counts(), updatedAt: new Date().toISOString() });
     } else {

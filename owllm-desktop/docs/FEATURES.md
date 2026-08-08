@@ -20,7 +20,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Core** (always) | Home, Server, Info | hardware probe, llama-server lifecycle, sandbox-disk care |
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
-| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe |
+| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline |
 | **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference

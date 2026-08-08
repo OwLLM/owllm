@@ -990,6 +990,7 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         ensure_listener_started(runtime);
         let rec = self_public_record()?;
         Ok(json!({
+            "presence_id": identity::presence_id(&rec.device_id),
             "device_id": rec.device_id,
             "name": rec.name,
             "os": rec.os,

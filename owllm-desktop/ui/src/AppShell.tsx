@@ -2086,13 +2086,20 @@ function WorldPresenceRunner() {
     let disposed = false;
     let stop: (() => void) | undefined;
     void getIdentity()
-      .then((identity) => presenceNodeIdForDevice(identity.device_id))
-      .then((nodeId) => {
-        if (!disposed) stop = installWorldPresenceConnection({ nodeId });
+      .then(async (identity) => ({
+        // Rust derives the same hash without needing `crypto.subtle`, which is
+        // secure-context-only; the webview hash stays as the browser-dev path.
+        nodeId: identity.presence_id || await presenceNodeIdForDevice(identity.device_id),
+        appVersion: identity.app_version,
+      }))
+      .then(({ nodeId, appVersion }) => {
+        if (!disposed) stop = installWorldPresenceConnection({ nodeId, appVersion });
       })
       .catch(() => {
-        // Browser-only development and a temporarily unavailable native identity
-        // retain the old device-local anonymous id instead of losing presence.
+        // No native identity (browser-only development, or a device that cannot
+        // read its own keypair): connect with NO id. The service shows the dot
+        // while it is live and records nothing, so repeated launches can never
+        // become repeated "users" — that is what a random fallback id did.
         if (!disposed) stop = installWorldPresenceConnection();
       });
     return () => {

@@ -104,6 +104,14 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
   ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,900}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
+  // A per-git-COMMAND lock is not enough: each sync channel is a read-modify-write
+  // (reset --hard → rewrite state/ → commit+push), so a concurrent channel's reset
+  // reverted another's pending write to a TRACKED file and commit_push then found
+  // nothing to commit. Signing metadata silently stopped reaching the vault.
+  ["src-tauri/src/vault.rs", /static VAULT_TXN_LOCK[\s\S]{0,400}fn vault_txn/, "whole vault sync transactions are serialized, not just single git commands (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,200}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).

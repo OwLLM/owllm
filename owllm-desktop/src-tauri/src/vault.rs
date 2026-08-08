@@ -2070,7 +2070,10 @@ mod tests {
         let branch = current_branch(&clone);
         run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&clone)).unwrap();
 
-        let (started, wait_for_start) = std::sync::mpsc::channel::<()>();
+        // An atomic, not a channel: scoped threads borrow their captures, and
+        // mpsc::Receiver is Send but not Sync.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let a_wrote = AtomicBool::new(false);
         std::thread::scope(|s| {
             // Channel A — the one whose write used to vanish.
             s.spawn(|| {
@@ -2081,14 +2084,16 @@ mod tests {
                     Some(&clone),
                 );
                 std::fs::write(&meta, "NEW").unwrap();
-                started.send(()).unwrap();
+                a_wrote.store(true, Ordering::SeqCst);
                 // Stall between write and commit — the window the bug lived in.
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 commit_push(&clone, &branch).unwrap();
             });
             // Channel B — a different sync firing concurrently.
             s.spawn(|| {
-                wait_for_start.recv().unwrap();
+                while !a_wrote.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100)); // land mid-stall
                 let _txn = vault_txn();
                 let _ = run_git(&["fetch", "origin", &branch], Some(&clone));

@@ -104,9 +104,14 @@ check(/const navigate[\s\S]{0,350}browser_open_tab[\s\S]{0,100}activate: true/.t
   "URLs opened by the user panel create selected tabs instead of replacing the current tab");
 
 // --- typed-login capture --------------------------------------------------
-check(browserRs.includes("function reportCred()") &&
-      browserRs.includes('addEventListener("submit", reportCred, true)') &&
-      browserRs.includes('addEventListener("pagehide", reportCred)'),
+// Same invariant as before; the scanner moved from BRIDGE_JS (main-frame-only)
+// into FRAME_CRED_JS (all frames) so iframed logins are captured too, and the
+// top frame keeps the transport because an iframe's title never reaches the
+// window. Depth is owned by browserCredentialVault.verify.run.mjs.
+check(browserRs.includes("const FRAME_CRED_JS") &&
+      browserRs.includes('addEventListener("submit", emit, true)') &&
+      browserRs.includes('addEventListener("pagehide", emit)') &&
+      browserRs.includes("window.__owllmSendCred = function"),
   "bridge reports typed logins on form submit and page leave");
 check((browserRs.match(/BrowserUiEvent::TypedLogin \{ data \}/g) || []).length >= 2 &&
       /for data in batch\.creds[\s\S]{0,200}store_typed_login/.test(browserRs),

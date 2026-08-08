@@ -980,73 +980,36 @@ const BRIDGE_JS: &str = r##"
       }
     } catch (e) { report(reqId, "ERROR: " + (e && e.message ? e.message : e)); }
   };
-  // --- typed-login capture → OwLLM vault ---------------------------------
-  // When the user submits a form with a filled password field (or leaves the
-  // page with one still filled), report origin+username+password to Rust on
-  // the EVT title channel; Rust upserts it into the encrypted browser vault
-  // (browser_vault.rs) so the login autofills next time. Same transient
-  // base64 title mechanics as every other message on this channel.
-  var credSent = "";
-  function grabCred() {
-    var pws = document.querySelectorAll("input[type=password]");
-    var pw = null;
-    for (var i = 0; i < pws.length; i++) if (pws[i].value) { pw = pws[i]; break; }
-    if (!pw) return null;
-    var user = "";
-    try { user = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
-    var ins = document.querySelectorAll("input");
-    for (var j = 0; j < ins.length; j++) {
-      if (ins[j] === pw) break;
-      var ty = (ins[j].type || "text").toLowerCase();
-      if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) user = ins[j].value;
-    }
-    try { if (user) sessionStorage.setItem("__owllmLoginUser", user); } catch (e) {}
-    return { origin: location.origin, username: user, password: pw.value };
-  }
-  function reportCred() {
-    var c = grabCred() || window.__owllmProv || null;
-    if (!c) return;
-    var key = c.origin + "" + c.username + "" + c.password;
-    if (key === credSent) return; // same login already reported on this page
-    credSent = key;
+  // --- typed-login capture: TRANSPORT ONLY -------------------------------
+  // The SCANNER lives in FRAME_CRED_JS, injected into EVERY frame. This script
+  // is main-frame-only -- Tauri hardcodes for_main_frame_only:true on
+  // initialization_script -- which is exactly why an iframed login (the Google
+  // identity iframe, most embedded OAuth) was never captured at all.
+  //
+  // Split so there is one scanner and one transport: a sub-frame postMessages
+  // its find up here and the top frame writes it to the EVT title channel. A
+  // sub-frame cannot report for itself -- an iframe document's title never
+  // reaches the window, so the channel simply does not exist down there. Rust
+  // upserts into the encrypted vault (browser_vault.rs) for next-time autofill.
+  // A SET, not a last-seen slot: a page can now report from several frames at
+  // once (top form + embedded provider), and with a single slot two logins
+  // ping-pong and re-report each other forever, rewriting the vault on a loop.
+  var credSeen = {};
+  window.__owllmSendCred = function (c) {
+    if (!c || !c.password) return;
+    var key = c.origin + "" + c.username + "" + c.password;
+    if (credSeen[key]) return; // this exact login already reported on this page
+    credSeen[key] = 1;
     if (document.title.indexOf(SENT) !== 0) window.__owllmTitle0 = document.title;
     document.title = SENT + "EVT" + Z + "cred" + Z + b64(JSON.stringify(c));
     setTimeout(function () { try { document.title = window.__owllmTitle0 || ""; } catch (e) {} }, 60);
-  }
-  document.addEventListener("submit", reportCred, true);
-  window.addEventListener("pagehide", reportCred);
-  // SPA logins often clear the form without navigating, so submit/pagehide
-  // alone lose the values. Keep a provisional copy of the last complete login
-  // while the user types, and also report on submit-ish clicks, Enter, and
-  // tab-hide — the report itself dedupes via credSent.
-  var credReportTimer = 0;
-  function scheduleCredReport() {
-    if (credReportTimer) clearTimeout(credReportTimer);
-    credReportTimer = setTimeout(function () {
-      credReportTimer = 0;
-      reportCred();
-    }, 700);
-  }
-  document.addEventListener("input", function (e) {
-    var t = e.target;
-    if (t && t.tagName === "INPUT") {
-      var ty = (t.type || "text").toLowerCase();
-      if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
-        try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e) {}
-      }
-      var c = grabCred();
-      if (c) { window.__owllmProv = c; scheduleCredReport(); }
-    }
-  }, true);
-  document.addEventListener("click", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
-    if (el) setTimeout(reportCred, 0);
-  }, true);
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") setTimeout(reportCred, 0);
-  }, true);
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "hidden") reportCred();
+  };
+  // The origin travels in the payload -- it is the FRAME's origin, not the top
+  // page's -- so a login typed into an embedded identity provider is filed
+  // under the site that actually owns it.
+  window.addEventListener("message", function (e) {
+    var d = e && e.data;
+    if (d && d.__owllmCred && d.__owllmCred.password) window.__owllmSendCred(d.__owllmCred);
   });
   // --- vault autofill (Rust → page) --------------------------------------
   // Rust evals __owllmAutofill(user, pass) after a page finishes loading when
@@ -1084,6 +1047,142 @@ const BRIDGE_JS: &str = r##"
     obs.observe(document.documentElement || document, { childList: true, subtree: true });
     setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 20000);
   };
+})();
+"##;
+
+/// Injected at document-start into EVERY frame (`initialization_script_for_all_frames`).
+///
+/// Tauri's plain `initialization_script` hardcodes `for_main_frame_only: true`,
+/// so BRIDGE_JS has never run inside an iframe — which is why an iframed login
+/// (Google's identity iframe, most embedded OAuth) produced no vault entry at
+/// all. This is the whole credential SCANNER, kept deliberately small because
+/// it runs in every frame of every page:
+///
+///   * pierces shadow roots, so a login built as a web component is seen (a
+///     plain `document.querySelectorAll` cannot cross a shadow boundary);
+///   * caches the password element, so the deep walk happens once per form and
+///     not on every keystroke;
+///   * reports through the top frame — an iframe's `document.title` never
+///     reaches the window, so the EVT channel does not exist in a sub-frame.
+const FRAME_CRED_JS: &str = r##"
+(function () {
+  if (window.__owllmCredScan) return;
+  window.__owllmCredScan = true;
+  var TOP = window.top === window;
+
+  // Cached password field. Re-finding it costs a full shadow walk, so hold on
+  // to it while it is still in the document.
+  var pwEl = null;
+  function livePw() {
+    if (pwEl && pwEl.isConnected && (pwEl.type || "").toLowerCase() === "password") return pwEl;
+    pwEl = null;
+    return null;
+  }
+  // Cheap first: the ordinary top-level query covers almost every site. Only
+  // when that finds nothing do we pay for the shadow-root walk.
+  function findPw() {
+    var live = livePw();
+    if (live) return live;
+    var shallow = document.querySelectorAll("input[type=password]");
+    for (var i = 0; i < shallow.length; i++) { pwEl = shallow[i]; return pwEl; }
+    var found = deepPw(document, 0);
+    if (found) pwEl = found;
+    return found;
+  }
+  function deepPw(root, depth) {
+    if (!root || depth > 8 || !root.querySelectorAll) return null;
+    var hosts = root.querySelectorAll("*");
+    for (var i = 0; i < hosts.length; i++) {
+      var sr = hosts[i].shadowRoot;
+      if (!sr) continue;
+      var p = sr.querySelector("input[type=password]");
+      if (p) return p;
+      var deeper = deepPw(sr, depth + 1);
+      if (deeper) return deeper;
+    }
+    return null;
+  }
+  // The username is the last filled text/email/tel input BEFORE the password
+  // field, in the same root. Two-step logins (Google, Microsoft) put the two on
+  // separate pages, so the typed value is also remembered in sessionStorage —
+  // which survives a same-origin navigation within this tab.
+  function userFor(pw) {
+    var u = "";
+    try { u = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
+    var root = pw.getRootNode ? pw.getRootNode() : document;
+    var ins = (root.querySelectorAll ? root : document).querySelectorAll("input");
+    for (var j = 0; j < ins.length; j++) {
+      if (ins[j] === pw) break;
+      var ty = (ins[j].type || "text").toLowerCase();
+      if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) u = ins[j].value;
+    }
+    return u;
+  }
+  function scan() {
+    var pw = findPw();
+    if (!pw || !pw.value) return null;
+    var u = userFor(pw);
+    try { if (u) sessionStorage.setItem("__owllmLoginUser", u); } catch (e) {}
+    // location.origin of THIS frame: an embedded identity provider's login
+    // belongs to the provider, not to the page that framed it.
+    return { origin: location.origin, username: u, password: pw.value };
+  }
+
+  var prov = null; // last complete login seen while typing
+  function emit() {
+    var c = scan() || prov;
+    if (!c) return;
+    if (TOP) {
+      // Both scripts are document-start; if the transport has not defined
+      // itself yet, come back on the next tick rather than dropping the login.
+      if (window.__owllmSendCred) window.__owllmSendCred(c);
+      else setTimeout(function () { if (window.__owllmSendCred) window.__owllmSendCred(c); }, 50);
+    } else {
+      try { window.top.postMessage({ __owllmCred: c }, "*"); } catch (e) {}
+    }
+  }
+  var timer = 0;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function () { timer = 0; emit(); }, 700);
+  }
+
+  // SPA logins often clear the form without ever navigating, so submit/pagehide
+  // alone lose the values. Keep a provisional copy while the user types and
+  // also report on submit-ish clicks, Enter and tab-hide; the transport dedupes.
+  document.addEventListener("submit", emit, true);
+  window.addEventListener("pagehide", emit);
+  // e.target is RETARGETED to the shadow HOST once an event crosses a shadow
+  // boundary, so a document-level listener sees a <div>, not the <input> the
+  // user typed into. composedPath()[0] is the real originating element — without
+  // it these listeners silently never fire for a web-component login.
+  function src(e) {
+    if (e && e.composedPath) { var p = e.composedPath(); if (p && p.length) return p[0]; }
+    return e ? e.target : null;
+  }
+  document.addEventListener("input", function (e) {
+    var t = src(e);
+    if (!t || t.tagName !== "INPUT") return;
+    var ty = (t.type || "text").toLowerCase();
+    if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
+      try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e2) {}
+    }
+    if (ty === "password") pwEl = t; // cheapest possible find
+    var c = scan();
+    if (c) { prov = c; schedule(); }
+  }, true);
+  document.addEventListener("click", function (e) {
+    var t = src(e);
+    var el = t && t.closest ? t.closest("button, input[type=submit], [role=button]") : null;
+    if (el) setTimeout(emit, 0);
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    var t = src(e);
+    if (e.key === "Enter" && t && t.tagName === "INPUT") setTimeout(emit, 0);
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") emit();
+  });
 })();
 "##;
 
@@ -2174,6 +2273,9 @@ fn attach_tab(
     #[allow(unused_mut)]
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
+        // Credential scanning must reach IFRAMES too — the plain
+        // initialization_script above is main-frame-only.
+        .initialization_script_for_all_frames(FRAME_CRED_JS)
         .on_new_window(move |url, _features| {
             // Opener-dependent OAuth popups must stay engine-owned so
             // `window.opener` / `window.close` keep working; everything else
@@ -2930,6 +3032,9 @@ fn attach_legacy_tab(
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
+        // Credential scanning must reach IFRAMES too — the plain
+        // initialization_script above is main-frame-only.
+        .initialization_script_for_all_frames(FRAME_CRED_JS)
         .on_new_window(move |url, _features| {
             // Same opener-preserving OAuth popup rule as the framed shape.
             if is_opener_dependent_popup(&url) {

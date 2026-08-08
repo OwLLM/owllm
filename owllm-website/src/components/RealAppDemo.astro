@@ -49,9 +49,6 @@
     gap: 0.6rem;
     flex-wrap: wrap;
     padding: 0.5rem 0.9rem;
-    border: 1px solid var(--border-accent);
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
     background: var(--bg-elevated);
     font-size: 0.9rem;
   }
@@ -109,10 +106,15 @@
     width: 100%;
     aspect-ratio: 16 / 10;
     min-height: 540px;
-    border: 1px solid var(--border-accent);
-    border-radius: 0 0 12px 12px;
-    background: #06080d;
-    box-shadow: var(--shadow-lg);
+    /* No site-side frame: the app draws its own window chrome, and its
+       transparent margin must show the page background, not a second box. */
+    border: none;
+    background: transparent;
+    /* The embedded app is color-scheme:dark. If this element's scheme
+       differs (site in light mode), Chromium gives the frame an opaque
+       black canvas instead of compositing transparently — the exact
+       "black band around the app" this component must not have. */
+    color-scheme: dark;
   }
 
   .demo-note {

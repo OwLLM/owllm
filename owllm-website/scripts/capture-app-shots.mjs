@@ -48,12 +48,19 @@ const shots = [
   { file: "code.png", nav: ["💻 Coding"] },
 ];
 
+// Capture the app's content panel only, not the viewport: the app renders a
+// transparent window margin around its frame (HybridFrame), which a viewport
+// screenshot bakes in as a black band — a second frame around every image on
+// the site. The panel is the first child of the frame root.
+const panel = page.locator('[data-ui="hybrid-frame-root"] > div').first();
+
 for (const { file, nav } of shots) {
   for (const step of nav) await go(step);
   // Browser mode surfaces a "no backend" toast on some pages; toasts
   // auto-dismiss, so let them clear before the marketing capture.
   await page.waitForTimeout(6000);
-  await page.screenshot({ path: path.join(outDir, file) });
+  if (await panel.count()) await panel.screenshot({ path: path.join(outDir, file) });
+  else await page.screenshot({ path: path.join(outDir, file) });
   console.log(`captured ${file}`);
 }
 

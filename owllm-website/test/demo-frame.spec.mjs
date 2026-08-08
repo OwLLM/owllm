@@ -40,6 +40,22 @@ describe("app imagery has no site-side frame", () => {
     assert.match(outlineRule, /outline:\s*none/, "no focus outline drawn around the app");
   });
 
+  it("the app's OS-window accent edge is not drawn when embedded", () => {
+    // WindowAccentEdge traces the native window's edge. Embedded in the site's
+    // demo iframe there is no such window, so it painted a full-bleed 3px
+    // accent rectangle outside HybridFrame's own chrome — the double frame.
+    // The iframe half of the guard is load-bearing: pages in the in-app
+    // browser get Tauri IPC injected, so isTauri() alone is true there.
+    const shell = fs.readFileSync(
+      path.resolve(projectRoot, "..", "owllm-desktop", "ui", "src", "AppShell.tsx"),
+      "utf8",
+    );
+    const fn = shell.match(/function WindowAccentEdge\(\)\s*\{[\s\S]*?\n\}/)?.[0];
+    assert.ok(fn, "WindowAccentEdge exists");
+    assert.match(fn, /!isTauri\(\)/, "not drawn outside the Tauri webview");
+    assert.match(fn, /window\.self !== window\.top/, "not drawn inside an iframe");
+  });
+
   it("screenshot containers have no rounded corners or border frame", () => {
     for (const [file, selector] of [
       [["src", "pages", "index.astro"], ".demo-image"],

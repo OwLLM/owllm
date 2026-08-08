@@ -60,6 +60,12 @@ for (const { toggle, tab: tabClick, expectTab, banned } of checks) {
   if (!ok) failed++;
 }
 
+// The OS-window accent edge must not render outside the Tauri webview: in the
+// demo it paints a second, full-bleed frame around the app's own chrome.
+const strayEdges = await page.locator('[data-ui="WindowAccentEdge"]').count();
+console.log(`${strayEdges === 0 ? "OK " : "FAIL"} no OS-window accent edge in the demo (${strayEdges})`);
+if (strayEdges !== 0) failed++;
+
 if (errors.length) console.log("\nConsole page errors:\n" + errors.join("\n"));
 await browser.close();
 process.exit(failed ? 1 : 0);

@@ -1599,6 +1599,13 @@ function OverlayContentPanel({ children }: { children: React.ReactNode }) {
 }
 
 function WindowAccentEdge() {
+  // This line traces the OS window's edge. Without a native window of our own
+  // it has nothing to trace and just paints a second rectangle around whatever
+  // is embedding us — e.g. the website's live demo iframe, where it lands
+  // outside HybridFrame's own chrome and reads as a double frame. Note the
+  // iframe check is not redundant: pages in the in-app browser DO get Tauri
+  // IPC injected, so isTauri() alone is true there.
+  if (!isTauri() || (typeof window !== "undefined" && window.self !== window.top)) return null;
   return (
     <div data-ui="WindowAccentEdge" aria-hidden="true" style={{
       position: "fixed", inset: 0, zIndex: 9999,

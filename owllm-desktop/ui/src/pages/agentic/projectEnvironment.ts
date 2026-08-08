@@ -331,6 +331,16 @@ async function openTabSet(
   }
 }
 
+/// Open the browser on its own welcome page and put OwLLM and the browser side
+/// by side — the SAME coordinated split the personal-operations recipe performs,
+/// through the same `openTabSet` so the two can never drift apart. Used by the
+/// Code page's browser control, including its collapsed rail.
+export async function openWelcomeBrowserSplit(
+  invokeCommand: ProjectEnvironmentInvoker,
+): Promise<void> {
+  await openTabSet([], 0, "desktop", "right-half", invokeCommand, true);
+}
+
 export async function launchProjectEnvironment(
   environment: ProjectEnvironment,
   invokeCommand: ProjectEnvironmentInvoker,

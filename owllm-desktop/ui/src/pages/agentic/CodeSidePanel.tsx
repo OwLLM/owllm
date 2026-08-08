@@ -25,6 +25,15 @@ const TAB_KEY = "owllm:code:sidetab";
 // At 300px their usable typing width fell below 250px after card padding.
 const MIN_W = 420;
 
+export type CodeSidePanelTab = "super" | "notebook";
+
+/// Choose which page the right column shows the next time it mounts. The
+/// collapsed rail uses this so its 📓 / ⚡ icons land on the page they name —
+/// the panel unmounts while shrunk, so its stored preference IS the handover.
+export function selectCodeSidePanelTab(tab: CodeSidePanelTab): void {
+  try { localStorage.setItem(TAB_KEY, tab); } catch { /* keeps the last choice */ }
+}
+
 type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
 type UsageStat = { label: string; turns: number; tokensEst: number };
 type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[]; balance?: string | null };
@@ -100,10 +109,10 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
   };
 
   // ---- Tabs (same strip pattern as TeamMemoryModal Facts/Worklog) ----
-  const [tab, setTab] = useState<"super" | "notebook">(() => {
+  const [tab, setTab] = useState<CodeSidePanelTab>(() => {
     try { return localStorage.getItem(TAB_KEY) === "notebook" ? "notebook" : "super"; } catch { return "super"; }
   });
-  const pickTab = (t: "super" | "notebook") => { setTab(t); try { localStorage.setItem(TAB_KEY, t); } catch { } };
+  const pickTab = (t: CodeSidePanelTab) => { setTab(t); selectCodeSidePanelTab(t); };
 
   // ---- Account usage (VS Code-style) — refreshed on provider change + every 5 min ----
   const [usage, setUsage] = useState<AccountUsage | null>(null);

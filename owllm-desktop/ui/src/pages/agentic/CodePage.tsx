@@ -30,7 +30,9 @@ import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
-import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
+import CodeSidePanel, { selectCodeSidePanelTab, type CodeAgentMode } from "./CodeSidePanel";
+import { CodeProjectRailIcons, CodeUtilityRailIcons, RAIL_W } from "./CodeColumnRails";
+import { openWelcomeBrowserSplit } from "./projectEnvironment";
 import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
@@ -978,6 +980,16 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [termDocked, setTermDocked] = useState(true);
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
+  // The Browser control — from the expanded panel or from the shrunk rail —
+  // opens the browser on its welcome page and puts OwLLM and the browser side
+  // by side: the same coordinated split the personal-assistant recipe performs.
+  const openBrowserSplit = async (): Promise<void> => {
+    try {
+      await openWelcomeBrowserSplit((command, args) => invoke(command, args as Record<string, unknown>));
+    } catch (e) {
+      notify(`Could not open the browser: ${String(e)}`, "error");
+    }
+  };
   useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
   // Tell the tab strip this page has an agent running (coder, second agent, or
   // just-chat) so its tab glows for ANY active agent while it's the visible
@@ -3683,7 +3695,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div
             data-ui="CodeProjectRail"
             data-state={projectRailOpen ? "expanded" : "collapsed"}
-            style={{ width: projectRailOpen ? 220 : 40, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: projectRailOpen ? "stretch" : "center", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: projectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: projectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
+            style={{ width: projectRailOpen ? 220 : RAIL_W, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: projectRailOpen ? "stretch" : "center", overflowY: projectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: projectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: projectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: projectRailOpen ? 4 : 3 }}
           >
             {projectRailOpen ? (
               <>
@@ -3730,16 +3742,13 @@ function CodeWorkspace({ pageId, onTitle }: {
                 />
               </>
             ) : (
-              <button
-                data-ui="CodeProjectRailExpand"
-                onClick={() => setProjectRailOpen(true)}
-                aria-label="Expand left project column"
-                title="Expand left column"
-                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ff78b7", background: "rgba(255, 82, 160, 0.16)", borderColor: "rgba(255, 105, 180, 0.68)", lineHeight: 1 }}
-              >
-                <span data-ui="CodeProjectRailCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>🧠</span>
-                <span aria-hidden="true" style={{ fontSize: 19 }}>›</span>
-              </button>
+              /* Shrunk: one icon per feature this column holds — memory, the
+                 file tree and the GitHub cards — so the column stays usable
+                 instead of being a blank strip. */
+              <CodeProjectRailIcons
+                onMemory={() => { void openProjectMemory(); }}
+                onExpand={() => setProjectRailOpen(true)}
+              />
             )}
           </div>
         )}
@@ -4051,7 +4060,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               mode={agentMode}
               onModeChange={setAgentMode}
               browserOpen={browserOpen}
-              onToggleBrowser={() => setBrowserOpen((v) => !v)}
+              onToggleBrowser={() => { if (!browserOpen) void openBrowserSplit(); setBrowserOpen((v) => !v); }}
               usageProvider={providerFor(modelId, availableModels)}
               onCollapse={() => setUtilityPanelOpen(false)}
               notebook={
@@ -4073,18 +4082,17 @@ function CodeWorkspace({ pageId, onTitle }: {
             <div
               data-ui="CodeUtilityPanelRail"
               data-state="collapsed"
-              style={{ width: 40, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
+              style={{ width: RAIL_W, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
             >
-              <button
-                data-ui="CodeUtilityPanelExpand"
-                onClick={() => setUtilityPanelOpen(true)}
-                aria-label="Expand right utility column"
-                title="Expand right column"
-                style={{ ...btn, width: 32, height: 64, padding: 0, flexDirection: "column", gap: 4, color: "#ffad42", background: "rgba(255, 153, 51, 0.17)", borderColor: "rgba(255, 166, 64, 0.7)", lineHeight: 1 }}
-              >
-                <span data-ui="CodeUtilityPanelCollapsedIcon" aria-hidden="true" style={{ fontSize: 22 }}>📓</span>
-                <span aria-hidden="true" style={{ fontSize: 19 }}>‹</span>
-              </button>
+              {/* Shrunk: one icon per feature this column holds — notebook,
+                  usage, project rules and the browser. */}
+              <CodeUtilityRailIcons
+                onNotebook={() => { selectCodeSidePanelTab("notebook"); setUtilityPanelOpen(true); }}
+                onUsage={() => setUtilityPanelOpen(true)}
+                onRules={() => { selectCodeSidePanelTab("super"); setUtilityPanelOpen(true); }}
+                onBrowser={() => { void openBrowserSplit(); }}
+                onExpand={() => setUtilityPanelOpen(true)}
+              />
             </div>
           )
         )}

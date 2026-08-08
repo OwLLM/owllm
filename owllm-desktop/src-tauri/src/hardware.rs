@@ -694,6 +694,31 @@ fn load_gpu_selection() -> Option<GpuSelection> {
     None
 }
 
+/// This machine's real name, asked of the OS — `None` when it names nothing,
+/// so each caller keeps its own fallback wording.
+///
+/// `COMPUTERNAME` is set only on Windows and `HOSTNAME` is a *shell* variable
+/// that a GUI-launched app never inherits, so every Linux/macOS install used
+/// to fall through to a hardcoded constant — which is why a whole fleet of
+/// them showed up in Remote Devices under one identical name. `sysinfo` (an
+/// existing dependency) asks the OS directly on all three platforms.
+pub fn machine_name() -> Option<String> {
+    let raw = sysinfo::System::host_name()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())?;
+    // `thor.local` / `thor.lan` read better as plain `thor`; a bare
+    // `localhost` distinguishes nothing, so let the caller's fallback win.
+    let name = raw
+        .trim()
+        .trim_end_matches(".local")
+        .trim_end_matches(".lan")
+        .trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// The GPU UUIDs the user selected in gpu_config.json (authoritative).
 /// Empty = no explicit selection → callers should leave the backend's
 /// default GPU behaviour untouched. Used by the model-server spawn to pin

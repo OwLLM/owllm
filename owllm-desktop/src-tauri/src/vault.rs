@@ -715,12 +715,7 @@ pub struct GpuServer {
 }
 
 fn machine_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "this-pc".to_string())
+    crate::hardware::machine_name().unwrap_or_else(|| "this-pc".to_string())
 }
 
 /// Primary LAN IPv4 — the UDP "connect to a public addr, read local_addr"

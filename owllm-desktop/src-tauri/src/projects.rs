@@ -754,9 +754,8 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let team_json = serde_json::to_string(&input.team).unwrap_or("[]".into());
 
         let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
-        let self_name = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "This PC".to_string());
+        let self_name =
+            crate::hardware::machine_name().unwrap_or_else(|| "This PC".to_string());
         let repo_url = normalize_repo_url(&input.repo_url);
         conn.execute(
             "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \

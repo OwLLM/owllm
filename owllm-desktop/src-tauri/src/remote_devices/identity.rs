@@ -98,13 +98,16 @@ mod presence_id_tests {
     }
 }
 
+/// The name EVERY Linux/macOS install used to receive, because the old
+/// derivation read `COMPUTERNAME`/`HOSTNAME` — a Windows-only and a *shell*
+/// variable that a GUI-launched app never inherits. Identities stamped with
+/// it before the fix are healed in `load_or_create`; the match is exact, so
+/// a name the user typed themselves is never touched.
+const LEGACY_PLACEHOLDER_NAME: &str = "This OwLLM PC";
+
 /// Best-effort machine name for the default device name.
 fn machine_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "This OwLLM PC".to_string())
+    crate::hardware::machine_name().unwrap_or_else(|| LEGACY_PLACEHOLDER_NAME.to_string())
 }
 
 /// Load the identity, creating (and persisting) a fresh keypair on first use.
@@ -118,11 +121,21 @@ pub fn load_or_create() -> Result<Identity, String> {
             };
             // Guard against a corrupted/edited id that no longer matches the key.
             if secrets.device_id() == f.device_id {
-                return Ok(Identity {
+                let mut ident = Identity {
                     secrets,
                     name: f.name,
                     created_at: f.created_at,
-                });
+                };
+                // Heal an identity stamped before the OS-level lookup existed,
+                // so an existing install stops showing up under the shared
+                // placeholder. Only ever rewrites that exact string.
+                if ident.name == LEGACY_PLACEHOLDER_NAME {
+                    if let Some(real) = crate::hardware::machine_name() {
+                        ident.name = real;
+                        let _ = write_identity(&ident);
+                    }
+                }
+                return Ok(ident);
             }
         }
     }

@@ -241,6 +241,18 @@ and the browser half/half, the same split the personal-assistant recipe uses.
   (`browser_vault::store_typed_login`), so anything the user types to log in
   autofills next time. Blank passwords are ignored; dedupe is per (origin,
   username), same merge path as manual and imported creds.
+  The SCANNER is `FRAME_CRED_JS`, injected with
+  `initialization_script_for_all_frames` so it reaches **iframes** — Tauri's
+  plain `initialization_script` is main-frame-only, which is why an embedded
+  identity provider (Google's iframe, most OAuth) used to be uncapturable. It
+  pierces **shadow roots** for web-component logins, and reads
+  `composedPath()[0]` rather than `e.target`, since events retarget to the
+  shadow host and a document-level listener would otherwise see a `<div>`.
+  `BRIDGE_JS` keeps the transport alone: an iframe's `document.title` never
+  reaches the window, so a sub-frame `postMessage`s its find to the top frame.
+  The credential is filed under the FRAME's origin, so an embedded provider
+  login belongs to the provider, not the framing site. QR/passwordless logins
+  (WhatsApp Web) are still not captured — no password ever exists to read.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they
@@ -345,6 +357,13 @@ and the browser half/half, the same split the personal-assistant recipe uses.
   Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
 - **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
   wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
+  The default name comes from `hardware::machine_name()`, which asks the OS via
+  `sysinfo` — NOT from `COMPUTERNAME`/`HOSTNAME`, a Windows-only and a *shell*
+  variable that a GUI-launched app never inherits, so every Linux/macOS install
+  used to be named the identical placeholder "This OwLLM PC". A trailing
+  `.local`/`.lan` is trimmed and a bare `localhost` is rejected. An identity
+  still stamped with the old placeholder is healed on load (exact match only,
+  so a name the user typed themselves is never rewritten).
 - **Sealed transport (WAN-capable)**: every command AND its reply is an
   end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
   ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`

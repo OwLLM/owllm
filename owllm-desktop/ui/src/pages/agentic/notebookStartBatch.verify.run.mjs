@@ -60,6 +60,10 @@ const js = ts.transpileModule(src, {
   },
 }).outputText;
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nb-verify-"));
+// The sandbox below copies react/react-dom/scheduler into TMP (~4 MB a run) and
+// the gate runs on every publish, so leaving it behind leaks temp space forever.
+// `exit` fires on the explicit process.exit() at the end of both paths.
+process.on("exit", () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {} });
 fs.mkdirSync(path.join(TMP, "hooks"), { recursive: true });
 fs.mkdirSync(path.join(TMP, "components"), { recursive: true });
 fs.writeFileSync(path.join(TMP, "pages.js"), js); // placeholder name below

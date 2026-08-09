@@ -11,6 +11,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type AccountsStatusLite, type ModelInfo } from "./ModelPicker";
 import { CURATOR_OFF, getCuratorModel, setCuratorModel } from "./memoryCurator";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 // The 3D graph pulls in three.js — lazy-load it so the WebGL bundle only loads
 // when the user opens the Graph view (still bundled, so it works offline).
@@ -76,7 +77,7 @@ export default function TeamMemoryModal({
   // Model list + account availability for the shared ModelPicker; loaded once
   // per open so the modal stays instant when the picker is never touched.
   const [pickerModels, setPickerModels] = useState<ModelInfo[]>([]);
-  const [pickerAccounts, setPickerAccounts] = useState<AccountsStatusLite | null>(null);
+  const [pickerAccounts, setPickerAccounts] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   // Pin the exact durable project id supplied by the opener. Coding resolves
   // its folder asynchronously, so reading only its render-time prop could
   // briefly query the raw folder/fallback scope while Agents queried the real
@@ -127,14 +128,15 @@ export default function TeamMemoryModal({
   useEffect(() => { if (open) setCuratorRaw(getCuratorModel(scope)); }, [open, scope]);
   useEffect(() => {
     if (!open) return;
-    void (async () => {
-      const [m, a] = await Promise.all([
-        invoke<ModelInfo[]>("list_models").catch(() => [] as ModelInfo[]),
-        invoke<AccountsStatusLite>("accounts_status").catch(() => null),
-      ]);
-      setPickerModels(m);
-      setPickerAccounts(a);
-    })();
+    // Provider status is informational (picker dimming) and comes from the
+    // shared session cache, so re-opening this modal starts no new CLI scan.
+    const unsubscribeAccounts = subscribeAccounts(() => setPickerAccounts(getCachedAccounts()));
+    setPickerAccounts(getCachedAccounts());
+    void fetchAccounts();
+    void invoke<ModelInfo[]>("list_models")
+      .then(setPickerModels)
+      .catch(() => setPickerModels([]));
+    return unsubscribeAccounts;
   }, [open]);
 
   if (!open) return null;

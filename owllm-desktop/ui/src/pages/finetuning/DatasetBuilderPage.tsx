@@ -26,6 +26,7 @@ import { LogBox } from "../../components/LogBox";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { translateUiText } from "../../localization";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 type Source = { id: string; kind: "file" | "url"; value: string; name: string };
 type Pair = { instruction: string; output: string; source?: string };
@@ -116,7 +117,7 @@ export default function DatasetBuilderPage() {
   const { sources, urlDraft, chunkSize, chunkOverlap, pairsPerChunk, maxChunks, modelId, pairs, log, busy, status, savedPath } = st;
 
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [accounts, setAccounts] = useState<AccountsStatusLite | null>(null);
+  const [accounts, setAccounts] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   // Rule-based "you never picked a model" popup — raised by Generate, never
   // resolved behind the user's back.
   const [modelRequired, setModelRequired] = useState(false);
@@ -131,11 +132,20 @@ export default function DatasetBuilderPage() {
         // user never chose.
         .then((all) => { if (!dead) setModels(all); })
         .catch(() => {});
-      invoke<AccountsStatusLite>("accounts_status").then((s) => { if (!dead) setAccounts(s); }).catch(() => {});
     };
     reload();
+    // Informational only — the shared session cache answers instantly, so
+    // re-opening the builder performs no new provider scan.
+    const unsubscribeAccounts = subscribeAccounts(() => {
+      if (!dead) setAccounts(getCachedAccounts());
+    });
+    void fetchAccounts();
     window.addEventListener("owllm:models:refresh", reload as EventListener);
-    return () => { dead = true; window.removeEventListener("owllm:models:refresh", reload as EventListener); };
+    return () => {
+      dead = true;
+      unsubscribeAccounts();
+      window.removeEventListener("owllm:models:refresh", reload as EventListener);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -28,6 +28,14 @@ import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
 import {
+  type AccountsStatusFull,
+  fetchAccounts,
+  getCachedAccounts,
+  invalidateAccounts,
+  startAccountsWatch,
+  subscribeAccounts,
+} from "../core/accountsStore";
+import {
   classifySubscriptionFailure,
   isKimiLoginSuccess,
   type AccountRemediation,
@@ -238,30 +246,9 @@ const PAGE_BG = "var(--bg-panel)";
 // -----------------------------------------------------------------------
 // Backend types
 // -----------------------------------------------------------------------
-type AccountsStatus = {
-  host_os: string;
-  anthropic_api_key: boolean;
-  openai_api_key: boolean;
-  moonshot_api_key: boolean;
-  deepseek_api_key: boolean;
-  xai_api_key: boolean;
-  groq_api_key: boolean;
-  perplexity_api_key: boolean;
-  mistral_api_key: boolean;
-  together_api_key: boolean;
-  gemini_api_key: boolean;
-  claude_cli: boolean;
-  claude_cli_installed: boolean;
-  codex_cli: boolean;
-  codex_cli_installed: boolean;
-  kimi_cli: boolean;
-  kimi_cli_installed: boolean;
-  kimi_cli_reauth_required: boolean;
-  gemini_cli: boolean;
-  gemini_cli_installed: boolean;
-  grok_cli: boolean;
-  grok_cli_installed: boolean;
-};
+/// The accounts_status payload. Defined once in accountsStore (which owns the
+/// cache every page reads) so this page and the model pickers cannot drift.
+type AccountsStatus = AccountsStatusFull;
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 type SavedLoginMeta = { origin: string; username: string; note: string; ts: number };
 const CLAUDE_ACCOUNT_KEY = "owllm:accounts:claude-login";
@@ -1138,41 +1125,50 @@ export default function AccountsPage() {
     });
   }
 
+  // This page renders from the SHARED session cache (accountsStore), so
+  // opening Accounts paints every card in its final connected/disconnected
+  // state immediately instead of flashing through "nothing connected".
+  //
+  // It is also the ONLY page that keeps a live poll, and that is deliberate:
+  // an OAuth login can complete in the embedded terminal (or an external
+  // browser) with nothing to notify the app, so the cards must notice on
+  // their own while the user is watching them. startAccountsWatch() drives
+  // ONE shared probe for the whole app and stops the moment this page
+  // unmounts — every other page is pure cache. Connect/disconnect actions
+  // additionally call invalidateAccounts() so the change lands at once
+  // instead of waiting out the interval.
   useEffect(() => {
     let dead = false;
-    const tick = async () => {
-      try {
-        const s = await invoke<AccountsStatus>("accounts_status");
-        if (!dead) {
-          setHostOs(s.host_os);
-          reconcile(s);
-          const connectedBackends = new Set([
-            ...(s.claude_cli ? ["claude_cli"] : []),
-            ...(s.codex_cli ? ["codex_cli"] : []),
-            ...(s.kimi_cli ? ["kimi_cli"] : []),
-            ...(s.gemini_cli ? ["gemini_cli"] : []),
-            ...(s.grok_cli ? ["grok_cli"] : []),
-          ]);
-          const routes = allRoutes.filter((route) =>
-            route.kind === "subscription"
-            && connectedBackends.has(route.backend)
-            && !autoHealthProbedBackends.current.has(route.backend));
-          if (routes.length) {
-            routes.forEach((route) => autoHealthProbedBackends.current.add(route.backend));
-            // Probe sequentially so opening Accounts cannot launch five CLIs at
-            // once. The work stays asynchronous and never blocks the WebView.
-            void (async () => {
-              for (const route of routes) await probeSubscriptionHealth(route, false);
-            })();
-          }
-        }
-      } catch (e) {
-        console.error("accounts_status failed", e);
+    const apply = () => {
+      const s = getCachedAccounts();
+      if (dead || !s) return;
+      setHostOs(s.host_os);
+      reconcile(s);
+      const connectedBackends = new Set([
+        ...(s.claude_cli ? ["claude_cli"] : []),
+        ...(s.codex_cli ? ["codex_cli"] : []),
+        ...(s.kimi_cli ? ["kimi_cli"] : []),
+        ...(s.gemini_cli ? ["gemini_cli"] : []),
+        ...(s.grok_cli ? ["grok_cli"] : []),
+      ]);
+      const routes = allRoutes.filter((route) =>
+        route.kind === "subscription"
+        && connectedBackends.has(route.backend)
+        && !autoHealthProbedBackends.current.has(route.backend));
+      if (routes.length) {
+        routes.forEach((route) => autoHealthProbedBackends.current.add(route.backend));
+        // Probe sequentially so opening Accounts cannot launch five CLIs at
+        // once. The work stays asynchronous and never blocks the WebView.
+        void (async () => {
+          for (const route of routes) await probeSubscriptionHealth(route, false);
+        })();
       }
     };
-    tick();
-    const id = window.setInterval(tick, 3000);
-    return () => { dead = true; window.clearInterval(id); };
+    apply();
+    const unsubscribe = subscribeAccounts(apply);
+    const stopWatch = startAccountsWatch();
+    void fetchAccounts();
+    return () => { dead = true; unsubscribe(); stopWatch(); };
   }, []);
 
   function setCardState(key: string, patch: Partial<CardState>) {
@@ -1369,6 +1365,9 @@ export default function AccountsPage() {
     // A login likely just completed in the terminal → mirror it into the
     // sandbox immediately so isolated agents are authenticated, no manual sync.
     mirrorToSandbox(backend);
+    // Same reason the mirror runs here: the credentials on disk just changed,
+    // so re-validate the shared cache instead of waiting for the next poll.
+    void invalidateAccounts();
   }
 
   function handleInstall(route: RouteSpec, provider: ProviderSpec) {
@@ -1441,6 +1440,9 @@ export default function AccountsPage() {
       if (route.kind === "api" && route.envName) {
         await invoke("accounts_delete_secret", { name: route.envName });
         setCardState(route.key, { connected: false, reauthRequired: false, remediation: null, testText: "", testOk: null });
+        // Provider state really changed — re-validate the shared cache so every
+        // other page's picker drops this provider without waiting for a poll.
+        void invalidateAccounts();
         logInfo(route.backend, `Removed ${provider.name} API key from local store.`);
       } else {
         // Web-only sub (Grok/DeepSeek) has nothing to wipe locally —
@@ -1456,6 +1458,7 @@ export default function AccountsPage() {
         // left the broken green card in place.
         const summary = await invoke<string>("subscription_cli_logout", { backend: route.backend });
         setCardState(route.key, { connected: false, reauthRequired: false, remediation: null, testText: "", testOk: null });
+        void invalidateAccounts();
         logInfo(route.backend, `${provider.name} disconnected. ${summary} Click Connect to log in again.`);
         // If the broken session's terminal is still open in the right
         // rail, close it so the user doesn't accidentally type into a
@@ -1476,6 +1479,9 @@ export default function AccountsPage() {
     try {
       await invoke("accounts_save_api_key", { name: route.envName, value });
       setCardState(route.key, { connected: true, reauthRequired: false, remediation: null, testText: "", testOk: null });
+      // A newly saved key must reach every picker immediately, not on the next
+      // session — this is the "re-validate when something relevant changed" hook.
+      void invalidateAccounts();
       logInfo(route.backend, `Saved ${provider.name} API key locally.`);
       // Push the key into the sandbox too, so isolated agents can use it — at
       // registration, automatically.

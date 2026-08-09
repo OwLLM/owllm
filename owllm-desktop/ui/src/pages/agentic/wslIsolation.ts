@@ -64,9 +64,30 @@ export function winToWslMountUnc(winPath: string | null | undefined, distro: str
     : `\\\\wsl.localhost\\${distro}\\mnt\\${drive}`;
 }
 
-export async function wslStatus(): Promise<WslStatus> {
+// Session cache for the WSL probe. wsl_status shells out to wsl.exe twice
+// (`-l -q` plus a bash round-trip), and both AgentsPage and CodePage probe it
+// on mount — with a fresh body mounted per tab, that re-ran the spawn on every
+// page/tab open. Which distros exist does not change while the app runs unless
+// the user installs or provisions one, and those paths invalidate below.
+//
+// ONLY a positive result is cached. A negative ("no WSL") can be a cold
+// service that hasn't warmed yet, and caching that would make the app claim
+// WSL is missing for the rest of the session — the same trap CodePage's
+// probeSandboxOnce documents. A miss therefore always re-probes.
+let cachedWslStatus: WslStatus | null = null;
+
+/// Drop the cached probe. Call after anything that can change which distros
+/// exist (install / provision), so the next reader sees the new truth.
+export function invalidateWslStatus(): void {
+  cachedWslStatus = null;
+}
+
+export async function wslStatus(force = false): Promise<WslStatus> {
+  if (!force && cachedWslStatus) return cachedWslStatus;
   try {
-    return await invoke<WslStatus>("wsl_status");
+    const status = await invoke<WslStatus>("wsl_status");
+    if (status.available) cachedWslStatus = status;
+    return status;
   } catch {
     return { available: false, distros: [], defaultDistro: null, bestDistro: null };
   }
@@ -106,12 +127,22 @@ export async function wslToolchainStatus(distro?: string | null): Promise<WslToo
 
 /// Install node/uv/git + the agent CLIs inside the distro. Long-running.
 export async function wslProvision(distro?: string | null): Promise<string> {
-  return invoke<string>("wsl_provision", { distro: distro ?? null });
+  try {
+    return await invoke<string>("wsl_provision", { distro: distro ?? null });
+  } finally {
+    // Provisioning can create the distro that the cached probe said was
+    // missing — re-validate rather than serve the pre-install answer.
+    invalidateWslStatus();
+  }
 }
 
 /// Launch `wsl --install` (elevated; needs a reboot). For PCs without WSL.
 export async function wslInstall(): Promise<string> {
-  return invoke<string>("wsl_install");
+  try {
+    return await invoke<string>("wsl_install");
+  } finally {
+    invalidateWslStatus();
+  }
 }
 
 /// Core toolchain ready = node + git present (the minimum for agent tooling).

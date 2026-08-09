@@ -60,6 +60,7 @@ import { notify } from "../../components/Toast";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
 import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 // Session id for a column's chat stream in the ChatRuntime store. The
 // store lives above the router, so an in-flight stream survives this
@@ -295,7 +296,7 @@ export default function ChatPage() {
   const [activePanel, setActivePanel] = useState<"A" | "B" | "C">("A");
   const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   // Rule-based popup raised by Send when no column picked a model.
   const [modelRequired, setModelRequired] = useState(false);
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -445,15 +446,20 @@ export default function ChatPage() {
         .catch(() => { /* leave empty */ });
     };
     reloadModels();
-    invoke<AccountsStatusLite>("accounts_status")
-      .then((s) => { if (!dead) setAccountsStatus(s); })
-      .catch(() => { /* leave null */ });
+    // Informational only (picker enabled/dimmed state) — served from the
+    // shared session cache so re-entering chat neither re-scans for CLIs nor
+    // repaints the picker after first frame.
+    const unsubscribeAccounts = subscribeAccounts(() => {
+      if (!dead) setAccountsStatus(getCachedAccounts());
+    });
+    void fetchAccounts();
     const onFocus = () => reloadModels();
     const onRefresh = () => reloadModels();
     window.addEventListener("focus", onFocus);
     window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
     return () => {
       dead = true;
+      unsubscribeAccounts();
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
     };

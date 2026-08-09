@@ -54,6 +54,7 @@ import { notify } from "../../components/Toast";
 import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
 import { projectsRootGet, projectPathUnder, projectFolderSlug } from "./projectsRoot";
 import { openSyncOnboarding } from "../core/AccountSyncModal";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -639,7 +640,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const SID = sidForPage(pageId);
   // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   // Set to the picker the user must visit when a send is blocked for having no
   // model. Rule-based popup — no auto-pick happens behind it.
   const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
@@ -1200,16 +1201,22 @@ function CodeWorkspace({ pageId, onTitle }: {
           // while running weights the user never chose.
         })
         .catch((e) => notify(`Couldn't load models: ${e}`));
-      invoke<AccountsStatusLite>("accounts_status")
-        .then((s) => { if (!dead) setAccountsStatus(s); })
-        .catch(() => { /* leave null */ });
     };
     reload();
+    // Provider badges are informational, and `reload` also runs on every
+    // window focus — fetching per focus re-ran the CLI scan for a value that
+    // had not changed. The session cache answers instantly; only a real
+    // account change (invalidateAccounts) triggers a new probe.
+    const unsubscribeAccounts = subscribeAccounts(() => {
+      if (!dead) setAccountsStatus(getCachedAccounts());
+    });
+    void fetchAccounts();
     const onRefresh = () => reload();
     window.addEventListener("focus", onRefresh);
     window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
     return () => {
       dead = true;
+      unsubscribeAccounts();
       window.removeEventListener("focus", onRefresh);
       window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
     };

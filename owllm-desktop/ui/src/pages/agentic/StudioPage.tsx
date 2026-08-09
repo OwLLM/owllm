@@ -20,6 +20,7 @@ import SkillLibraryDialog from "./SkillLibraryDialog";
 import { skillIcon } from "./AgentsPage";
 import TeamWorkbench from "./TeamWorkbench";
 import { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 import PersonalAgentsDialog from "./PersonalAgentsDialog";
 import IconPickerDialog, {
   setStudioAgentIconOverride,
@@ -2082,10 +2083,15 @@ export default function StudioPage() {
   const [skillBackends, setSkillBackends] = useState<SkillPackBackend[]>([]);
   // Loaded for the Workbench's per-agent ModelPicker (shared picker + list_models).
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  // Informational only — decides which ModelPicker entries render enabled.
+  // Read from the shared session cache (accountsStore) so re-opening Studio
+  // neither re-runs the CLI scan nor repaints the picker a second time.
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   useEffect(() => {
     invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
-    invoke<AccountsStatusLite>("accounts_status").then(setAccountsStatus).catch(() => {});
+    const unsubscribe = subscribeAccounts(() => setAccountsStatus(getCachedAccounts()));
+    void fetchAccounts();
+    return unsubscribe;
   }, []);
 
   // Layer overrides on top of backend-loaded agent icons. Cheap pass

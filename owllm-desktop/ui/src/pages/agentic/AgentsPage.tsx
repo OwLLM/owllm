@@ -180,6 +180,7 @@ import {
 } from "./worktreeIsolation";
 import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
 import { historyBudgetFor } from "./contextBudget";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -8479,7 +8480,7 @@ export function AgentsPage({
   /// Account presence flags driving the ModelPicker's enabled / dimmed
   /// states. Polled every 4s so the picker flips live when the user
   /// saves / removes credentials on the Accounts page.
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
 
   // Goal input — persisted per-project to localStorage so the text the
   // user typed survives page navigation. Same pattern as the SuperUser
@@ -9489,20 +9490,18 @@ export function AgentsPage({
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
-  // Poll Accounts presence — drives the ModelPicker's available /
-  // dimmed states for the (subscription) + (API) variants of each
-  // cloud model. 4s cadence: cheap and not latency-critical.
+  // Accounts presence — drives the ModelPicker's available / dimmed states
+  // for the (subscription) + (API) variants of each cloud model. PURELY
+  // INFORMATIONAL: nothing here blocks a run; dispatch.ts re-checks the CLI
+  // for real before it uses one. This used to poll every 4s, which re-ran the
+  // whole CLI/PATH scan ~15x a minute for a value that changes only when the
+  // user connects an account — and repainted the picker each time. It now
+  // reads the shared session cache, which probes once per session and
+  // re-validates on an actual account change (invalidateAccounts).
   useEffect(() => {
-    let dead = false;
-    const tick = async () => {
-      try {
-        const s = await invoke<AccountsStatusLite>("accounts_status");
-        if (!dead) setAccountsStatus(s);
-      } catch { /* keep last good value */ }
-    };
-    tick();
-    const id = window.setInterval(tick, 4000);
-    return () => { dead = true; window.clearInterval(id); };
+    const unsubscribe = subscribeAccounts(() => setAccountsStatus(getCachedAccounts()));
+    void fetchAccounts();
+    return unsubscribe;
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;

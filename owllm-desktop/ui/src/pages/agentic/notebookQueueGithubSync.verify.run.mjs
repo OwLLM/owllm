@@ -261,6 +261,14 @@ console.log("case 3: every job state transition publishes too");
   await drain();
   check("finishing a job publishes", writes.A.length > before);
 
+  // Dispatch s2 first: a run only ever fails a card it is CARRYING. The
+  // stampers now refuse a card that has left the run, so that a queue the user
+  // stopped is not silently un-cancelled by the abandoned run's late stamp —
+  // failing a still-pending card was a test shortcut no production path takes
+  // (every caller is settleNotebookStep at run end, on a card `sent` at
+  // dispatch). This exercises the real pending → sent → failed transition.
+  NB.markNotebookStepStarted(PID, "s2");
+  await drain();
   const beforeFail = writes.A.length;
   NB.markNotebookStepFailed(PID, "s2", "boom");
   await drain();

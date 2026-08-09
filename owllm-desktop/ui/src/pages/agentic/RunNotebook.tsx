@@ -561,12 +561,22 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   saveNotebook(projectId, nb, { publish: true });
 }
 
+/// True once a card is no longer the one this run is carrying. A run holds a
+/// step id from dispatch to its `finally`, so it still stamps an outcome after
+/// the user has stopped or reset the queue — and that late stamp would archive
+/// (or fail) a card the user had deliberately handed back to `pending`,
+/// silently undoing the cancellation. Also keeps the stampers idempotent: a
+/// second call finds the card already settled and leaves it alone.
+function stepLeftTheRun(s: NotebookStep): boolean {
+  return s.status !== "sent" || s.finishedAt != null;
+}
+
 /// Stamp when the run that processed a notebook step finished. Idempotent.
 export function markNotebookStepFinished(projectId: string | null | undefined, stepId: string, finishedAt: number = Date.now()): void {
   if (!projectId || !stepId) return;
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
-  if (idx < 0) return;
+  if (idx < 0 || stepLeftTheRun(nb.steps[idx])) return;
   nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, stepUpdatedAt: finishedAt, failureReason: undefined };
   saveNotebook(projectId, nb, { publish: true });
 }
@@ -582,7 +592,7 @@ export function markNotebookStepFailed(
   if (!projectId || !stepId) return;
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
-  if (idx < 0) return;
+  if (idx < 0 || stepLeftTheRun(nb.steps[idx])) return;
   nb.steps[idx] = {
     ...nb.steps[idx],
     status: "failed",
@@ -1126,6 +1136,70 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   useTick(queueActive && nb.autoFeedOwner !== surfaceId && nb.autoFeedHeartbeat != null);
   const lockedElsewhere = queueActive && nb.autoFeedOwner !== surfaceId && leaseLive;
   const takeOverQueue = () => updateNotebook((prev) => ({ ...prev, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+  // ---- The queue control's state machine ----------------------------------
+  // One button, four states, all derived from the QUEUE DOCUMENT rather than a
+  // local "I pressed start" flag. The in-flight test reads the step records —
+  // the part of the notebook that actually syncs — so a job dispatched by a
+  // window that has since closed, or by another PC, still reads as in flight.
+  //
+  // What this replaces: the button was rendered only when `pendingCount > 0`
+  // and was labelled/enabled off the caller's device-local `running` prop. So
+  // it stayed green and pressable while this very window drove the queue, it
+  // DISAPPEARED entirely while the last card was in flight (nothing left to
+  // stop with), and a card left `sent` by a window that crashed mid-job
+  // stranded the queue behind no control at all.
+  const inFlight = useMemo(() => nb.steps.some((s) => s.status === "sent" && s.finishedAt == null), [nb.steps]);
+  // Our own lease only counts while we are actually beating for it, which is
+  // what separates "this window is driving" from "a dead window left its name".
+  const leaseLiveHere = nb.autoFeedOwner === surfaceId && leaseLive;
+  // `locked` is tested FIRST and independently of `inFlight`: another window can
+  // hold a live lease between two jobs, and a queue that is merely between cards
+  // must still not be startable from here (it would double-drive the one team).
+  const queueStatus: "empty" | "idle" | "running" | "locked" | "stale" =
+    lockedElsewhere ? "locked"
+      : inFlight ? ((running || leaseLiveHere) ? "running" : "stale")
+        : (pendingCount > 0 ? "idle" : "empty");
+  /// Cancel the queue: hand every in-flight card back as `pending` so the
+  /// sequence is restartable on the spot, and release the lease. Serves BOTH
+  /// the Stop shown while a queue runs and the Reset offered when a crashed or
+  /// closed window left a card `sent` forever — one recovery, named for what
+  /// the user meant in each state.
+  ///
+  /// This cancels the QUEUE, not the agent. A run already in flight keeps going
+  /// (the dock's Stop is what aborts a run); it simply no longer owns the card,
+  /// and its late run-end stamp is refused by stepLeftTheRun.
+  const releaseQueue = () => {
+    const at = Date.now();
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((s) => (s.status === "sent" && s.finishedAt == null)
+        ? { ...s, status: "pending", startedAt: undefined, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: at, failureReason: undefined }
+        : s),
+      autoFeedArmed: false,
+      autoFeedOwner: undefined,
+      autoFeedHeartbeat: undefined,
+      ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
+        ? { autoFeedFinishedAt: at, autoFeedStopped: true }
+        : {}),
+    }), { publish: true });
+  };
+  // Label, colour and action per state. `running` and `locked` are indicators:
+  // they render disabled, and stopping is a separate, explicit affordance so a
+  // stray click on the status can never cancel a live queue.
+  const queueControl = {
+    idle: { label: "Start queue", icon: "play" as const, background: "var(--ok)", onClick: startQueue, disabled: false,
+      title: nb.autoFeed
+        ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+        : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)" },
+    running: { label: "Running", icon: "loader" as const, background: "var(--warn)", onClick: () => {}, disabled: true,
+      title: "A job from this queue is in flight. Stop the queue to hand its card back and start again." },
+    locked: { label: "Running elsewhere", icon: "monitor" as const, background: "var(--bg-surface)", onClick: () => {}, disabled: true,
+      title: "The queue is already running in another window on this project. Take over from the header to drive it here." },
+    stale: { label: "Reset queue", icon: "rotate" as const, background: "var(--warn)", onClick: releaseQueue, disabled: false,
+      title: "This queue still has a job marked as running, but nothing is driving it — the window that started it was closed or crashed. Reset hands the card back as pending so you can start again." },
+    // `empty` renders no control at all, so it has no entry here — it falls back
+    // to the idle shape purely to keep this lookup total.
+  }[queueStatus === "empty" ? "idle" : queueStatus];
   // Cross-PC ADVISORY. The run-lease deliberately never syncs, so until now a
   // second machine had no way to know a queue was already running and could
   // start the same steps again. This only informs — it must not disable, since
@@ -1471,19 +1545,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               {incompleteCount > 0 && (
                 <span style={{ fontSize: 10, fontWeight: 700, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 8px" }}>{incompleteCount} incomplete</span>
               )}
-              {pendingCount > 0 && (
+              {queueStatus !== "empty" && (
                 <button
-                  onClick={startQueue}
-                  disabled={lockedElsewhere}
-                  title={lockedElsewhere
-                    ? "The queue is already running in another window on this project. Take over from the header to drive it here."
-                    : running
-                      ? "Queue is waiting for the current run to finish before starting"
-                      : nb.autoFeed
-                        ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
-                        : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
-                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: lockedElsewhere ? "var(--bg-surface)" : running ? "var(--warn)" : "var(--ok)", color: lockedElsewhere ? "var(--fg-muted)" : "#ffffff", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.6 : 1, textTransform: "none", letterSpacing: 0 }}
-                ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
+                  data-ui="NotebookQueueControl"
+                  data-queue-status={queueStatus}
+                  onClick={queueControl.onClick}
+                  disabled={queueControl.disabled}
+                  title={queueControl.title}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: queueControl.background, color: queueStatus === "locked" ? "var(--fg-muted)" : "#ffffff", fontSize: 11, fontWeight: 700, cursor: queueControl.disabled ? "not-allowed" : "pointer", opacity: queueControl.disabled ? 0.6 : 1, textTransform: "none", letterSpacing: 0 }}
+                ><ActionIcon name={queueControl.icon} size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />{queueControl.label}</button>
+              )}
+              {queueStatus === "running" && (
+                <button
+                  data-ui="NotebookQueueStop"
+                  onClick={releaseQueue}
+                  aria-label="Stop queue"
+                  title="Stop the queue: its in-flight card goes back to pending so you can start again. The run already in flight keeps going — use the dock's Stop to abort that."
+                  style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--error-rgb),0.5)", borderRadius: 6, background: "rgba(var(--error-rgb),0.12)", color: "var(--error)", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                ><ActionIcon name="close" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Stop</button>
               )}
               {queueNotice && (
                 <span style={{

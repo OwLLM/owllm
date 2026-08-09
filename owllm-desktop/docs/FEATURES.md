@@ -118,6 +118,16 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   chosen = on); an explicit off/on is the user's word and persists across
   restart, navigation and sync. It still only decides whether a live chain
   CONTINUES — starting one is always a deliberate ▶ Start queue.
+  The queue control is a **state machine over the queue document** (a card
+  `sent` with no `finishedAt` = in flight), never a local "I pressed start"
+  flag: ▶ Start queue when idle → ⏳ Running (disabled) with a ✕ Stop beside
+  it → pressable again the moment the job finishes, fails or is stopped.
+  Stop/↺ Reset hand every in-flight card back as `pending` and release the
+  lease, so a window that crashed or was closed mid-job leaves a queue that
+  **recovers** (heartbeat expiry turns Running into ↺ Reset queue) instead of
+  one the user can never restart. Stop cancels the QUEUE, not the agent — the
+  run in flight keeps going, and its late run-end stamp is refused because the
+  card has left the run.
   Mounted inline on the Code page and as a modal on the Agents page —
   ONE blob per project, so both surfaces are views of the same notebook.
   The Kanban plan board (NOW/NEXT/LATER) and its ⚡ Start batch action are

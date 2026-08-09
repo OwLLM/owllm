@@ -703,8 +703,13 @@ console.log("case 9: a queue owned by another window is ghosted here");
   const { root } = mount({ surfaceId: "code:this-window" });
   check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
   check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
-  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
-  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  // The control is a state machine now: while another live window owns the queue
+  // it reads "Running elsewhere", not "Start queue". The invariant is unchanged —
+  // it must exist, be disabled, and say which state it is in — and targeting it
+  // by data-ui means a MISSING control can no longer satisfy this check.
+  const startBtn = document.querySelector('[data-ui="NotebookQueueControl"]');
+  check("Start queue is disabled here",
+    !!startBtn && startBtn.disabled && startBtn.getAttribute("data-queue-status") === "locked");
   const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
   check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
   const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
@@ -766,8 +771,13 @@ console.log("case 9: a queue owned by another window is ghosted here");
   const { root } = mount({ surfaceId: "code:this-window" });
   check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
   check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
-  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
-  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  // The control is a state machine now: while another live window owns the queue
+  // it reads "Running elsewhere", not "Start queue". The invariant is unchanged —
+  // it must exist, be disabled, and say which state it is in — and targeting it
+  // by data-ui means a MISSING control can no longer satisfy this check.
+  const startBtn = document.querySelector('[data-ui="NotebookQueueControl"]');
+  check("Start queue is disabled here",
+    !!startBtn && startBtn.disabled && startBtn.getAttribute("data-queue-status") === "locked");
   const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
   check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
   const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
@@ -1054,6 +1064,119 @@ console.log("case 13: the queue buttons publish inside the click");
     /saveNotebook\(projRef\.current, next, opts\)/.test(src));
   check("a step lifecycle patch publishes on exactly that condition",
     /\}\), \{ publish: changesLifecycle \}\);/.test(src));
+}
+
+// ---- 14. The Start-queue control is a STATE MACHINE over the queue document,
+//         not a one-shot button ------------------------------------------------
+// The label and the enabled state must follow the queue's own status — which
+// lives in the persisted/synced step records (a card is `sent` with no
+// finishedAt) — rather than the caller's device-local `running` prop. Every
+// mount below passes `running: false`, so any check that passes here does so
+// because the DOCUMENT said the queue was live.
+console.log("case 14: Start queue reflects the real queue status and always recovers");
+{
+  const control = () => document.querySelector('[data-ui="NotebookQueueControl"]');
+  const stopBtn = () => document.querySelector('[data-ui="NotebookQueueStop"]');
+  const label = () => textOf(control() || { textContent: "" });
+  // Report a missing control as a failure instead of throwing, so one absent
+  // element cannot hide the rest of the state machine's checks.
+  const clickIf = (el, what) => {
+    if (!el) { console.error("  FAIL nothing to click: " + what); failures++; return false; }
+    clickEl(el);
+    return true;
+  };
+  const isDisabled = () => control()?.disabled === true;
+  // Seed a queue document directly — this is how a peer's copy, or this
+  // window's own copy after a crash, arrives: as persisted step statuses.
+  const seedDoc = (steps, extra = {}) => {
+    localStorage.setItem(KEY, JSON.stringify({
+      text: "", plan: PLAN, autoFeed: true, digest: [], steps, ...extra,
+    }));
+  };
+
+  // --- start → running ---
+  seed();
+  const m = mount({ running: false });
+  check("an idle queue offers Start", !!control() && /Start queue/.test(label()) && !isDisabled());
+  check("  ...and shows no Stop affordance while idle", !stopBtn());
+  clickIf(control(), "Start queue (idle)");
+  check("starting flips the control to a Running indicator", /Running/.test(label()));
+  check("  ...which is not pressable (one click cannot double-dispatch)", isDisabled());
+  check("  ...and a Stop affordance appears alongside it", !!stopBtn());
+  check("  ...the document really is mid-job", blob().steps.find((s) => s.id === "s1")?.status === "sent");
+  act(() => m.root.unmount());
+
+  // --- running → finished → restartable ---
+  NB.markNotebookStepFinished(PID, "s1", Date.now());
+  const m2 = mount({ running: false });
+  check("a finished job makes the queue pressable again", !!control() && /Start queue/.test(label()) && !isDisabled());
+  act(() => m2.root.unmount());
+
+  // --- running → failed → restartable ---
+  seed();
+  const m3 = mount({ running: false });
+  clickIf(control(), "Start queue (before failure)");
+  act(() => m3.root.unmount());
+  NB.markNotebookStepFailed(PID, "s1", "the run stopped", Date.now());
+  const m4 = mount({ running: false });
+  check("a failed job leaves the queue restartable, not stuck on Running",
+    !!control() && /Start queue/.test(label()) && !isDisabled());
+  act(() => m4.root.unmount());
+
+  // --- cancellation ---
+  seed();
+  const m5 = mount({ running: false });
+  clickIf(control(), "Start queue (before cancel)");
+  clickIf(stopBtn(), "Stop queue");
+  check("Stop returns the in-flight card to pending", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("  ...releases the run lease", blob().autoFeedOwner == null);
+  check("  ...records the sequence as stopped rather than completed",
+    blob().autoFeedStopped === true && typeof blob().autoFeedFinishedAt === "number");
+  check("  ...and the control is immediately pressable again",
+    /Start queue/.test(label()) && !isDisabled());
+  // A cancelled card must stay cancelled: the abandoned run still ends and
+  // calls the same stamper, which would otherwise archive it behind the user.
+  NB.markNotebookStepFinished(PID, "s1", Date.now());
+  check("the abandoned run cannot silently un-cancel the card",
+    NB.loadNotebook(PID).steps.find((s) => s.id === "s1")?.status === "pending");
+  act(() => m5.root.unmount());
+
+  // --- recovery from a stale running state (the lockout) ---
+  // One card, fed, never finished, owned by a window that is gone. Before the
+  // fix the control was gated on `pendingCount > 0`, so this state rendered NO
+  // queue control at all — the user could not restart the queue at all.
+  seedDoc(
+    [{ id: "s1", text: "crashed mid-job", status: "sent", ts: 1, startedAt: 1000 }],
+    { autoFeedOwner: "agents:dead-window", autoFeedHeartbeat: Date.now() - 300_000, autoFeedStartedAt: 1000 },
+  );
+  const m6 = mount({ running: false });
+  check("a stale in-flight queue still renders its control", !!control());
+  check("  ...and offers an explicit reset", /Reset queue/.test(label()) && !isDisabled());
+  clickIf(control(), "Reset queue");
+  check("reset returns the stranded card to pending", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("  ...clears the dead owner's lease", blob().autoFeedOwner == null);
+  check("  ...and the queue is startable again", /Start queue/.test(label()) && !isDisabled());
+  act(() => m6.root.unmount());
+
+  // --- a LIVE owner elsewhere still wins: recovery must not become a way for a
+  //     second window to yank a card out from under a running one ---
+  seedDoc(
+    [{ id: "s1", text: "running in the other window", status: "sent", ts: 1, startedAt: 1000 }],
+    { autoFeedOwner: "agents:other-live-window", autoFeedHeartbeat: Date.now(), autoFeedStartedAt: 1000 },
+  );
+  const m7 = mount({ running: false });
+  check("a live owner elsewhere keeps the control disabled", !!control() && isDisabled());
+  check("  ...and offers no reset that would steal its card", !/Reset queue/.test(label()));
+  act(() => m7.root.unmount());
+
+  // The seam: the state must be computed from the step records. A check on the
+  // rendering alone would still pass if someone reintroduced a local flag that
+  // happened to track them.
+  check("queue status is derived from the persisted step records",
+    /const inFlight[\s\S]{0,200}status === "sent" && s\.finishedAt == null[\s\S]{0,1600}const queueStatus[\s\S]{0,300}inFlight/.test(src));
+  check("the run-end stampers refuse a card that left the run",
+    /function markNotebookStepFinished[\s\S]{0,400}stepLeftTheRun\(/.test(src)
+    && /function markNotebookStepFailed[\s\S]{0,500}stepLeftTheRun\(/.test(src));
 }
 
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");

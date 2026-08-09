@@ -84,9 +84,13 @@ const TRIPWIRES = [
   // times on 2026-08-09 — twice trapping in NSWMWindowCoordinator under
   // setStyleMask: (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
   // NSViewUpdateVibrancyForSubtree from the half-swapped NSThemeFrame (v1.0.7).
+  // GTK is the same story with a louder failure: it asserts rather than
+  // corrupting state, so linux_expose_resize_edges off-thread panicked a
+  // v1.0.10 session outright ("GTK may only be used from the main thread",
+  // tokio-rt-worker, 2026-08-09 22:52).
   // The native tweaks must stay behind the on_ui_thread hop; the negative
   // lookaheads are what actually fail if a bare call comes back.
-  ["src-tauri/src/browser.rs", /^(?![\s\S]*mac_enable_native_resize\(&win\);)(?![\s\S]*apply_chrome\(&win\);)(?=[\s\S]*fn on_ui_thread\(win: &Window)(?=[\s\S]*on_ui_thread\(&win, mac_enable_native_resize\))(?=[\s\S]*on_ui_thread\(&win, apply_chrome\))[\s\S]*$/, "agent-browser native window setup runs on the UI thread, never on the tokio worker that built the window (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
+  ["src-tauri/src/browser.rs", /^(?![\s\S]*mac_enable_native_resize\(&win\);)(?![\s\S]*apply_chrome\(&win\);)(?![\s\S]*linux_expose_resize_edges\(&win\);)(?=[\s\S]*fn on_ui_thread\(win: &Window)(?=[\s\S]*on_ui_thread\(&win, mac_enable_native_resize\))(?=[\s\S]*on_ui_thread\(&win, apply_chrome\))(?=[\s\S]*on_ui_thread\(&win, linux_expose_resize_edges\))[\s\S]*$/, "agent-browser native window setup runs on the UI thread, never on the tokio worker that built the window (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
   ["src-tauri/src/lib.rs", /^(?=[\s\S]*UI_THREAD\.set\(std::thread::current\(\)\.id\(\)\))(?=[\s\S]*fn is_ui_thread\(\) -> bool)[\s\S]*$/, "the event-loop thread is recorded at startup so native window code can tell it apart from a worker (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamMoonshot/, "shared dispatch routes kimi — Code page 'unknown model_id' (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],

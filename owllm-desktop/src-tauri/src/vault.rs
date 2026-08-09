@@ -207,6 +207,26 @@ fn is_cloned(dir: &std::path::Path) -> bool {
 // One process-wide lock means our git never runs two-at-once on the vault.
 static VAULT_GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// …but one lock per git INVOCATION is not enough. Every vault channel is a
+// read-modify-write TRANSACTION: `reset --hard origin/<branch>`, rewrite files
+// under state/, then add+commit+push. With only the per-command lock, a second
+// channel's `reset --hard` lands between another channel's file write and its
+// commit and silently discards it — `commit_push` then finds "nothing to
+// commit" and returns Ok, so the loss is invisible. The launch path fires
+// teams/devices/signing/projects concurrently, and signing (the last one wired
+// in, and the smallest write) is the one that kept losing: its meta.json never
+// reached the vault while the other channels synced fine.
+//
+// Held for the whole transaction. ALWAYS acquired before VAULT_GIT_LOCK and
+// never the reverse, so the two cannot deadlock.
+static VAULT_TXN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Guard one whole vault transaction. A poisoned lock (a prior panic mid-sync)
+/// must not wedge sync forever — recover the guard, same as run_git does.
+fn vault_txn() -> std::sync::MutexGuard<'static, ()> {
+    VAULT_TXN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn run_git_once(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args);
@@ -762,6 +782,7 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
         device: machine_name(),
     };
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).map_err(|e| format!("mkdir state: {e}"))?;
@@ -782,6 +803,7 @@ pub async fn vault_unpublish_server() -> Result<(), String> {
         return Ok(());
     }
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let f = dir.join("state").join("gpu-server.json");
         if f.exists() {
@@ -862,6 +884,7 @@ pub async fn vault_sync_teams() -> Result<(), String> {
         (crate::paths::custom_agents_dir(), "roles"),
     ];
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first.
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
@@ -1494,6 +1517,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
     // is the safe default.
     let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first (same as teams).
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
@@ -1583,6 +1607,7 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
     }
     let (self_id, self_json) = crate::remote_devices::self_vault_record()?;
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
         let _ = run_git(
@@ -1636,6 +1661,7 @@ pub async fn vault_sync_signing() -> Result<bool, String> {
         return Ok(false);
     }
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
         let _ = run_git(
@@ -1709,6 +1735,7 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
         return Err("vault not set up on this device yet".to_string());
     }
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).map_err(|e| format!("mkdir state: {e}"))?;
@@ -1747,6 +1774,7 @@ pub async fn vault_align() -> Result<(), String> {
         return Ok(());
     }
     tokio::task::spawn_blocking(move || {
+        let _txn = vault_txn();
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
         let _ = run_git(
@@ -1999,5 +2027,97 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "");
         assert_eq!(row.1, "https://github.com/acme/project.git");
+    }
+
+    // ---- REGRESSION: concurrent sync transactions ----
+
+    /// Every vault channel is a read-modify-write: `reset --hard origin/<branch>`,
+    /// rewrite files under state/, then commit+push. VAULT_GIT_LOCK only serialized
+    /// ONE git invocation, so a second channel's reset could land between another
+    /// channel's write and its commit — reverting a TRACKED file to origin's copy.
+    /// `commit_push` then found nothing to commit and returned Ok, so the loss was
+    /// silent. Observed live: state/signing/meta.json stayed frozen at its old
+    /// content while devices/projects kept syncing, because startVaultSync fires
+    /// teams/devices/signing/projects concurrently.
+    ///
+    /// Forces exactly that interleaving against a real local repo (no network):
+    /// A takes the transaction, rewrites the tracked file, then stalls before
+    /// committing; B starts mid-stall and resets. With VAULT_TXN_LOCK, B waits and
+    /// A's rewrite reaches origin. Without it, origin still serves the OLD bytes.
+    #[test]
+    fn a_concurrent_sync_cannot_discard_another_channels_pending_write() {
+        let root = std::env::temp_dir().join(format!("owllm-vault-txn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let origin = root.join("origin.git");
+        let clone = root.join("clone");
+        let origin_s = origin.to_string_lossy().to_string();
+        let clone_s = clone.to_string_lossy().to_string();
+
+        run_git(&["init", "--bare", &origin_s], None).unwrap();
+        run_git(&["clone", &origin_s, &clone_s], None).unwrap();
+        run_git(&["config", "user.email", "test@owllm.local"], Some(&clone)).unwrap();
+        run_git(&["config", "user.name", "owllm test"], Some(&clone)).unwrap();
+
+        // The file must be TRACKED — that is what makes a stray `reset --hard`
+        // destructive (it reverts committed content; untracked files survive it).
+        // This mirrors state/signing/meta.json, which already existed at origin.
+        let meta = clone.join("state").join("meta.json");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(&meta, "OLD").unwrap();
+        run_git(&["add", "-A"], Some(&clone)).unwrap();
+        run_git(&["commit", "-m", "seed"], Some(&clone)).unwrap();
+        let branch = current_branch(&clone);
+        run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&clone)).unwrap();
+
+        // An atomic, not a channel: scoped threads borrow their captures, and
+        // mpsc::Receiver is Send but not Sync.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let a_wrote = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // Channel A — the one whose write used to vanish.
+            s.spawn(|| {
+                let _txn = vault_txn();
+                let _ = run_git(&["fetch", "origin", &branch], Some(&clone));
+                let _ = run_git(
+                    &["reset", "--hard", &format!("origin/{branch}")],
+                    Some(&clone),
+                );
+                std::fs::write(&meta, "NEW").unwrap();
+                a_wrote.store(true, Ordering::SeqCst);
+                // Stall between write and commit — the window the bug lived in.
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                commit_push(&clone, &branch).unwrap();
+            });
+            // Channel B — a different sync firing concurrently.
+            s.spawn(|| {
+                while !a_wrote.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100)); // land mid-stall
+                let _txn = vault_txn();
+                let _ = run_git(&["fetch", "origin", &branch], Some(&clone));
+                let _ = run_git(
+                    &["reset", "--hard", &format!("origin/{branch}")],
+                    Some(&clone),
+                );
+                std::fs::write(clone.join("state").join("other.json"), "B").unwrap();
+                commit_push(&clone, &branch).unwrap();
+            });
+        });
+
+        // Assert against ORIGIN, not the working tree: what actually got published.
+        let published = run_git(&["show", &format!("{branch}:state/meta.json")], Some(&origin))
+            .expect("channel A's file must exist at origin");
+        assert_eq!(
+            published.trim(),
+            "NEW",
+            "a concurrent sync's `reset --hard` discarded channel A's pending write"
+        );
+        let other = run_git(&["show", &format!("{branch}:state/other.json")], Some(&origin))
+            .expect("channel B's file must exist at origin");
+        assert_eq!(other.trim(), "B", "channel B's own write must also survive");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

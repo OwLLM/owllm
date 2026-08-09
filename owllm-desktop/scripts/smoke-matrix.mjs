@@ -104,6 +104,14 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
   ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,900}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
+  // A per-git-COMMAND lock is not enough: each sync channel is a read-modify-write
+  // (reset --hard → rewrite state/ → commit+push), so a concurrent channel's reset
+  // reverted another's pending write to a TRACKED file and commit_push then found
+  // nothing to commit. Signing metadata silently stopped reaching the vault.
+  ["src-tauri/src/vault.rs", /static VAULT_TXN_LOCK[\s\S]{0,400}fn vault_txn/, "whole vault sync transactions are serialized, not just single git commands (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,200}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).
@@ -303,6 +311,17 @@ function runCli(bin, args, { stdinText, env, cwd, timeoutMs = 180_000 } = {}) {
   });
 }
 
+async function claudeAuthStatusLoggedIn(bin, home) {
+  // Legacy npm builds use a JSON file; current native Claude Code stores its
+  // token in macOS Keychain / the platform credential store. The ship gate
+  // must exercise either form instead of silently skipping a connected CLI.
+  if (fs.existsSync(path.join(home, ".claude", ".credentials.json"))) return true;
+  const status = await runCli(bin, ["auth", "status"], { timeoutMs: 5_000 });
+  if (status.code !== 0 || status.timedOut) return false;
+  try { return JSON.parse(status.out).loggedIn === true; }
+  catch { return false; }
+}
+
 // A ≥40 KB payload — over the 32 KB CreateProcess cap and the 8 KB cmd-shim
 // cap, so it only survives through stdin (the shape the app now uses).
 function bigPrompt(token) {
@@ -353,7 +372,7 @@ async function runProviders() {
     // ---- claude --------------------------------------------------------
     const claude = findCli("claude");
     if (!claude) record("P", "claude (all cells)", "SKIP", "CLI not installed");
-    else if (!exists(home, ".claude", ".credentials.json")) record("P", "claude (all cells)", "SKIP", "not logged in");
+    else if (!(await claudeAuthStatusLoggedIn(claude, home))) record("P", "claude (all cells)", "SKIP", "not logged in");
     else {
       await cell("P", "claude · small prompt", async () =>
         expectToken(await runCli(claude, ["--print"], { stdinText: "Reply with exactly SMOKE_OK_CLAUDE and nothing else." }), "SMOKE_OK_CLAUDE"));

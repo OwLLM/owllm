@@ -892,6 +892,7 @@ function RightRail({
               args={activeTerm.args}
               autoSend={activeTerm.send}
               autoOpenAuthUrls
+              authProvider={activeTerm.backend}
               visible={tab === "terminal"}
               onOutputText={(text) => onTerminalOutput(activeTerm.backend, text)}
               onAuthTabOpened={(tabId) => onAuthTabOpened(activeTerm.backend, tabId)}

@@ -21,6 +21,7 @@
 // duplicates model-listing logic.
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Attachment } from "../pages/agentic/dispatch";
+import { filesFromClipboard } from "../pages/agentic/clipboardFiles";
 
 export type ComposerSlashCommand = { name: string; hint?: string; run: () => void };
 export type ComposerToggle = { key: string; label: string; title?: string; on: boolean; onToggle: () => void };
@@ -257,7 +258,7 @@ export default function Composer(props: ComposerProps) {
           disabled={disabled}
           placeholder={placeholder}
           onChange={(e) => onChange(e.target.value)}
-          onPaste={(e) => { if (takeFiles(e.clipboardData?.files)) e.preventDefault(); }}
+          onPaste={(e) => { if (takeFiles(filesFromClipboard(e.clipboardData))) e.preventDefault(); }}
           onKeyDown={handleKeyDown}
           style={{ minHeight, maxHeight, resize: autosize ? "none" : "vertical" }}
         />

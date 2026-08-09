@@ -33,6 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -41,7 +42,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, NewWindowResponse, Webview, WebviewBuilder};
 use tauri::{
-    LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
+    Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
 
 /// OwLLM dark base (matches the UI `--bg-panel` floor `#0e1117`), so the agent
@@ -493,6 +495,53 @@ const DEVICES: &[Device] = &[
         height: 1180.0,
     },
 ];
+
+/// WKWebView deliberately omits Safari's `Version/... Safari/...` tokens from
+/// its default user agent. Sites such as WhatsApp therefore mistake a current
+/// embedded WebKit for Safari < 15 and send the user into an update loop that
+/// no macOS update can fix. Read the installed Safari compatibility version so
+/// the embedded browser reports the engine actually present on this Mac. The
+/// privacy-reduced macOS token matches WKWebView's own default UA.
+#[cfg(target_os = "macos")]
+fn macos_desktop_user_agent() -> Option<&'static str> {
+    static USER_AGENT: OnceLock<Option<String>> = OnceLock::new();
+    USER_AGENT
+        .get_or_init(|| {
+            use objc2_foundation::{NSBundle, NSString};
+
+            let version = NSBundle::bundleWithPath(objc2_foundation::ns_string!(
+                "/Applications/Safari.app"
+            ))
+            .and_then(|bundle| {
+                bundle.objectForInfoDictionaryKey(objc2_foundation::ns_string!(
+                    "CFBundleShortVersionString"
+                ))
+            })
+            .and_then(|value| value.downcast::<NSString>().ok())
+            .map(|value| value.to_string())
+            .filter(|value| {
+                !value.is_empty()
+                    && value
+                        .chars()
+                        .all(|character| character.is_ascii_digit() || character == '.')
+            })?;
+            Some(format!(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                 AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+            ))
+        })
+        .as_deref()
+}
+
+fn device_user_agent(device: &Device) -> Option<Cow<'static, str>> {
+    #[cfg(target_os = "macos")]
+    if device.name == "desktop" {
+        if let Some(user_agent) = macos_desktop_user_agent() {
+            return Some(Cow::Borrowed(user_agent));
+        }
+    }
+    device.ua.map(Cow::Borrowed)
+}
 
 /// Currently selected device preset — used by browser_start so a device chosen
 /// before the window opens (or after a stop) sticks.
@@ -1913,6 +1962,12 @@ enum BrowserUiEvent {
         id: u64,
         url: String,
     },
+    /// Claude's manual OAuth callback contains the one-time code and PKCE
+    /// state that the waiting login PTY expects as `code#state`. Keep it off
+    /// the WebView callback thread and never persist or log it.
+    ClaudeAuthCode {
+        code: String,
+    },
     /// A page requested a separate browsing context (`target=_blank` or
     /// `window.open`). The native callback denies the engine-owned popup and
     /// queues this event so the URL becomes a managed OwLLM tab instead.
@@ -1942,6 +1997,7 @@ struct BrowserUiBatch {
     push_tabs: bool,
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
+    claude_auth_codes: Vec<String>,
     open_tabs: Vec<(String, bool, bool)>,
     legacy_close_requested: Vec<u64>,
     legacy_destroyed: Vec<u64>,
@@ -1968,6 +2024,7 @@ impl BrowserUiBatch {
             BrowserUiEvent::AutofillPage { id, url } => {
                 self.autofills.insert(id, url);
             }
+            BrowserUiEvent::ClaudeAuthCode { code } => self.claude_auth_codes.push(code),
             BrowserUiEvent::OpenTab {
                 url,
                 activate,
@@ -2030,6 +2087,11 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                     let _ = wv.eval(&script);
                 }
             }
+        }
+        for code in batch.claude_auth_codes {
+            // Send only to the trusted application WebView. Browser tabs must
+            // never receive another tab's one-time authorization code.
+            let _ = app.emit_to("main", "owllm:claude-auth-code", json!({ "code": code }));
         }
         for (url, activate, private_session) in batch.open_tabs {
             if let Err(e) = new_tab(&app, &url, activate, private_session) {
@@ -2328,6 +2390,14 @@ fn attach_tab(
                 );
             }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if private_session {
+                    if let Some(code) = claude_auth_code_from_callback(payload.url()) {
+                        queue_browser_ui(
+                            &wv.app_handle().clone(),
+                            BrowserUiEvent::ClaudeAuthCode { code },
+                        );
+                    }
+                }
                 let url = payload.url().to_string();
                 if !private_session && url.starts_with("http") {
                     queue_browser_ui(
@@ -2340,8 +2410,8 @@ fn attach_tab(
     if private_session {
         content = content.incognito(true);
     }
-    if let Some(ua) = dev.ua {
-        content = content.user_agent(ua);
+    if let Some(ua) = device_user_agent(dev) {
+        content = content.user_agent(&ua);
     }
     // A stable, isolated data dir so agent-browser logins persist across runs.
     // The builder method is only present on Windows/Linux; macOS WKWebView uses
@@ -3073,6 +3143,14 @@ fn attach_legacy_tab(
         .on_page_load(move |win, payload| {
             // Vault autofill works in this top-level-window shape too.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if private_session {
+                    if let Some(code) = claude_auth_code_from_callback(payload.url()) {
+                        queue_browser_ui(
+                            &win.app_handle().clone(),
+                            BrowserUiEvent::ClaudeAuthCode { code },
+                        );
+                    }
+                }
                 let url = payload.url().to_string();
                 if !private_session && url.starts_with("http") {
                     queue_browser_ui(
@@ -3090,8 +3168,8 @@ fn attach_legacy_tab(
     if private_session {
         builder = builder.incognito(true);
     }
-    if let Some(ua) = dev.ua {
-        builder = builder.user_agent(ua);
+    if let Some(ua) = device_user_agent(dev) {
+        builder = builder.user_agent(&ua);
     }
     if let Ok(Some(m)) = app.primary_monitor() {
         let ls = m.size().to_logical::<f64>(m.scale_factor());
@@ -3297,6 +3375,39 @@ fn parse_navigation_url(raw_url: &str) -> Result<tauri::Url, String> {
     Ok(parsed)
 }
 
+/// Turn Claude's browser callback into the exact line requested by
+/// `claude auth login`: `<code>#<state>`. The callback is accepted only from
+/// Anthropic's fixed HTTPS origin/path and only for bounded base64url-like
+/// values, so an ordinary page cannot type arbitrary text into a login PTY.
+fn claude_auth_code_from_callback(url: &tauri::Url) -> Option<String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("platform.claude.com")
+        || url.path().trim_end_matches('/') != "/oauth/code/callback"
+    {
+        return None;
+    }
+    let mut code = None;
+    let mut state = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let valid = |value: &str| {
+        (16..=1024).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    let (code, state) = (code?, state?);
+    if !valid(&code) || !valid(&state) {
+        return None;
+    }
+    Some(format!("{code}#{state}"))
+}
+
 #[tauri::command(async)]
 pub fn browser_open_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
     open_web_url(&app, &url)
@@ -3485,7 +3596,7 @@ fn apply_linux_device(app: &tauri::AppHandle, dev: &'static Device) -> Result<()
         .unwrap_or_default();
     for id in ids {
         if let Some(webview) = app.get_webview(&tab_label(id)) {
-            let user_agent = dev.ua.map(str::to_string);
+            let user_agent = device_user_agent(dev).map(Cow::into_owned);
             webview
                 .with_webview(move |platform| {
                     use webkit2gtk::{SettingsExt, WebViewExt};
@@ -4880,9 +4991,42 @@ mod tests {
         assert_eq!(device_by_name("ipad").unwrap().name, "tablet");
         assert_eq!(device_by_name("default").unwrap().name, "desktop");
         assert!(device_by_name("watch").is_none());
-        // mobile presets carry a UA override; desktop uses the engine default
+        // Mobile presets carry an explicit UA override. Desktop uses the native
+        // engine default except on macOS, where bare WKWebView needs Safari's
+        // compatibility tokens for sites that enforce a minimum Safari version.
         assert!(device_by_name("iphone").unwrap().ua.is_some());
         assert!(device_by_name("desktop").unwrap().ua.is_none());
+        #[cfg(target_os = "macos")]
+        {
+            let desktop = device_user_agent(device_by_name("desktop").unwrap()).unwrap();
+            assert!(desktop.contains("Version/"));
+            assert!(desktop.contains(" Safari/"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(device_user_agent(device_by_name("desktop").unwrap()).is_none());
+    }
+
+    #[test]
+    fn claude_callback_returns_only_the_bounded_code_and_state() {
+        let callback = tauri::Url::parse(
+            "https://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+        )
+        .unwrap();
+        assert_eq!(
+            claude_auth_code_from_callback(&callback).as_deref(),
+            Some("abcdefghijklmnopqrstuvwxyz012345#ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789")
+        );
+        for rejected in [
+            "http://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://evil.example/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://platform.claude.com/oauth/code/callback?code=short&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=bad%23input________________",
+        ] {
+            assert_eq!(
+                claude_auth_code_from_callback(&tauri::Url::parse(rejected).unwrap()),
+                None
+            );
+        }
     }
 
     #[test]

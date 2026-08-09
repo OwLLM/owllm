@@ -123,6 +123,12 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
+  // The breaker's own doc says "any success clears it immediately", but the
+  // ladder's fallthrough arm returned Ok without ever calling note_repo_health —
+  // so only a successful POST-HEAL retry could reset it. Once armed, the backoff
+  // stayed pinned at its 1 h cap forever. Seen on a second device: one "owllm
+  // sync" commit per hour, on the hour, with no reset/merge in between.
+  ["src-tauri/src/vault.rs", /other => \{\s*note_repo_health\(&other\);/, "a successful git command clears the sync circuit breaker (v1.0.9)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).

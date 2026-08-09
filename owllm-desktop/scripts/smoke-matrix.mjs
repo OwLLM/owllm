@@ -79,6 +79,15 @@ const TRIPWIRES = [
   ["src-tauri/src/browser.rs", /WindowEvent::CloseRequested \{ api, \.\. \}[\s\S]{0,500}api\.prevent_close\(\)/, "Linux title-bar close retains WebKitGTK windows instead of aborting Thor with X11 BadDrawable"],
   ["src-tauri/src/browser.rs", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*fn destroy_browser_windows/, "Linux browser stop never destroys a WebKitGTK top-level window on NVIDIA/Tegra"],
   ["src-tauri/src/browser.rs", /fn apply_linux_device[\s\S]{0,900}settings\.set_user_agent/, "Linux device emulation changes WebKitGTK in place instead of destroy/rebuild"],
+  // Every agent-browser window is built by a #[tauri::command(async)], i.e. on a
+  // tokio worker. Touching AppKit/GTK window state there crashed OwLLM three
+  // times on 2026-08-09 — twice trapping in NSWMWindowCoordinator under
+  // setStyleMask: (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
+  // NSViewUpdateVibrancyForSubtree from the half-swapped NSThemeFrame (v1.0.7).
+  // The native tweaks must stay behind the on_ui_thread hop; the negative
+  // lookaheads are what actually fail if a bare call comes back.
+  ["src-tauri/src/browser.rs", /^(?![\s\S]*mac_enable_native_resize\(&win\);)(?![\s\S]*apply_chrome\(&win\);)(?=[\s\S]*fn on_ui_thread\(win: &Window)(?=[\s\S]*on_ui_thread\(&win, mac_enable_native_resize\))(?=[\s\S]*on_ui_thread\(&win, apply_chrome\))[\s\S]*$/, "agent-browser native window setup runs on the UI thread, never on the tokio worker that built the window (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
+  ["src-tauri/src/lib.rs", /^(?=[\s\S]*UI_THREAD\.set\(std::thread::current\(\)\.id\(\)\))(?=[\s\S]*fn is_ui_thread\(\) -> bool)[\s\S]*$/, "the event-loop thread is recorded at startup so native window code can tell it apart from a worker (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamMoonshot/, "shared dispatch routes kimi — Code page 'unknown model_id' (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],

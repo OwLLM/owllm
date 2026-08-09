@@ -287,6 +287,39 @@ fn apply_chrome(win: &Window) {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn apply_chrome(_win: &Window) {}
 
+/// Run `f` against `win` on the UI (event-loop) thread and wait for it.
+///
+/// Native window mutation is main-thread-only: AppKit tears down and rebuilds
+/// the window's NSThemeFrame inside `setStyleMask:`, and GTK owns its widget
+/// tree the same way. Every window built here is built by a
+/// `#[tauri::command(async)]`, which Tauri runs on a tokio worker — so doing
+/// that work inline is off-thread by construction. It crashed OwLLM three times
+/// on 2026-08-09: twice trapping immediately inside `NSWMWindowCoordinator`
+/// (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
+/// `NSViewUpdateVibrancyForSubtree` on the next display cycle, from a
+/// half-swapped view tree (v1.0.7). A standalone AppKit probe of the same call
+/// sequence crashed 5/5 off-thread and survived 5/5 on the main thread.
+///
+/// Waits, because callers depend on the window being set up before they add
+/// child webviews. Runs inline when we already are the UI thread, so a
+/// UI-thread caller can never deadlock waiting on its own dispatch.
+fn on_ui_thread(win: &Window, f: impl FnOnce(&Window) + Send + 'static) -> Result<(), String> {
+    if crate::is_ui_thread() {
+        f(win);
+        return Ok(());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let window = win.clone();
+    win.run_on_main_thread(move || {
+        f(&window);
+        let _ = tx.send(());
+    })
+    .map_err(|e| format!("ui thread dispatch: {e}"))?;
+    // Bounded: a wedged event loop must surface as an error, never as a hang.
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "native window setup did not run on the UI thread".to_string())
+}
+
 /// macOS: keep the undecorated window natively resizable.
 ///
 /// tao maps `decorations(false)` to an NSWindow styleMask of
@@ -337,7 +370,7 @@ pub fn browser_set_chrome(app: tauri::AppHandle, bg: String) -> Result<(), Strin
     let rgb = parse_hex_rgb(&bg).ok_or_else(|| format!("bad chrome colour {bg:?}"))?;
     *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) = Some(rgb);
     if let Some(win) = get_window(&app) {
-        apply_chrome(&win);
+        on_ui_thread(&win, apply_chrome)?;
     }
     Ok(())
 }
@@ -2899,9 +2932,9 @@ fn build_framed(
     // its edges. Both of these run before the webviews exist so the very first
     // frame is already resizable.
     #[cfg(target_os = "macos")]
-    mac_enable_native_resize(&win);
+    on_ui_thread(&win, mac_enable_native_resize)?;
     #[cfg(target_os = "linux")]
-    linux_expose_resize_edges(&win);
+    on_ui_thread(&win, linux_expose_resize_edges)?;
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
     // buttons/drag/URL box/tab strip use a reserved same-origin navigation as
@@ -2989,7 +3022,7 @@ fn build_framed(
         }
     });
 
-    apply_chrome(&win);
+    on_ui_thread(&win, apply_chrome)?;
     update_chrome_bar(app, Some(&public_browser_url(&start_url)), None);
     sync_tabs(app);
     Ok(())
@@ -3202,7 +3235,7 @@ fn attach_legacy_tab(
         });
     }
     if let Some(win) = app.get_window(&tab_label(id)) {
-        apply_chrome(&win);
+        let _ = on_ui_thread(&win, apply_chrome);
         let handle = app.clone();
         win.on_window_event(move |event| {
             match event {

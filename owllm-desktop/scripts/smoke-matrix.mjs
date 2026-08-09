@@ -311,6 +311,17 @@ function runCli(bin, args, { stdinText, env, cwd, timeoutMs = 180_000 } = {}) {
   });
 }
 
+async function claudeAuthStatusLoggedIn(bin, home) {
+  // Legacy npm builds use a JSON file; current native Claude Code stores its
+  // token in macOS Keychain / the platform credential store. The ship gate
+  // must exercise either form instead of silently skipping a connected CLI.
+  if (fs.existsSync(path.join(home, ".claude", ".credentials.json"))) return true;
+  const status = await runCli(bin, ["auth", "status"], { timeoutMs: 5_000 });
+  if (status.code !== 0 || status.timedOut) return false;
+  try { return JSON.parse(status.out).loggedIn === true; }
+  catch { return false; }
+}
+
 // A ≥40 KB payload — over the 32 KB CreateProcess cap and the 8 KB cmd-shim
 // cap, so it only survives through stdin (the shape the app now uses).
 function bigPrompt(token) {
@@ -361,7 +372,7 @@ async function runProviders() {
     // ---- claude --------------------------------------------------------
     const claude = findCli("claude");
     if (!claude) record("P", "claude (all cells)", "SKIP", "CLI not installed");
-    else if (!exists(home, ".claude", ".credentials.json")) record("P", "claude (all cells)", "SKIP", "not logged in");
+    else if (!(await claudeAuthStatusLoggedIn(claude, home))) record("P", "claude (all cells)", "SKIP", "not logged in");
     else {
       await cell("P", "claude · small prompt", async () =>
         expectToken(await runCli(claude, ["--print"], { stdinText: "Reply with exactly SMOKE_OK_CLAUDE and nothing else." }), "SMOKE_OK_CLAUDE"));

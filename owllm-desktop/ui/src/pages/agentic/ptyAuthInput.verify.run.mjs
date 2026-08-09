@@ -23,5 +23,9 @@ check("xterm remains the interactive provider input", /aria-label=\"Interactive 
 check("terminal input is queued until PTY spawn completes", /pendingInputRef/.test(terminal));
 check("terminal can be explicitly focused after browser auth", /term\.focus\(\)/.test(terminal));
 check("terminal receives visibility changes from the rail", /visible=\{tab === "terminal"\}/.test(accounts));
+check("macOS command-paste is bridged before xterm can drop it", /onPasteCapture=\{handlePaste\}/.test(terminal) && /clipboardData\.getData\("text\/plain"\)/.test(terminal));
+check("terminal exposes an explicit clipboard paste control", /navigator\.clipboard\.readText\(\)/.test(terminal) && /Paste clipboard into terminal/.test(terminal));
+check("Claude callback codes return to the matching live PTY", /owllm:claude-auth-code/.test(terminal) && /authProvider !== "claude_cli"/.test(terminal));
+check("Accounts identifies the PTY provider for safe callback routing", /authProvider=\{activeTerm\.backend\}/.test(accounts));
 
 console.log(`PTY auth input verification: ${passed}/${passed} passed`);

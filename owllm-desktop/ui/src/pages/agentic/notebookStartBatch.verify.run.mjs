@@ -894,5 +894,89 @@ console.log("case 11: only a queue-driven (or explicitly armed) run advances the
   check("no page still advertises 'send a message' as a way to resume", !codePageSrc.includes("send a message or press ▶ Start queue") && !agentsPageSrc.includes("fix or dispatch the next one (▶ Start queue)"));
 }
 
+// ---- 12. Auto-feed is the DEFAULT for a notebook nobody has decided about.
+//          The queue is the point of the notebook, and having to find and tick
+//          a checkbox before the team would walk it meant the Agents page sat
+//          on a full list doing nothing. `autoFeed` used to be read as
+//          `p.autoFeed === true`, which conflates "never chosen" with "the user
+//          switched it off" — so the default could only ever be OFF. It is now
+//          tri-state on load: an absent flag means ON, a stored boolean is the
+//          user's word and is obeyed in both directions.
+//
+//          Crucially this must NOT resurrect case 11's incident. The permission
+//          to BEGIN a chain is still `autoFeedArmed` / queue provenance; the
+//          toggle only governs whether a live chain CONTINUES. ----
+console.log("case 12: the notebook opens with auto-feed already on, and obeys an explicit OFF");
+{
+  const AF_PID = "verify-autofeed-default";
+  const AF_KEY = `owllm:agents:notebook:${AF_PID}`;
+  const AGENTS_SURFACE = "agents:page-1";
+  const CODE_SURFACE = "code:page-1";
+  const afBlob = () => JSON.parse(localStorage.getItem(AF_KEY) || "null");
+  const seedSteps = (steps) => localStorage.setItem(AF_KEY, JSON.stringify({
+    text: "", plan: "", digest: [], steps, // NO autoFeed key — never chosen
+  }));
+
+  // --- first open: a project whose notebook has never been touched ---
+  localStorage.removeItem(AF_KEY);
+  check("a never-seen notebook loads with auto-feed ON", NB.loadNotebook(AF_PID).autoFeed === true);
+  const m1 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  const firstBox = document.querySelector("input[type=checkbox]");
+  check("the Agents-page toggle renders already checked", !!firstBox && firstBox.checked === true);
+  act(() => m1.root.unmount());
+
+  // --- agent output advances the queue with no user action at all ---
+  // The blob carries steps but still no autoFeed key, so ONLY the default can
+  // make this dispatch. Provenance is the queue's own run (ranFromNotebook).
+  seedSteps([
+    { id: "a1", text: "first agent task", status: "pending", ts: 1 },
+    { id: "a2", text: "second agent task", status: "pending", ts: 2 },
+  ]);
+  const fed = [];
+  check("a queue-driven run advances the list without the user enabling anything",
+    NB.continueNotebookAutoFeed(AF_PID, AGENTS_SURFACE, (s) => fed.push(s.id)) === "dispatched" && fed.join(",") === "a1");
+  check("the fed card is recorded in the shared per-project notebook blob",
+    afBlob()?.steps.find((s) => s.id === "a1")?.status === "sent");
+
+  // --- that shared list is the SAME one the Coding-page notebook renders ---
+  const m2 = mount({ projectId: AF_PID, surfaceId: CODE_SURFACE });
+  check("the other surface shows the step the Agents page fed", textOf(document.body).includes("first agent task"));
+  check("the other surface shows the rest of the shared queue", textOf(document.body).includes("second agent task"));
+  act(() => m2.root.unmount());
+
+  // --- an explicit OFF is the user's word: persisted, and never re-defaulted ---
+  const m3 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("unchecking persists an explicit OFF", afBlob()?.autoFeed === false);
+  act(() => m3.root.unmount());
+  check("a restart re-reads OFF rather than the ON default", NB.loadNotebook(AF_PID).autoFeed === false);
+  const m4 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  const reopened = document.querySelector("input[type=checkbox]");
+  check("the reopened toggle is still unchecked", !!reopened && reopened.checked === false);
+  act(() => m4.root.unmount());
+  const afterOff = [];
+  check("a user-disabled queue does not advance", NB.continueNotebookAutoFeed(AF_PID, AGENTS_SURFACE, (s) => afterOff.push(s.id)) === "inactive" && afterOff.length === 0);
+  check("  ...and its cards stay pending", NB.loadNotebook(AF_PID).steps.find((s) => s.id === "a2")?.status === "pending");
+
+  // --- switching it back on is equally durable ---
+  const m5 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  clickEl(document.querySelector("input[type=checkbox]"));
+  act(() => m5.root.unmount());
+  check("re-enabling persists an explicit ON", NB.loadNotebook(AF_PID).autoFeed === true);
+
+  // --- the default must not re-open case 11's hole ---
+  seedSteps([{ id: "b1", text: "queued work", status: "pending", ts: 1 }]);
+  check("the ON default still cannot START a chain from an unrelated clean run",
+    NB.consumeAutoFeedArm(AF_PID, AGENTS_SURFACE) === false);
+  check("  ...and that card stays pending", NB.loadNotebook(AF_PID).steps[0]?.status === "pending");
+
+  // --- both surfaces share one store and one default: neither page may hold
+  //     its own autoFeed seed, or the two notebooks drift apart again ---
+  check("no page seeds its own auto-feed default",
+    !/autoFeed\s*:\s*(true|false)/.test(agentsPageSrc) && !/autoFeed\s*:\s*(true|false)/.test(codePageSrc));
+  check("the ON default is a documented tri-state read, not a coerced boolean",
+    !src.includes("autoFeed: p.autoFeed === true") && src.includes('typeof p.autoFeed === "boolean" ? p.autoFeed : true'));
+}
+
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

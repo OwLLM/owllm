@@ -124,6 +124,26 @@ console.log("case 4: adopt drops any stray lease when this PC holds none");
   check("peer content still adopted", merged.text === "peer");
 }
 
+// Auto-feed now defaults to ON for a notebook nobody has decided about
+// (RunNotebook.loadNotebook reads it tri-state: absent = ON). That makes a LOST
+// `false` behaviourally different from a missing one for the first time: drop it
+// during adoption and the user's deliberate OFF silently comes back as ON, and
+// the queue starts walking again on a PC where they switched it off.
+console.log("case 4a: an explicit auto-feed OFF survives adopting a peer's content");
+{
+  const KEY_OFF = "owllm:agents:notebook:p-off";
+  store.set(KEY_OFF, JSON.stringify({
+    text: "local", steps: [{ id: "s1", text: "a", status: "pending", ts: 1 }],
+    autoFeed: false, // the user's explicit choice on THIS PC
+  }));
+  // The peer stripped its own lease on push, so the remote carries no autoFeed.
+  const merged = JSON.parse(mergeNotebookLease(KEY_OFF, JSON.stringify({
+    text: "peer notes", steps: [{ id: "s1", text: "a", status: "pending", ts: 1 }],
+  })));
+  check("an explicit OFF is preserved, not dropped to the ON default", merged.autoFeed === false);
+  check("peer content is still adopted alongside it", merged.text === "peer notes");
+}
+
 console.log("case 5: source wiring");
 {
   check("snapshot strips the lease before syncing", rawSrc.includes("stripNotebookLease(k, v)"));

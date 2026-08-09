@@ -80,6 +80,13 @@ export type NotebookState = {
   /// edits freely. Steps are the feedable units cut from it.
   plan: string;
   steps: NotebookStep[];
+  /// Whether a live chain CONTINUES at each clean run end. Defaults to ON for a
+  /// notebook nobody has decided about — walking the list is the whole point of
+  /// the queue, and requiring the user to find and tick a box first left both
+  /// surfaces sitting on a full step list doing nothing. The stored blob is
+  /// tri-state (see loadNotebook): absent = never chosen = ON, a stored boolean
+  /// is the user's explicit word and is obeyed in both directions.
+  /// This is NOT permission to START a chain — that remains autoFeedArmed.
   autoFeed: boolean;
   /// Which surface DRIVES auto-feed — the notebook blob is shared per project,
   /// so without an owner every open page on the project popped the queue at
@@ -138,7 +145,7 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
-const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [], deletedSteps: [] };
+const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: true, digest: [], deletedSteps: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 // The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
 // they live IN this blob so tabs on THIS PC coordinate the queue through it, but
@@ -252,7 +259,12 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
             };
           })
         : [],
-      autoFeed: p.autoFeed === true,
+      // Tri-state, deliberately not `=== true`: that coercion made "never
+      // chosen" indistinguishable from "the user switched it off", so the
+      // default could only ever be OFF. Absent = ON; a stored boolean is the
+      // user's choice and survives restart, navigation and a peer's sync
+      // (mergeNotebookLease keeps the LOCAL value of every run-lease field).
+      autoFeed: typeof p.autoFeed === "boolean" ? p.autoFeed : true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       autoFeedHeartbeat: typeof p.autoFeedHeartbeat === "number" ? p.autoFeedHeartbeat : undefined,
       autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,

@@ -114,7 +114,11 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue
   feeds the first pending step and auto-feed walks the rest at each clean run
-  end. Mounted inline on the Code page and as a modal on the Agents page —
+  end. Auto-feed is **ON by default** on both surfaces (absent flag = never
+  chosen = on); an explicit off/on is the user's word and persists across
+  restart, navigation and sync. It still only decides whether a live chain
+  CONTINUES — starting one is always a deliberate ▶ Start queue.
+  Mounted inline on the Code page and as a modal on the Agents page —
   ONE blob per project, so both surfaces are views of the same notebook.
   The Kanban plan board (NOW/NEXT/LATER) and its ⚡ Start batch action are
   built but **hidden** behind `SHOW_KANBAN = false`; the digest stops asking

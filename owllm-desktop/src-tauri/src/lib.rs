@@ -269,8 +269,43 @@ fn fit_macos_main_window(window: &tauri::Window) {
 #[cfg(not(target_os = "macos"))]
 fn fit_macos_main_window(_window: &tauri::Window) {}
 
+/// The thread that owns the tao/Tauri event loop — necessarily the process main
+/// thread. Recorded so native window code can tell whether it may touch AppKit
+/// or GTK directly; see `browser::on_ui_thread`.
+static UI_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// True when the caller already runs on the UI/event-loop thread.
+pub(crate) fn is_ui_thread() -> bool {
+    UI_THREAD.get() == Some(&std::thread::current().id())
+}
+
+#[cfg(test)]
+mod ui_thread_tests {
+    /// The discrimination the agent-browser crash fix rests on: a worker thread
+    /// must never be mistaken for the event-loop thread, or `on_ui_thread` would
+    /// run AppKit/GTK window code inline on tokio's pool again — the cause of
+    /// the v1.0.7/v1.0.10 crashes of 2026-08-09.
+    #[test]
+    fn a_worker_thread_is_never_mistaken_for_the_ui_thread() {
+        // Nothing recorded yet (`run()` does not execute under cargo test), so
+        // no thread may claim to be the UI thread. An inverted check here would
+        // send every caller down the "run it inline" path.
+        assert!(!super::is_ui_thread());
+
+        // Record THIS thread the way `run()` records the event loop's.
+        super::UI_THREAD
+            .set(std::thread::current().id())
+            .expect("UI_THREAD is unset until this test records it");
+        assert!(super::is_ui_thread());
+
+        // …and a different thread is still told apart.
+        assert!(!std::thread::spawn(super::is_ui_thread).join().unwrap());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = UI_THREAD.set(std::thread::current().id());
     if linux_updater::handle_startup_mode() {
         return;
     }

@@ -291,7 +291,23 @@ console.log("case 12: a notebook keyed by a raw folder path never leaves this PC
 console.log("case 13: notebooks converge WITHOUT waiting for the next app launch");
 {
   check("a scoped mid-session pull exists", typeof pullNotebooksNow === "function");
-  check("it is on an interval", rawSrc.includes("window.setInterval(() => { if (_enabled) void pullNotebooksNow(); }"));
+  // Was a flat `window.setInterval(... pullNotebooksNow ...)`; it is now a
+  // self-rescheduling timer so a RUNNING queue can be polled harder than an
+  // idle one. The invariant is unchanged and is what we assert: the pull is
+  // armed periodically, and every path re-arms it — a timer that fails to
+  // re-arm converges once and then goes silent, which the old interval could
+  // not do and this shape can.
+  {
+    const wire = rawSrc.slice(rawSrc.indexOf("function wireListeners"));
+    const body = wire.slice(wire.indexOf("const scheduleNotebookPull"), wire.indexOf("Fleet liveness heartbeat"));
+    // Anchored to the call that follows the closure's `};` — matching a bare
+    // `scheduleNotebookPull();` would also match the re-arm INSIDE the closure,
+    // so deleting the startup call would still pass. It must be armed once from
+    // wireListeners or the timer never starts at all.
+    check("a periodic pull is armed at startup", /\};\s*\n\s*scheduleNotebookPull\(\);/.test(body) && body.includes("pullNotebooksNow()"));
+    check("...and re-arms when sync is disabled", /if \(!_enabled\) \{ scheduleNotebookPull\(\); return; \}/.test(body));
+    check("...and re-arms even if the pull rejects", body.includes(".finally(scheduleNotebookPull)"));
+  }
   check("and runs when the window regains focus", rawSrc.includes("else void pullNotebooksNow();"));
   check("it must NOT claim the whole blob as adopted", rawSrc.slice(rawSrc.indexOf("export async function pullNotebooksNow"), rawSrc.indexOf("export async function pushNow")).includes("NOT setLast()"));
   check("launch-time full adopt is still there", rawSrc.includes("if (await pullAndAdopt())"));

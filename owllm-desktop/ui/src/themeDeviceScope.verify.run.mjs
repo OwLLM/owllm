@@ -141,7 +141,10 @@ globalThis.sessionStorage = storage({ "owllm:session:user-interacted": "1" });
 globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init?.detail; } };
 globalThis.location = { reload: () => { throw new Error("unexpected reload"); } };
 globalThis.document = { addEventListener: () => {}, visibilityState: "visible" };
-globalThis.window = { addEventListener: () => {}, dispatchEvent: () => {}, setInterval: () => 1 };
+// setTimeout is stubbed alongside setInterval because wireListeners arms a
+// self-rescheduling notebook pull; a real timer re-arms forever and holds this
+// process open instead of letting it exit.
+globalThis.window = { addEventListener: () => {}, dispatchEvent: () => {}, setInterval: () => 1, setTimeout: () => 1 };
 
 const pushed = [];
 globalThis.__vaultInvoke = async (command, args) => {

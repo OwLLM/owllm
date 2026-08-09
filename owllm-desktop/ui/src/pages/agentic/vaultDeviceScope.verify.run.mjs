@@ -121,7 +121,11 @@ globalThis.document = { addEventListener: () => {}, visibilityState: "visible" }
 globalThis.window = {
   addEventListener: () => {},
   dispatchEvent: () => {},
+  // Both timer families must be stubbed. wireListeners arms repeating syncs AND
+  // a self-rescheduling notebook pull; a real timer here re-arms forever and
+  // holds this process open instead of letting it exit.
   setInterval: () => 1,
+  setTimeout: () => 1,
 };
 const startupEvents = [];
 let ensureCalls = 0;

@@ -123,6 +123,22 @@ export type NotebookState = {
   /// not synchronized, so a stale/skewed stamp must never be able to block a
   /// user from starting their own queue.
   runningOn?: { deviceId: string; deviceName: string; at: number };
+  /// Stable identity of THIS project's queue document, minted on first save and
+  /// carried across devices. Two PCs comparing notebooks need to know they are
+  /// looking at the same queue and not at two that merely share a project id
+  /// (a project restored from a backup, say).
+  queueId?: string;
+  /// MONOTONIC document revision — a Lamport counter, not a clock. Every save
+  /// bumps it, and an adopted remote copy raises it to max(local, remote) so it
+  /// only ever moves forward on either machine. `updatedAt` below cannot do this
+  /// job alone: device clocks are not synchronized, so a peer can legitimately
+  /// publish a NEWER queue carrying an OLDER wall-clock stamp, and ordering by
+  /// the stamp then rolls a finished job back to pending.
+  queueRev?: number;
+  /// Which job the queue is on: the index of the running step, else the next
+  /// pending one, else steps.length when the queue is drained. Derived on every
+  /// save so a peer can render "job 3 of 7" without replaying the whole list.
+  currentIndex?: number;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// Content stamp, rewritten by every saveNotebook. This is what lets two PCs
   /// order their copies of THIS notebook. The vault blob's single `syncedAt`
@@ -145,6 +161,21 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
+/// Fired ONLY by queue-lifecycle writes (start, job transition, sequence end),
+/// never by note/plan typing. vaultSync listens and publishes to the user's
+/// GitHub vault immediately, so device B sees a queue the moment device A
+/// starts it instead of up to ~9s later (a 5s snapshot poll feeding a 4s
+/// debounce) — or never, if the window closed before either timer fired.
+/// An event rather than a direct import: the runtime layer must not depend on
+/// a page module, which is why vaultSync already keeps these names as local
+/// literals rather than importing them from here.
+export const NOTEBOOK_QUEUE_EVENT = "owllm:notebook-queue-changed";
+/// Fired when a notebook surface OPENS. vaultSync answers with a pull, so the
+/// user sees the queue as it stands on their other PC rather than whatever this
+/// machine last cached — mid-session adoption previously only happened on a
+/// timer or a window-focus change, so opening the notebook straight after
+/// launch showed a stale queue.
+export const NOTEBOOK_PULL_EVENT = "owllm:notebook-pull-request";
 const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: true, digest: [], deletedSteps: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 // The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
@@ -275,6 +306,9 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
         ? { deviceId: p.runningOn.deviceId, deviceName: typeof p.runningOn.deviceName === "string" ? p.runningOn.deviceName : p.runningOn.deviceId.slice(0, 8), at: p.runningOn.at }
         : undefined,
       updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
+      queueId: typeof p.queueId === "string" && p.queueId ? p.queueId : undefined,
+      queueRev: typeof p.queueRev === "number" && Number.isFinite(p.queueRev) ? p.queueRev : undefined,
+      currentIndex: typeof p.currentIndex === "number" && Number.isFinite(p.currentIndex) ? p.currentIndex : undefined,
       deletedSteps: Array.isArray(p.deletedSteps)
         ? p.deletedSteps.filter((d: unknown): d is { id: string; ts: number } =>
             !!d && typeof (d as any).id === "string" && typeof (d as any).ts === "number")
@@ -303,7 +337,30 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
 /// dead weight, so an unbounded list would grow forever in the synced blob.
 const MAX_STEP_TOMBSTONES = 200;
 
-export function saveNotebook(projectId: string | null | undefined, nb: NotebookState): void {
+const newQueueId = () => `q${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/// Which job the queue is on. A step that was fed and has not finished is the
+/// live one; otherwise the next pending card is up next; a drained queue points
+/// one past the end so "job N of N" reads as complete rather than wrapping to 0.
+function currentJobIndex(steps: NotebookStep[]): number {
+  const running = steps.findIndex((s) => s.status === "sent" && s.finishedAt == null);
+  if (running >= 0) return running;
+  const pending = steps.findIndex((s) => s.status === "pending");
+  return pending >= 0 ? pending : steps.length;
+}
+
+/// Persist the notebook.
+///
+/// `publish` marks a QUEUE-lifecycle write (start, job transition, sequence
+/// end) as opposed to the user typing in the notes. Only the former is pushed
+/// to the vault immediately — publishing every keystroke would mean a git
+/// commit per character. Content edits still reach the vault through the
+/// existing snapshot poll.
+export function saveNotebook(
+  projectId: string | null | undefined,
+  nb: NotebookState,
+  opts?: { publish?: boolean },
+): void {
   if (!projectId) return;
   try {
     const deletedSteps = (nb.deletedSteps ?? []).slice().sort((a, b) => b.ts - a.ts).slice(0, MAX_STEP_TOMBSTONES);
@@ -311,11 +368,20 @@ export function saveNotebook(projectId: string | null | undefined, nb: NotebookS
       ...nb,
       digest: nb.digest.slice(-12),
       deletedSteps,
+      queueId: nb.queueId || newQueueId(),
+      // Strictly increasing, and never reset by an adopted copy: mergeNotebook
+      // raises the stored value to max(local, remote) first, so +1 here is
+      // always ahead of anything either PC has published.
+      queueRev: (typeof nb.queueRev === "number" && Number.isFinite(nb.queueRev) ? nb.queueRev : 0) + 1,
+      currentIndex: currentJobIndex(nb.steps),
       // Stamp EVERY write: this is the only per-notebook ordering signal two
       // PCs have when deciding whose copy of a field is newer.
       updatedAt: Date.now(),
     }));
     window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT, { detail: { projectId } }));
+    // Fire-and-forget: the listener pushes asynchronously, so the queue helper
+    // that called us (often inside a run-end finally block) never waits on git.
+    if (opts?.publish) window.dispatchEvent(new CustomEvent(NOTEBOOK_QUEUE_EVENT, { detail: { projectId } }));
   } catch { /* best effort */ }
 }
 
@@ -354,7 +420,7 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   // this queue owns, so the one-shot arm has done its job.
   nb.autoFeedArmed = false;
   nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return next;
 }
 
@@ -420,7 +486,7 @@ export function markNotebookAutoFeedStarted(projectId: string | null | undefined
   nb.autoFeedStartedAt = startedAt;
   nb.autoFeedFinishedAt = undefined;
   nb.autoFeedStopped = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// Freeze the whole-sequence timer only after the owner finishes the final
@@ -433,7 +499,7 @@ export function markNotebookAutoFeedFinished(projectId: string | null | undefine
   if (stillActive) return false;
   nb.autoFeedFinishedAt = finishedAt;
   nb.autoFeedStopped = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return true;
 }
 
@@ -453,7 +519,7 @@ export function consumeAutoFeedArm(projectId: string | null | undefined, surface
   if (!nb.autoFeedArmed) return false;
   if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
   nb.autoFeedArmed = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return true;
 }
 
@@ -492,7 +558,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
   nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: startedAt, failureReason: undefined };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// Stamp when the run that processed a notebook step finished. Idempotent.
@@ -502,7 +568,7 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
   nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, stepUpdatedAt: finishedAt, failureReason: undefined };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// A stopped/errored run did not complete its notebook card. Keep the card in
@@ -525,7 +591,7 @@ export function markNotebookStepFailed(
     stepUpdatedAt: finishedAt,
     failureReason: reason.trim() || "The run did not complete.",
   };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// A filesystem preflight failed before an agent started. The card remains
@@ -547,7 +613,7 @@ export function markNotebookStepPending(
     stepUpdatedAt: Date.now(),
     failureReason: undefined,
   };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// How a run that was carrying notebook cards ended.
@@ -1052,6 +1118,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   // peer clocks are unsynchronized and a skewed stamp would lock the user out
   // of their own queue.
   useEffect(() => { warmNotebookDeviceIdentity(); }, []);
+  // Pull-on-open: ask the runtime layer for the peer's copy as the surface
+  // mounts. Fire-and-forget — the pull is async and repaints through
+  // NOTEBOOK_EVENT, so opening the notebook is never gated on the network.
+  useEffect(() => {
+    try { window.dispatchEvent(new CustomEvent(NOTEBOOK_PULL_EVENT, { detail: { projectId } })); } catch { /* non-browser */ }
+  }, [projectId]);
   useTick(nb.runningOn != null);
   const peerRun = peerRunningQueue(nb);
   // While THIS window owns an active queue, beat the heartbeat so peers keep

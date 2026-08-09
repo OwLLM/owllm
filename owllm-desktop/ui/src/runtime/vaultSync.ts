@@ -74,6 +74,13 @@ const NOTEBOOK_KEY_PREFIX = "owllm:agents:notebook:";
 // Mirrors RunNotebook's NOTEBOOK_EVENT. Kept as a local literal rather than an
 // import so this runtime module stays free of page-level dependencies.
 const NOTEBOOK_EVENT_NAME = "owllm:notebook-changed";
+// Mirrors RunNotebook's NOTEBOOK_QUEUE_EVENT — fired only by queue-lifecycle
+// writes (start, job transition, sequence end), never by note typing. See
+// publishQueueNow: this is what makes a started queue visible on the user's
+// other PCs immediately instead of after the poll+debounce.
+const NOTEBOOK_QUEUE_EVENT_NAME = "owllm:notebook-queue-changed";
+// Mirrors RunNotebook's NOTEBOOK_PULL_EVENT — a notebook surface just opened.
+const NOTEBOOK_PULL_EVENT_NAME = "owllm:notebook-pull-request";
 const NOTEBOOK_RUN_LEASE_FIELDS = [
   "autoFeed", "autoFeedOwner", "autoFeedHeartbeat", "autoFeedStartedAt", "autoFeedFinishedAt", "autoFeedStopped",
   // One-shot "start the queue when the current run ends", set by a click on THIS
@@ -183,9 +190,19 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
       const buried = new Set(tombstones.keys());
       const localAt = typeof local.updatedAt === "number" ? local.updatedAt : 0;
       const remoteAt = typeof remote.updatedAt === "number" ? remote.updatedAt : 0;
+      // Order by the MONOTONIC revision when both sides have one, and only fall
+      // back to the wall clock when they don't (legacy blobs, or a tie). Device
+      // clocks are not synchronized — this vault's own history shows peers
+      // writing out-of-order stamps — so a peer's newer queue could carry an
+      // older `updatedAt` and roll a finished job back to pending. The revision
+      // is a Lamport counter and cannot be skewed that way.
+      const localRev = typeof local.queueRev === "number" && Number.isFinite(local.queueRev) ? local.queueRev : null;
+      const remoteRev = typeof remote.queueRev === "number" && Number.isFinite(remote.queueRev) ? remote.queueRev : null;
       // Legacy blobs (written before updatedAt existed) score 0 on both sides;
       // preferring remote there preserves the previous adopt-the-peer behaviour.
-      const remoteIsNewer = remoteAt >= localAt;
+      const remoteIsNewer = localRev !== null && remoteRev !== null && localRev !== remoteRev
+        ? remoteRev > localRev
+        : remoteAt >= localAt;
       const newer = remoteIsNewer ? remote : local;
       const localSteps = Array.isArray(local.steps) ? local.steps : [];
       const remoteSteps = Array.isArray(remote.steps) ? remote.steps : [];
@@ -197,6 +214,17 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
       remote.steps = mergeSteps(remoteIsNewer ? remoteSteps : localSteps, remoteIsNewer ? localSteps : remoteSteps, buried);
       remote.deletedSteps = [...tombstones.values()].sort((a, b) => b.ts - a.ts).slice(0, 200);
       remote.updatedAt = Math.max(localAt, remoteAt);
+      // Queue identity + position follow the side that won the ordering above,
+      // so "job 3 of 7" always describes the copy whose steps we just adopted.
+      if (newer.queueId !== undefined) remote.queueId = newer.queueId;
+      else if (local.queueId !== undefined) remote.queueId = local.queueId;
+      if (newer.currentIndex !== undefined) remote.currentIndex = newer.currentIndex;
+      else delete remote.currentIndex;
+      // Raise the counter to the highest either PC has seen. The next local save
+      // does +1 on this, so our own writes always land ahead of the peer's and
+      // the counter never moves backwards on either machine.
+      const highestRev = Math.max(localRev ?? 0, remoteRev ?? 0);
+      if (localRev !== null || remoteRev !== null) remote.queueRev = highestRev;
       // Advisory only (never a lock) — keep whichever device started a queue
       // most recently so each PC can say where the run is happening.
       const runs = [local.runningOn, remote.runningOn].filter((r: any) => r && typeof r.at === "number");
@@ -367,6 +395,30 @@ function sameNotebookJson(a: string | null, b: string): boolean {
   try { return stableJson(JSON.parse(a)) === stableJson(JSON.parse(b)); } catch { return false; }
 }
 
+// How often we pull notebooks from the vault. A running queue is a live
+// two-machine conversation, so it needs a tight loop; an idle notebook does not
+// justify polling a git remote that often.
+const NOTEBOOK_ACTIVE_PULL_MS = 10_000;
+const NOTEBOOK_IDLE_PULL_MS = 60_000;
+
+/// Does THIS device have a queue in flight? A step that was fed and has not
+/// finished is the live one — the same rule RunNotebook uses for currentIndex.
+/// Read straight from storage rather than tracked in a variable so a queue
+/// started before this module loaded (or in another tab) still counts.
+function localQueueIsRunning(): boolean {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(NOTEBOOK_KEY_PREFIX)) continue;
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      const steps = JSON.parse(raw)?.steps;
+      if (Array.isArray(steps) && steps.some((s: any) => s?.status === "sent" && s.finishedAt == null)) return true;
+    }
+  } catch { /* private mode / unparseable blob */ }
+  return false;
+}
+
 /// Mid-session NOTEBOOK refresh.
 ///
 /// pullAndAdopt above runs exactly once, at launch, because adopting rewrites
@@ -420,6 +472,35 @@ export async function pushNow(force = false): Promise<void> {
     setLast(syncedAt); // our own push isn't "newer" to us next launch
   } catch (e) {
     console.warn("[vaultSync] push failed", e);
+  }
+}
+
+/// Publish a QUEUE-lifecycle change to the vault right now.
+///
+/// The notebook is meant to be one shared object, but the only routes to the
+/// vault were a 5-second snapshot poll feeding a 4-second debounce. So a queue
+/// started on device A was invisible on device B for up to ~9 seconds — and not
+/// at all if the run ended or the window closed before both timers elapsed,
+/// which is exactly the "started it here, the other PC never knew" report.
+///
+/// Fully asynchronous: callers dispatch an event and return, so a run-end
+/// handler never waits on git. Overlapping transitions coalesce into one
+/// trailing push rather than queueing a commit per job.
+let _queuePublishing = false;
+let _queuePublishAgain = false;
+export async function publishQueueNow(): Promise<void> {
+  if (!_enabled) return;
+  if (_queuePublishing) { _queuePublishAgain = true; return; }
+  _queuePublishing = true;
+  try {
+    do {
+      _queuePublishAgain = false;
+      // force: a queue transition must go out even when the snapshot dedupe
+      // would call it unchanged (the lease fields it touches are stripped).
+      await pushNow(true);
+    } while (_queuePublishAgain);
+  } finally {
+    _queuePublishing = false;
   }
 }
 
@@ -629,10 +710,29 @@ function wireListeners(): void {
   // reconcile projects/facts as a backstop for native memory writes and abrupt
   // exits; event-driven writes normally sync after the 4-second debounce.
   window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
+  // A queue-lifecycle write publishes immediately — see publishQueueNow.
+  window.addEventListener(NOTEBOOK_QUEUE_EVENT_NAME, () => { void publishQueueNow(); });
+  // A notebook surface opening asks for the peer's copy before the user acts on
+  // a stale queue.
+  window.addEventListener(NOTEBOOK_PULL_EVENT_NAME, () => { void pullNotebooksNow(); });
   // Notebook queues are the one localStorage store that must converge WITHOUT
   // waiting for the next launch — otherwise a step a peer already completed
   // keeps being re-fed here. Safe mid-session: see pullNotebooksNow.
-  window.setInterval(() => { if (_enabled) void pullNotebooksNow(); }, 60_000);
+  //
+  // Self-rescheduling rather than a flat interval: while a queue is actually
+  // running the two PCs are both writing, so a minute of blindness is long
+  // enough to re-feed a card the peer already finished. Idle notebooks keep the
+  // cheap cadence — this polls a git remote, so it is not free.
+  const scheduleNotebookPull = () => {
+    // `window.` like every other timer armed by wireListeners, NOT the bare
+    // global used by schedulePush: these fire at startup, so harnesses stub
+    // them out to keep a test process from being held open by a live timer.
+    window.setTimeout(() => {
+      if (!_enabled) { scheduleNotebookPull(); return; }
+      void pullNotebooksNow().finally(scheduleNotebookPull);
+    }, localQueueIsRunning() ? NOTEBOOK_ACTIVE_PULL_MS : NOTEBOOK_IDLE_PULL_MS);
+  };
+  scheduleNotebookPull();
   // Fleet liveness heartbeat: republish OUR device record (fresh published_at)
   // and ingest peers' heartbeats. Without this the record was published once at
   // launch, so isDeviceOnline's 5-minute freshness window was unhittable for

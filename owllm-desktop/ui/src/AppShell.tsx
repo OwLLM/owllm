@@ -57,6 +57,7 @@ import {
 import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
+import { worldChatHooks } from "./pages/gamify/worldChatRuntime";
 import { getIdentity } from "./pages/advanced/remoteDevices";
 import { openWebUrl } from "./utils/openWebUrl";
 
@@ -2093,7 +2094,9 @@ function WorldPresenceRunner() {
         appVersion: identity.app_version,
       }))
       .then(({ nodeId, appVersion }) => {
-        if (!disposed) stop = installWorldPresenceConnection({ nodeId, appVersion });
+        // chatHooks is undefined unless the user turned World Chat on, in which
+        // case no key is ever presented and the socket stays anonymous.
+        if (!disposed) stop = installWorldPresenceConnection({ nodeId, appVersion, chatHooks: worldChatHooks() });
       })
       .catch(() => {
         // No native identity (browser-only development, or a device that cannot

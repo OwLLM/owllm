@@ -94,7 +94,15 @@ type SocketEvent = Event | MessageEvent<unknown>;
 
 type SocketLike = {
   close(code?: number, reason?: string): void;
+  send(data: string): void;
   addEventListener(type: SocketEventName, listener: (event: SocketEvent) => void): void;
+};
+
+/** A live connection: stop it, or write a frame back up the same socket. */
+export type PresenceSocketHandle = {
+  stop: () => void;
+  /** False when there is no open socket right now — the caller must retry. */
+  send: (value: unknown) => boolean;
 };
 
 type ConnectionOptions = {
@@ -102,6 +110,8 @@ type ConnectionOptions = {
   nodeId?: string;
   os?: PresenceOs;
   appVersion?: string;
+  /** Ask the service for an identity challenge so this socket can carry chat. */
+  chat?: boolean;
   socketFactory?: (url: string) => SocketLike;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
@@ -198,6 +208,7 @@ export function worldPresenceSocketUrl(
   nodeId = "",
   os: PresenceOs | "" = "",
   appVersion = "",
+  chat = false,
 ): string {
   const normalized = baseUrl.trim().replace(/\/$/, "");
   if (!normalized) return "";
@@ -214,6 +225,10 @@ export function worldPresenceSocketUrl(
     // version is visible without exposing anything device-identifying.
     const version = role === "presence" ? normalizePresenceVersion(appVersion) : "";
     if (version) url.searchParams.set("v", version);
+    // Only asked for when the user has turned chat on. Without it the service
+    // never issues a challenge, so no key is presented and presence stays as
+    // anonymous as it was before chat existed.
+    if (role === "presence" && nodeId && chat) url.searchParams.set("chat", "1");
     return url.toString();
   } catch {
     return "";
@@ -267,13 +282,14 @@ function reconnectDelay(attempt: number): number {
   return Math.min(WORLD_PRESENCE_RECONNECT_MAX_MS, WORLD_PRESENCE_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 5)));
 }
 
-function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): () => void {
-  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "", options.os ?? "", options.appVersion ?? "");
-  if (!url) return () => {};
+function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): PresenceSocketHandle {
+  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "", options.os ?? "", options.appVersion ?? "", options.chat ?? false);
+  if (!url) return { stop: () => {}, send: () => false };
   const socketFactory = options.socketFactory ?? ((target) => new WebSocket(target));
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
   let socket: SocketLike | undefined;
+  let open = false;
   let timer: TimerHandle | undefined;
   let attempt = 0;
   let disposed = false;
@@ -305,6 +321,7 @@ function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionO
     next.addEventListener("open", () => {
       if (disposed || generation !== ownGeneration) return;
       attempt = 0;
+      open = true;
       options.onOpen?.();
     });
     next.addEventListener("message", (event) => {
@@ -318,19 +335,32 @@ function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionO
     next.addEventListener("close", () => {
       if (disposed || generation !== ownGeneration) return;
       socket = undefined;
+      open = false;
       options.onDisconnect?.("World presence connection closed");
       schedule();
     });
   };
 
   connect();
-  return () => {
-    disposed = true;
-    generation += 1;
-    cancelTimer();
-    try { socket?.close(1000, "disabled"); }
-    catch { /* already closed */ }
-    socket = undefined;
+  return {
+    stop: () => {
+      disposed = true;
+      generation += 1;
+      cancelTimer();
+      try { socket?.close(1000, "disabled"); }
+      catch { /* already closed */ }
+      socket = undefined;
+      open = false;
+    },
+    send: (value: unknown) => {
+      if (disposed || !socket || !open) return false;
+      try {
+        socket.send(typeof value === "string" ? value : JSON.stringify(value));
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -384,10 +414,29 @@ export function subscribeWorldPresence(options: PresenceSubscriptionOptions): ()
         emit(message.updatedAt);
       }
     },
-  });
+  }).stop;
 }
 
-type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage };
+/**
+ * Everything the presence socket needs in order to also carry chat. The keys
+ * stay in Rust: this side only asks for a signature over the relay's challenge.
+ */
+export type WorldChatHooks = {
+  /** Public halves of this device's identity, or null when chat is off. */
+  identity: () => Promise<{ publicKey: string; xPub: string } | null>;
+  /** Sign the relay's 64-hex challenge with the native device key. */
+  sign: (nonce: string) => Promise<string>;
+  /** Display name and whether strangers may send a first-contact request. */
+  profile: () => { nick: string; reachable: boolean };
+  /** Every chat and room frame the relay sends. */
+  onFrame: (frame: Record<string, unknown>) => void;
+  /** Called with a writer when authenticated, and with null when it drops. */
+  onTransport: (send: ((value: unknown) => boolean) | null) => void;
+  /** Surfaced so a failed handshake is visible instead of silently doing nothing. */
+  onError?: (error: string) => void;
+};
+
+type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage; chatHooks?: WorldChatHooks };
 
 /**
  * Maintain one anonymous presence socket for this installation.
@@ -423,17 +472,73 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
   const nodeId = options.nodeId ?? "";
   const os = options.os ?? currentPresenceOs();
   const appVersion = normalizePresenceVersion(options.appVersion);
+  const chatHooks = options.chatHooks;
+  const chat = Boolean(chatHooks) && Boolean(nodeId);
+
+  /**
+   * Answer the relay's challenge. The signature is produced natively, so a
+   * webview without `crypto.subtle` still authenticates — and a device that
+   * cannot sign simply stays a plain anonymous dot instead of guessing.
+   */
+  const answerChallenge = async (nonce: string, send: (value: unknown) => boolean) => {
+    if (!chatHooks) return;
+    try {
+      const identity = await chatHooks.identity();
+      if (!identity) return;
+      const profile = chatHooks.profile();
+      send({
+        type: "chat_auth",
+        publicKey: identity.publicKey,
+        xPub: identity.xPub,
+        signature: await chatHooks.sign(nonce),
+        nick: profile.nick,
+        reachable: profile.reachable,
+      });
+    } catch (reason) {
+      chatHooks.onError?.(String(reason));
+    }
+  };
 
   const sync = () => {
     stopSocket?.();
     stopSocket = undefined;
-    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId, os, appVersion)) return;
-    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId, os, appVersion });
+    chatHooks?.onTransport(null);
+    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId, os, appVersion, chat)) return;
+    const handle = createReconnectingSocket("presence", {
+      ...options,
+      baseUrl,
+      nodeId,
+      os,
+      appVersion,
+      chat,
+      onDisconnect: (error) => {
+        chatHooks?.onTransport(null);
+        options.onDisconnect?.(error);
+      },
+      onMessage: (value) => {
+        options.onMessage?.(value);
+        if (!chatHooks || !value || typeof value !== "object") return;
+        const frame = value as Record<string, unknown>;
+        const type = typeof frame.type === "string" ? frame.type : "";
+        if (type === "chat_challenge" && typeof frame.nonce === "string") {
+          void answerChallenge(frame.nonce, handle.send);
+          return;
+        }
+        if (!type.startsWith("chat_") && !type.startsWith("room_")) return;
+        // The writer is handed over only once the relay has accepted the
+        // identity, so nothing can be sent on a socket that is not yet bound.
+        if (type === "chat_ready") chatHooks.onTransport(handle.send);
+        if (type === "chat_error") chatHooks.onError?.(String(frame.error ?? "chat error"));
+        chatHooks.onFrame(frame);
+      },
+    });
+    stopSocket = handle.stop;
   };
   const onOnline = () => sync();
   const signOff = () => {
     stopSocket?.();
     stopSocket = undefined;
+    chatHooks?.onTransport(null);
   };
 
   if (typeof window !== "undefined") {

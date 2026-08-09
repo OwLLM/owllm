@@ -14,10 +14,17 @@ import path from "node:path";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (match) => match.slice(1)));
 const SERVICE = path.resolve(HERE, "../../../../../services/world-presence");
-const suite = path.join(SERVICE, "test/presence.test.mjs");
+const TEST_DIR = path.join(SERVICE, "test");
 
-if (!fs.existsSync(suite)) {
-  console.error(`world presence service verification: suite missing at ${suite}`);
+// Every suite in the folder, discovered rather than listed. A hand-written list
+// silently excludes the next suite somebody adds, which is the same failure
+// this gate exists to prevent.
+const suites = fs.existsSync(TEST_DIR)
+  ? fs.readdirSync(TEST_DIR).filter((name) => name.endsWith(".test.mjs")).map((name) => path.join(TEST_DIR, name))
+  : [];
+
+if (!suites.length) {
+  console.error(`world presence service verification: no suites found under ${TEST_DIR}`);
   process.exit(1);
 }
 
@@ -28,7 +35,7 @@ if (!fs.existsSync(path.join(SERVICE, "node_modules/miniflare"))) {
   process.exit(1);
 }
 
-const run = spawnSync(process.execPath, ["--test", suite], { cwd: SERVICE, encoding: "utf8", timeout: 110_000 });
+const run = spawnSync(process.execPath, ["--test", ...suites], { cwd: SERVICE, encoding: "utf8", timeout: 240_000 });
 const output = `${run.stdout || ""}${run.stderr || ""}`;
 const pass = Number(/^# pass (\d+)$/m.exec(output)?.[1] ?? /^ℹ pass (\d+)$/m.exec(output)?.[1] ?? 0);
 const fail = Number(/^# fail (\d+)$/m.exec(output)?.[1] ?? /^ℹ fail (\d+)$/m.exec(output)?.[1] ?? 0);
@@ -38,4 +45,4 @@ if (run.status !== 0 || fail > 0 || pass === 0) {
   console.error(`world presence service verification: ${pass} passed, ${fail} failed`);
   process.exit(1);
 }
-console.log(`world presence service verification: ${pass}/${pass + fail} passed`);
+console.log(`world presence service verification: ${pass}/${pass + fail} passed across ${suites.length} suite(s)`);

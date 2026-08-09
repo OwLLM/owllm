@@ -870,10 +870,17 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     setQueueNotice(null);
   }, [projectId]);
 
-  const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
+  /// `publish` forwards to saveNotebook and marks a QUEUE-lifecycle write, so
+  /// it reaches the other PCs inside this click rather than on the snapshot
+  /// poll. The exported helpers below already do this; the component's own
+  /// handlers drive the SAME transitions from the buttons, so they must too.
+  const updateNotebook = (
+    makeNext: (prev: NotebookState) => NotebookState,
+    opts?: { publish?: boolean },
+  ) => {
     setNb((prev) => {
       const next = makeNext(prev);
-      saveNotebook(projRef.current, next);
+      saveNotebook(projRef.current, next, opts);
       return next;
     });
   };
@@ -914,7 +921,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       steps: prev.steps.map((s) => (s.id === id
         ? { ...s, ...patch, ...(stepUpdatedAt != null ? { stepUpdatedAt } : {}) }
         : s)),
-    }));
+    // A lifecycle patch IS a per-job state transition (Archive → "done" is the
+    // one users click), so publish on exactly that condition. Renaming a step
+    // is a content edit and still rides the poll.
+    }), { publish: changesLifecycle });
   };
   /// Deleting records a TOMBSTONE as well as dropping the step. Steps merge
   /// across PCs as a union by id (so a peer's completion can't be clobbered by
@@ -959,7 +969,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
         ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
         : {}),
-    }));
+    // THE start action: ▶ Start queue lands here, and so does feeding a single
+    // card. Both move a job pending → sent and claim the run, so the peers must
+    // see it inside the click — waiting on the snapshot poll is what let a queue
+    // run to completion on this PC while the others still showed it idle.
+    }), { publish: true });
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.

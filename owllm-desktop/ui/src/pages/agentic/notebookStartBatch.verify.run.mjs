@@ -978,5 +978,83 @@ console.log("case 12: the notebook opens with auto-feed already on, and obeys an
     !src.includes("autoFeed: p.autoFeed === true") && src.includes('typeof p.autoFeed === "boolean" ? p.autoFeed : true'));
 }
 
+// ---- 13. The BUTTONS publish the queue, not just the exported helpers ----
+// notebookQueueGithubSync proves the exported queue helpers push to the vault
+// inside the start action. It cannot reach the handlers the user actually
+// clicks: feedStep/setStep are closures inside the component, so a gate that
+// only calls the module exports passes while ▶ Start queue still waits on the
+// ~9s snapshot poll. That is the hole this case closes — same claim, driven
+// through the rendered DOM.
+console.log("case 13: the queue buttons publish inside the click");
+{
+  const QUEUE_EVENT = "owllm:notebook-queue-changed";
+  let published = 0;
+  const onPublish = () => { published++; };
+  window.addEventListener(QUEUE_EVENT, onPublish);
+
+  // The event name is the contract between the page and the runtime pusher.
+  check("the harness listens on the name the page actually dispatches",
+    src.includes(`export const NOTEBOOK_QUEUE_EVENT = "${QUEUE_EVENT}"`));
+
+  // --- starting the queue: the headline requirement ---
+  seed();
+  const m = mount({ onFeed: () => "dispatched" });
+  published = 0;
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("▶ Start queue publishes the queue within the click", published > 0);
+  check("  ...and the click is what moved the job to sent",
+    blob().steps.find((s) => s.id === "s1")?.status === "sent");
+  // A publish is only worth anything if the document it pushes is the versioned
+  // one — queue id and revision are what let device B order the two copies.
+  check("  ...and the published document carries its queue id and revision",
+    typeof blob().queueId === "string" && blob().queueId.length > 0
+    && typeof blob().queueRev === "number" && blob().queueRev > 0);
+  // `runningOn` needs the device identity, which arrives from an async Tauri
+  // invoke this harness stubs out — notebookQueueGithubSync case 4 covers it,
+  // seeding the device directly. What IS observable here is the local half of
+  // the same claim: the click made this window the queue's owner.
+  check("  ...and the click claimed the queue for this window",
+    blob().autoFeedOwner != null);
+  act(() => m.root.unmount());
+
+  // --- archiving: a per-job state transition reached only from the UI ---
+  // Target the per-step control by aria-label: "Archive" alone also matches the
+  // Active/Archive TAB, and clicking that would switch tabs and publish nothing.
+  seed();
+  const m2 = mount({});
+  published = 0;
+  clickEl(buttons().find((b) => b.getAttribute("aria-label") === "Archive step"));
+  check("Archive publishes the job's transition to done", published > 0);
+  check("  ...and the step really is done", blob().steps.find((s) => s.id === "s1")?.status === "done");
+  act(() => m2.root.unmount());
+
+  // --- the negative: content edits must NOT publish, or the vault takes a git
+  //     commit per keystroke. This is the check that keeps the fix honest. ---
+  seed();
+  const m3 = mount({});
+  const notes = [...document.querySelectorAll("textarea")][0];
+  published = 0;
+  if (notes) {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(notes, "typing working notes");
+      notes.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+  }
+  check("a notes keystroke found a textarea to type into", !!notes);
+  check("typing notes does NOT publish (no commit per keystroke)", published === 0);
+  check("  ...but the keystroke was still persisted locally", blob().text === "typing working notes");
+  act(() => m3.root.unmount());
+
+  window.removeEventListener(QUEUE_EVENT, onPublish);
+
+  // The seam itself: a publishing write must reach saveNotebook's opts, or every
+  // check above could pass through some other dispatch.
+  check("updateNotebook forwards publish to saveNotebook",
+    /saveNotebook\(projRef\.current, next, opts\)/.test(src));
+  check("a step lifecycle patch publishes on exactly that condition",
+    /\}\), \{ publish: changesLifecycle \}\);/.test(src));
+}
+
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

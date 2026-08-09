@@ -112,6 +112,17 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,200}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
+  // A THIRD corruption shape, and the one that actually bit: an orphaned
+  // `.git/index.lock` (app killed mid-write). Git then refuses add/commit/reset
+  // alike, and nothing removed it — a 0-byte lock from 2026-07-29 left one
+  // device's clone 31,997 commits behind origin for eleven days. Device sync
+  // still looked healthy because its `reset --hard` was best-effort: it kept
+  // re-ingesting an eleven-day-old state/devices/ and reporting "no change".
+  ["src-tauri/src/vault.rs", /fn is_lock_contention[\s\S]{0,300}file exists/, "an orphaned git lock is recognized, not mistaken for a healthy repo (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /is_lock_contention\(&e\) && repair_stale_lock\(&e\)/, "run_git's self-heal ladder clears an orphaned lock and retries (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).

@@ -281,6 +281,68 @@ pub(crate) fn repair_index(cwd: Option<&std::path::Path>) {
     eprintln!("vault: rebuilt a corrupt git index");
 }
 
+/// A leftover `.lock` file — git's single-writer guard, orphaned when the app (or
+/// a git child) is killed mid-write. Git then refuses EVERY operation that needs
+/// that lock: `add`, `commit` and `reset --hard` all fail with "Unable to create
+/// '<path>.lock': File exists". Nothing ever removes it, so one crash freezes
+/// vault sync permanently.
+///
+/// Observed live: a 0-byte `.git/index.lock` from 2026-07-29 15:15 left this
+/// device's clone 31,997 commits behind origin for eleven days. Device sync still
+/// looked healthy because its `reset --hard` was best-effort — it kept re-reading
+/// an eleven-day-old snapshot of `state/devices/` and reporting "no change", so
+/// "My OwLLM Devices" silently stopped seeing peers.
+pub(crate) fn is_lock_contention(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains(".lock") && l.contains("file exists")
+}
+
+/// How long a `.lock` must sit untouched before we treat it as orphaned. A lock
+/// is created once and held for the whole operation, so age is the honest signal:
+/// a genuinely concurrent write is seconds old, the wedge this repairs was days
+/// old. Ten minutes is far beyond any index write on a text-only vault, and far
+/// short of "one crash freezes sync forever".
+const STALE_LOCK_SECS: u64 = 600;
+
+/// The lock path git names in its own error — `Unable to create '<path>': File
+/// exists`. Using git's reported path (rather than guessing `.git/index.lock`)
+/// heals whichever lock actually blocked us, including ref locks under a
+/// worktree's private git dir.
+fn lock_path_from_err(err: &str) -> Option<std::path::PathBuf> {
+    let (_, rest) = err.split_once('\'')?;
+    let (path, _) = rest.split_once('\'')?;
+    let p = std::path::PathBuf::from(path);
+    let is_lock = p
+        .extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| x.eq_ignore_ascii_case("lock"));
+    is_lock.then_some(p)
+}
+
+/// Remove an orphaned lock so the retried command can proceed. Only removes it
+/// when it is older than `STALE_LOCK_SECS`, so a git process that really is
+/// mid-write is never sabotaged — that case is transient and resolves itself.
+/// Working-tree files are NEVER touched. Returns true when a lock was cleared,
+/// so the caller only retries if something actually changed.
+pub(crate) fn repair_stale_lock(err: &str) -> bool {
+    let Some(path) = lock_path_from_err(err) else {
+        return false;
+    };
+    let stale = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().map(|d| d.as_secs() >= STALE_LOCK_SECS).unwrap_or(false))
+        .unwrap_or(false);
+    if !stale {
+        return false;
+    }
+    if std::fs::remove_file(&path).is_err() {
+        return false;
+    }
+    eprintln!("vault: cleared an orphaned git lock ({})", path.display());
+    true
+}
+
 /// A zeroed / unreadable branch ref — `.git/refs/heads/<branch>` left as 41 NUL
 /// bytes when the app dies mid-ref-write (the filesystem records the size but the
 /// content never flushes). HEAD then resolves to nothing and EVERY git command in
@@ -525,7 +587,7 @@ fn note_repo_health(r: &Result<String, String>) {
             REPO_FAILS.store(0, Relaxed);
             COOLDOWN_UNTIL.store(0, Relaxed);
         }
-        Err(e) if is_broken_ref(e) || is_corrupt_index(e) => {
+        Err(e) if is_broken_ref(e) || is_corrupt_index(e) || is_lock_contention(e) => {
             let n = REPO_FAILS.fetch_add(1, Relaxed) + 1;
             if n >= 3 {
                 let backoff = 60u64.saturating_mul(1u64 << (n - 3).min(6)).min(3600);
@@ -555,7 +617,15 @@ fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, Strin
             note_repo_health(&retried);
             retried
         }
-        other => other,
+        Err(e) if is_lock_contention(&e) && repair_stale_lock(&e) => {
+            let retried = run_git_once(args, cwd); // retry once, now with the lock gone
+            note_repo_health(&retried);
+            retried
+        }
+        other => {
+            note_repo_health(&other); // a lock too FRESH to clear still counts as a failure
+            other
+        }
     }
 }
 
@@ -747,6 +817,29 @@ fn local_lan_ip() -> Option<String> {
     sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
+/// Fast-forward the clone to origin's tip — the base every vault transaction
+/// reads peers from and builds its commit on.
+///
+/// NOT best-effort, which is what it used to be. When the reset fails the working
+/// tree is an unknown snapshot, and each channel then ingests that snapshot as if
+/// it were current: a clone wedged by an orphaned lock kept reporting "no peer
+/// changed" for eleven days instead of reporting that it could not read the
+/// account at all. Failing here makes the channel return the error to the UI.
+///
+/// The fetch stays best-effort — offline is normal, and origin/<branch> is still
+/// a valid base then. A vault with no origin ref yet (brand-new, never pushed) is
+/// likewise not a failure: there is simply nothing to reset to.
+fn reset_to_origin(dir: &std::path::Path, branch: &str) -> Result<(), String> {
+    let _ = run_git(&["fetch", "origin", branch], Some(dir));
+    let remote = format!("origin/{branch}");
+    if run_git(&["rev-parse", "--verify", "--quiet", &remote], Some(dir)).is_err() {
+        return Ok(());
+    }
+    run_git(&["reset", "--hard", &remote], Some(dir))
+        .map(|_| ())
+        .map_err(|e| format!("vault reset to {remote} failed: {e}"))
+}
+
 fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
     run_git(&["add", "-A"], Some(dir))?;
     let _ = run_git(&["commit", "-m", "owllm sync"], Some(dir));
@@ -887,11 +980,7 @@ pub async fn vault_sync_teams() -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first.
-        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(
-            &["reset", "--hard", &format!("origin/{branch}")],
-            Some(&dir),
-        );
+        reset_to_origin(&dir, &branch)?;
         let mut any = false;
         for (src_opt, sub) in &pairs {
             let Some(src) = src_opt.as_ref() else {
@@ -1520,11 +1609,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first (same as teams).
-        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(
-            &["reset", "--hard", &format!("origin/{branch}")],
-            Some(&dir),
-        );
+        reset_to_origin(&dir, &branch)?;
         let proj_dir = dir.join("state").join("projects");
         std::fs::create_dir_all(&proj_dir).map_err(|e| format!("mkdir projects: {e}"))?;
 
@@ -1609,11 +1694,7 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
-        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(
-            &["reset", "--hard", &format!("origin/{branch}")],
-            Some(&dir),
-        );
+        reset_to_origin(&dir, &branch)?;
         let dev_dir = dir.join("state").join("devices");
         std::fs::create_dir_all(&dev_dir).map_err(|e| format!("mkdir devices: {e}"))?;
 
@@ -1663,11 +1744,7 @@ pub async fn vault_sync_signing() -> Result<bool, String> {
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
-        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(
-            &["reset", "--hard", &format!("origin/{branch}")],
-            Some(&dir),
-        );
+        reset_to_origin(&dir, &branch)?;
         let sdir = dir.join("state").join("signing");
         std::fs::create_dir_all(&sdir).map_err(|e| format!("mkdir signing: {e}"))?;
         let file = sdir.join("meta.json");
@@ -1773,18 +1850,13 @@ pub async fn vault_align() -> Result<(), String> {
     if !is_cloned(&dir) {
         return Ok(());
     }
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
-        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(
-            &["reset", "--hard", &format!("origin/{branch}")],
-            Some(&dir),
-        );
+        reset_to_origin(&dir, &branch)
     })
     .await
-    .map_err(|e| format!("join error: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Ensure the private vault repo exists AND is cloned locally. Idempotent:
@@ -2119,5 +2191,96 @@ mod tests {
         assert_eq!(other.trim(), "B", "channel B's own write must also survive");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- an orphaned git lock must not freeze vault sync forever ----
+
+    /// A seeded repo plus a `.git/index.lock` aged `age_secs` into the past —
+    /// the exact on-disk shape left behind when the app is killed mid-index-write.
+    fn repo_with_planted_lock(tag: &str, age_secs: u64) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("owllm-vault-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let repo_s = root.to_string_lossy().to_string();
+        run_git(&["init", &repo_s], None).unwrap();
+        run_git(&["config", "user.email", "test@owllm.local"], Some(&root)).unwrap();
+        run_git(&["config", "user.name", "owllm test"], Some(&root)).unwrap();
+        std::fs::write(root.join("seed.txt"), "seed").unwrap();
+        run_git(&["add", "-A"], Some(&root)).unwrap();
+        run_git(&["commit", "-m", "seed"], Some(&root)).unwrap();
+
+        let lock = root.join(".git").join("index.lock");
+        let f = std::fs::File::create(&lock).unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        f.set_times(std::fs::FileTimes::new().set_modified(when)).unwrap();
+        drop(f);
+        (root, lock)
+    }
+
+    /// The breaker is process-global; keep these cases from leaking into each other.
+    fn clear_breaker() {
+        use std::sync::atomic::Ordering::Relaxed;
+        REPO_FAILS.store(0, Relaxed);
+        COOLDOWN_UNTIL.store(0, Relaxed);
+    }
+
+    #[test]
+    fn an_orphaned_git_lock_self_heals_instead_of_freezing_sync_forever() {
+        clear_breaker();
+        let (repo, lock) = repo_with_planted_lock("lock-stale", STALE_LOCK_SECS + 60);
+
+        // The wedge is real, not hypothetical: raw git refuses EVERY index
+        // operation while the lock exists — `add`, `commit` and `reset --hard`
+        // alike. That is what froze one device's clone 31,997 commits behind
+        // origin for eleven days while device sync kept reporting success.
+        let raw = run_git_once(&["add", "-A"], Some(&repo))
+            .expect_err("a planted lock must make raw git fail");
+        assert!(is_lock_contention(&raw), "unexpected git error: {raw}");
+        assert!(
+            !is_corrupt_index(&raw) && !is_broken_ref(&raw),
+            "lock contention is a THIRD failure shape — the older healers must not claim it"
+        );
+
+        // The healed path recovers instead of failing forever.
+        run_git(&["add", "-A"], Some(&repo)).expect("an orphaned lock must self-heal");
+        assert!(!lock.exists(), "the orphaned lock must be gone");
+        assert!(
+            sync_cooldown_remaining().is_none(),
+            "a successful heal must clear the circuit breaker"
+        );
+
+        clear_breaker();
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_lock_young_enough_to_be_live_is_never_stolen() {
+        clear_breaker();
+        // Age 0 — indistinguishable from a git process that is mid-write right
+        // now. Deleting it would corrupt that writer's index, so we must not.
+        let (repo, lock) = repo_with_planted_lock("lock-fresh", 0);
+
+        let err = run_git(&["add", "-A"], Some(&repo))
+            .expect_err("a live lock must still surface as a failure");
+        assert!(is_lock_contention(&err), "unexpected git error: {err}");
+        assert!(
+            lock.exists(),
+            "a lock young enough to belong to a live git process must survive"
+        );
+
+        clear_breaker();
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn only_a_lock_file_is_ever_removed() {
+        // The path is taken from git's own message, so it must be validated:
+        // anything that is not a `.lock` is never touched, and a message with no
+        // quoted path is simply not actionable.
+        assert!(lock_path_from_err("fatal: Unable to create 'C:/v/.git/index.lock': File exists.")
+            .is_some());
+        assert!(lock_path_from_err("error: cannot open 'C:/v/state/local.json'").is_none());
+        assert!(lock_path_from_err("fatal: could not read Username").is_none());
+        assert!(!repair_stale_lock("fatal: no quoted path here: File exists"));
     }
 }

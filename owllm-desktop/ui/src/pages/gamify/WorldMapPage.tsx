@@ -8,6 +8,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
 import { isDeviceOnline } from "../advanced/deviceLiveness";
 import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
+import WorldChatPanel from "./WorldChatPanel";
 import { isClickGesture, nodeSignature } from "./globeStability";
 import {
   PLANETS,
@@ -1542,6 +1543,13 @@ export default function WorldMapPage() {
                 <div style={{ marginTop: 9, color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700 }}>{selected.kind === "fleet" ? t("Private fleet orbit · not a location") : t("Approximate city only")}</div>
               </div>
             )}
+
+            {/* A fleet dot is keyed by device id; chat is always addressed by the
+                public presence id, which is what the relay knows it as. */}
+            <WorldChatPanel
+              selectedNodeId={selected ? (selected.kind === "world" ? selected.id : fleetPresenceIds.get(selected.id) ?? "") : ""}
+              selectedLabel={selected?.label ?? ""}
+            />
           </aside>
         </div>
       </div>

@@ -18,8 +18,9 @@
 // Uint8Array since v4; xterm.onData gives us strings (we encode them
 // with TextEncoder before forwarding).
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -59,19 +60,24 @@ export type PtyTerminalProps = {
   /// Leave unset for general-purpose terminals — any command that prints a
   /// URL (git, npm, curl…) would otherwise hijack the browser.
   autoOpenAuthUrls?: boolean;
+  /// Subscription backend owning this login PTY. Used only to route a
+  /// provider callback code back to the terminal that requested it.
+  authProvider?: string;
   onOutputText?: (text: string) => void;
   onAuthTabOpened?: (tabId: number) => void;
 };
 
 export default function PtyTerminal({
   cli, args, cwd, onSpawned, onExit, autoSend, autoOpenAuthUrls,
-  onOutputText, onAuthTabOpened, visible = true,
+  authProvider, onOutputText, onAuthTabOpened, visible = true,
 }: PtyTerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef<string | null>(null);
   const pendingInputRef = useRef<string[]>([]);
+  const lastAuthCodeRef = useRef("");
+  const [pasteError, setPasteError] = useState("");
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
   const autoSendRef = useRef(autoSend);
@@ -91,6 +97,29 @@ export default function PtyTerminal({
       sessionId: sid,
       data: Array.from(new TextEncoder().encode(data)),
     }).catch(() => {});
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const text = event.clipboardData.getData("text/plain");
+    if (!text) return;
+    // Capture before xterm's hidden textarea. WKWebView can otherwise route
+    // Command-V to the WebView edit menu without xterm emitting onData.
+    event.preventDefault();
+    event.stopPropagation();
+    setPasteError("");
+    ptyWrite(text);
+  };
+
+  const pasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) throw new Error("The clipboard has no text.");
+      setPasteError("");
+      ptyWrite(text);
+      termRef.current?.focus();
+    } catch (error) {
+      setPasteError(`Couldn't read the clipboard: ${String((error as { message?: string })?.message ?? error)} Press ⌘V inside the terminal instead.`);
+    }
   };
 
   useEffect(() => {
@@ -202,6 +231,19 @@ export default function PtyTerminal({
     // of being lost during the PTY handshake.
     term.onData((data) => ptyWrite(data));
 
+    // Claude's current browser flow ends on platform.claude.com with a code
+    // that its CLI is waiting to read from this PTY. The native browser emits
+    // that code only to the main app; route it to the matching live terminal
+    // and submit it exactly once without putting the secret in logs or state.
+    const authUnlisten = listen<{ code?: string }>("owllm:claude-auth-code", (event) => {
+      if (authProvider !== "claude_cli") return;
+      const code = event.payload?.code?.trim();
+      if (!code || code === lastAuthCodeRef.current) return;
+      lastAuthCodeRef.current = code;
+      ptyWrite(`${code}\r`);
+      term.focus();
+    });
+
     invoke<string>("pty_spawn", {
       cli,
       args,
@@ -241,6 +283,7 @@ export default function PtyTerminal({
       ro.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
       if (autoSendTimer) window.clearTimeout(autoSendTimer);
+      authUnlisten.then((unlisten) => unlisten()).catch(() => {});
       const sid = sessionRef.current;
       sessionRef.current = null;
       if (sid) invoke("pty_kill", { sessionId: sid }).catch(() => {});
@@ -252,7 +295,7 @@ export default function PtyTerminal({
     // We intentionally re-spawn when cli/args change — each Connect
     // click should get a fresh terminal session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cli, JSON.stringify(args), cwd]);
+  }, [cli, JSON.stringify(args), cwd, authProvider]);
 
   useEffect(() => {
     if (!visible) return;
@@ -268,17 +311,29 @@ export default function PtyTerminal({
   }, [visible]);
 
   return (
-    <div
-      ref={hostRef}
-      onClick={() => termRef.current?.focus()}
-      style={{
-        width: "100%", height: "100%",
-        background: "#0c0f14",
-        padding: 6,
-        boxSizing: "border-box",
-        outline: "none",
-      }}
-      aria-label="Interactive provider terminal"
-    />
+    <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "#0c0f14" }}>
+      <div style={{ minHeight: 30, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "3px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+        {pasteError && <span role="alert" style={{ flex: 1, color: "#ffb0b0", fontSize: 10 }}>{pasteError}</span>}
+        <button
+          type="button"
+          onClick={() => { void pasteClipboard(); }}
+          title="Paste clipboard into terminal"
+          style={{ border: "1px solid rgba(127,184,255,0.35)", borderRadius: 5, background: "rgba(127,184,255,0.10)", color: "#cfd4e1", fontSize: 11, padding: "3px 9px", cursor: "pointer" }}
+        >Paste</button>
+      </div>
+      <div
+        ref={hostRef}
+        onClick={() => termRef.current?.focus()}
+        onPasteCapture={handlePaste}
+        style={{
+          width: "100%", flex: 1, minHeight: 0,
+          background: "#0c0f14",
+          padding: 6,
+          boxSizing: "border-box",
+          outline: "none",
+        }}
+        aria-label="Interactive provider terminal"
+      />
+    </div>
   );
 }

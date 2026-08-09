@@ -377,7 +377,16 @@ try {
   check("Presence runs application-wide from the opaque native-device hash",
     appShell.includes("<WorldPresenceRunner />")
       && appShell.includes("presenceNodeIdForDevice(identity.device_id)")
-      && appShell.includes("installWorldPresenceConnection({ nodeId, appVersion })"));
+      // Options beyond these two are allowed (World Chat adds an opt-in hook),
+      // but the recorded id and the release must still come from the native
+      // identity — that pairing is what keeps one install one recorded node.
+      && /installWorldPresenceConnection\(\{ nodeId, appVersion[,}]/.test(appShell));
+  // World Chat rides the same socket. It must be strictly opt-in, or enabling
+  // an inbox would quietly de-anonymise every dot on the public map.
+  check("World Chat never presents a key unless the user turned it on",
+    appShell.includes("chatHooks: worldChatHooks()")
+      && fs.existsSync(path.join(UI, "pages/gamify/worldChatRuntime.ts"))
+      && read("pages/gamify/worldChatRuntime.ts").includes("if (!worldChatEnabled()) return undefined"));
   // `crypto.subtle` is secure-context-only. When the webview does not expose it
   // the old code silently fell back to a random id, so the SAME install was
   // recorded as a new node on every launch. Rust computes the identical hash

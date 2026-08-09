@@ -1491,8 +1491,16 @@ pub async fn accounts_refresh_sandbox_creds(cwd: Option<String>) -> Result<bool,
     let fut = tokio::task::spawn_blocking(|| {
         // Re-mirror Windows → distro (claude/codex/gemini/kimi creds + keys). The
         // distro is resolved inside (best_linux_distro). Best-effort.
-        let _ = crate::sandbox::sandbox_sync_logins(None);
-        true
+        //
+        // MUST be the *_blocking entry point: `sandbox_sync_logins` is async, so
+        // calling it here only built a future that was dropped — the re-mirror
+        // never ran and the sandbox token stayed expired (the recurring 401).
+        // Report whether creds ACTUALLY landed, so a failed sync can't read as a
+        // successful refresh.
+        match crate::sandbox::sandbox_sync_logins_blocking(None) {
+            Ok(r) => !r.synced.is_empty(),
+            Err(_) => false,
+        }
     });
     // BOUND IT: a cold / unresponsive WSL (classically right after a PC reboot) made
     // this WSL round-trip hang with no timeout — which blocked the warm-up, which
@@ -4367,17 +4375,76 @@ pub async fn codex_cli_stream(
 // Subscription-CLI detection helpers
 // ---------------------------------------------------------------------
 
-/// Claude CLI persists its OAuth token at ~/.claude/.credentials.json
-/// (anthropic-ai/claude-code). Presence of the file is a reliable
-/// "logged in" signal; presence of just the binary on PATH is not.
-fn claude_cli_logged_in() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+fn claude_auth_status_json_logged_in(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("loggedIn").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Current native Claude Code builds store macOS login tokens in Keychain (and
+/// use the OS credential store on other platforms), so a credential file is no
+/// longer a complete connection test. Ask the installed CLI for its local auth
+/// status with a strict timeout. The command returns JSON and does not make a
+/// model/API request or expose the account identity to OwLLM.
+fn claude_auth_status_logged_in(cli: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    let batch = is_batch_shim(cli);
+    #[cfg(not(windows))]
+    let batch = false;
+    let mut cmd = Command::new(cli);
+    push_arg(&mut cmd, batch, "auth");
+    push_arg(&mut cmd, batch, "status");
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    sanitize_appimage_env(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
         return false;
     };
-    let creds = PathBuf::from(home)
-        .join(".claude")
-        .join(".credentials.json");
-    creds.exists()
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    };
+    if !success {
+        return false;
+    }
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .and_then(|mut pipe| pipe.read_to_end(&mut stdout).ok())
+        .is_some()
+        && claude_auth_status_json_logged_in(&stdout)
+}
+
+/// Legacy npm Claude Code builds persisted OAuth at
+/// ~/.claude/.credentials.json. Keep that zero-process fast path, then fall
+/// back to `claude auth status` for native/Keychain-backed builds.
+fn claude_cli_logged_in() -> bool {
+    let Some(cli) = find_claude_cli() else {
+        return false;
+    };
+    let credentials = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .map(|home| home.join(".claude").join(".credentials.json"));
+    credentials.as_ref().is_some_and(|path| path.is_file()) || claude_auth_status_logged_in(&cli)
 }
 
 /// OpenAI Codex CLI persists its token at ~/.openai/auth.json (per
@@ -6132,12 +6199,21 @@ pub async fn kimi_cli_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
-        is_browser_role_allowlist, is_unrestricted_tool_allowlist, kimi_agent_yaml, kimi_config_has_default,
-        kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
-        ClaudeStreamEvent,
+        append_codex_input_args, claude_auth_status_json_logged_in, cli_child_path, cli_exit_err,
+        codex_should_grant_browser, is_browser_role_allowlist, is_unrestricted_tool_allowlist,
+        kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
+        kimi_output_llm_unset, kimi_output_mcp_failed, parse_kimi_stream_line,
+        sanitize_appimage_env, ClaudeStreamEvent,
     };
+
+    #[test]
+    fn claude_auth_status_reads_only_the_logged_in_boolean() {
+        assert!(claude_auth_status_json_logged_in(
+            br#"{"loggedIn":true,"email":"private@example.com"}"#
+        ));
+        assert!(!claude_auth_status_json_logged_in(br#"{"loggedIn":false}"#));
+        assert!(!claude_auth_status_json_logged_in(b"not json"));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

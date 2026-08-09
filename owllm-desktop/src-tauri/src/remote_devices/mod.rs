@@ -32,6 +32,7 @@ mod relay;
 mod session;
 mod transport;
 mod trust;
+pub mod world_chat;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;

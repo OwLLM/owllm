@@ -21,6 +21,9 @@ async function withService(run) {
   const mf = new Miniflare({
     modules: true,
     scriptPath: new URL("../src/index.js", import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (match) => match.slice(1)),
+    // index.js imports ./chat.js; without this rule miniflare loads the
+    // sibling as CommonJS and every test fails on its export statements.
+    modulesRules: [{ type: "ESModule", include: ["**/*.js"] }],
     compatibilityDate: "2026-07-21",
     durableObjects: { WORLD_PRESENCE: { className: "WorldPresence", useSQLite: true } },
   });

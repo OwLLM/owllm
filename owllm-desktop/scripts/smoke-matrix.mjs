@@ -140,6 +140,15 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/AgentsPage.tsx", /toolCalls\.slice\(toolsWin\.start\)/, "Tool Calls view renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
+  // Orphaned WebKit helpers — Ubuntu's recurring "internal error" (SIGBUS).
+  // A helper that outlives us keeps executing code mmap'd out of the AppImage
+  // mount the runtime tears down the moment we leave, so its next cold page
+  // fault is a SIGBUS. Measured on the reference Jetson: with an unresponsive
+  // web process both helpers survived the app process for the full 30s
+  // observation window, and apport archived six such SIGBUS reports.
+  ["src-tauri/src/lib.rs", /RunEvent::Exit =>[\s\S]{0,900}webkit_children::reap\(/, "WebKit helpers are reaped before the process leaves, so none can outlive the AppImage mount"],
+  ["src-tauri/src/lib.rs", /\.setup\(\|app\|[\s\S]{0,400}webkit_children::install_shutdown_signals\(/, "SIGHUP/SIGINT/SIGTERM route through the normal exit path so the reaper actually runs"],
+  ["src-tauri/src/webkit_children.rs", /process\.parent\(\) != Some\(me\)[\s\S]{0,200}continue/, "the reaper kills only this instance's own helpers, never a second OwLLM instance's"],
   ["../.github/workflows/release.yml", /UPDATER_OUTPUT="stage\/latest-\$\{\{ matrix\.rust_target \}\}\.json"[\s\S]{0,100}generate-updater-manifest\.mjs/, "release builds generate target-qualified updater manifests instead of expecting Tauri to emit latest.json"],
   ["../.github/workflows/release.yml", /Verify updater manifest generation[\s\S]{0,180}generate-updater-manifest\.verify\.run\.mjs/, "updater manifest regression check runs before every release build"],
   ["../.github/workflows/release.yml", /TAURI_BUILD_MAX_ATTEMPTS=3[\s\S]{0,900}retrying in 15 seconds/, "transient platform-bundler downloads retry without discarding a completed native build"],

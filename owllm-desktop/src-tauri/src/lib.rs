@@ -89,6 +89,7 @@ mod sync_core;
 mod telegram;
 mod vault;
 mod webhook;
+mod webkit_children;
 mod wsl;
 mod wsl_setup;
 
@@ -303,6 +304,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             install_linux_webview_recovery(app);
+            // Route termination signals through the normal exit path so the
+            // WebKit helpers are reaped instead of being orphaned onto an
+            // AppImage mount that is about to disappear under them.
+            webkit_children::install_shutdown_signals(app.handle());
             // Kill Windows' "ghost window" so a brief main-thread stall never
             // pops a stray "(Not Responding)" frame over the overlay chrome.
             overlay_frame::disable_window_ghosting();
@@ -875,6 +880,12 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit");
                     }
+                    // Last thing before the process leaves: a WebKit helper
+                    // that outlives us keeps executing code mmap'd out of the
+                    // AppImage mount, which the runtime tears down the moment
+                    // we go. Its next cold page fault is a SIGBUS and an
+                    // "Ubuntu has experienced an internal error" dialog.
+                    webkit_children::reap("app-exit");
                 }
                 _ => {}
             }

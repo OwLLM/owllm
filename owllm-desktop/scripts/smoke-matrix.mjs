@@ -172,6 +172,36 @@ function runStatic() {
     catch { note = `${guard} — FILE MISSING: ${rel}`; }
     record("S", `${rel} :: ${re.source.slice(0, 32)}`, ok ? "PASS" : "FAIL", ok ? guard : note);
   }
+  runVaultAtomicWriteInvariant();
+}
+
+// An invariant, not a single pattern: NO production vault writer may truncate a
+// file in place. `git add`/`commit` hashes through mmap, and shortening the
+// inode under an active read faults past EOF — SIGBUS, which Ubuntu surfaces as
+// "internal error". Proven from a core dump on the reference Jetson: git faulted
+// at byte 143156 of a 193558-byte project JSON the sync had just rewritten.
+// Enumerating writers (rather than pinning one call site) is what stops the next
+// vault feature from quietly reintroducing it.
+function runVaultAtomicWriteInvariant() {
+  const rel = "src-tauri/src/vault.rs";
+  try {
+    const production = fs.readFileSync(path.join(APP, rel), "utf8").split("#[cfg(test)]", 1)[0];
+    const truncating = [...production.matchAll(/std::fs::(?:write|copy)\s*\(|\.truncate\s*\(\s*true\s*\)/g)];
+    const helper = /fn atomic_write[\s\S]{0,2200}create_new\(true\)[\s\S]{0,500}file\.sync_all\(\)[\s\S]{0,300}replace_file\(&temp, path\)/.test(production);
+    const unix = /#\[cfg\(not\(windows\)\)\][\s\S]{0,260}std::fs::rename\(temp, path\)/.test(production);
+    const windows = /#\[cfg\(windows\)\][\s\S]{0,900}MoveFileExW[\s\S]{0,500}MOVEFILE_REPLACE_EXISTING/.test(production);
+    const ok = truncating.length === 0 && helper && unix && windows;
+    record(
+      "S",
+      `${rel} :: vault working-tree writes are atomic`,
+      ok ? "PASS" : "FAIL",
+      ok
+        ? "a Git mmap reader keeps a stable inode; no SIGBUS during vault sync"
+        : `${truncating.length} truncating writer(s); helper=${helper} unix=${unix} windows=${windows}`,
+    );
+  } catch (e) {
+    record("S", `${rel} :: vault working-tree writes are atomic`, "FAIL", `cannot inspect vault.rs: ${e.message}`);
+  }
 }
 
 // -------------------------------------------------- H: layer-1 harnesses ---

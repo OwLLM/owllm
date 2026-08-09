@@ -79,6 +79,19 @@ const TRIPWIRES = [
   ["src-tauri/src/browser.rs", /WindowEvent::CloseRequested \{ api, \.\. \}[\s\S]{0,500}api\.prevent_close\(\)/, "Linux title-bar close retains WebKitGTK windows instead of aborting Thor with X11 BadDrawable"],
   ["src-tauri/src/browser.rs", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*fn destroy_browser_windows/, "Linux browser stop never destroys a WebKitGTK top-level window on NVIDIA/Tegra"],
   ["src-tauri/src/browser.rs", /fn apply_linux_device[\s\S]{0,900}settings\.set_user_agent/, "Linux device emulation changes WebKitGTK in place instead of destroy/rebuild"],
+  // Every agent-browser window is built by a #[tauri::command(async)], i.e. on a
+  // tokio worker. Touching AppKit/GTK window state there crashed OwLLM three
+  // times on 2026-08-09 — twice trapping in NSWMWindowCoordinator under
+  // setStyleMask: (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
+  // NSViewUpdateVibrancyForSubtree from the half-swapped NSThemeFrame (v1.0.7).
+  // GTK is the same story with a louder failure: it asserts rather than
+  // corrupting state, so linux_expose_resize_edges off-thread panicked a
+  // v1.0.10 session outright ("GTK may only be used from the main thread",
+  // tokio-rt-worker, 2026-08-09 22:52).
+  // The native tweaks must stay behind the on_ui_thread hop; the negative
+  // lookaheads are what actually fail if a bare call comes back.
+  ["src-tauri/src/browser.rs", /^(?![\s\S]*mac_enable_native_resize\(&win\);)(?![\s\S]*apply_chrome\(&win\);)(?![\s\S]*linux_expose_resize_edges\(&win\);)(?=[\s\S]*fn on_ui_thread\(win: &Window)(?=[\s\S]*on_ui_thread\(&win, mac_enable_native_resize\))(?=[\s\S]*on_ui_thread\(&win, apply_chrome\))(?=[\s\S]*on_ui_thread\(&win, linux_expose_resize_edges\))[\s\S]*$/, "agent-browser native window setup runs on the UI thread, never on the tokio worker that built the window (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
+  ["src-tauri/src/lib.rs", /^(?=[\s\S]*UI_THREAD\.set\(std::thread::current\(\)\.id\(\)\))(?=[\s\S]*fn is_ui_thread\(\) -> bool)[\s\S]*$/, "the event-loop thread is recorded at startup so native window code can tell it apart from a worker (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamMoonshot/, "shared dispatch routes kimi — Code page 'unknown model_id' (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
@@ -140,6 +153,15 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/AgentsPage.tsx", /toolCalls\.slice\(toolsWin\.start\)/, "Tool Calls view renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
+  // Orphaned WebKit helpers — Ubuntu's recurring "internal error" (SIGBUS).
+  // A helper that outlives us keeps executing code mmap'd out of the AppImage
+  // mount the runtime tears down the moment we leave, so its next cold page
+  // fault is a SIGBUS. Measured on the reference Jetson: with an unresponsive
+  // web process both helpers survived the app process for the full 30s
+  // observation window, and apport archived six such SIGBUS reports.
+  ["src-tauri/src/lib.rs", /RunEvent::Exit =>[\s\S]{0,900}webkit_children::reap\(/, "WebKit helpers are reaped before the process leaves, so none can outlive the AppImage mount"],
+  ["src-tauri/src/lib.rs", /\.setup\(\|app\|[\s\S]{0,400}webkit_children::install_shutdown_signals\(/, "SIGHUP/SIGINT/SIGTERM route through the normal exit path so the reaper actually runs"],
+  ["src-tauri/src/webkit_children.rs", /process\.parent\(\) != Some\(me\)[\s\S]{0,200}continue/, "the reaper kills only this instance's own helpers, never a second OwLLM instance's"],
   ["../.github/workflows/release.yml", /UPDATER_OUTPUT="stage\/latest-\$\{\{ matrix\.rust_target \}\}\.json"[\s\S]{0,100}generate-updater-manifest\.mjs/, "release builds generate target-qualified updater manifests instead of expecting Tauri to emit latest.json"],
   ["../.github/workflows/release.yml", /Verify updater manifest generation[\s\S]{0,180}generate-updater-manifest\.verify\.run\.mjs/, "updater manifest regression check runs before every release build"],
   ["../.github/workflows/release.yml", /TAURI_BUILD_MAX_ATTEMPTS=3[\s\S]{0,900}retrying in 15 seconds/, "transient platform-bundler downloads retry without discarding a completed native build"],
@@ -162,6 +184,36 @@ function runStatic() {
     try { ok = re.test(fs.readFileSync(p, "utf8")); }
     catch { note = `${guard} — FILE MISSING: ${rel}`; }
     record("S", `${rel} :: ${re.source.slice(0, 32)}`, ok ? "PASS" : "FAIL", ok ? guard : note);
+  }
+  runVaultAtomicWriteInvariant();
+}
+
+// An invariant, not a single pattern: NO production vault writer may truncate a
+// file in place. `git add`/`commit` hashes through mmap, and shortening the
+// inode under an active read faults past EOF — SIGBUS, which Ubuntu surfaces as
+// "internal error". Proven from a core dump on the reference Jetson: git faulted
+// at byte 143156 of a 193558-byte project JSON the sync had just rewritten.
+// Enumerating writers (rather than pinning one call site) is what stops the next
+// vault feature from quietly reintroducing it.
+function runVaultAtomicWriteInvariant() {
+  const rel = "src-tauri/src/vault.rs";
+  try {
+    const production = fs.readFileSync(path.join(APP, rel), "utf8").split("#[cfg(test)]", 1)[0];
+    const truncating = [...production.matchAll(/std::fs::(?:write|copy)\s*\(|\.truncate\s*\(\s*true\s*\)/g)];
+    const helper = /fn atomic_write[\s\S]{0,2200}create_new\(true\)[\s\S]{0,500}file\.sync_all\(\)[\s\S]{0,300}replace_file\(&temp, path\)/.test(production);
+    const unix = /#\[cfg\(not\(windows\)\)\][\s\S]{0,260}std::fs::rename\(temp, path\)/.test(production);
+    const windows = /#\[cfg\(windows\)\][\s\S]{0,900}MoveFileExW[\s\S]{0,500}MOVEFILE_REPLACE_EXISTING/.test(production);
+    const ok = truncating.length === 0 && helper && unix && windows;
+    record(
+      "S",
+      `${rel} :: vault working-tree writes are atomic`,
+      ok ? "PASS" : "FAIL",
+      ok
+        ? "a Git mmap reader keeps a stable inode; no SIGBUS during vault sync"
+        : `${truncating.length} truncating writer(s); helper=${helper} unix=${unix} windows=${windows}`,
+    );
+  } catch (e) {
+    record("S", `${rel} :: vault working-tree writes are atomic`, "FAIL", `cannot inspect vault.rs: ${e.message}`);
   }
 }
 

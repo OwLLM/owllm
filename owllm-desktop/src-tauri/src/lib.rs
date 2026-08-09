@@ -89,6 +89,7 @@ mod sync_core;
 mod telegram;
 mod vault;
 mod webhook;
+mod webkit_children;
 mod wsl;
 mod wsl_setup;
 
@@ -269,8 +270,43 @@ fn fit_macos_main_window(window: &tauri::Window) {
 #[cfg(not(target_os = "macos"))]
 fn fit_macos_main_window(_window: &tauri::Window) {}
 
+/// The thread that owns the tao/Tauri event loop — necessarily the process main
+/// thread. Recorded so native window code can tell whether it may touch AppKit
+/// or GTK directly; see `browser::on_ui_thread`.
+static UI_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// True when the caller already runs on the UI/event-loop thread.
+pub(crate) fn is_ui_thread() -> bool {
+    UI_THREAD.get() == Some(&std::thread::current().id())
+}
+
+#[cfg(test)]
+mod ui_thread_tests {
+    /// The discrimination the agent-browser crash fix rests on: a worker thread
+    /// must never be mistaken for the event-loop thread, or `on_ui_thread` would
+    /// run AppKit/GTK window code inline on tokio's pool again — the cause of
+    /// the v1.0.7/v1.0.10 crashes of 2026-08-09.
+    #[test]
+    fn a_worker_thread_is_never_mistaken_for_the_ui_thread() {
+        // Nothing recorded yet (`run()` does not execute under cargo test), so
+        // no thread may claim to be the UI thread. An inverted check here would
+        // send every caller down the "run it inline" path.
+        assert!(!super::is_ui_thread());
+
+        // Record THIS thread the way `run()` records the event loop's.
+        super::UI_THREAD
+            .set(std::thread::current().id())
+            .expect("UI_THREAD is unset until this test records it");
+        assert!(super::is_ui_thread());
+
+        // …and a different thread is still told apart.
+        assert!(!std::thread::spawn(super::is_ui_thread).join().unwrap());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = UI_THREAD.set(std::thread::current().id());
     if linux_updater::handle_startup_mode() {
         return;
     }
@@ -303,6 +339,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             install_linux_webview_recovery(app);
+            // Route termination signals through the normal exit path so the
+            // WebKit helpers are reaped instead of being orphaned onto an
+            // AppImage mount that is about to disappear under them.
+            webkit_children::install_shutdown_signals(app.handle());
             // Kill Windows' "ghost window" so a brief main-thread stall never
             // pops a stray "(Not Responding)" frame over the overlay chrome.
             overlay_frame::disable_window_ghosting();
@@ -875,6 +915,12 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit");
                     }
+                    // Last thing before the process leaves: a WebKit helper
+                    // that outlives us keeps executing code mmap'd out of the
+                    // AppImage mount, which the runtime tears down the moment
+                    // we go. Its next cold page fault is a SIGBUS and an
+                    // "Ubuntu has experienced an internal error" dialog.
+                    webkit_children::reap("app-exit");
                 }
                 _ => {}
             }

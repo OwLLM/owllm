@@ -101,6 +101,14 @@ fs.writeFileSync(
     "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n" +
     "};\n",
 );
+// The REAL step-merge module vaultSync now shares with the notebook page —
+// dependency-free, so it runs as-is rather than as a stub that could drift.
+fs.writeFileSync(
+  path.join(runtimeDir, "notebookMerge.js"),
+  ts.transpileModule(read(path.join(SRC, "runtime", "notebookMerge.ts")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText,
+);
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
 
 function storage() {

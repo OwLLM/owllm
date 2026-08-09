@@ -118,6 +118,10 @@ fs.writeFileSync(
   + "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n"
   + "};\n",
 );
+// The REAL step-merge module vaultSync shares with the notebook page. It is
+// dependency-free, so it runs as-is rather than as a stub that could drift.
+const mergeSrc = read(path.join(HERE, "runtime", "notebookMerge.ts"));
+fs.writeFileSync(path.join(runtimeDir, "notebookMerge.js"), transpile(mergeSrc));
 const syncSrc = read(path.join(HERE, "runtime", "vaultSync.ts"));
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), transpile(syncSrc));
 
@@ -186,6 +190,7 @@ const secondDir = path.join(temp, "runtime2");
 fs.mkdirSync(secondDir, { recursive: true });
 fs.writeFileSync(path.join(secondDir, "vaultSync.js"), transpile(syncSrc));
 fs.cpSync(path.join(runtimeDir, "stateMirror.js"), path.join(secondDir, "stateMirror.js"));
+fs.cpSync(path.join(runtimeDir, "notebookMerge.js"), path.join(secondDir, "notebookMerge.js"));
 globalThis.sessionStorage = storage({ "owllm:session:user-interacted": "1" });
 const sync2 = require(path.join(secondDir, "vaultSync.js"));
 await sync2.startVaultSync();

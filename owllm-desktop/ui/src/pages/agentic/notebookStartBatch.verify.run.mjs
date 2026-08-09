@@ -121,11 +121,18 @@ out = out
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")')
   .replace(/require\("\.\.\/\.\.\/runtime\/renderingPolicy"\)/g, 'require("./renderingPolicy.js")')
+  .replace(/require\("\.\.\/\.\.\/runtime\/notebookMerge"\)/g, 'require("./notebookMerge.js")')
   .replace(/require\("\.\/notebookDigestAura"\)/g, 'require("./notebookDigestAura.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./localization.js")')
   .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")')
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./tauri.js")');
 fs.writeFileSync(path.join(TMP, "RunNotebook.js"), out);
+// The REAL step-merge module (dependency-free), not a stub: saveNotebook's
+// optimistic-concurrency reconcile runs through it on every contended write.
+fs.writeFileSync(path.join(TMP, "notebookMerge.js"), ts.transpileModule(
+  readLF(path.join(REPO, "ui/src/runtime/notebookMerge.ts")),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } },
+).outputText);
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });
 for (const m of ["react", "react-dom", "scheduler"]) {

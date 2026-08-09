@@ -55,6 +55,12 @@ const HOT_PREFIXES = [
 
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nbsync-"));
 fs.writeFileSync(path.join(TMP, "vaultSync.js"), js);
+// The REAL step-merge module, not a stub: it holds the union/ratchet rules the
+// cases below actually exercise, so stubbing it would test nothing.
+fs.writeFileSync(path.join(TMP, "notebookMerge.js"), ts.transpileModule(
+  readLF(path.join(SRC, "runtime", "notebookMerge.ts")),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } },
+).outputText);
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
 fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");

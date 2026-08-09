@@ -23,6 +23,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMirror";
+import { mergeSteps, unionTombstones } from "./notebookMerge";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
 import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
 
@@ -103,57 +104,6 @@ export function stripNotebookLease(key: string, value: string): string {
   }
 }
 
-/// How far a step has progressed. This is only the tie-breaker when two copies
-/// have the same lifecycle timestamp; a newer explicit Reopen must be allowed
-/// to move a step from archived back to pending.
-function stepProgress(s: any): number {
-  if (!s || typeof s !== "object") return 0;
-  if (s.status === "done") return 4;
-  if (s.status === "sent" && s.finishedAt != null) return 3;
-  if (s.status === "failed") return 2;
-  if (s.status === "sent") return 1;
-  return 0; // pending
-}
-
-function stepLifecycleAt(s: any): number {
-  if (!s || typeof s !== "object") return 0;
-  for (const value of [s.stepUpdatedAt, s.archivedAt, s.finishedAt, s.startedAt, s.ts]) {
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
-}
-
-/// Union two step lists by id, newest-lifecycle-wins, with deleted ids buried.
-/// Order follows the newer side, then any ids only the older side still has,
-/// so a reordering on the newer device survives without dropping the other's
-/// additions.
-function mergeSteps(newer: any[], older: any[], buried: Set<string>): any[] {
-  const byId = new Map<string, any>();
-  for (const s of older) if (s?.id && !buried.has(s.id)) byId.set(s.id, s);
-  for (const s of newer) {
-    if (!s?.id || buried.has(s.id)) continue;
-    const prev = byId.get(s.id);
-    const currentAt = stepLifecycleAt(s);
-    const previousAt = stepLifecycleAt(prev);
-    const winner = !prev
-      || currentAt > previousAt
-      || (currentAt === previousAt && stepProgress(s) >= stepProgress(prev))
-      ? s
-      : prev;
-    byId.set(s.id, winner);
-  }
-  const out: any[] = [];
-  const emitted = new Set<string>();
-  for (const src of [newer, older]) {
-    for (const s of src) {
-      if (!s?.id || emitted.has(s.id) || !byId.has(s.id)) continue;
-      emitted.add(s.id);
-      out.push(byId.get(s.id));
-    }
-  }
-  return out;
-}
-
 /// Merge an adopted notebook blob with the local one.
 ///
 /// Two separate jobs:
@@ -180,14 +130,8 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
 
     if (local && typeof local === "object") {
       // Tombstones are a union: a delete on EITHER device is authoritative.
-      const tombstones = new Map<string, { id: string; ts: number }>();
-      for (const src of [local.deletedSteps, remote.deletedSteps]) {
-        if (!Array.isArray(src)) continue;
-        for (const d of src) {
-          if (d && typeof d.id === "string" && typeof d.ts === "number") tombstones.set(d.id, d);
-        }
-      }
-      const buried = new Set(tombstones.keys());
+      const tombstones = unionTombstones(local.deletedSteps, remote.deletedSteps);
+      const buried = new Set(tombstones.map((d) => d.id));
       const localAt = typeof local.updatedAt === "number" ? local.updatedAt : 0;
       const remoteAt = typeof remote.updatedAt === "number" ? remote.updatedAt : 0;
       // Order by the MONOTONIC revision when both sides have one, and only fall
@@ -212,7 +156,7 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
         else delete remote[f];
       }
       remote.steps = mergeSteps(remoteIsNewer ? remoteSteps : localSteps, remoteIsNewer ? localSteps : remoteSteps, buried);
-      remote.deletedSteps = [...tombstones.values()].sort((a, b) => b.ts - a.ts).slice(0, 200);
+      remote.deletedSteps = tombstones.sort((a, b) => b.ts - a.ts).slice(0, 200);
       remote.updatedAt = Math.max(localAt, remoteAt);
       // Queue identity + position follow the side that won the ordering above,
       // so "job 3 of 7" always describes the copy whose steps we just adopted.
@@ -225,11 +169,19 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
       // the counter never moves backwards on either machine.
       const highestRev = Math.max(localRev ?? 0, remoteRev ?? 0);
       if (localRev !== null || remoteRev !== null) remote.queueRev = highestRev;
-      // Advisory only (never a lock) — keep whichever device started a queue
-      // most recently so each PC can say where the run is happening.
-      const runs = [local.runningOn, remote.runningOn].filter((r: any) => r && typeof r.at === "number");
-      remote.runningOn = runs.sort((a: any, b: any) => b.at - a.at)[0] ?? undefined;
-      if (remote.runningOn === undefined) delete remote.runningOn;
+      // Who owns the RUN. This is the cross-device queue lock (see RunNotebook →
+      // peerQueueLock), so it follows the side that won the revision ordering
+      // above — the same authority that decided the steps we just adopted.
+      //
+      // It used to take whichever copy carried the larger `runningOn.at`, which
+      // is a straight clock comparison between two machines: the PC whose clock
+      // runs fast keeps winning the field regardless of who is actually
+      // driving, so an explicit takeover on the slow PC was silently undone by
+      // the next pull and both devices could feed the same queue. The revision
+      // is a Lamport counter and cannot be skewed that way.
+      const ownerSide = newer.runningOn !== undefined ? newer : (remoteIsNewer ? local : remote);
+      if (ownerSide.runningOn !== undefined) remote.runningOn = ownerSide.runningOn;
+      else delete remote.runningOn;
     }
 
     for (const f of NOTEBOOK_RUN_LEASE_FIELDS) {

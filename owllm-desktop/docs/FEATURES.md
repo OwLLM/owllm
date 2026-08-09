@@ -134,10 +134,22 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   built but **hidden** behind `SHOW_KANBAN = false`; the digest stops asking
   for a PLAN block while it is off.
   Cross-device: content syncs through the vault and merges per step
-  (union by id, most-advanced-status wins, tombstones for deletions) so a
-  step another PC finished can never come back as pending. The run-lease
-  (who drives the queue) stays device-local; a synced `runningOn` field is
-  advisory only and never blocks a second machine.
+  (union by id, most-advanced-status wins, tombstones for deletions — the
+  shared rules live in `runtime/notebookMerge.ts`) so a step another PC
+  finished can never come back as pending.
+  **Exactly one device drives a queue.** `autoFeedOwner` locks it between
+  windows on one PC (device-local, stripped before sync); the synced
+  `runningOn` is the cross-device lock. Its owner republishes a heartbeat
+  every 30s while the queue is live, and a peer holds the queue read-only —
+  *"Queue is running on \<PC\> — job N of M"*, Start disabled, Feed disabled,
+  with an explicit **Take over here** that keeps the queue's progress — until
+  that beat stops changing for 120s, then the lock releases so a crashed PC
+  never strands the list. Liveness is judged by whether the beat VALUE changed
+  and how long ago THIS device saw it change, never by subtracting a peer's
+  clock from the local one (device clocks are not synchronized).
+  Writes use optimistic concurrency on the monotonic `queueRev`: a save whose
+  base revision has been overtaken in storage reconciles against the winner
+  (same step-union rules) instead of overwriting the other device's progress.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph

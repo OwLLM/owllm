@@ -103,6 +103,9 @@ const toCjs = (src, jsx) => ts.transpileModule(src, {
 
 const w = (name, body) => fs.writeFileSync(path.join(TMP, name), body);
 w("package.json", "{}");
+// The REAL step-merge module, shared by vaultSync and RunNotebook. Loaded, not
+// stubbed: it holds the union/ratchet rules these cases actually exercise.
+w("notebookMerge.js", toCjs(readLF(path.join(SRC, "runtime", "notebookMerge.ts")), false));
 
 // RunNotebook: only its exported queue helpers are exercised, but the module
 // imports React and siblings at load, so those are stubbed.
@@ -113,6 +116,7 @@ w("RunNotebook.js", toCjs(runNotebookSrc, true)
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./_noop.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./_noop.js")')
   .replace(/require\("\.\.\/\.\.\/runtime\/renderingPolicy"\)/g, 'require("./_noop.js")')
+  .replace(/require\("\.\.\/\.\.\/runtime\/notebookMerge"\)/g, 'require("./notebookMerge.js")')
   .replace(/require\("\.\/notebookDigestAura"\)/g, 'require("./_noop.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./_noop.js")')
   .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./_noop.js")')

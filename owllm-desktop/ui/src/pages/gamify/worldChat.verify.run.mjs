@@ -213,6 +213,48 @@ check("the panel exposes the reachable toggle", /WorldChat:reachable/.test(panel
 check("the thread uses the shared sticky-scroll hook", /useStickyScroll/.test(panelTsx));
 
 // ------------------------------------------------------------------
+// 6a. It has to read as a conversation, not a settings form
+// ------------------------------------------------------------------
+// The card shipped as a nickname row, a reachability checkbox, a Save button,
+// an invite box and a Join button stacked above a ONE-LINE input and a button
+// labelled "Ask" — so the surface was mostly setup and the part you actually
+// talk with was the smallest thing on it. Each of these guards one of those.
+
+const composerAt = panelTsx.indexOf('data-ui="WorldChat:draft"');
+const composerTagAt = panelTsx.lastIndexOf("<", composerAt);
+check("the composer is a multi-line textarea, not a one-line input",
+  panelTsx.slice(composerTagAt, composerAt).includes("textarea"),
+  "a single-line input cannot hold a message worth sending");
+check("Enter sends and Shift+Enter keeps writing",
+  /event\.key === "Enter" && !event\.shiftKey/.test(panelTsx));
+check('the send button never says "Ask"',
+  !/t\("Ask"\)/.test(panelTsx),
+  "'Ask' made the user wonder what they were asking for");
+
+check("profile and group setup are folded behind a toggle",
+  /data-ui="WorldChat:settings"/.test(panelTsx) && /settingsOpen && \(/.test(panelTsx),
+  "setup controls must not outweigh the conversation");
+// Anchor on the opening of the folded block AND its close. Comparing against a
+// bare indexOf would read -1 as "before everything" when the block is absent,
+// so every control would score as folded on a card that folds nothing.
+const settingsAt = panelTsx.indexOf("{settingsOpen && (");
+const settingsEndsAt = panelTsx.indexOf("\n      )}", settingsAt);
+check("the folded settings block is a complete element",
+  settingsAt > 0 && settingsEndsAt > settingsAt,
+  `open=${settingsAt} close=${settingsEndsAt}`);
+for (const folded of ["WorldChat:nick", "WorldChat:invite", "WorldChat:join", "WorldChat:save-profile"]) {
+  const at = panelTsx.indexOf(`data-ui="${folded}"`);
+  check(`${folded} lives inside the folded settings block`,
+    settingsAt > 0 && at > settingsAt && at < settingsEndsAt,
+    `at=${at} block=${settingsAt}..${settingsEndsAt}`);
+}
+
+check("an empty thread explains what to do instead of showing a blank box",
+  /data-ui="WorldChat:thread-empty"/.test(panelTsx));
+check("the thread is given real height rather than collapsing to nothing",
+  /minHeight: 1\d\d/.test(panelTsx.slice(panelTsx.indexOf('data-ui="WorldChat:thread"'))));
+
+// ------------------------------------------------------------------
 // 6b. Chat lives on the canvas, and a click on a dot is the send action
 // ------------------------------------------------------------------
 

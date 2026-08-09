@@ -63,6 +63,10 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const [draft, setDraft] = useState("");
   const [invite, setInvite] = useState("");
   const [openRoom, setOpenRoom] = useState("");
+  // Nickname, reachability and group invites are setup, not conversation. They
+  // are folded away so the card reads as a chat rather than a settings form
+  // with a one-line box wedged underneath it.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const store = worldChatStore();
   const target = openRoom ? "" : selectedNodeId;
@@ -74,7 +78,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const isBlocked = chat.blocked.includes(target);
   const awaitingThem = chat.requested.includes(target);
 
-  const draftRef = useRef<HTMLInputElement | null>(null);
+  const draftRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (target) store.lookup([target]);
@@ -122,27 +126,45 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         <span style={{ fontSize: 10.5, fontWeight: 700, color: chat.status === "ready" ? "var(--ok, #7ddc9a)" : "var(--fg-muted)" }}>
           {chat.status === "ready" ? t("Connected") : t("Connecting…")}
         </span>
-        <button type="button" style={buttonStyle()} data-ui="WorldChat:disable" onClick={() => { setWorldChatEnabled(false); setEnabled(false); }}>
-          {t("Turn off")}
+        <button type="button" style={buttonStyle()} data-ui="WorldChat:settings" title={t("Chat settings")} onClick={() => setSettingsOpen((open) => !open)}>
+          ⚙
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          value={nick}
-          onChange={(event) => setNick(event.target.value.slice(0, 32))}
-          placeholder={t("Nickname")}
-          data-ui="WorldChat:nick"
-          style={{ flex: 1, minWidth: 110, borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11.5, padding: "5px 8px" }}
-        />
-        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--fg-muted)" }}>
-          <input type="checkbox" checked={reachable} data-ui="WorldChat:reachable" onChange={(event) => setReachable(event.target.checked)} />
-          {t("Let strangers ask")}
-        </label>
-        <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:save-profile" onClick={() => saveWorldChatProfile(nick, reachable)}>
-          {t("Save")}
-        </button>
-      </div>
+      {settingsOpen && (
+        <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center", flexWrap: "wrap" }} data-ui="WorldChat:settings-panel">
+          <input
+            value={nick}
+            onChange={(event) => setNick(event.target.value.slice(0, 32))}
+            placeholder={t("Nickname")}
+            data-ui="WorldChat:nick"
+            style={{ flex: 1, minWidth: 110, borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11.5, padding: "5px 8px" }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--fg-muted)" }}>
+            <input type="checkbox" checked={reachable} data-ui="WorldChat:reachable" onChange={(event) => setReachable(event.target.checked)} />
+            {t("Let strangers ask")}
+          </label>
+          <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:save-profile" onClick={() => saveWorldChatProfile(nick, reachable)}>
+            {t("Save")}
+          </button>
+          <input
+            value={invite}
+            onChange={(event) => setInvite(event.target.value)}
+            placeholder={t("Invite code")}
+            data-ui="WorldChat:invite"
+            style={{ flex: 1, minWidth: 110, borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11, padding: "4px 7px" }}
+          />
+          <button
+            type="button"
+            style={buttonStyle()}
+            data-ui="WorldChat:join"
+            onClick={async () => { const room = await store.joinRoom(invite); if (room) { setInvite(""); setOpenRoom(room); } }}
+          >{t("Join group")}</button>
+          <button type="button" style={buttonStyle()} data-ui="WorldChat:disable" onClick={() => { setWorldChatEnabled(false); setEnabled(false); }}>
+            {t("Turn off World Chat")}
+          </button>
+        </div>
+      )}
 
       {chat.requests.length > 0 && (
         <div style={{ marginTop: 10 }} data-ui="WorldChat:requests">
@@ -158,44 +180,39 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }} data-ui="WorldChat:rooms">
-        <button
-          type="button"
-          style={{ ...buttonStyle(openRoom ? "plain" : "accent") }}
-          data-ui="WorldChat:room-direct"
-          onClick={() => setOpenRoom("")}
-        >{t("Direct")}</button>
-        {chat.rooms.map((room) => (
+      {/* Only worth the vertical space once the user actually belongs to a
+          group — with none joined this row was a lone "Direct" button naming
+          the only mode there is. */}
+      {chat.rooms.length > 0 && (
+        <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }} data-ui="WorldChat:rooms">
           <button
-            key={room}
             type="button"
-            style={buttonStyle(openRoom === room ? "accent" : "plain")}
-            data-ui="WorldChat:room-tab"
-            onClick={() => { setOpenRoom(room); store.refreshRoom(room); }}
-          >{`# ${room.slice(0, 6)}`}</button>
-        ))}
-        <input
-          value={invite}
-          onChange={(event) => setInvite(event.target.value)}
-          placeholder={t("Invite code")}
-          data-ui="WorldChat:invite"
-          style={{ width: 110, borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11, padding: "4px 7px" }}
-        />
-        <button
-          type="button"
-          style={buttonStyle()}
-          data-ui="WorldChat:join"
-          onClick={async () => { const room = await store.joinRoom(invite); if (room) { setInvite(""); setOpenRoom(room); } }}
-        >{t("Join group")}</button>
-      </div>
+            style={{ ...buttonStyle(openRoom ? "plain" : "accent") }}
+            data-ui="WorldChat:room-direct"
+            onClick={() => setOpenRoom("")}
+          >{t("Direct")}</button>
+          {chat.rooms.map((room) => (
+            <button
+              key={room}
+              type="button"
+              style={buttonStyle(openRoom === room ? "accent" : "plain")}
+              data-ui="WorldChat:room-tab"
+              onClick={() => { setOpenRoom(room); store.refreshRoom(room); }}
+            >{`# ${room.slice(0, 6)}`}</button>
+          ))}
+        </div>
+      )}
 
-      <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--fg-strong)", fontWeight: 700 }} data-ui="WorldChat:thread-title">
-        {openRoom
-          ? `${t("Group")} # ${openRoom.slice(0, 10)}`
-          : target
-            ? worldChatLabel(chat.peers[target], target) || selectedLabel
-            : t("Pick a dot on the map to start a conversation")}
-      </div>
+      {/* Only rendered once there is someone to name. With nothing selected the
+          empty thread below already says what to do, and a heading repeating it
+          made the card look like it was stuttering. */}
+      {(openRoom || target) && (
+        <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--fg-strong)", fontWeight: 700 }} data-ui="WorldChat:thread-title">
+          {openRoom
+            ? `${t("Group")} # ${openRoom.slice(0, 10)}`
+            : worldChatLabel(chat.peers[target], target) || selectedLabel}
+        </div>
+      )}
 
       {!openRoom && target && isBlocked && (
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--error)" }}>{t("You blocked this person.")}
@@ -207,8 +224,15 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         ref={sticky.ref}
         onScroll={sticky.onScroll}
         data-ui="WorldChat:thread"
-        style={{ marginTop: 7, maxHeight: 190, overflowY: "auto", display: "flex", flexDirection: "column", gap: 5 }}
+        style={{ marginTop: 7, minHeight: 132, maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 5, justifyContent: messages.length ? "flex-start" : "center" }}
       >
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.5, padding: "0 10px" }} data-ui="WorldChat:thread-empty">
+            {openRoom || target
+              ? t("No messages yet. Say something.")
+              : t("Every gold dot is someone running OwLLM. Click one to talk to them.")}
+          </div>
+        )}
         {messages.map((message, index) => (
           <div
             key={`${message.id}:${index}`}
@@ -232,18 +256,25 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
       </div>
 
       {(openRoom || target) && !isBlocked && (
-        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-          <input
+        <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "stretch" }}>
+          {/* A textarea, not a single-line input: Enter sends, Shift+Enter
+              keeps writing, so a paragraph is possible without the message
+              leaving half-typed. */}
+          <textarea
             ref={draftRef}
             value={draft}
+            rows={2}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }}
-            placeholder={openRoom || isContact ? t("Message") : awaitingThem ? t("Waiting for them to accept") : t("Say hello — they must accept first")}
+            placeholder={openRoom || isContact ? t("Message") : awaitingThem ? t("Waiting for them to accept") : t("Say hello — this is a first message, they choose whether to reply")}
             data-ui="WorldChat:draft"
-            style={{ flex: 1, borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11.5, padding: "6px 9px" }}
+            style={{ flex: 1, resize: "none", borderRadius: 9, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 11.5, lineHeight: 1.4, padding: "6px 9px", fontFamily: "inherit" }}
           />
-          <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:send" onClick={() => void submit()}>
-            {openRoom || isContact ? t("Send") : t("Ask")}
+          {/* Always "Send". The relay still gates a first message on the other
+              side accepting, but that is the protocol's business — calling the
+              button "Ask" only made the user wonder what they were asking. */}
+          <button type="button" style={{ ...buttonStyle("accent"), padding: "5px 13px" }} data-ui="WorldChat:send" onClick={() => void submit()}>
+            {t("Send")}
           </button>
         </div>
       )}

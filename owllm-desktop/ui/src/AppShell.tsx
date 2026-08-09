@@ -638,7 +638,7 @@ const HEADER_TAB_WORKING_ANIMATION = "owllm-tab-working 1.4s ease-in-out infinit
 
 function ModeBar({
   mode, setMode, installed,
-  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor,
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
@@ -654,7 +654,6 @@ function ModeBar({
   textColorKey: TextColorSelection;
   textColor: string;
   onPickTextColor: (color: TextColorSelection) => void;
-  onOpenServer: () => void;
   onOpenMarketplace: () => void;
   onOpenSigning: () => void;
   onOpenSettingsPage: (key: string) => void;
@@ -1273,16 +1272,18 @@ function ModeBar({
         </>
       )}
 
-      <SysInfoBlock onOpenServer={onOpenServer} />
+      <SysInfoBlock />
       <WindowControls />
     </div>
   );
 }
 
-// Header right-block — live status. Clicking it opens the Server modal
-// (same trigger as the "Server" tab) so the user can spin a model up/down
-// from anywhere. Laid out for the 88px header: two compact lines.
-function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
+// Header right-block — a live status readout, and nothing more. It used to
+// double as a link into the Server modal; that made an always-visible corner
+// of the chrome navigate somewhere on any stray click. Server Control is
+// reached from its own "Server" tab, which is where a destination belongs.
+// Laid out for the 88px header: two compact lines.
+function SysInfoBlock() {
   const { server, vram } = useLiveSysInfo();
   // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
   // ServerStatusLite carries only one server, so N is 0 or 1.
@@ -1298,10 +1299,7 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   return (
     <div
       data-ui="SysInfoBlock"
-      onClick={onOpenServer}
-      title={server.running
-        ? `Model: ${fullModelId}\nOpen Server Control`
-        : "Open Server Control"}
+      title={server.running ? `Model: ${fullModelId}` : undefined}
       style={{
         // Narrower and shorter than the pre-0.9.90 block so it fits the
         // 88px header without crowding the mode toggles. overflow:hidden +
@@ -1312,7 +1310,6 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         alignItems: "stretch", justifyContent: "center", gap: 2,
         fontSize: 11, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
         overflow: "hidden",
-        cursor: "pointer",
       }}
     >
       <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1962,7 +1959,6 @@ export default function AppShell() {
             textColorKey={theme.textColorKey}
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
-            onOpenServer={() => setServerModalOpen(true)}
             onOpenSigning={() => setSigningModalOpen(true)}
             onOpenMarketplace={() => {
               openWebUrl(MARKETPLACE_URL)

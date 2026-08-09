@@ -3,7 +3,7 @@
 // Kept in its own module so it can be mounted and driven without the globe,
 // the WebGL context, or a live relay behind it.
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { useLocalization } from "../../localization";
@@ -74,9 +74,20 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const isBlocked = chat.blocked.includes(target);
   const awaitingThem = chat.requested.includes(target);
 
+  const draftRef = useRef<HTMLInputElement | null>(null);
+
   useEffect(() => {
     if (target) store.lookup([target]);
   }, [store, target]);
+
+  // Clicking a dot on the globe IS the "message this person" action — there is
+  // no second button to hunt for. Selecting one puts the caret in the box, so
+  // the click and the first keystroke are one gesture. Only ever fires on a
+  // real selection: target starts empty, so mounting the map steals no focus.
+  useEffect(() => {
+    if (!enabled || openRoom || !target) return;
+    draftRef.current?.focus();
+  }, [enabled, openRoom, target]);
 
   const submit = async () => {
     const text = draft.trim();
@@ -92,7 +103,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
       <div style={shellStyle()} data-ui="WorldChat:off">
         <div style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 12 }}>💬 {t("World Chat")}</div>
         <div style={{ marginTop: 6, color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>
-          {t("Off. Turning it on publishes your device's public key so others can encrypt to you — nothing else, and no message is ever readable by the service.")}
+          {t("You turned this off. On, it publishes your device's public key so others can encrypt to you — nothing else, and no message is ever readable by the service.")}
         </div>
         <button
           type="button"
@@ -223,6 +234,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
       {(openRoom || target) && !isBlocked && (
         <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
           <input
+            ref={draftRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }}

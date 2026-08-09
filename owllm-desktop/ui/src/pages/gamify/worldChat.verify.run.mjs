@@ -209,8 +209,40 @@ check("a fleet dot is addressed by its presence id, not its device id",
   "chatting to a raw device id would address a dot the relay has never heard of");
 check("the panel offers accept, block and report on a request",
   /WorldChat:accept/.test(panelTsx) && /WorldChat:block/.test(panelTsx) && /WorldChat:report/.test(panelTsx));
-check("the panel exposes the reachable opt-in", /WorldChat:reachable/.test(panelTsx));
+check("the panel exposes the reachable toggle", /WorldChat:reachable/.test(panelTsx));
 check("the thread uses the shared sticky-scroll hook", /useStickyScroll/.test(panelTsx));
+
+// ------------------------------------------------------------------
+// 6b. Chat lives on the canvas, and a click on a dot is the send action
+// ------------------------------------------------------------------
+
+// The chat card must sit inside the globe <section>, top-right, rather than in
+// the side rail: the dot you click and the box you type in have to be one
+// glance apart. Containment is only visible from here as position-in-file, so
+// anchor on the overlay marker and the section tag that closes after it.
+const overlayAt = mapTsx.indexOf('data-ui="WorldMap:top-right"');
+const panelAt = mapTsx.indexOf("<WorldChatPanel");
+const sectionEndsAt = mapTsx.indexOf("</section>");
+check("the chat card is inside the globe canvas, not the side rail",
+  overlayAt > 0 && panelAt > overlayAt && sectionEndsAt > panelAt,
+  `overlay=${overlayAt} panel=${panelAt} sectionEnd=${sectionEndsAt}`);
+check("the chat card is anchored to the TOP RIGHT of the canvas",
+  /data-ui="WorldMap:top-right"[\s\S]{0,400}?position: "absolute"[\s\S]{0,200}?top: 13, right: 13/.test(mapTsx));
+check("the overlay column is click-through so a drag still orbits the globe",
+  /data-ui="WorldMap:top-right"[\s\S]{0,600}?pointerEvents: "none"/.test(mapTsx));
+check("the chat card itself still takes clicks",
+  /pointerEvents: "auto"[\s\S]{0,200}?<WorldChatPanel/.test(mapTsx));
+check("only one chat card is mounted",
+  mapTsx.split("<WorldChatPanel").length - 1 === 1,
+  "two cards would mean two carets and two drafts for the same thread");
+
+check("selecting a dot puts the caret in the message box",
+  /draftRef\.current\?\.focus\(\);[\s\S]{0,80}?\}, \[enabled, openRoom, target\]\)/.test(panelTsx)
+  && /ref=\{draftRef\}/.test(panelTsx),
+  "clicking a user IS the 'message them' action; there is no second button");
+check("focus is never stolen without a selection",
+  /if \(!enabled \|\| openRoom \|\| !target\) return;/.test(panelTsx),
+  "target starts empty, so merely opening the map must not grab the caret");
 
 // ------------------------------------------------------------------
 // 7. Execute the real helpers, rather than only reading them
@@ -245,6 +277,101 @@ if (chat) {
   check("a malformed nonce is refused", badNonce.ok === false && badNonce.error === "auth_nonce_invalid");
   const badKey = await chat.verifyPresenceAuth({ nonce: "a".repeat(64), publicKey: "AAAA", signature: "AAAA" });
   check("a malformed key is refused", badKey.ok === false && badKey.error === "auth_key_invalid");
+}
+
+// ------------------------------------------------------------------
+// 8. Chat is ON out of the box — measured by running the real module
+// ------------------------------------------------------------------
+//
+// Static text cannot tell a default apart from a coincidence, so this loads the
+// real worldChatRuntime with a working localStorage and asks it. The deps it
+// pulls in (Tauri, the device list, the store) are stubbed: none of them are
+// consulted to answer "is chat on".
+
+function fakeStorage(seed = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    reads: 0,
+    getItem(key) { this.reads += 1; return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, String(value)); },
+    removeItem(key) { map.delete(key); },
+    raw: map,
+  };
+}
+
+const runtimeStubs = {
+  name: "world-chat-runtime-stubs",
+  setup(build) {
+    build.onResolve({ filter: /(@tauri-apps\/api\/core|remoteDevices|\/worldPresence|\/worldChat)$/ },
+      (args) => ({ path: args.path, namespace: "stub" }));
+    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
+      loader: "js",
+      contents: args.path.endsWith("/worldChat")
+        ? `export const emptyWorldChatState = () => ({ threads: {}, contacts: [], blocked: [], requested: [], requests: [], rooms: [], peers: {}, status: "off", error: "" });
+           export const createWorldChatStore = () => ({ setEnabled() {}, setProfile() {}, lookup() {}, onFrame() {}, setTransport() {}, clearError() {} });`
+        : `export const invoke = async () => "";
+           export const getIdentity = async () => ({});
+           export const listDevices = async () => [];
+           export const presenceNodeIdForDevice = async () => "";`,
+    }));
+  },
+};
+
+/** A fresh module instance over the given storage — i.e. an app restart. */
+async function bootRuntime(storage, tag) {
+  const built = await esbuild.build({
+    entryPoints: [path.join(UI, "src/pages/gamify/worldChatRuntime.ts")],
+    bundle: true, write: false, format: "esm", platform: "neutral",
+    plugins: [runtimeStubs],
+  });
+  globalThis.localStorage = storage;
+  return import(`data:text/javascript;base64,${Buffer.from(`${built.outputFiles[0].text}\n//${tag}`).toString("base64")}`);
+}
+
+let esbuild = null;
+try { esbuild = await import("esbuild"); }
+catch (reason) { check("esbuild is available to run the runtime", false, String(reason).slice(0, 120)); }
+
+if (esbuild) {
+  const previousStorage = globalThis.localStorage;
+  try {
+    // --- out of the box -------------------------------------------------
+    const fresh = fakeStorage();
+    const first = await bootRuntime(fresh, "fresh");
+    check("World Chat is ON for a user who has never chosen", first.worldChatEnabled() === true,
+      "a map of dots you cannot talk to is a poster");
+    check("strangers may open a conversation out of the box", first.worldChatReachable() === true);
+    check("the default is read from storage, not hardcoded", fresh.reads > 0,
+      "a check that never consults storage would pass even if the toggle were ignored");
+
+    // --- the user's own choice wins, in both directions ------------------
+    first.setWorldChatEnabled(false);
+    check("turning it off is persisted as an explicit no", fresh.raw.get(first.WORLD_CHAT_ENABLED_KEY) === "0");
+    check("turning it off is obeyed", first.worldChatEnabled() === false);
+
+    const afterRestart = await bootRuntime(fresh, "restart");
+    check("an explicit off survives a restart and is not re-defaulted on",
+      afterRestart.worldChatEnabled() === false,
+      "'never chosen' and 'switched off' must not read as the same value");
+
+    afterRestart.setWorldChatEnabled(true);
+    check("turning it back on is obeyed", afterRestart.worldChatEnabled() === true);
+    check("turning it back on is persisted", fresh.raw.get(afterRestart.WORLD_CHAT_ENABLED_KEY) === "1");
+
+    const shy = await bootRuntime(fakeStorage({ "owllm:world-chat:reachable": "0" }), "shy");
+    check("an explicit 'do not let strangers ask' is obeyed", shy.worldChatReachable() === false);
+    check("...while chat itself stays on", shy.worldChatEnabled() === true);
+
+    // --- the presence socket must actually carry it ----------------------
+    check("chat hooks exist by default, so the socket asks for a challenge",
+      Boolean(shy.worldChatHooks()),
+      "a default that never reaches the socket is a default in name only");
+  } catch (reason) {
+    check("the chat runtime can be executed", false, String(reason).slice(0, 200));
+  } finally {
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
 }
 
 if (failures.length) {

@@ -18,7 +18,8 @@
 //
 // Secrets never touch this — they live in the Rust accounts store, not
 // localStorage. Device-local keys (sync markers, one-time wizard flags,
-// regenerable caches, machine-specific workspace paths) are denied below.
+// regenerable caches, machine-specific workspace paths, per-screen appearance)
+// are denied below.
 
 import { invoke } from "@tauri-apps/api/core";
 import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMirror";
@@ -54,6 +55,13 @@ const DENY_EXACT = new Set<string>([
 const DENY_PREFIX = [
   "owllm:code:",
   "owllm:agents:page:",
+  // Appearance is a property of the SCREEN, not of the account: mode, GUI
+  // colour and text colour (owllm:theme:*). Syncing them meant a second PC
+  // repainted the first one behind the user's back — and because adoption
+  // lands during startVaultSync, i.e. after bootstrapTheme has already painted
+  // the first frame, it arrived as a visible flash. A prefix rather than three
+  // literals so a future theme key is device-local by default.
+  "owllm:theme:",
 ];
 
 // The notebook blob (owllm:agents:notebook:<pid>) DOES sync — its notes, plan

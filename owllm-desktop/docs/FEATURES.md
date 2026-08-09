@@ -193,6 +193,11 @@ stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.
+Opening a workspace also sweeps the **parked** page worktrees of that project
+(`fleet_reclaim_page_caches`, background): git-ignored `target/`/`node_modules/`
+untouched for 24 h are removed rename-first, so a page you navigated away from
+stops hoarding gigabytes. Never the page you just opened, never `dist/` (that
+holds the downloaded module payloads), never source, a branch or a worktree.
 Both outer columns shrink independently to a 46px rail (`CodeColumnRails.tsx`)
 that keeps one large icon per feature the column holds — left 🧠 memory /
 📁 files / 🐙 GitHub, right 📓 notebook / 📊 usage / ⚡ rules / 🌐 browser.

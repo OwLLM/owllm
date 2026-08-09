@@ -1356,6 +1356,12 @@ function CodeWorkspace({ pageId, onTitle }: {
         isolated: true, preparing: false,
       }));
       notify(`On branch ${outcome.branch} — a private copy (ready in ${secs}s). Your edits stay in this page until you Merge to ${name}.`);
+      // Reclaim the git-ignored build caches of this project's PARKED page
+      // worktrees (never this one). Navigating away from a page used to leave
+      // its multi-GB `target/` on disk forever — nothing else ever swept it.
+      // Fire-and-forget: it must never delay or fail opening the workspace.
+      void invoke<number>("fleet_reclaim_page_caches", { projectCwd: dir, activeWorktree: outcome.path })
+        .catch(() => {});
     } else if (outcome.status === "notAGitRepo") {
       chatRuntime.setPayload(SID, (p) => ({
         ...((p as CodeState) ?? DEFAULT_CODE_STATE),

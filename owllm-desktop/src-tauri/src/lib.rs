@@ -612,6 +612,7 @@ pub fn run() {
             fleet::fleet_worktree_sync,
             fleet::fleet_worktree_remove,
             fleet::fleet_cleanup_orphans,
+            fleet::fleet_reclaim_page_caches,
             fleet::fleet_repo_init,
             fleet::fleet_head_files,
             hardware::hardware_info,

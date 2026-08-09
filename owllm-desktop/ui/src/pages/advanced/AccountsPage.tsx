@@ -801,6 +801,11 @@ function ProviderCard({
 type RailTab = "log" | "terminal";
 
 type ActiveTerminal = {
+  /// Every Connect click gets a fresh identity, even when the provider command
+  /// is unchanged. Without it React keeps the exited PtyTerminal mounted (same
+  /// props → no remount), so the terminal still looks live while every
+  /// keystroke and paste goes to a session Rust has already dropped.
+  launchId: number;
   cli: string;
   args: string[];
   backend: string;
@@ -875,6 +880,7 @@ function RightRail({
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
           ? <PtyTerminal
+              key={activeTerm.launchId}
               cli={activeTerm.cli}
               args={activeTerm.args}
               autoSend={activeTerm.send}
@@ -1047,6 +1053,7 @@ export default function AccountsPage() {
   const [selectedClaudeAccount, setSelectedClaudeAccount] = useState(() => {
     try { return localStorage.getItem(CLAUDE_ACCOUNT_KEY) ?? ""; } catch { return ""; }
   });
+  const terminalLaunchId = useRef(0);
   const autoHealthProbedBackends = useRef(new Set<string>());
   const authTabs = useRef<Record<string, number>>({});
   const terminalOutput = useRef<Record<string, string>>({});
@@ -1287,6 +1294,7 @@ export default function AccountsPage() {
       terminalOutput.current[route.backend] = "";
       delete authTabs.current[route.backend];
       setActiveTerm({
+        launchId: ++terminalLaunchId.current,
         cli: recipe.cli,
         args: recipe.args,
         backend: route.backend,

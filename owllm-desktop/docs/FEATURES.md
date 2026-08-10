@@ -110,6 +110,15 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
+- **Auto mode** (⚡ next to the composer, or `/auto`): auto-accepts the agents'
+  tool calls. **ON by default** — `claude -p` is non-interactive, so a tool that
+  needs approval has no prompt anyone can answer and the turn ends having run
+  zero tools. Per project, persisted in localStorage; only an explicit untick
+  turns it off. When a CLI does refuse a tool anyway, `runBlockers.ts` turns its
+  prose ("permission … hasn't been granted") into the real cause plus the one
+  step that clears it, in the thread and as a toast — detected once for every
+  backend inside `withCliAuthRetry`, since a refusal arrives as a normal reply,
+  not an error.
 - **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane +
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue

@@ -52,6 +52,7 @@ import {
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
 import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { detectRunBlocker, type RunBlocker } from "./runBlockers";
 import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
@@ -1842,6 +1843,15 @@ export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | 
   _authWaitHandler = handler;
 }
 
+/// Same shape for the OTHER kind of stall: the CLI answered fine but refused
+/// to act, and buried the reason in prose. Registered by AgentsPage so the
+/// cause + the one fix surface in the thread instead of the user re-asking.
+export type RunBlockerInfo = RunBlocker & { backend: string };
+let _blockerHandler: ((info: RunBlockerInfo) => void) | null = null;
+export function setRunBlockerHandler(handler: ((info: RunBlockerInfo) => void) | null): void {
+  _blockerHandler = handler;
+}
+
 /// Run a subscription-CLI call (Claude, Codex, Gemini, or Kimi), retrying on auth
 /// (401) failures with backoff. Forces a token refresh before each retry. Non-auth
 /// errors are NOT retried here (they bubble straight up). Honors the run's
@@ -1860,6 +1870,14 @@ export async function withCliAuthRetry<T>(
     try {
       const result = await fn();
       if (attempt > 0) _authWaitHandler?.({ kind: "recovered", backend }); // we recovered after a 401
+      // A refusal is not an error — it arrives as a perfectly normal reply. This
+      // is the one place EVERY subscription-CLI call (both dispatch copies, all
+      // backends, streaming and one-shot) passes through, so the check lives
+      // here rather than at ~20 call sites that would drift apart.
+      if (typeof result === "string") {
+        const blocker = detectRunBlocker(result);
+        if (blocker) _blockerHandler?.({ ...blocker, backend });
+      }
       return result;
     } catch (e: any) {
       const msg = e?.message ?? String(e);

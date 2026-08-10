@@ -94,6 +94,8 @@ import {
   withCliAuthRetry,
   setCliAuthWaitHandler,
   type AuthWaitInfo,
+  setRunBlockerHandler,
+  type RunBlockerInfo,
   parseDispatchesDetailed,
   unresolvedCorrectionMessage,
   resolveAutoModel,
@@ -8923,18 +8925,31 @@ export function AgentsPage({
   // re-check it after every app restart (which would otherwise
   // silently revert and the next bot run would stall on permission
   // prompts).
+  //
+  // DEFAULT ON. `claude -p` is non-interactive: when a tool needs
+  // approval there is no one to answer, so the turn dies with
+  // "permission to use <tool> hasn't been granted" and zero tool calls
+  // run. Defaulting OFF made that the out-of-the-box experience for
+  // every new project. Only an EXPLICIT "0" (the user unticking ⚡)
+  // turns it off — a missing key means "never chosen", which is ON.
+  const AUTO_APPROVE_DEFAULT = true;
+  const readAutoApprove = (key: string): boolean => {
+    if (!key) return AUTO_APPROVE_DEFAULT;
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === null ? AUTO_APPROVE_DEFAULT : raw === "1";
+    } catch { return AUTO_APPROVE_DEFAULT; }
+  };
   const autoApproveKey = selectedProjectId ? `owllm:autoapprove:${selectedProjectId}` : "";
   const autoApproveKeyRef = useRef(autoApproveKey);
   autoApproveKeyRef.current = autoApproveKey;
-  const [autoApprove, setAutoApproveState] = useState<boolean>(() => {
-    if (!autoApproveKey) return false;
-    try { return localStorage.getItem(autoApproveKey) === "1"; } catch { return false; }
-  });
+  const [autoApprove, setAutoApproveState] = useState<boolean>(() => readAutoApprove(autoApproveKey));
   useEffect(() => {
-    if (!autoApproveKey) { setAutoApproveState(false); return; }
-    try { setAutoApproveState(localStorage.getItem(autoApproveKey) === "1"); }
-    catch { setAutoApproveState(false); }
+    setAutoApproveState(readAutoApprove(autoApproveKey));
   }, [autoApproveKey]);
+  // Read by the run-blocker notice, which registers once and must not go stale.
+  const autoApproveRef = useRef(autoApprove);
+  autoApproveRef.current = autoApprove;
   const setAutoApprove = (v: boolean | ((prev: boolean) => boolean)) => {
     setAutoApproveState(prev => {
       const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
@@ -9381,6 +9396,32 @@ export function AgentsPage({
       }]);
     });
     return () => { setCliAuthWaitHandler(null); };
+  }, [setSupChat]);
+
+  // The other kind of stall: the CLI answered normally but refused to act and
+  // explained itself in prose ("permission … hasn't been granted"). Left alone
+  // that reads like a considered decision, so the user re-asks and gets the
+  // same non-answer. Surface the real cause plus the ONE step that clears it.
+  useEffect(() => {
+    setRunBlockerHandler((info: RunBlockerInfo) => {
+      const cli = info.backend === "codex_cli" ? "Codex"
+        : info.backend === "gemini_cli" ? "Gemini"
+        : info.backend === "kimi_cli" ? "Kimi"
+        : info.backend === "grok_cli" ? "Grok"
+        : "Claude";
+      // Auto mode already ON means the diagnosis above is wrong — say less
+      // rather than send the user to a toggle that is not the problem.
+      const action = autoApproveRef.current
+        ? "Auto mode is already ON for this project, so this is not the toggle — tell me and I'll dig in."
+        : info.action;
+      setSupChat(prev => [...prev, {
+        role: "system", color: "#ffb74d",
+        text: `⚡ ${cli} stopped itself, not the task — ${info.why} ${action}`,
+        ts: Date.now(), seq: nextSeq(),
+      }]);
+      notify(`${cli} blocked its own tool call. ${action}`);
+    });
+    return () => { setRunBlockerHandler(null); };
   }, [setSupChat]);
 
   // Re-fetch team templates + role defs and refresh derived state. Called

@@ -39,6 +39,9 @@ transpile("askUserBubble.verify.ts", AGENTIC, "verify.js");
 // Real (not stubbed): dispatch's model routing calls these peer-id helpers on
 // EVERY model id, so a stub would silently change which branch is taken.
 transpile("peerCatalogue.ts", AGENTIC, "peerCatalogue.js");
+// Also real: the run-blocker detector runs on every successful CLI reply, and
+// it is pure — a stub would hide a regression rather than isolate one.
+transpile("runBlockers.ts", AGENTIC, "runBlockers.js");
 transpile("accountHealth.ts", ADVANCED, "accountHealth.js", path.join(HERE, "../advanced"));
 
 // Heavy imports of dispatch.ts that the pure helpers under test never call.

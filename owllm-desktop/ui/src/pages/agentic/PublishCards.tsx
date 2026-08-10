@@ -457,9 +457,16 @@ export default function PublishCards({
   const fixWithAgent = () => {
     if (!onFixIssues) return;
     const parts: string[] = [];
+    // The action the user actually pressed. Without it the agent only ever
+    // learns "something failed", repairs the cause and stops — which is how a
+    // long successful fix run still left the user with the Sync never done.
+    const failedAction = activity?.kind === "err" && output?.kind === "err" ? output.title : null;
     if (activity?.kind === "err") {
       const failedOutput = output?.kind === "err" ? output.body : activity.msg;
-      parts.push(`The last release action failed with this output:\n\n${failedOutput}`);
+      parts.push(
+        `The action the user asked for is: ${failedAction ?? "the last release action"}.\n` +
+        `It failed with this output:\n\n${failedOutput}`,
+      );
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
@@ -471,6 +478,20 @@ export default function PublishCards({
         "\n\nClean them safely: add precise ignore rules and remove only these runtime paths from Git tracking while preserving their working-tree copies. " +
         "Do not delete or ignore durable project data such as .owllm/project.json, .owllm/verify.json, .owllm/skills/, .owllm/assets/, or user source files. " +
         "Verify the resulting Git status and the rule-based release workflow.",
+      );
+    }
+    // The deliverable is the ACTION, not a patch. Repairing the cause and
+    // stopping leaves the user exactly where they started, staring at the same
+    // unsynced branch after a long green run.
+    if (failedAction) {
+      parts.push(
+        `Then COMPLETE THAT ACTION — fixing the cause is not the deliverable, the finished action is.\n` +
+        `Re-run "${failedAction}" and carry it to a terminal result. If the app path still cannot run it, ` +
+        `perform the equivalent operation directly (git commit / merge / push, or the repository's publish script) ` +
+        `from the checkout that owns it.\n` +
+        `Then VERIFY the end state with a command, not an assumption: for a commit, a clean tree; for a sync or push, ` +
+        `0 ahead / 0 behind the remote branch; for a publish, the release actually live on GitHub. ` +
+        `Report that verification output. If it genuinely cannot be completed, stop and report the exact blocker with evidence.`,
       );
     }
     const outcome = onFixIssues(
@@ -485,7 +506,9 @@ export default function PublishCards({
     } else if (outcome === "queued") {
       setActivity({ kind: "run", msg: "Coder is mid-run — the fix task is queued as a ⚡ steer and will run next." });
     } else {
-      setActivity({ kind: "run", msg: "Sent to the coder agent — watch the chat for the fix." });
+      setActivity({ kind: "run", msg: failedAction
+        ? `Sent to the coder agent — it will fix the cause and then finish ${failedAction}.`
+        : "Sent to the coder agent — watch the chat for the fix." });
     }
   };
 

@@ -68,8 +68,14 @@ check("the abort controller lives in a module-level registry",
   && /secondAgentRun\.arm\(SID, ctrl\)/.test(code)
   && /secondAgentRun\.disarm\(SID, ctrl\)/.test(code));
 
+// Same invariant, re-expressed: Stop now also kills the pane's CLI children
+// (see codeAgentStopScope.verify.run.mjs), so the button routes through a named
+// handler instead of an inline arrow. What must still hold is that the abort
+// reaches the run through the MODULE registry — a component ref would be null
+// after a remount, which is what made Stop unreachable across a page change.
 check("Stop goes through the registry, so it works after a remount",
-  /onStop=\{\(\) => \{ secondAgentRun\.stop\(SID\); \}\}/.test(code));
+  /onStop=\{stopSecondary\}/.test(code)
+  && /const stopSecondary = \(\) => \{[\s\S]{0,200}?secondAgentRun\.stop\(SID\);/.test(code));
 
 check("closing the TAB stops the run that page changes no longer stop",
   /secondAgentRun\.stop\(sidForPage\(id\)\)/.test(code));

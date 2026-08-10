@@ -224,7 +224,12 @@ header). Plan/Act phases; live diffs; editable file viewer; image paste.
 Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
 divided composer). Both agents' runs live in `chatRuntime`, so navigating away
 mid-turn keeps them streaming and the tab keeps glowing; closing the tab stops
-them. The chat pane carries its own header — model picker +
+them. **Each pane's Stop is independent**: a run registers its own cancel scope
+(`setCliCancelScope`, keyed by the run's AbortSignal) before dispatching, so
+Stop kills that agent's spawned CLI via `cli_cancel_scope` and leaves the other
+agent running. The second agent's Stop used to only abort the JS controller —
+which a spawned `claude`/`codex`/`kimi` never sees — so on every subscription
+model it did nothing at all. The chat pane carries its own header — model picker +
 `Clear` (run state) + `Clear history` (chat window **and** saved threads) —
 and the composer lives in the same column as the chat, so input and window
 stay width-aligned beside the full-height file rail and right column.

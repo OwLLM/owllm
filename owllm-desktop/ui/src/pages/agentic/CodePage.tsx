@@ -24,7 +24,7 @@ import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import { useChatSession } from "../../runtime/useChatSession";
 import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, abortable, isAbortError, sleepAbortable, setCliCancelScope, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import { requiresManagedLocalServer } from "./peerCatalogue";
 import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
@@ -356,7 +356,38 @@ const secondAgentRun = {
     if (secondaryAborts.get(sid) === ctrl) secondaryAborts.delete(sid);
   },
   stop(sid: string): void { secondaryAborts.get(sid)?.abort(); },
+  /// Is `ctrl` still the live turn? A turn that was Stopped and superseded must
+  /// not clear the NEXT turn's busy flag when its own `finally` finally runs.
+  isCurrent(sid: string, ctrl: AbortController): boolean {
+    return secondaryAborts.get(sid) === ctrl;
+  },
 };
+
+/// Cancel scopes for the Code page's two agents.
+///
+/// Aborting an AbortController never reaches a spawned claude/codex/kimi CLI —
+/// Stop must also ask Rust to kill that run's children. Rust scopes a child by
+/// the project `cwd` unless told otherwise, so BOTH panes landed in one scope:
+/// the second agent's Stop killed nothing of its own (it never asked at all),
+/// and the primary's global Stop killed the second agent's CLI as collateral.
+/// Giving each pane its own scope string makes the two independently stoppable.
+///
+/// The primary's scope IS the workspace path — identical to Rust's default —
+/// so a primary CLI path that forgets to register a scope still gets stopped.
+function primaryCancelScope(workspace: string): string { return workspace.trim(); }
+function secondaryCancelScope(workspace: string): string {
+  const w = workspace.trim();
+  return w ? `${w} second-agent` : "";
+}
+
+/// Kill the CLI children of ONE run. A page with no workspace has no scope to
+/// match, so it still needs the global kill — otherwise Stop would go back to
+/// doing nothing, which is the bug this whole path exists to fix.
+function killCliChildren(scope: string): void {
+  const s = scope.trim();
+  void invoke(s ? "cli_cancel_scope" : "cli_cancel_all", s ? { scope: s } : undefined)
+    .catch(() => { /* best-effort */ });
+}
 
 const pageBusyExtra = new Map<string, boolean>();
 const pageDone = new Set<string>();
@@ -2359,6 +2390,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    // Own scope → the Coder's Stop kills its CLI children without also
+    // tree-killing the second agent's run in the same workspace.
+    setCliCancelScope(ctrl.signal, primaryCancelScope(workspace));
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
@@ -2537,6 +2571,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     setSecondaryBusy(true);
     const ctrl = new AbortController();
     secondAgentRun.arm(SID, ctrl);
+    // Own scope → this pane's Stop kills its CLI children and only its own.
+    setCliCancelScope(ctrl.signal, secondaryCancelScope(workspace));
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
@@ -2573,7 +2609,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         if (last && last.role === "assistant" && last.placeholder) return msgs.slice(0, -1);
         return msgs;
       });
-      setSecondaryBusy(false);
+      // A Stopped turn can land here AFTER the user started the next one —
+      // clearing busy then would unstick a run that is still going.
+      if (secondAgentRun.isCurrent(SID, ctrl)) setSecondaryBusy(false);
       secondAgentRun.disarm(SID, ctrl);
     }
     // ⇄ Selectable auto-feed back to the primary (send() steers if it's busy).
@@ -2666,7 +2704,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       value={secondaryDraft}
       onChange={setSecondaryDraft}
       onSend={() => { void sendSecondary(); }}
-      onStop={() => { secondAgentRun.stop(SID); }}
+      onStop={stopSecondary}
       busy={secondaryBusy}
       disabled={secondaryBusy}
       placeholder="Message the second agent… (same workspace, its own conversation & model)"
@@ -2865,6 +2903,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setPlanGoal(goal);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    // Own scope → the Coder's Stop kills its CLI children without also
+    // tree-killing the second agent's run in the same workspace.
+    setCliCancelScope(ctrl.signal, primaryCancelScope(workspace));
     setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
     // Show immediate feedback; planning is silent so the placeholder stays until
     // the plan is parsed and the Kanban board appears.
@@ -2920,6 +2961,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    // Own scope → the Coder's Stop kills its CLI children without also
+    // tree-killing the second agent's run in the same workspace.
+    setCliCancelScope(ctrl.signal, primaryCancelScope(workspace));
     setRunPhase("resuming plan");
     try {
       await executePlanCards(goal, resumable, ctrl);
@@ -2936,13 +2980,25 @@ function CodeWorkspace({ pageId, onTitle }: {
   // completion while the button looked dead.
   const stop = () => {
     abortRef.current?.abort();
-    void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    killCliChildren(primaryCancelScope(workspace));
     // A stopped card did not finish. Return it to To do so the persisted board
     // is honest and the rule-based Resume action can pick it up.
     setTasks((ts) => ts.map((t) => t.status === "running" ? { ...t, status: "pending" } : t));
     setRunPhase(null);
     setLlamaLoading(null);
     setBusy(false);
+  };
+
+  // The second agent's Stop. It used to ONLY abort the JS controller, which a
+  // spawned CLI never sees — so on every subscription model the button did
+  // nothing at all: the agent kept working and the pane stayed busy until the
+  // whole turn finished. It now kills that pane's own CLI children too, and
+  // unsticks the pane immediately instead of waiting for a process it just
+  // asked to die.
+  const stopSecondary = () => {
+    secondAgentRun.stop(SID);
+    killCliChildren(secondaryCancelScope(workspace));
+    setSecondaryBusy(false);
   };
   const clearWorkspace = () => {
     if (busy) return;

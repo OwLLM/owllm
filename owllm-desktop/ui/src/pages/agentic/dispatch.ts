@@ -202,6 +202,9 @@ async function runClaudeCliStream(args: {
   effort?: string | null;
   /// Persistent session UUID — same id across calls gives multi-turn memory.
   sessionId?: string | null;
+  /// Which run owns the spawned child, so a per-run Stop kills only its own
+  /// CLI (see setCliCancelScope). Unset = Rust scopes it to `cwd`.
+  cancelScope?: string | null;
   /// Enable SendUserMessage tool (--brief). The dispatch tap below
   /// surfaces those questions to the user via onAskUser if supplied,
   /// or falls back to a "❓ to user" entry in the Thought channel.
@@ -284,6 +287,7 @@ async function runClaudeCliStream(args: {
       // explicitly to disable when truly autonomous behaviour is wanted.
       briefMode: args.briefMode ?? true,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
       onEvent: ch,
     });
   } finally {
@@ -315,6 +319,8 @@ export async function runCodexCliStream(args: {
   /// tools, so the orchestrator edited the project, left it dirty, and every
   /// specialist worktree afterwards failed to cut.
   readOnly?: boolean;
+  /// Which run owns the spawned child (see setCliCancelScope).
+  cancelScope?: string | null;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -356,6 +362,7 @@ export async function runCodexCliStream(args: {
       effort: args.effort ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
       onEvent: ch,
     });
   } finally {
@@ -374,6 +381,8 @@ export async function runKimiCliStream(args: {
   allowedTools?: string[];
   /// See runClaudeCliStream — normally derived from `allowedTools`.
   readOnly?: boolean;
+  /// Which run owns the spawned child (see setCliCancelScope).
+  cancelScope?: string | null;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -418,6 +427,7 @@ export async function runKimiCliStream(args: {
       model: args.model ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
       onEvent: ch,
     });
   } finally {
@@ -1803,6 +1813,33 @@ export function isAbortError(e: unknown): boolean {
   return (e as { name?: string } | null)?.name === "AbortError";
 }
 
+/// Which run owns the CLI children a dispatch spawns, keyed by the run's
+/// AbortSignal — the object that ALREADY identifies "this turn" everywhere in
+/// this file, so nothing new has to be threaded through the long positional
+/// parameter lists below.
+///
+/// Aborting the signal never reaches a spawned claude/codex/kimi/grok/gemini
+/// process (Tauri `invoke` has no cancellation channel), so a Stop button must
+/// also ask Rust to kill that run's children. `cli_cancel_scope` does exactly
+/// that — but only for children registered under the SAME scope string, and
+/// Rust defaults an unset scope to the project `cwd`. Two agents sharing one
+/// workspace therefore land in the same scope and cannot be stopped apart:
+/// that is why the Code page's second agent had a dead Stop.
+///
+/// A caller that wants an independently stoppable run registers its scope here
+/// before dispatching, and passes the identical string to `cli_cancel_scope`.
+/// Leaving it unset keeps the previous behaviour (children scoped to `cwd`).
+const cliCancelScopes = new WeakMap<AbortSignal, string>();
+
+export function setCliCancelScope(signal: AbortSignal, scope: string): void {
+  const s = scope.trim();
+  if (s) cliCancelScopes.set(signal, s);
+}
+
+export function cliCancelScopeFor(signal?: AbortSignal | null): string | null {
+  return (signal && cliCancelScopes.get(signal)) || null;
+}
+
 /// Await `p`, but stop waiting the instant `signal` aborts.
 ///
 /// This does NOT cancel the underlying work — a Tauri `invoke` has no
@@ -3143,6 +3180,10 @@ async function streamAnthropic(
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
   const imgList = images ?? [];
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
+
   // Picker encodes effort tier as ":high"/":xhigh"/etc on the model id.
   // Split it out so both paths (CLI sub --effort, API thinking budget)
   // receive the clean wire-name + a normalised effort label.
@@ -3198,6 +3239,7 @@ async function streamAnthropic(
         systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
         model: cliModel, effort: claudeEffort, sessionId: sid,
+        cancelScope,
         onDelta, onThought,
       }));
     }
@@ -3206,6 +3248,7 @@ async function streamAnthropic(
       autoApprove: autoApprove ?? false,
       readOnly: isReadOnlyToolAllowlist(allowedTools),
       model: cliModel, effort: claudeEffort, sessionId: sid,
+      cancelScope,
     }));
     if (reply) onDelta(reply);
     return reply;
@@ -3222,6 +3265,7 @@ async function streamAnthropic(
             systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId: sid,
+            cancelScope,
             onDelta, onThought,
           }));
         }
@@ -3230,6 +3274,7 @@ async function streamAnthropic(
           autoApprove: autoApprove ?? false,
           readOnly: isReadOnlyToolAllowlist(allowedTools),
           model: cliModel, effort: claudeEffort, sessionId: sid,
+          cancelScope,
         }));
         if (reply) onDelta(reply);
         return reply;
@@ -3398,6 +3443,9 @@ async function streamOpenAI(
   /// side can detect the Browser role and wire the MCP browser gateway.
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
   // the Claude subscription routes through claude_cli_complete. Without
   // this the chat demanded OPENAI_API_KEY even when a Codex subscription
@@ -3436,6 +3484,7 @@ async function streamOpenAI(
         effort: codexEffort,
         allowedTools,
         readOnly: isReadOnlyToolAllowlist(allowedTools),
+        cancelScope,
         onDelta,
         onThought,
       }), codexCwd);
@@ -3447,6 +3496,7 @@ async function streamOpenAI(
       imagePaths: codexImagePaths,
       model: codexModel,
       effort: codexEffort,
+      cancelScope,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
@@ -3496,6 +3546,9 @@ async function streamMoonshot(
   images?: Attachment[],
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("kimi_cli", projectCwd);
     // Kimi --print mode has no native image flag, but it CAN read image files
@@ -3512,6 +3565,7 @@ async function streamMoonshot(
         cwd: kimiCwd ?? null,
         model: modelId,
         allowedTools,
+        cancelScope,
         onDelta,
         onThought: onThought ?? (() => {}),
       }),
@@ -3555,6 +3609,9 @@ async function streamXai(
   images?: Attachment[],
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("grok_cli", projectCwd);
     // grok -p has no image flag but reads files from its cwd — save pasted
@@ -3572,6 +3629,7 @@ async function streamXai(
         userMessage: prompt,
         cwd: grokCwd ?? null,
         model: modelId,
+        cancelScope,
       }),
       grokCwd,
     );
@@ -3637,6 +3695,9 @@ async function streamGemini(
   projectCwd?: string,
   history?: HistoryItem[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("gemini_cli", projectCwd);
     // Bounded fold — see streamXai. Unbounded before, on a path that also folds
@@ -3648,6 +3709,7 @@ async function streamGemini(
         userMessage: prompt,
         cwd: projectCwd ?? null,
         model: modelId,
+        cancelScope,
       }),
       projectCwd,
     );

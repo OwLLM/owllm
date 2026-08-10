@@ -3,7 +3,7 @@ name = "owllm-desktop"
 # Kept in sync with tauri.conf.json "version" (the release source of truth).
 # User-visible version strings read crate::APP_VERSION (parsed from the conf),
 # so this only affects exe/crate metadata.
-version = "1.0.13"
+version = "1.0.14"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["Far island Corporation Ltd."]
 publish = false

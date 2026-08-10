@@ -25,6 +25,11 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { firstCompleteAuthUrl } from "./authUrlCapture";
+import { unwrapTerminalLines, type TerminalRow } from "./unwrapTerminalLines";
+
+/// Rows of terminal scrollback searched for a login URL. A login banner plus a
+/// wrapped authorization URL is far short of this, and it bounds the scan.
+const MAX_SCANNED_ROWS = 400;
 
 type PtyEvent =
   | { kind: "data"; data: number[] }
@@ -79,6 +84,7 @@ export default function PtyTerminal({
   const inputErrorRef = useRef(false);
   const lastAuthCodeRef = useRef("");
   const [pasteError, setPasteError] = useState("");
+  const [authUrl, setAuthUrl] = useState("");
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
   const autoSendRef = useRef(autoSend);
@@ -184,12 +190,20 @@ export default function PtyTerminal({
     let authUrlOpened = false;
     const decoder = new TextDecoder();
     let outputText = "";
-    const openAuthUrlFrom = (decoded: string) => {
-      if (!autoOpenAuthUrls || authUrlOpened) return;
-      outputText = (outputText + decoded).slice(-16_384);
-      const url = firstCompleteAuthUrl(outputText);
-      if (!url) return;
-      authUrlOpened = true;
+    // Read the login URL back from the terminal's own buffer, where the wrap is
+    // recorded per row, rather than re-deriving it from the byte stream. Falls
+    // back to the raw bytes if the buffer cannot be read.
+    const bufferedText = (): string => {
+      const buffer = termRef.current?.buffer.active;
+      if (!buffer) return outputText;
+      const rows: TerminalRow[] = [];
+      for (let i = Math.max(0, buffer.length - MAX_SCANNED_ROWS); i < buffer.length; i += 1) {
+        const line = buffer.getLine(i);
+        if (line) rows.push({ text: line.translateToString(true), isWrapped: line.isWrapped });
+      }
+      return rows.length ? unwrapTerminalLines(rows) : outputText;
+    };
+    const openAuthUrl = (url: string) => {
       invoke<string>("browser_open_auth_tab", { url })
         .then((opened) => {
           try {
@@ -202,6 +216,20 @@ export default function PtyTerminal({
         });
       // A login command can later print help/fallback links. Keep the browser
       // on the first authorization page instead of navigating it away.
+    };
+    const noteAuthUrlFrom = (decoded: string) => {
+      if (!autoOpenAuthUrls) return;
+      outputText = (outputText + decoded).slice(-16_384);
+      const url = firstCompleteAuthUrl(bufferedText());
+      if (!url) return;
+      // Keep the URL reachable from the header even once it has scrolled away,
+      // and whether or not opening it succeeded. Automatic opening is a
+      // convenience; without a manual way in, a single miss leaves sign-in with
+      // no route at all.
+      setAuthUrl(url);
+      if (authUrlOpened) return;
+      authUrlOpened = true;
+      openAuthUrl(url);
     };
     const armAutoSend = () => {
       const payload = autoSendRef.current;
@@ -227,7 +255,7 @@ export default function PtyTerminal({
           .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
           .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
         onOutputTextRef.current?.(plain);
-        openAuthUrlFrom(decoded);
+        noteAuthUrlFrom(decoded);
         armAutoSend();
       } else if (evt.kind === "exit") {
         // Soft visual hint at exit; the parent decides whether to
@@ -333,6 +361,14 @@ export default function PtyTerminal({
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "#0c0f14" }}>
       <div style={{ minHeight: 30, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "3px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         {pasteError && <span role="alert" style={{ flex: 1, color: "#ffb0b0", fontSize: 10 }}>{pasteError}</span>}
+        {authUrl && (
+          <button
+            type="button"
+            onClick={() => { void invoke("browser_open_auth_tab", { url: authUrl }); }}
+            title={authUrl}
+            style={{ border: "1px solid rgba(127,219,149,0.45)", borderRadius: 5, background: "rgba(127,219,149,0.12)", color: "#cfd4e1", fontSize: 11, padding: "3px 9px", cursor: "pointer" }}
+          >⧉ Open sign-in page</button>
+        )}
         <button
           type="button"
           onClick={() => { void pasteClipboard(); }}

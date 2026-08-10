@@ -30,7 +30,10 @@ function check(name, ok) {
 check(
   "PtyTerminal URL auto-open is opt-in (autoOpenAuthUrls gate)",
   pty.includes("autoOpenAuthUrls?: boolean")
-    && /if \(!autoOpenAuthUrls \|\| authUrlOpened\) return;/.test(pty),
+    && /if \(!autoOpenAuthUrls\) return;/.test(pty)
+    // The browser is still opened at most once per session; only the record of
+    // the URL (which backs the manual "Open sign-in page" action) outlives it.
+    && /if \(authUrlOpened\) return;\s*\n\s*authUrlOpened = true;/.test(pty),
 );
 check(
   "Accounts login terminal opts in to auth-URL auto-open",

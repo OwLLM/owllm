@@ -356,6 +356,26 @@ and the browser half/half, the same split the personal-assistant recipe uses.
   `executeToolCall`; subscription-CLI agents (Claude, Codex and Kimi) reach the
   SAME browser natively via the MCP gateway below. No per-tool harvest hack.
 
+## Subscription sign-in — Connect opens the provider's page (`PtyTerminal.tsx`)
+
+- **Flow**: Accounts → Connect spawns the provider CLI in an embedded PTY,
+  auto-sends `/login`, and opens the authorization URL the CLI prints in a
+  private Agent Browser tab (`browser_open_auth_tab`), so provider OAuth never
+  inherits the user's ordinary cookies. Opt-in per terminal via
+  `autoOpenAuthUrls`; general-purpose terminals never hijack the browser.
+- **The URL is read from the terminal buffer, not the byte stream**
+  (`unwrapTerminalLines.ts`). A CLI's URL is hard-wrapped across rows, and
+  re-deriving that wrap from bytes is ambiguous: a URL ending exactly on the
+  last column is indistinguishable from one that continues. xterm records per
+  row whether it is a continuation, so read that flag. `authUrlCapture.ts`
+  additionally refuses any URL whose END has not been observed — Claude puts
+  `state` last, so a cut inside it used to yield a URL that passed every
+  "required parameter present" check and was silently truncated.
+- **Always a manual route**: once a complete authorization URL has been seen,
+  the terminal header shows **⧉ Open sign-in page**, so a failed or missed
+  automatic open can never leave sign-in with no way through.
+- Guarded by `pages/advanced/authLoginBrowserOpen.verify.run.mjs`.
+
 ## MCP gateway — OWLLM tools for subscription-CLI agents (`mcp_gateway.rs`)
 
 - **The problem it solves**: subscription-CLI agents never reach the app's

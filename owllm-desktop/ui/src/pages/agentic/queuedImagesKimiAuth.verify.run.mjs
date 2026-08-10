@@ -118,7 +118,7 @@ try {
 
   check("PTY terminal uses only the complete-URL extractor",
     terminal.includes('import { firstCompleteAuthUrl } from "./authUrlCapture"')
-      && terminal.includes("const url = firstCompleteAuthUrl(outputText);"));
+      && terminal.includes("const url = firstCompleteAuthUrl(bufferedText());"));
   check("Claude reconnect never deletes the last credential before OAuth succeeds",
     accounts.includes('if (route.backend === "kimi_cli")')
       && accounts.includes("Keeping the existing ${provider.name} credential until the replacement sign-in succeeds."));

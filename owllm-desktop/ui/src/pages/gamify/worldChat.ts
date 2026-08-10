@@ -78,6 +78,12 @@ export type WorldChatDeps = {
    */
   initialThreads?: Record<string, WorldChatMessage[]>;
   onChange: (state: WorldChatState) => void;
+  /**
+   * A message that just arrived from someone else. Fires once per line and
+   * never for our own echoes or for a relay replay, so a notification raised
+   * from it cannot announce the same message twice.
+   */
+  onIncoming?: (message: WorldChatMessage) => void;
   now?: () => string;
 };
 
@@ -193,13 +199,15 @@ export function createWorldChatStore(deps: WorldChatDeps) {
     deps.onChange(state);
   };
 
-  const appendMessage = (key: string, message: WorldChatMessage) => {
+  /** True when the line was actually added — false for a replayed duplicate. */
+  const appendMessage = (key: string, message: WorldChatMessage): boolean => {
     const existing = state.threads[key] ?? [];
     // The relay may replay an unacknowledged message after a reconnect; a
     // sequence number that is already present must not become a second line.
-    if (message.id > 0 && existing.some((entry) => entry.id === message.id)) return;
+    if (message.id > 0 && existing.some((entry) => entry.id === message.id)) return false;
     const next = [...existing, message].slice(-MAX_THREAD_MESSAGES);
     commit({ threads: { ...state.threads, [key]: next } });
+    return true;
   };
 
   const write = (value: unknown): boolean => {
@@ -321,9 +329,10 @@ export function createWorldChatStore(deps: WorldChatDeps) {
             return;
           }
           const from = opened.from || claimed;
-          appendMessage(threadKey(from, room), {
+          const message: WorldChatMessage = {
             id, kind, from, room, text: trimText(opened.text), ts: typeof frame.ts === "string" ? frame.ts : now(), mine: false,
-          });
+          };
+          if (appendMessage(threadKey(from, room), message)) deps.onIncoming?.(message);
           lookup([from]);
         } catch (reason) {
           commit({ error: `Could not read a message: ${String(reason)}` });

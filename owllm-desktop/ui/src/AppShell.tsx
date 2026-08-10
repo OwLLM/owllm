@@ -57,7 +57,11 @@ import {
 import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
-import { worldChatHooks } from "./pages/gamify/worldChatRuntime";
+import {
+  worldChatHooks,
+  WORLD_CHAT_MESSAGE_EVENT,
+  type WorldChatMessageEventDetail,
+} from "./pages/gamify/worldChatRuntime";
 import { getIdentity } from "./pages/advanced/remoteDevices";
 import { openWebUrl } from "./utils/openWebUrl";
 
@@ -640,7 +644,8 @@ function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor,
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
-  onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
+  onWatcher, watcherHint, chatNotice, onOpenChatNotice,
+  keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
 }: {
@@ -662,6 +667,11 @@ function ModeBar({
   /// doubles as the summon point.
   onWatcher?: () => void;
   watcherHint?: boolean;
+  /// World Chat: a message just arrived, so the owl says so. Chat can land on
+  /// any page, which is why the notice belongs to the chrome and not to the
+  /// World Map.
+  chatNotice?: boolean;
+  onOpenChatNotice?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
   chatFontStep: number;
@@ -1223,6 +1233,50 @@ function ModeBar({
       )}
       <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 0%, rgba(var(--accent-rgb),0.30), transparent 72%) !important; }`}</style>
 
+      {/* World Chat push notice — a speech bubble beside the top-centre owl,
+          so a message that arrives while the user is on any other page still
+          announces itself. Clicking it goes to the conversation. It sits above
+          the OWLLM title and to the right of the owl's head, clear of the
+          Watcher satellite label (which is vertically centred). */}
+      {chatNotice && (
+        <>
+          {/* The placement is a plain style and never a keyframe: with
+              prefers-reduced-motion the animation is dropped, and a bubble
+              whose position lived in the keyframes would land on the owl. */}
+          <style>{`
+            @keyframes owllm-chat-pop {
+              0%   { opacity: 0; transform: scale(0.86); }
+              100% { opacity: 1; transform: scale(1); }
+            }
+          `}</style>
+          <button
+            data-ui="WorldChatNotice"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenChatNotice?.(); }}
+            title="World Chat — open the conversation"
+            style={{
+              position: "absolute",
+              left: "50%", top: 6,
+              transform: "translateX(80px)",
+              transformOrigin: "left center",
+              padding: "3px 11px",
+              borderRadius: "999px",
+              background: "rgba(var(--accent-rgb),0.92)",
+              border: "1px solid rgba(var(--accent-rgb),1)",
+              color: "#fff", fontSize: 12, fontWeight: 800,
+              letterSpacing: 0.3, whiteSpace: "nowrap",
+              cursor: "pointer", zIndex: 8,
+              boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
+            }}
+          >
+            <span style={{
+              display: "inline-block",
+              animation: continuousUiAnimation("owllm-chat-pop 220ms ease-out 1 both"),
+            }}>💬 Got a message</span>
+          </button>
+        </>
+      )}
+
       {/* The OWLLM title stays a drag surface, and hovering it restores the
           decorative frame. Clicking the compact owl hotspot above still
           summons the Watcher drawer. */}
@@ -1762,6 +1816,31 @@ export default function AppShell() {
     setWatcherHint(false);
     setWatcherOpen(true);
   };
+  // World Chat push notice. A message can arrive on any page — the World Map
+  // is one tab among many — so the owl in the top-centre of the frame is where
+  // it is announced. It clears itself, and clicking it opens the conversation.
+  const [chatNotice, setChatNotice] = useState<boolean>(false);
+  useEffect(() => {
+    let hideTimer: number | undefined;
+    const onMessage = (event: Event) => {
+      const detail = (event as CustomEvent<WorldChatMessageEventDetail>).detail;
+      if (!detail?.from && !detail?.room) return;
+      setChatNotice(true);
+      // A second message restarts the dwell instead of stacking a bubble.
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => setChatNotice(false), 8000);
+    };
+    window.addEventListener(WORLD_CHAT_MESSAGE_EVENT, onMessage as EventListener);
+    return () => {
+      window.removeEventListener(WORLD_CHAT_MESSAGE_EVENT, onMessage as EventListener);
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+    };
+  }, []);
+  const openChatNotice = () => {
+    setChatNotice(false);
+    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "world-map" } }));
+  };
+
   // The always-visible "🦉 Watcher" chrome button (and any other surface)
   // summons via this window event, so it never depends on the click-through
   // owl's geometry.
@@ -1969,6 +2048,8 @@ export default function AppShell() {
             }}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}
+            chatNotice={chatNotice}
+            onOpenChatNotice={openChatNotice}
             keepFrameVisible={keepFrameVisible}
             onKeepFrameVisible={setKeepFrameVisible}
             chatFontStep={chatFontStep}

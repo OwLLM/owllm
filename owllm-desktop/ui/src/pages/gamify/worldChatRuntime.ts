@@ -19,6 +19,7 @@ import {
   createWorldChatStore,
   emptyWorldChatState,
   sanitizeWorldChatThreads,
+  worldChatLabel,
   type WorldChatMessage,
   type WorldChatState,
   type WorldChatStore,
@@ -29,6 +30,23 @@ export const WORLD_CHAT_ENABLED_KEY = "owllm:world-chat:enabled";
 export const WORLD_CHAT_NICK_KEY = "owllm:world-chat:nick";
 export const WORLD_CHAT_REACHABLE_KEY = "owllm:world-chat:reachable";
 export const WORLD_CHAT_THREADS_KEY = "owllm:world-chat:threads";
+
+/**
+ * Fired on the window whenever a message arrives from someone else, so the app
+ * chrome can announce it from anywhere — the World Map is one tab among many,
+ * and a chat you only hear about while you are looking at it is not a chat.
+ * A window event and not the shared state store on purpose: this is a
+ * per-renderer nudge, not data other processes should be woken for.
+ */
+export const WORLD_CHAT_MESSAGE_EVENT = "owllm:world-chat:message";
+
+export type WorldChatMessageEventDetail = {
+  from: string;
+  /** Nickname when the sender is already known, else their short id. */
+  label: string;
+  room: string;
+  text: string;
+};
 
 /** Conversations from the last run, or nothing if none were kept. */
 export function loadWorldChatThreads(): Record<string, WorldChatMessage[]> {
@@ -101,6 +119,23 @@ async function loadOwnDeviceIds() {
   }
 }
 
+/**
+ * Tell the rest of the app that a message landed. The sender's nickname is
+ * often still in flight (a lookup is a round trip), so the short id stands in
+ * until it arrives rather than the notice waiting for it.
+ */
+function announceIncoming(message: WorldChatMessage) {
+  try {
+    const detail: WorldChatMessageEventDetail = {
+      from: message.from,
+      label: worldChatLabel(snapshot.peers[message.from], message.from),
+      room: message.room,
+      text: message.text,
+    };
+    window.dispatchEvent(new CustomEvent(WORLD_CHAT_MESSAGE_EVENT, { detail }));
+  } catch { /* no window (tests) — the inbox itself is unaffected */ }
+}
+
 export function worldChatStore(): WorldChatStore {
   if (!store) {
     // The store does not announce its own construction, so the restored
@@ -119,6 +154,7 @@ export function worldChatStore(): WorldChatStore {
       },
       ownDeviceIds: () => ownDeviceIds,
       initialThreads: restored,
+      onIncoming: (message) => announceIncoming(message),
       onChange: (state) => {
         // Only rewrite storage when the conversation itself moved: status and
         // peer-lookup churn every few seconds and must not cost a serialize.

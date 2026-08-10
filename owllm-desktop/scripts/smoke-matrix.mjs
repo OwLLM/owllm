@@ -399,14 +399,40 @@ function bigPrompt(token) {
   return `${filler}\nEnd of reference. Reply with exactly ${token} and nothing else.`;
 }
 
+// P cells are the only non-deterministic ones: they ask a REAL model to echo a
+// token after ~43 KB of filler, and it sometimes comments on the prompt instead
+// of obeying it. Measured 2026-08-10 — 1 miss in 13 consecutive runs of the
+// claude 40 KB cell (~8%), with two different off-script replies; the 43 KB
+// payload transited correctly both times, so what failed was obedience, not the
+// spawn boundary the cell exists to guard. Three such cells put roughly 1 matrix
+// run in 5 spuriously red, and a red gate costs a full re-run before every
+// publish. One retry drops that below 1% while a REAL regression still fails
+// both attempts and keeps the matrix red. Deterministic sections are unchanged:
+// retrying those would hide exactly what they are built to catch.
+const CELL_ATTEMPTS = { P: 2 };
 async function cell(section, name, fn) {
   const t0 = Date.now();
-  try {
-    const r = await fn(); // {status, note}
-    record(section, name, r.status, r.note || "", Date.now() - t0);
-  } catch (e) {
-    record(section, name, "FAIL", String(e?.message ?? e).slice(0, 140), Date.now() - t0);
+  const attempts = CELL_ATTEMPTS[section] || 1;
+  let last = null;
+  let retried = 0;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      last = await fn(); // {status, note}
+    } catch (e) {
+      last = { status: "FAIL", note: String(e?.message ?? e).slice(0, 140) };
+    }
+    // Only a FAIL is retried. SKIP is a credential/install STATE and PASS is
+    // done — re-running either would just burn a live turn.
+    if (last.status !== "FAIL") break;
+    if (i < attempts) retried = i;
   }
+  // Always disclose a retry, including when the retry ALSO failed: a cell that
+  // needed two attempts is a signal even when it ends green, and a silent retry
+  // would make a degrading provider look healthy.
+  const note = retried
+    ? `${last.note || ""} [attempt ${retried} failed, retried]`.trim()
+    : last.note || "";
+  record(section, name, last.status, note, Date.now() - t0);
 }
 
 // An expired / invalid subscription token is a credential STATE, not a code

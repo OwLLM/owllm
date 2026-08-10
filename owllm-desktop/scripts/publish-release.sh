@@ -185,8 +185,23 @@ assert_installer_version() {
 case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
   Darwin)               HOST_OS="macos" ;;
+  # WSL defaults to "windows" because this script is normally invoked from the
+  # WSL sandbox to drive a WINDOWS build through Windows tooling (signtool,
+  # node.exe — see find_signtool/to_windows_path). The SAME distro also builds
+  # the native linux-x86_64 AppImage, and that run was mis-typed as windows: it
+  # looked for dist/OwLLM Desktop Setup.exe, so the Linux host could never
+  # publish itself and its artifact had to be signed and uploaded by hand.
   *)                    if [ "$is_wsl_windows" = 1 ]; then HOST_OS="windows"; else HOST_OS="linux"; fi ;;
 esac
+# Explicit override for the ambiguous WSL case above. Only the two values this
+# script can genuinely be ambiguous about are accepted, so a typo fails loudly
+# instead of silently selecting the wrong artifact set.
+if [ -n "${OWLLM_HOST_OS:-}" ]; then
+  case "$OWLLM_HOST_OS" in
+    linux|windows) HOST_OS="$OWLLM_HOST_OS" ;;
+    *) echo "OWLLM_HOST_OS must be 'linux' or 'windows' (got '$OWLLM_HOST_OS')" >&2; exit 2 ;;
+  esac
+fi
 ARCH="$(uname -m)"
 case "$ARCH" in arm64|aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
 # Extra latest.json keys served by the SAME updater artifact (macOS universal).
@@ -647,6 +662,15 @@ fi
 # So after this tag is Latest, copy forward the newest existing stable-named
 # installer for any OS this build didn't produce. Purely additive and
 # failure-tolerant — a hiccup here never fails the publish.
+#
+# EXCEPT during a coordinated multi-host release, where the sibling platform is
+# not missing — it is still building. Carrying an older version's binary into
+# the new tag there publishes a STALE installer under a version that never
+# contained it, and the real upload then has to win a race against it. v1.0.12
+# shipped a v1.0.11 dmg for exactly this reason: the Windows host finished
+# first, carried the old dmg forward, and the Mac's later upload collided with
+# the name it had just created. OWLLM_PENDING_PLATFORMS lists the stable asset
+# names still to come, and this skips them.
 carry_forward_assets() {
   local repo="$1" tag="$2"
   local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb"
@@ -655,6 +679,9 @@ carry_forward_assets() {
   tmp="$(mktemp -d)"
   for name in $names; do
     printf '%s\n' "$have" | grep -qxF "$name" && continue   # already on this tag
+    case " ${OWLLM_PENDING_PLATFORMS:-} " in
+      *" $name "*) echo "  pending on another host, not carrying forward: $name"; continue ;;
+    esac
     # per_page=100, not 30: GitHub's list endpoint returns DRAFTS first
     # regardless of date, so a short page can be consumed entirely by drafts and
     # find no published release to carry from.

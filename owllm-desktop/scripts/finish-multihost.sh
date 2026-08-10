@@ -25,9 +25,12 @@ mkdir -p "$W"
 
 say() { echo "== $*"; }
 
-# 1. pull the linux-x86_64 artifacts out of WSL under their published names
+# 1. pull the linux-x86_64 artifacts out of WSL under their published names.
+#    W is a Git-Bash path (/c/...) but WSL only understands the /mnt/c/... form,
+#    and Git Bash ships no wslpath, so translate the drive prefix here.
+W_WSL="$(printf '%s' "$W" | sed -E 's|^/([a-zA-Z])/|/mnt/\1/|')"
 wslcp() {
-  wsl -d Ubuntu -- bash -c "cp \"\$(ls ~/$LXROOT/$1)\" \"$(wslpath -a "$W" 2>/dev/null || echo "$W")/$2\""
+  wsl -d Ubuntu -- bash -c "cp \"\$(ls ~/$LXROOT/$1)\" \"$W_WSL/$2\""
 }
 say "collecting linux-x86_64 from WSL"
 wslcp "appimage/*_${VERSION}_amd64.AppImage" "OwLLM.Desktop_${VERSION}_amd64.AppImage"

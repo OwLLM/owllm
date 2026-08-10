@@ -168,11 +168,22 @@ check("the offline queue is bounded and expires",
 
 // Negated checks must also require the file to be present, otherwise a deleted
 // or moved module would read as "clean" instead of as a failure.
-check("message history is never written to localStorage",
+// The original rule here was "history never reaches localStorage", justified as
+// "it would be broadcast to every renderer". That justification belongs to the
+// SHARED state mirror, which really does replicate every write across windows,
+// processes and devices — localStorage is per-renderer and silent. History is
+// now kept, because a chat that forgets every line on quit is not a chat, so
+// the invariant is restated as what actually protects the machine: it must not
+// reach the broadcasting store, and it must stay bounded.
+check("chat history never reaches the shared/broadcasting state store",
   runtimeTs.length > 0 && worldChatTs.length > 0
-  && !/localStorage[\s\S]{0,80}(threads|messages|history)/i.test(codeOnly(runtimeTs))
-  && !/localStorage/.test(codeOnly(worldChatTs)),
-  "history is rewritten constantly and would be broadcast to every renderer");
+  && !/stateMirror|vaultSync|pageSettings/.test(codeOnly(runtimeTs))
+  && !/stateMirror|vaultSync|pageSettings|localStorage/.test(codeOnly(worldChatTs)),
+  "replicating a thread per keystroke costs every other window and device");
+
+check("history is only serialized when the conversation actually moved",
+  /state\.threads\s*!==\s*snapshot\.threads/.test(codeOnly(runtimeTs)),
+  "status and peer-lookup churn every few seconds; serializing on those is waste");
 
 check("only small scalars are persisted",
   /WORLD_CHAT_ENABLED_KEY/.test(runtimeTs) && /WORLD_CHAT_NICK_KEY/.test(runtimeTs));
@@ -237,7 +248,7 @@ check("profile and group setup are folded behind a toggle",
 // Anchor on the opening of the folded block AND its close. Comparing against a
 // bare indexOf would read -1 as "before everything" when the block is absent,
 // so every control would score as folded on a card that folds nothing.
-const settingsAt = panelTsx.indexOf("{settingsOpen && (");
+const settingsAt = panelTsx.search(/\{!collapsed && settingsOpen && \(/);
 const settingsEndsAt = panelTsx.indexOf("\n      )}", settingsAt);
 check("the folded settings block is a complete element",
   settingsAt > 0 && settingsEndsAt > settingsAt,
@@ -248,6 +259,22 @@ for (const folded of ["WorldChat:nick", "WorldChat:invite", "WorldChat:join", "W
     settingsAt > 0 && at > settingsAt && at < settingsEndsAt,
     `at=${at} block=${settingsAt}..${settingsEndsAt}`);
 }
+
+// The card floats over the globe and takes pointer events, so while it is open
+// it is also a hole in the map — every dot behind it is unclickable, which the
+// user experiences as "the chat is stuck on whoever I picked first".
+check("the chat card can be folded away to free the globe underneath",
+  /data-ui="WorldChat:collapse"/.test(panelTsx) && /setCollapsed\(\(value\) => !value\)/.test(panelTsx),
+  "with no way to fold it, dots behind the card can never be selected");
+check("the conversation body is gated on the card being open",
+  /\{!collapsed && \(/.test(panelTsx),
+  "a collapse that leaves the body rendered frees no space at all");
+check("picking a new dot re-opens a folded card",
+  /setCollapsed\(false\)/.test(panelTsx),
+  "silently re-addressing a folded card is worse than not changing it");
+check("the overlay does not span most of the globe",
+  /width: "min\(3\d\dpx, [1-4]\d%\)"/.test(mapTsx),
+  "the wider the card, the more of the map is unreachable");
 
 check("an empty thread explains what to do instead of showing a blank box",
   /data-ui="WorldChat:thread-empty"/.test(panelTsx));
@@ -279,7 +306,9 @@ check("only one chat card is mounted",
   "two cards would mean two carets and two drafts for the same thread");
 
 check("selecting a dot puts the caret in the message box",
-  /draftRef\.current\?\.focus\(\);[\s\S]{0,80}?\}, \[enabled, openRoom, target\]\)/.test(panelTsx)
+  // Focus moved into its own effect once the card became collapsible: the box
+  // does not exist to receive the caret until the expanded body has rendered.
+  /draftRef\.current\?\.focus\(\);[\s\S]{0,80}?\}, \[enabled, collapsed, openRoom, target\]\)/.test(panelTsx)
   && /ref=\{draftRef\}/.test(panelTsx),
   "clicking a user IS the 'message them' action; there is no second button");
 check("focus is never stolen without a selection",
@@ -344,14 +373,14 @@ function fakeStorage(seed = {}) {
 const runtimeStubs = {
   name: "world-chat-runtime-stubs",
   setup(build) {
-    build.onResolve({ filter: /(@tauri-apps\/api\/core|remoteDevices|\/worldPresence|\/worldChat)$/ },
+    // worldChat.ts is deliberately NOT stubbed: it has no imports of its own,
+    // and the history round-trip below has to exercise the real sanitizer —
+    // a stubbed one would only prove the stub works.
+    build.onResolve({ filter: /(@tauri-apps\/api\/core|remoteDevices|\/worldPresence)$/ },
       (args) => ({ path: args.path, namespace: "stub" }));
-    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
+    build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
       loader: "js",
-      contents: args.path.endsWith("/worldChat")
-        ? `export const emptyWorldChatState = () => ({ threads: {}, contacts: [], blocked: [], requested: [], requests: [], rooms: [], peers: {}, status: "off", error: "" });
-           export const createWorldChatStore = () => ({ setEnabled() {}, setProfile() {}, lookup() {}, onFrame() {}, setTransport() {}, clearError() {} });`
-        : `export const invoke = async () => "";
+      contents: `export const invoke = async () => "";
            export const getIdentity = async () => ({});
            export const listDevices = async () => [];
            export const presenceNodeIdForDevice = async () => "";`,
@@ -408,6 +437,48 @@ if (esbuild) {
     check("chat hooks exist by default, so the socket asks for a challenge",
       Boolean(shy.worldChatHooks()),
       "a default that never reaches the socket is a default in name only");
+
+    // --- conversations survive a restart, measured across two instances ---
+    const kept = fakeStorage();
+    const before = await bootRuntime(kept, "before-restart");
+    before.saveWorldChatThreads({
+      "peer-a": [{ id: 4, kind: "message", from: "peer-a", room: "", text: "hello", ts: "t", mine: false }],
+    });
+    const after = await bootRuntime(kept, "after-restart");
+    const restored = after.loadWorldChatThreads();
+    check("a conversation is still there after a restart",
+      restored["peer-a"]?.[0]?.text === "hello",
+      "the relay only replays what it still holds undelivered, so this is the client's job");
+    check("restored lines keep which side sent them",
+      restored["peer-a"][0].mine === false && restored["peer-a"][0].id === 4);
+
+    // A store that keeps garbage would crash the panel that renders it, and
+    // storage is user-writable and outlives any single app version.
+    const junk = fakeStorage({ "owllm:world-chat:threads": '{"peer-b":[{"text":""},7,null,{"text":"ok"}]}' });
+    const salvaged = (await bootRuntime(junk, "junk")).loadWorldChatThreads();
+    check("malformed stored history is salvaged, not fatal",
+      salvaged["peer-b"]?.length === 1 && salvaged["peer-b"][0].text === "ok");
+    const corrupt = fakeStorage({ "owllm:world-chat:threads": "{not json" });
+    check("unparseable stored history yields an empty history",
+      Object.keys((await bootRuntime(corrupt, "corrupt")).loadWorldChatThreads()).length === 0);
+
+    // Storage that grows without bound eventually throws on write and takes the
+    // whole history with it, so the restore path must cap what it accepts.
+    const flood = fakeStorage({
+      "owllm:world-chat:threads": JSON.stringify({
+        "peer-c": Array.from({ length: 640 }, (_, index) => ({ id: index + 1, text: `line ${index}` })),
+      }),
+    });
+    const capped = (await bootRuntime(flood, "flood")).loadWorldChatThreads()["peer-c"];
+    check("restored history is capped, keeping the most recent lines",
+      capped.length === 500 && capped[capped.length - 1].text === "line 639",
+      `restored ${capped.length}`);
+
+    // Turning chat off must leave nothing behind, not an empty husk.
+    const cleared = fakeStorage({ "owllm:world-chat:threads": '{"p":[{"text":"x"}]}' });
+    (await bootRuntime(cleared, "cleared")).saveWorldChatThreads({});
+    check("an emptied history is removed from storage",
+      cleared.raw.has("owllm:world-chat:threads") === false);
   } catch (reason) {
     check("the chat runtime can be executed", false, String(reason).slice(0, 200));
   } finally {

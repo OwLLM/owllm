@@ -67,6 +67,11 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   // are folded away so the card reads as a chat rather than a settings form
   // with a one-line box wedged underneath it.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The card floats over the globe, so while it is open it is also a hole in
+  // the map: a dot underneath it cannot be clicked, which reads as "the chat
+  // is stuck on the first person I picked". Collapsing folds it back to its
+  // header and hands that area of the globe back.
+  const [collapsed, setCollapsed] = useState(false);
 
   const store = worldChatStore();
   const target = openRoom ? "" : selectedNodeId;
@@ -90,8 +95,17 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   // real selection: target starts empty, so mounting the map steals no focus.
   useEffect(() => {
     if (!enabled || openRoom || !target) return;
-    draftRef.current?.focus();
+    // Picking someone new always brings the card back: a collapsed card that
+    // silently changed who it was addressed to would be worse than no change.
+    // Focus is a separate effect because the box does not exist to receive it
+    // until the expanded body has actually rendered.
+    setCollapsed(false);
   }, [enabled, openRoom, target]);
+
+  useEffect(() => {
+    if (!enabled || collapsed || openRoom || !target) return;
+    draftRef.current?.focus();
+  }, [enabled, collapsed, openRoom, target]);
 
   const submit = async () => {
     const text = draft.trim();
@@ -126,12 +140,22 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         <span style={{ fontSize: 10.5, fontWeight: 700, color: chat.status === "ready" ? "var(--ok, #7ddc9a)" : "var(--fg-muted)" }}>
           {chat.status === "ready" ? t("Connected") : t("Connecting…")}
         </span>
-        <button type="button" style={buttonStyle()} data-ui="WorldChat:settings" title={t("Chat settings")} onClick={() => setSettingsOpen((open) => !open)}>
-          ⚙
-        </button>
+        {!collapsed && (
+          <button type="button" style={buttonStyle()} data-ui="WorldChat:settings" title={t("Chat settings")} onClick={() => setSettingsOpen((open) => !open)}>
+            ⚙
+          </button>
+        )}
+        {/* Folds the card away so the globe underneath it is clickable again. */}
+        <button
+          type="button"
+          style={buttonStyle()}
+          data-ui="WorldChat:collapse"
+          title={collapsed ? t("Show chat") : t("Hide chat — makes the globe underneath clickable")}
+          onClick={() => setCollapsed((value) => !value)}
+        >{collapsed ? "▴" : "▾"}</button>
       </div>
 
-      {settingsOpen && (
+      {!collapsed && settingsOpen && (
         <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center", flexWrap: "wrap" }} data-ui="WorldChat:settings-panel">
           <input
             value={nick}
@@ -166,6 +190,8 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         </div>
       )}
 
+      {!collapsed && (
+      <>
       {chat.requests.length > 0 && (
         <div style={{ marginTop: 10 }} data-ui="WorldChat:requests">
           <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: .4 }}>{t("Chat requests")}</div>
@@ -284,6 +310,8 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
           {chat.error}
           <button type="button" style={{ ...buttonStyle(), marginLeft: 6 }} onClick={() => store.clearError()}>{t("Dismiss")}</button>
         </div>
+      )}
+      </>
       )}
     </div>
   );

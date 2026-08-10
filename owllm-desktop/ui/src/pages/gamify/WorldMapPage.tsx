@@ -1376,7 +1376,7 @@ export default function WorldMapPage() {
               data-ui="WorldMap:top-right"
               style={{
                 position: "absolute", zIndex: 3, top: 13, right: 13,
-                width: "min(360px, 52%)", maxHeight: "calc(100% - 26px)",
+                width: "min(340px, 40%)", maxHeight: "calc(100% - 26px)",
                 display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none",
               }}
             >

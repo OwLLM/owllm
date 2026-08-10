@@ -82,6 +82,10 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const isContact = chat.contacts.includes(target);
   const isBlocked = chat.blocked.includes(target);
   const awaitingThem = chat.requested.includes(target);
+  const peer = chat.peers[target];
+  const isSelf = Boolean(target && target === chat.selfId);
+  const hasKeys = Boolean(peer?.edPub && peer?.xPub);
+  const missingFleet = Boolean(!openRoom && !target && selectedLabel);
 
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -239,6 +243,17 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
             : worldChatLabel(chat.peers[target], target) || selectedLabel}
         </div>
       )}
+      {(missingFleet || isSelf || (!openRoom && target && !hasKeys)) && (
+        <div style={{ marginTop: 5, fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.4 }} data-ui="WorldChat:hint">
+          {missingFleet
+            ? t("This device has no world-presence id, so it cannot be messaged from the map.")
+            : isSelf
+            ? t("This dot is you — you cannot message yourself.")
+            : !openRoom && !hasKeys
+            ? t("This node has not enabled World Chat, so it cannot receive messages.")
+            : null}
+        </div>
+      )}
 
       {!openRoom && target && isBlocked && (
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--error)" }}>{t("You blocked this person.")}
@@ -281,7 +296,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         ))}
       </div>
 
-      {(openRoom || target) && !isBlocked && (
+      {(openRoom || target) && !isBlocked && !isSelf && (openRoom || hasKeys) && (
         <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "stretch" }}>
           {/* A textarea, not a single-line input: Enter sends, Shift+Enter
               keeps writing, so a paragraph is possible without the message
@@ -306,9 +321,9 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
       )}
 
       {chat.error && (
-        <div style={{ marginTop: 8, fontSize: 11, color: "var(--error)" }} data-ui="WorldChat:error">
-          {chat.error}
-          <button type="button" style={{ ...buttonStyle(), marginLeft: 6 }} onClick={() => store.clearError()}>{t("Dismiss")}</button>
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--error)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }} data-ui="WorldChat:error">
+          <span>{chat.error}</span>
+          <button type="button" style={buttonStyle()} onClick={() => store.clearError()}>{t("Dismiss")}</button>
         </div>
       )}
       </>

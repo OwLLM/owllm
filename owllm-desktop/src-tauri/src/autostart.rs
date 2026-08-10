@@ -154,22 +154,46 @@ fn linux_desktop() -> Option<PathBuf> {
     Some(base.join("autostart/owllm.desktop"))
 }
 
+/// Whether `path` sits in a directory the OS clears (reboot or tmpfiles), which
+/// would leave an autostart entry pointing at a file that no longer exists.
+#[cfg(target_os = "linux")]
+fn is_volatile_path(path: &std::path::Path) -> bool {
+    const VOLATILE: [&str; 4] = ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/"];
+    let path = path.to_string_lossy();
+    VOLATILE.iter().any(|dir| path.starts_with(dir))
+}
+
+/// Pick the path to record in the autostart entry, rejecting any candidate the
+/// OS wipes. Returning `None` leaves an existing good entry untouched, which
+/// beats overwriting it with a path that cannot survive the next boot.
+#[cfg(target_os = "linux")]
+fn stable_autostart_exe(appimage: Option<PathBuf>, current: Option<PathBuf>) -> Option<PathBuf> {
+    appimage.or(current).filter(|path| !is_volatile_path(path))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_exe_path() -> Option<PathBuf> {
     // `current_exe()` points inside /tmp/.mount_* when running as an AppImage.
     // That mount disappears as soon as the app exits, leaving login autostart
     // permanently broken. AppImage's runtime provides the stable source path.
-    std::env::var_os("APPIMAGE")
+    let appimage = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
-        .filter(|path| path.is_absolute() && path.is_file())
-        .or_else(exe_path)
+        .filter(|path| path.is_absolute() && path.is_file());
+    // An AppImage launched straight from /tmp is itself wiped on reboot, and so
+    // is the .mount_* fallback. Recording either poisons autostart for good: the
+    // entry can only self-repair on a launch that then never happens.
+    stable_autostart_exe(appimage, exe_path())
 }
 
 #[cfg(target_os = "linux")]
 fn set_linux(enabled: bool) -> Result<(), String> {
     let desktop = linux_desktop().ok_or("HOME/XDG_CONFIG_HOME unavailable")?;
     if enabled {
-        let exe = linux_exe_path().ok_or("current exe path unavailable")?;
+        let exe = linux_exe_path().ok_or(
+            "current exe path unavailable or inside a directory the OS wipes \
+             (/tmp, /var/tmp, /dev/shm, /run); move the AppImage somewhere \
+             permanent to enable autostart",
+        )?;
         if let Some(dir) = desktop.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir autostart: {e}"))?;
         }
@@ -225,5 +249,59 @@ pub fn ensure_default_enabled() {
     // after an app move/update (especially vanished AppImage /tmp mounts).
     if let Err(e) = set(true) {
         eprintln!("[owllm] autostart default-enable failed: {e}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Regression: an AppImage run from `/tmp` was recorded verbatim, so the
+    /// next reboot wiped the target. The app then never launched, and because
+    /// the entry only self-repairs on launch, it stayed broken for good.
+    #[test]
+    fn appimage_under_tmp_is_never_recorded() {
+        let picked = stable_autostart_exe(
+            Some(PathBuf::from("/tmp/v106/owllm106.AppImage")),
+            Some(PathBuf::from("/tmp/.mount_abc123/AppRun")),
+        );
+        assert_eq!(picked, None, "a /tmp AppImage must not reach the entry");
+    }
+
+    #[test]
+    fn installed_appimage_wins_over_ephemeral_mount() {
+        let installed = PathBuf::from("/home/u/Applications/OwLLM.Desktop.AppImage");
+        let picked = stable_autostart_exe(
+            Some(installed.clone()),
+            Some(PathBuf::from("/tmp/.mount_abc123/AppRun")),
+        );
+        assert_eq!(picked, Some(installed));
+    }
+
+    #[test]
+    fn wiped_dirs_are_volatile() {
+        for path in [
+            "/tmp/v106/owllm106.AppImage",
+            "/tmp/.mount_abc123/AppRun",
+            "/var/tmp/owllm.AppImage",
+            "/dev/shm/owllm.AppImage",
+            "/run/user/1000/owllm.AppImage",
+        ] {
+            assert!(is_volatile_path(Path::new(path)), "{path} must be volatile");
+        }
+    }
+
+    #[test]
+    fn install_dirs_are_not_volatile() {
+        // `/home/u/tmpfiles/...` guards against a naive `contains("/tmp")`.
+        for path in [
+            "/home/u/Applications/OwLLM.Desktop.AppImage",
+            "/usr/bin/owllm-desktop",
+            "/opt/owllm/owllm-desktop",
+            "/home/u/tmpfiles/owllm.AppImage",
+        ] {
+            assert!(!is_volatile_path(Path::new(path)), "{path} must be stable");
+        }
     }
 }

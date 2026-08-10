@@ -76,6 +76,7 @@ export default function PtyTerminal({
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef<string | null>(null);
   const pendingInputRef = useRef<string[]>([]);
+  const inputErrorRef = useRef(false);
   const lastAuthCodeRef = useRef("");
   const [pasteError, setPasteError] = useState("");
   const onExitRef = useRef(onExit);
@@ -96,7 +97,15 @@ export default function PtyTerminal({
     invoke("pty_write", {
       sessionId: sid,
       data: Array.from(new TextEncoder().encode(data)),
-    }).catch(() => {});
+    }).catch((error) => {
+      // Never swallow this: a rejected write means the PTY session is gone, and
+      // silence makes the terminal look alive while it ignores every keystroke.
+      if (inputErrorRef.current) return;
+      inputErrorRef.current = true;
+      termRef.current?.write(
+        `\r\n\x1b[31m[input error] ${String(error)} — click Connect to start a fresh terminal.\x1b[0m\r\n`,
+      );
+    });
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -162,6 +171,7 @@ export default function PtyTerminal({
     termRef.current = term;
     fitRef.current = fit;
     pendingInputRef.current = [];
+    inputErrorRef.current = false;
 
     const dim = fit.proposeDimensions() ?? { cols: 100, rows: 28 };
 
@@ -244,6 +254,7 @@ export default function PtyTerminal({
       term.focus();
     });
 
+    let disposed = false;
     invoke<string>("pty_spawn", {
       cli,
       args,
@@ -253,6 +264,13 @@ export default function PtyTerminal({
       onEvent: channel,
     })
       .then((sid) => {
+        if (disposed) {
+          // A provider switch or a second Connect can win this race. Adopting
+          // the late session here would leak a child process and point the next
+          // terminal's input at the wrong PTY.
+          invoke("pty_kill", { sessionId: sid }).catch(() => {});
+          return;
+        }
         sessionRef.current = sid;
         onSpawned?.(sid);
         const queued = pendingInputRef.current.splice(0);
@@ -280,6 +298,7 @@ export default function PtyTerminal({
     ro.observe(host);
 
     return () => {
+      disposed = true;
       ro.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
       if (autoSendTimer) window.clearTimeout(autoSendTimer);

@@ -1363,16 +1363,40 @@ export default function WorldMapPage() {
                 </div>
               </div>
             </div>
-            <div style={{ position: "absolute", zIndex: 2, top: 13, right: 13, display: "flex", gap: 8, pointerEvents: "none", flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "58%" }}>
-              <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
-                <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}
-              </span>
-              {mode === "world" && (
-                <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>
-                  <b style={{ color: "var(--fg-strong)" }}>{nodes.length}</b> {t("recorded")}
+            {/* Top-right of the canvas: the live counters, and directly under
+                them the chat surface. Chat sits over the globe rather than in
+                the side rail so the dot you click and the box you type in are
+                one glance apart. The column itself is click-through — only the
+                chat card takes pointer events, so a drag that starts on the
+                counters still orbits the globe.
+
+                A fleet dot is keyed by device id; chat is always addressed by
+                the public presence id, which is what the relay knows it as. */}
+            <div
+              data-ui="WorldMap:top-right"
+              style={{
+                position: "absolute", zIndex: 3, top: 13, right: 13,
+                width: "min(340px, 40%)", maxHeight: "calc(100% - 26px)",
+                display: "flex", flexDirection: "column", gap: 8, pointerEvents: "none",
+              }}
+            >
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
+                  <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}
                 </span>
-              )}
-              <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>{t("Drag to orbit · scroll to zoom")}</span>
+                {mode === "world" && (
+                  <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>
+                    <b style={{ color: "var(--fg-strong)" }}>{nodes.length}</b> {t("recorded")}
+                  </span>
+                )}
+                <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>{t("Drag to orbit · scroll to zoom")}</span>
+              </div>
+              <div style={{ pointerEvents: "auto", minHeight: 0, overflowY: "auto", overscrollBehavior: "contain" }}>
+                <WorldChatPanel
+                  selectedNodeId={selected ? (selected.kind === "world" ? selected.id : fleetPresenceIds.get(selected.id) ?? "") : ""}
+                  selectedLabel={selected?.label ?? ""}
+                />
+              </div>
             </div>
             {mode === "world" && !configured && !loading && (
               <div style={{ position: "absolute", inset: "auto 18px 18px 18px", padding: "12px 14px", borderRadius: 12, border: "1px solid rgba(var(--accent-rgb),.35)", background: "rgba(3,7,17,.88)", backdropFilter: "blur(12px)", color: "var(--fg-muted)", fontSize: 12.5 }}>
@@ -1543,13 +1567,6 @@ export default function WorldMapPage() {
                 <div style={{ marginTop: 9, color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700 }}>{selected.kind === "fleet" ? t("Private fleet orbit · not a location") : t("Approximate city only")}</div>
               </div>
             )}
-
-            {/* A fleet dot is keyed by device id; chat is always addressed by the
-                public presence id, which is what the relay knows it as. */}
-            <WorldChatPanel
-              selectedNodeId={selected ? (selected.kind === "world" ? selected.id : fleetPresenceIds.get(selected.id) ?? "") : ""}
-              selectedLabel={selected?.label ?? ""}
-            />
           </aside>
         </div>
       </div>

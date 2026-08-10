@@ -70,6 +70,13 @@ export type WorldChatDeps = {
   crypto: WorldChatCrypto;
   /** Presence ids of this user's OWN devices; requests from these auto-accept. */
   ownDeviceIds?: () => string[];
+  /**
+   * Conversations restored from the previous run. A chat that forgets every
+   * line the moment the app closes is a notification pane, not a chat: the
+   * relay only replays what it still holds *undelivered*, so keeping the
+   * history is the client's job.
+   */
+  initialThreads?: Record<string, WorldChatMessage[]>;
   onChange: (state: WorldChatState) => void;
   now?: () => string;
 };
@@ -115,6 +122,36 @@ export function threadKey(peerId: string, room = ""): string {
   return room ? `room:${room}` : peerId;
 }
 
+/**
+ * Restore threads from whatever was persisted, dropping anything that is not
+ * a message. Storage is user-writable and survives across versions, so a
+ * malformed entry must not be able to break the panel that renders it.
+ */
+export function sanitizeWorldChatThreads(value: unknown): Record<string, WorldChatMessage[]> {
+  const threads: Record<string, WorldChatMessage[]> = {};
+  if (!value || typeof value !== "object") return threads;
+  for (const [key, entries] of Object.entries(value as Record<string, unknown>)) {
+    if (!key || !Array.isArray(entries)) continue;
+    const messages = entries.flatMap((entry): WorldChatMessage[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const row = entry as Record<string, unknown>;
+      const text = trimText(row.text);
+      if (!text) return [];
+      return [{
+        id: Number.isFinite(row.id) ? Number(row.id) : 0,
+        kind: row.kind === "request" || row.kind === "room" ? row.kind : "message",
+        from: typeof row.from === "string" ? row.from : "",
+        room: typeof row.room === "string" ? row.room : "",
+        text,
+        ts: typeof row.ts === "string" ? row.ts : "",
+        mine: row.mine === true,
+      }];
+    }).slice(-MAX_THREAD_MESSAGES);
+    if (messages.length) threads[key] = messages;
+  }
+  return threads;
+}
+
 function trimText(value: unknown): string {
   return typeof value === "string" ? value.slice(0, MAX_CHAT_TEXT) : "";
 }
@@ -129,7 +166,7 @@ function asIdList(value: unknown): string[] {
  * so an action taken while offline reports that rather than vanishing.
  */
 export function createWorldChatStore(deps: WorldChatDeps) {
-  let state = emptyWorldChatState();
+  let state = { ...emptyWorldChatState(), threads: sanitizeWorldChatThreads(deps.initialThreads) };
   let send: ((value: unknown) => boolean) | null = null;
   const now = deps.now ?? (() => new Date().toISOString());
 

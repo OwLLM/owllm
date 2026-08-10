@@ -55,6 +55,12 @@ const HOT_PREFIXES = [
 
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nbsync-"));
 fs.writeFileSync(path.join(TMP, "vaultSync.js"), js);
+// The REAL step-merge module, not a stub: it holds the union/ratchet rules the
+// cases below actually exercise, so stubbing it would test nothing.
+fs.writeFileSync(path.join(TMP, "notebookMerge.js"), ts.transpileModule(
+  readLF(path.join(SRC, "runtime", "notebookMerge.ts")),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } },
+).outputText);
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
 fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
@@ -122,6 +128,26 @@ console.log("case 4: adopt drops any stray lease when this PC holds none");
   const merged = JSON.parse(mergeNotebookLease(KEY2, JSON.stringify({ text: "peer", steps: [], autoFeed: true, autoFeedOwner: "code:peerwin" })));
   check("no lease inherited from peer", LEASE.every((f) => merged[f] === undefined));
   check("peer content still adopted", merged.text === "peer");
+}
+
+// Auto-feed now defaults to ON for a notebook nobody has decided about
+// (RunNotebook.loadNotebook reads it tri-state: absent = ON). That makes a LOST
+// `false` behaviourally different from a missing one for the first time: drop it
+// during adoption and the user's deliberate OFF silently comes back as ON, and
+// the queue starts walking again on a PC where they switched it off.
+console.log("case 4a: an explicit auto-feed OFF survives adopting a peer's content");
+{
+  const KEY_OFF = "owllm:agents:notebook:p-off";
+  store.set(KEY_OFF, JSON.stringify({
+    text: "local", steps: [{ id: "s1", text: "a", status: "pending", ts: 1 }],
+    autoFeed: false, // the user's explicit choice on THIS PC
+  }));
+  // The peer stripped its own lease on push, so the remote carries no autoFeed.
+  const merged = JSON.parse(mergeNotebookLease(KEY_OFF, JSON.stringify({
+    text: "peer notes", steps: [{ id: "s1", text: "a", status: "pending", ts: 1 }],
+  })));
+  check("an explicit OFF is preserved, not dropped to the ON default", merged.autoFeed === false);
+  check("peer content is still adopted alongside it", merged.text === "peer notes");
 }
 
 console.log("case 5: source wiring");
@@ -271,7 +297,23 @@ console.log("case 12: a notebook keyed by a raw folder path never leaves this PC
 console.log("case 13: notebooks converge WITHOUT waiting for the next app launch");
 {
   check("a scoped mid-session pull exists", typeof pullNotebooksNow === "function");
-  check("it is on an interval", rawSrc.includes("window.setInterval(() => { if (_enabled) void pullNotebooksNow(); }"));
+  // Was a flat `window.setInterval(... pullNotebooksNow ...)`; it is now a
+  // self-rescheduling timer so a RUNNING queue can be polled harder than an
+  // idle one. The invariant is unchanged and is what we assert: the pull is
+  // armed periodically, and every path re-arms it — a timer that fails to
+  // re-arm converges once and then goes silent, which the old interval could
+  // not do and this shape can.
+  {
+    const wire = rawSrc.slice(rawSrc.indexOf("function wireListeners"));
+    const body = wire.slice(wire.indexOf("const scheduleNotebookPull"), wire.indexOf("Fleet liveness heartbeat"));
+    // Anchored to the call that follows the closure's `};` — matching a bare
+    // `scheduleNotebookPull();` would also match the re-arm INSIDE the closure,
+    // so deleting the startup call would still pass. It must be armed once from
+    // wireListeners or the timer never starts at all.
+    check("a periodic pull is armed at startup", /\};\s*\n\s*scheduleNotebookPull\(\);/.test(body) && body.includes("pullNotebooksNow()"));
+    check("...and re-arms when sync is disabled", /if \(!_enabled\) \{ scheduleNotebookPull\(\); return; \}/.test(body));
+    check("...and re-arms even if the pull rejects", body.includes(".finally(scheduleNotebookPull)"));
+  }
   check("and runs when the window regains focus", rawSrc.includes("else void pullNotebooksNow();"));
   check("it must NOT claim the whole blob as adopted", rawSrc.slice(rawSrc.indexOf("export async function pullNotebooksNow"), rawSrc.indexOf("export async function pushNow")).includes("NOT setLast()"));
   check("launch-time full adopt is still there", rawSrc.includes("if (await pullAndAdopt())"));

@@ -5,9 +5,12 @@
 // you are looking at it is not an inbox. The presence socket that carries it is
 // already app-wide, so the two have the same lifetime.
 //
-// Only three small scalars are persisted (on/off, nickname, reachable). Message
-// history stays in memory: it is rewritten constantly and would otherwise be
-// broadcast to every other renderer on every line.
+// On/off, nickname and reachability are persisted, and so is the conversation
+// history — a chat that forgets every line on quit is not a chat, and the relay
+// only ever replays what it still holds *undelivered*. History goes to
+// localStorage deliberately: it is per-renderer and silent, unlike the shared
+// state store, which would broadcast every keystroke's worth of thread to every
+// other window and process on the machine.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -15,6 +18,8 @@ import { getIdentity, listDevices } from "../advanced/remoteDevices";
 import {
   createWorldChatStore,
   emptyWorldChatState,
+  sanitizeWorldChatThreads,
+  type WorldChatMessage,
   type WorldChatState,
   type WorldChatStore,
 } from "./worldChat";
@@ -23,10 +28,37 @@ import { presenceNodeIdForDevice, type WorldChatHooks } from "./worldPresence";
 export const WORLD_CHAT_ENABLED_KEY = "owllm:world-chat:enabled";
 export const WORLD_CHAT_NICK_KEY = "owllm:world-chat:nick";
 export const WORLD_CHAT_REACHABLE_KEY = "owllm:world-chat:reachable";
+export const WORLD_CHAT_THREADS_KEY = "owllm:world-chat:threads";
 
-function readFlag(key: string): boolean {
-  try { return localStorage.getItem(key) === "1"; }
-  catch { return false; }
+/** Conversations from the last run, or nothing if none were kept. */
+export function loadWorldChatThreads(): Record<string, WorldChatMessage[]> {
+  try { return sanitizeWorldChatThreads(JSON.parse(localStorage.getItem(WORLD_CHAT_THREADS_KEY) ?? "null")); }
+  catch { return {}; }
+}
+
+export function saveWorldChatThreads(threads: Record<string, WorldChatMessage[]>) {
+  try {
+    // An empty history is stored as a removal so that turning chat off leaves
+    // nothing behind rather than an empty object nobody prunes.
+    if (!Object.keys(threads).length) localStorage.removeItem(WORLD_CHAT_THREADS_KEY);
+    else localStorage.setItem(WORLD_CHAT_THREADS_KEY, JSON.stringify(threads));
+  } catch { /* storage unavailable or full */ }
+}
+
+/**
+ * Read a persisted on/off choice, tri-state.
+ *
+ * `getItem(key) === "1"` cannot express this: it reads "never chosen" and
+ * "the user switched it off" as the same value, so a flag written that way can
+ * only ever default to off. Absent means nobody has chosen yet, so the caller's
+ * default applies; a stored "1"/"0" is the user's own word and is obeyed in
+ * both directions, including across restarts.
+ */
+function readFlag(key: string, fallback: boolean): boolean {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored === null ? fallback : stored === "1";
+  } catch { return fallback; }
 }
 
 function writeFlag(key: string, value: boolean) {
@@ -34,8 +66,14 @@ function writeFlag(key: string, value: boolean) {
   catch { /* storage unavailable */ }
 }
 
+/**
+ * On unless the user turned it off. World Chat is the point of the World Map —
+ * a map of dots you cannot talk to is a poster — and every identity on it is
+ * already anonymous (a derived presence id, no account, no name), so there is
+ * nothing to opt into. Turning it off is one click and it sticks.
+ */
 export function worldChatEnabled(): boolean {
-  return readFlag(WORLD_CHAT_ENABLED_KEY);
+  return readFlag(WORLD_CHAT_ENABLED_KEY, true);
 }
 
 export function worldChatNick(): string {
@@ -43,8 +81,9 @@ export function worldChatNick(): string {
   catch { return ""; }
 }
 
+/** On by default too: a chat nobody may open a conversation on is not a chat. */
 export function worldChatReachable(): boolean {
-  return readFlag(WORLD_CHAT_REACHABLE_KEY);
+  return readFlag(WORLD_CHAT_REACHABLE_KEY, true);
 }
 
 let store: WorldChatStore | undefined;
@@ -64,6 +103,12 @@ async function loadOwnDeviceIds() {
 
 export function worldChatStore(): WorldChatStore {
   if (!store) {
+    // The store does not announce its own construction, so the restored
+    // conversations are seeded into the snapshot here — otherwise a panel that
+    // mounts before the first frame arrives would render an empty history and
+    // look like nothing was remembered.
+    const restored = loadWorldChatThreads();
+    snapshot = { ...emptyWorldChatState(), threads: restored };
     store = createWorldChatStore({
       crypto: {
         seal: (toEdPub, toXPub, text) => invoke<string>("world_chat_seal", { toEd25519Pub: toEdPub, toX25519Pub: toXPub, text }),
@@ -73,7 +118,11 @@ export function worldChatStore(): WorldChatStore {
         },
       },
       ownDeviceIds: () => ownDeviceIds,
+      initialThreads: restored,
       onChange: (state) => {
+        // Only rewrite storage when the conversation itself moved: status and
+        // peer-lookup churn every few seconds and must not cost a serialize.
+        if (state.threads !== snapshot.threads) saveWorldChatThreads(state.threads);
         snapshot = state;
         for (const listener of listeners) listener(state);
       },

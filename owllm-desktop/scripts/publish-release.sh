@@ -589,7 +589,15 @@ step "3/5 latest.json (merge platform keys)"
 # same version (coordinated multi-OS publish of one tag). A stale entry from
 # an older version would make that platform's updater "install" an update
 # that leaves the app on the old version — an infinite update loop.
-EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)"
+# Seed from THIS TAG's manifest, not from `releases/latest`: until the tag is
+# promoted (every prerelease, and every multi-OS publish before promotion)
+# `releases/latest` still serves an OLDER version, the version guard below
+# rejects it, and each host's run wipes the sibling platforms it just merged.
+EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/download/$TAG/latest.json" 2>/dev/null || true)"
+case "$EXISTING_LATEST" in
+  '{'*) : ;;
+  *) EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)" ;;
+esac
 SIG="$SIG" NOTES="$NOTES" VERSION="$VERSION" URL="$URL" \
 PLATFORM_KEY="$PLATFORM_KEY" EXTRA_PLATFORM_KEYS="$EXTRA_PLATFORM_KEYS" \
 EXISTING_LATEST="$EXISTING_LATEST" node -e '

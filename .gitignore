@@ -30,6 +30,7 @@ build/
 logs/
 tmp/
 temp/
+.tmp_wheels/
 
 # Agent runtime — local-only state (DB, agent secret keys).
 LLM/data/owllm_state.db

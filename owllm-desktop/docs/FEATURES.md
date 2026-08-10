@@ -20,7 +20,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Core** (always) | Home, Server, Info | hardware probe, llama-server lifecycle, sandbox-disk care |
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
-| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline. **World Chat** (opt-in, off by default) rides the same socket: the client proves it owns a dot by signing a server nonce with the device key the dot's id is derived from (`remote_devices::world_chat`, `services/world-presence/src/chat.js`), so a public id cannot be claimed by anyone else. Messages are `crypto::seal` envelopes the relay only stores and forwards — 1:1 after an explicit accept, group rooms addressed by hash of an invite code that never leaves the client, with block, report, per-day first-contact quotas and an offline queue. Requests from this user's own fleet devices auto-accept. UI: `ui/src/pages/gamify/WorldChatPanel.tsx`; history is memory-only and never touches localStorage |
+| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline. **World Chat** (on by default — every identity on the map is already anonymous; one click turns it off and that choice sticks across restarts) rides the same socket. Its card sits over the **top-right of the globe canvas**, not in the side rail, so clicking a dot and typing to it are one gesture — selecting a dot puts the caret straight in the message box. The client proves it owns a dot by signing a server nonce with the device key the dot's id is derived from (`remote_devices::world_chat`, `services/world-presence/src/chat.js`), so a public id cannot be claimed by anyone else. Messages are `crypto::seal` envelopes the relay only stores and forwards — 1:1 after an explicit accept, group rooms addressed by hash of an invite code that never leaves the client, with block, report, per-day first-contact quotas and an offline queue. Requests from this user's own fleet devices auto-accept. UI: `ui/src/pages/gamify/WorldChatPanel.tsx` — a conversation surface, not a settings form: nickname, reachability and group invites fold behind a ⚙ toggle, the thread keeps real height with an empty-state prompt, and the composer is a multi-line textarea (Enter sends, Shift+Enter continues) whose button always reads **Send**. The card folds to its header (▾): it floats over the globe and takes pointer events, so while open it is also a hole in the map and dots behind it cannot be clicked — picking a new dot re-opens it. Conversation history **survives a restart** (`owllm:world-chat:threads` in localStorage, capped at `MAX_THREAD_MESSAGES`, sanitized on restore) because the relay only replays what it still holds *undelivered*; it must never go to the shared state mirror, which replicates every write to every window and device. **The relay half must be deployed for any of this to work** — `npm run deploy` in `services/world-presence/` (needs Cloudflare auth). Against a Worker built before the chat commit no `chat_challenge` is ever issued, so the card sits on "Connecting…" forever |
 | **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference
@@ -90,7 +90,10 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Project Card** (`.owllm/project.json`): committed per-repo config — goal,
   verify command(s), release config, solo/team default. Steward role lints it
   (rule-based, `cardLint.ts`). Releases run **deterministically on the host**
-  (bump → commit → tag → build → sign → publish → verify updater).
+  (bump → commit → tag → build → sign → publish → verify updater). The
+  Publisher card surfaces tracked app scratch such as `.tmp_wheels/` and can
+  de-track only those known runtime roots with `git rm --cached`, preserving
+  bytes on disk and avoiding model-invented cleanup shell.
 - **Job-specific project environments** (`projectEnvironment.ts`): new-project
   intent cards now persist a versioned workspace recipe, not only a team name.
   Web/React work opens a localhost preview beside OwLLM; responsive work uses a
@@ -147,16 +150,42 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue
   feeds the first pending step and auto-feed walks the rest at each clean run
-  end. Mounted inline on the Code page and as a modal on the Agents page —
+  end. Auto-feed is **ON by default** on both surfaces (absent flag = never
+  chosen = on); an explicit off/on is the user's word and persists across
+  restart, navigation and sync. It still only decides whether a live chain
+  CONTINUES — starting one is always a deliberate ▶ Start queue.
+  The queue control is a **state machine over the queue document** (a card
+  `sent` with no `finishedAt` = in flight), never a local "I pressed start"
+  flag: ▶ Start queue when idle → ⏳ Running (disabled) with a ✕ Stop beside
+  it → pressable again the moment the job finishes, fails or is stopped.
+  Stop/↺ Reset hand every in-flight card back as `pending` and release the
+  lease, so a window that crashed or was closed mid-job leaves a queue that
+  **recovers** (heartbeat expiry turns Running into ↺ Reset queue) instead of
+  one the user can never restart. Stop cancels the QUEUE, not the agent — the
+  run in flight keeps going, and its late run-end stamp is refused because the
+  card has left the run.
+  Mounted inline on the Code page and as a modal on the Agents page —
   ONE blob per project, so both surfaces are views of the same notebook.
   The Kanban plan board (NOW/NEXT/LATER) and its ⚡ Start batch action are
   built but **hidden** behind `SHOW_KANBAN = false`; the digest stops asking
   for a PLAN block while it is off.
   Cross-device: content syncs through the vault and merges per step
-  (union by id, most-advanced-status wins, tombstones for deletions) so a
-  step another PC finished can never come back as pending. The run-lease
-  (who drives the queue) stays device-local; a synced `runningOn` field is
-  advisory only and never blocks a second machine.
+  (union by id, most-advanced-status wins, tombstones for deletions — the
+  shared rules live in `runtime/notebookMerge.ts`) so a step another PC
+  finished can never come back as pending.
+  **Exactly one device drives a queue.** `autoFeedOwner` locks it between
+  windows on one PC (device-local, stripped before sync); the synced
+  `runningOn` is the cross-device lock. Its owner republishes a heartbeat
+  every 30s while the queue is live, and a peer holds the queue read-only —
+  *"Queue is running on \<PC\> — job N of M"*, Start disabled, Feed disabled,
+  with an explicit **Take over here** that keeps the queue's progress — until
+  that beat stops changing for 120s, then the lock releases so a crashed PC
+  never strands the list. Liveness is judged by whether the beat VALUE changed
+  and how long ago THIS device saw it change, never by subtracting a peer's
+  clock from the local one (device clocks are not synchronized).
+  Writes use optimistic concurrency on the monotonic `queueRev`: a save whose
+  base revision has been overtaken in storage reconciles against the winner
+  (same step-union rules) instead of overwriting the other device's progress.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
@@ -200,6 +229,11 @@ stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.
+Opening a workspace also sweeps the **parked** page worktrees of that project
+(`fleet_reclaim_page_caches`, background): git-ignored `target/`/`node_modules/`
+untouched for 24 h are removed rename-first, so a page you navigated away from
+stops hoarding gigabytes. Never the page you just opened, never `dist/` (that
+holds the downloaded module payloads), never source, a branch or a worktree.
 Both outer columns shrink independently to a 46px rail (`CodeColumnRails.tsx`)
 that keeps one large icon per feature the column holds — left 🧠 memory /
 📁 files / 🐙 GitHub, right 📓 notebook / 📊 usage / ⚡ rules / 🌐 browser.

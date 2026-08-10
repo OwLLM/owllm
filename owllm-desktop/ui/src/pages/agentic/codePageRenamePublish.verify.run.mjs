@@ -108,6 +108,19 @@ anchor("PublishCards.tsx", cards, "fixWithAgent consumes the dispatch outcome",
   'const outcome = onFixIssues(');
 anchor("PublishCards.tsx", cards, "fixWithAgent sends the full failed output, not the one-line rail summary",
   'const failedOutput = output?.kind === "err" ? output.body : activity.msg;');
+// Fix-with-agent must DELIVER the action, not just repair its cause. A long
+// green fix run that leaves the branch unsynced is the exact failure this
+// guards: the prompt has to name the pressed action and demand it be finished.
+anchor("PublishCards.tsx", cards, "fixWithAgent captures which action the user pressed",
+  'const failedAction = activity?.kind === "err" && output?.kind === "err" ? output.title : null;');
+anchor("PublishCards.tsx", cards, "the fix prompt names the requested action",
+  'The action the user asked for is: ${failedAction ?? "the last release action"}.');
+anchor("PublishCards.tsx", cards, "the fix prompt demands the action be completed, not just fixed",
+  "fixing the cause is not the deliverable, the finished action is.");
+anchor("PublishCards.tsx", cards, "the fix prompt re-runs the named action",
+  'Re-run "${failedAction}" and carry it to a terminal result.');
+anchor("PublishCards.tsx", cards, "the fix prompt requires a verified end state, not an assumption",
+  "0 ahead / 0 behind the remote branch");
 anchor("PublishCards.tsx", cards, "a no-model outcome surfaces as an inline error, not a fake success",
   'if (outcome === "no-model") {');
 anchor("PublishCards.tsx", cards, "a mid-run dispatch tells the user it rides the steer queue",

@@ -32,6 +32,7 @@ import {
 // github bindings so there's no parallel auth path.
 import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT } from "../pages/agentic/github";
 import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../pages/core/accountsStore";
 
 /** Open a URL in OwLLM's persistent browser so the session remains available to agents. */
 function openExternal(url: string) {
@@ -293,7 +294,10 @@ export default function WatcherDrawer({
   // AI chat (Slice 5): free-text questions answered by an auto-chosen model.
   const [draft, setDraft] = React.useState("");
   const [models, setModels] = React.useState<ModelInfo[]>([]);
-  const [accounts, setAccounts] = React.useState<AccountsStatusLite | null>(null);
+  // Informational only (drives the picker's enabled/dimmed entries). Seeded
+  // from the shared session cache so opening the drawer paints the badges in
+  // their final state instead of empty-then-filled.
+  const [accounts, setAccounts] = React.useState<AccountsStatusLite | null>(() => getCachedAccounts());
   const [server, setServer] = React.useState<ServerStatusT | null>(null);
   // Cloud use needs one explicit confirmation (the question + snapshot
   // leave the device). Holds the pending question while we wait.
@@ -386,9 +390,10 @@ export default function WatcherDrawer({
   React.useEffect(() => {
     if (!open) return;
     invoke<ModelInfo[]>("list_models").then((m) => setModels(Array.isArray(m) ? m : [])).catch(() => {});
-    invoke<AccountsStatusLite>("accounts_status").then(setAccounts).catch(() => {});
+    const unsubscribe = subscribeAccounts(() => setAccounts(getCachedAccounts()));
+    void fetchAccounts();
     invoke<ServerStatusT>("server_status").then(setServer).catch(() => {});
-    return () => { abortRef.current?.abort(); };
+    return () => { unsubscribe(); abortRef.current?.abort(); };
   }, [open]);
 
   /// Resolve which model answers. An EXPLICIT user pick (shared ModelPicker)

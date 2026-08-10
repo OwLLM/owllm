@@ -26,6 +26,7 @@ import {
 } from "../pages/agentic/dispatch";
 import { buildEntries, type AccountsStatusLite, type ModelPickerEntry } from "../pages/agentic/ModelPicker";
 import { runMemoryCurator } from "../pages/agentic/memoryCurator";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../pages/core/accountsStore";
 
 /// How a bridge sends a reply on its platform. The ONLY transport coupling the
 /// dispatch core needs — everything inbound (receiving/download) lives in each
@@ -175,7 +176,7 @@ type RouteDecision =
 export function useBridgeDispatch() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   const [server, setServer] = useState<ServerStatus>({ running: false, model_id: null, port: null });
   const [teams, setTeams] = useState<Team[]>([]);
   const [roleByName, setRoleByName] = useState<Map<string, RoleData>>(new Map());
@@ -191,9 +192,18 @@ export function useBridgeDispatch() {
   useEffect(() => {
     invoke<ProjectRow[]>("list_projects").then(setProjects).catch(() => {});
     invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
-    invoke<AccountsStatusLite>("accounts_status").then(setAccountsStatus).catch(() => {});
     invoke<TeamTemplateBackend[]>("list_team_templates").then(rows => setTeams(rows.map(toTeam))).catch(() => {});
     invoke<AgentRoleBackend[]>("list_agent_roles").then(rows => setRoleByName(rolesFromBackend(rows))).catch(() => {});
+  }, []);
+
+  // Provider presence — informational here too: it only decides which model
+  // the bridge's routing prefers, and the dispatch path re-checks for real.
+  // Served from the shared session cache instead of the 5s poll below, which
+  // re-ran the full CLI/PATH scan for the lifetime of the app.
+  useEffect(() => {
+    const unsubscribe = subscribeAccounts(() => setAccountsStatus(getCachedAccounts()));
+    void fetchAccounts();
+    return unsubscribe;
   }, []);
 
   // Periodic refresh — server status + projects so the bridge sees a freshly
@@ -203,7 +213,6 @@ export function useBridgeDispatch() {
     const tick = async () => {
       try { setServer(await invoke<ServerStatus>("server_status")); } catch {}
       try { setProjects(await invoke<ProjectRow[]>("list_projects")); } catch {}
-      try { setAccountsStatus(await invoke<AccountsStatusLite>("accounts_status")); } catch {}
     };
     tick();
     const id = window.setInterval(tick, 5000);

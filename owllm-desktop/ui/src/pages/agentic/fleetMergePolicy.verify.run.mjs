@@ -73,9 +73,10 @@ if (!fleet.includes('p == ".owllm/brainstorm.json"') ||
 const gitSource = fs.readFileSync(path.join(APP, "src-tauri/src/git.rs"), "utf8");
 const publishCards = fs.readFileSync(path.join(APP, "ui/src/pages/agentic/PublishCards.tsx"), "utf8");
 if (!gitSource.includes("pub nuisance_files: Vec<String>") ||
-    !gitSource.includes("crate::fleet::is_app_scratch(path)") ||
+    !gitSource.includes("fn is_tracked_runtime_path") ||
     !gitSource.includes("status_reports_tracked_runtime_but_keeps_project_card_committable") ||
-    !publishCards.includes("Use Fix with agent to safely de-track them") ||
+    !gitSource.includes("git_untrack_runtime_files") ||
+    !publishCards.includes("Clean tracked runtime") ||
     !publishCards.includes("Do not delete or ignore durable project data")) {
   fail("tracked runtime files are not surfaced through the constrained Fix-with-agent cleanup path");
 }

@@ -39,8 +39,15 @@ function BootCover() {
   // The cover masks the startup flash until the first real frame paints.
   // All three platforms now ship an OPAQUE window (Linux went opaque with
   // the Jetson stale-pixel fix — see AppShell's opaque-Linux comment), so
-  // the dark cover is correct everywhere. On non-Tauri contexts (vite dev,
+  // an opaque cover is correct everywhere. On non-Tauri contexts (vite dev,
   // Playwright/TwinForge) we skip it so screenshots see real content.
+  //
+  // It paints var(--bg-panel) — the token every shell variant uses for the
+  // app canvas — for the reason spelled out in index.html: the literal
+  // #06080d this used to hardcode matches no theme, so the cover WAS a
+  // flash. It mounts after the React tree, so in light mode the sequence
+  // was near-black splash → near-white app → near-black cover → near-white
+  // app: two full-contrast flips, both originating in this file.
   const [visible, setVisible] = React.useState(() => isTauriContext());
 
   React.useEffect(() => {
@@ -80,7 +87,7 @@ function BootCover() {
       style={{
         position: "fixed",
         inset: 0,
-        background: "#06080d",
+        background: "var(--bg-panel, #06080d)",
         zIndex: 2147483647,
         pointerEvents: "none",
       }}
@@ -98,6 +105,14 @@ async function boot() {
   } catch {
     /* never block startup on recovery */
   }
+  // Re-apply now that the mirror has rehydrated localStorage. On a WebView
+  // profile change the theme keys are missing for the call at module scope
+  // above, so that one paints the DEFAULT dark/indigo; without this the app
+  // would only pick up the user's real theme when useTheme's state
+  // initialisers read the restored values at mount — i.e. one frame late,
+  // as a visible repaint. bootstrapTheme is memoised, so this costs nothing
+  // in the normal case where localStorage was already intact.
+  bootstrapTheme();
   startStateMirror();
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

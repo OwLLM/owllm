@@ -676,18 +676,61 @@ fn safe_seg(s: &str) -> String {
 /// is built inside it. A Rust `target/` alone is 8-17 GB, so the pile of KEPT
 /// page/crashed worktrees (which the sweep never fully deletes because they hold
 /// unmerged edits) is what silently fills the disk. Reclaiming these loses
-/// nothing — they rebuild on demand.
-const BUILD_CACHE_DIR_NAMES: &[&str] = &["target", "node_modules", "dist"];
+/// nothing — they rebuild on demand from sources already on disk.
+///
+/// `dist/` is deliberately NOT in this list. It looks like build output, but
+/// `dist/modules/` is the module payload cache — multi-GB CUDA/Whisper archives
+/// that `build-modules.ps1` DOWNLOADS rather than compiles (9.4 GB on one
+/// machine here). `build-release.bat` skips regenerating it whenever
+/// `dist/modules/manifest.json` exists, precisely because re-fetching costs
+/// hours. The rest of a `dist/` is a few hundred MB, so excluding the whole name
+/// gives up almost nothing and removes any chance of eating that download cache.
+const BUILD_CACHE_DIR_NAMES: &[&str] = &["target", "node_modules"];
+
+/// Name given to a cache directory that has been renamed out of the way but not
+/// yet fully deleted. Deliberately not a build-cache name, so no build ever
+/// mistakes it for one, and deliberately dot-prefixed so it sorts out of sight.
+const QUARANTINE_PREFIX: &str = ".owllm-reclaimed-";
+
+/// Remove a build-cache directory RENAME-FIRST, so the caller can never leave a
+/// half-deleted one behind. `remove_dir_all` walks and unlinks in place: if any
+/// file is locked partway through — and on Windows a running `node` or `rustc`
+/// holds plenty — it stops with the directory still present but gutted. That
+/// wreckage still LOOKS like a populated `node_modules`, so the next build picks
+/// it up and fails confusingly. Observed for real while reclaiming: two
+/// `node_modules` were left as 40 MB stubs.
+///
+/// Renaming to a sibling first makes the outcome binary. Either the rename
+/// succeeds and the cache is atomically out of the build's way (any leftover
+/// wreckage is parked under an obviously-not-a-cache name, and the next sweep
+/// retries it), or it fails and nothing was touched at all.
+fn evict_cache_dir(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let quarantine = parent.join(format!("{QUARANTINE_PREFIX}{stamp}"));
+    if std::fs::rename(path, &quarantine).is_err() {
+        return false; // locked → leave the cache exactly as it was
+    }
+    // Best-effort from here: the cache is already out of the build's way, so a
+    // partial delete costs disk but can no longer confuse a build.
+    let _ = std::fs::remove_dir_all(&quarantine);
+    true
+}
 
 /// Strip regenerable build caches from `worktree` in place, preserving all
 /// source. A directory is removed only when BOTH hold: its name is a known build
 /// cache, AND git confirms it is ignored (so it is provably not tracked source
-/// nor the user's uncommitted untracked work). A cache touched in the last hour
-/// is left alone in case a build is live in it right now. The walk is bounded to
-/// a shallow depth so a deep dependency tree is never fully traversed.
-/// Best-effort; returns the number of cache directories removed.
-fn reclaim_build_caches(worktree: &Path) -> u32 {
-    fn walk(root: &Path, dir: &Path, depth: u32, removed: &mut u32) {
+/// nor the user's uncommitted untracked work). A cache modified within
+/// `min_idle_secs` is left alone in case a build is live in it right now. The
+/// walk is bounded to a shallow depth so a deep dependency tree is never fully
+/// traversed. Best-effort; returns the number of cache directories removed.
+fn reclaim_build_caches(worktree: &Path, min_idle_secs: u64) -> u32 {
+    fn walk(root: &Path, dir: &Path, depth: u32, min_idle_secs: u64, removed: &mut u32) {
         if depth == 0 {
             return;
         }
@@ -703,12 +746,19 @@ fn reclaim_build_caches(worktree: &Path) -> u32 {
             if name == ".git" {
                 continue;
             }
+            // Wreckage from an earlier sweep whose delete was interrupted. Retry
+            // it and never descend — otherwise a leftover would sit there
+            // forever, which is the very leak this function exists to stop.
+            if name.to_string_lossy().starts_with(QUARANTINE_PREFIX) {
+                let _ = std::fs::remove_dir_all(&path);
+                continue;
+            }
             let is_cache = name
                 .to_str()
                 .map(|n| BUILD_CACHE_DIR_NAMES.contains(&n))
                 .unwrap_or(false);
             if !is_cache {
-                walk(root, &path, depth - 1, removed);
+                walk(root, &path, depth - 1, min_idle_secs, removed);
                 continue;
             }
             // Only delete a build-cache dir git actually ignores — guarantees it
@@ -716,24 +766,35 @@ fn reclaim_build_caches(worktree: &Path) -> u32 {
             let ignored = git(root, &["check-ignore", "-q", &path.to_string_lossy()])
                 .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
-            // Skip a cache modified within the last hour: a build may be live in
-            // it, and yanking target/ mid-compile forces a needless rebuild.
+            // Skip a recently-modified cache: a build may be live in it, and
+            // yanking target/ mid-compile forces a needless rebuild. Can't read
+            // the mtime → assume recent → keep.
             let recent = std::fs::metadata(&path)
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .map(|e| e.as_secs() < 3600)
-                .unwrap_or(false);
-            if ignored && !recent && std::fs::remove_dir_all(&path).is_ok() {
+                .map(|e| e.as_secs() < min_idle_secs)
+                .unwrap_or(true);
+            if ignored && !recent && evict_cache_dir(&path) {
                 *removed += 1;
             }
             // Never descend into a build-cache-named dir.
         }
     }
     let mut removed = 0;
-    walk(worktree, worktree, 4, &mut removed);
+    walk(worktree, worktree, 4, min_idle_secs, &mut removed);
     removed
 }
+
+/// A build cache is live for an hour after it is written — long enough that a
+/// compile finishing while the sweep runs is never disturbed.
+const BUILD_CACHE_LIVE_SECS: u64 = 60 * 60;
+
+/// A Code-page worktree must have gone a full day without a build before its
+/// caches are reclaimed. Long enough that pages the user flips between during a
+/// working day keep their `node_modules` (re-installing is a slow surprise),
+/// short enough that a parked page stops hoarding gigabytes.
+const PAGE_CACHE_IDLE_SECS: u64 = 24 * 60 * 60;
 
 /// Suppresses the console window that a spawned `git` would otherwise FLASH on
 /// Windows. Without this every git call (and fleet_worktree_create makes ~6)
@@ -1644,7 +1705,7 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
         // Keep the worktree (unmerged edits to inspect) but reclaim its
         // regenerable build caches — otherwise every kept worktree hoards an
         // 8-17 GB `target/` forever. Source + git state are left intact.
-        reclaim_build_caches(&PathBuf::from(&args.worktree_path));
+        reclaim_build_caches(&PathBuf::from(&args.worktree_path), BUILD_CACHE_LIVE_SECS);
         return Ok(());
     }
     // Best-effort: remove worktree, then delete the branch. Don't
@@ -1718,6 +1779,73 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
         }
     }
     let _ = git(&cwd, &["worktree", "prune"]);
+    Ok(removed)
+}
+
+/// Compare two paths for "same directory on this host" — case- and
+/// separator-insensitive, trailing separator ignored. Good enough to decide
+/// whether a listed worktree is the one the caller is using right now; it is
+/// only ever used to SKIP work, so a false non-match costs a cache, never data.
+fn same_worktree(a: &Path, b: &Path) -> bool {
+    fn norm(p: &Path) -> String {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+    !norm(a).is_empty() && norm(a) == norm(b)
+}
+
+/// Reclaim regenerable build caches from this project's PARKED Code-page
+/// worktrees. Returns how many cache directories were removed.
+///
+/// What this guards: nothing functional. It is pure disk hygiene — every
+/// directory it removes is git-ignored compiler output the next build
+/// regenerates from sources already on disk. No worktree, branch, commit or
+/// source file is ever touched.
+///
+/// Why it has to exist: a Code-page worktree had only two possible fates, and
+/// neither reclaimed anything while the page stayed open. `fleet_cleanup_orphans`
+/// deliberately skips `owllm-page/*` (those hold the user's unmerged edits), and
+/// `fleet_worktree_remove` only strips caches when the page is explicitly closed
+/// and confirmed. So merely navigating away from a page left its `target/` on
+/// disk forever — measured as ~12 GB of parked `target/` across four workspaces
+/// on one machine, which is why that disk refilled days after being cleared.
+///
+/// Called in the BACKGROUND when a page opens a workspace, mirroring how
+/// `fleet_cleanup_orphans` runs at team-run start. `active_worktree` is the
+/// worktree the caller just opened and is always skipped, so opening a page can
+/// never disturb its own build.
+#[tauri::command]
+pub async fn fleet_reclaim_page_caches(
+    project_cwd: String,
+    active_worktree: String,
+) -> Result<u32, String> {
+    let cwd = PathBuf::from(&project_cwd);
+    if !is_git_repo(&cwd)? {
+        return Ok(0);
+    }
+    let active = PathBuf::from(&active_worktree);
+    let mut removed = 0u32;
+    if let (true, out, _) = git(&cwd, &["worktree", "list", "--porcelain"])? {
+        let mut path: Option<String> = None;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(p.trim().to_string());
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                let branch = b.trim().trim_start_matches("refs/heads/").to_string();
+                let Some(p) = path.take() else { continue };
+                if !branch.starts_with("owllm-page/") {
+                    continue;
+                } // Code pages only — team runs have their own sweep.
+                let wt = git_reported_path_for_host(&cwd, &p);
+                if same_worktree(&wt, &active) {
+                    continue;
+                } // never the page being opened
+                removed += reclaim_build_caches(&wt, PAGE_CACHE_IDLE_SECS);
+            }
+        }
+    }
     Ok(removed)
 }
 

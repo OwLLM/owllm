@@ -93,7 +93,27 @@ function resolveHeaderHex(accentHex: string): string {
   return `#${mix(a.r, NAVY_R)}${mix(a.g, NAVY_G)}${mix(a.b, NAVY_B)}`;
 }
 
-function applyAccent(hex: string) {
+// Applied-state memo — the second half of the startup-flash fix.
+//
+// bootstrapTheme() paints the persisted theme before the first frame; then
+// useTheme()'s effects run on mount and ask for the SAME values again.
+// Re-writing identical custom properties invalidates style for the whole
+// document and re-fires both IPC pushes below, so the overlay frame repaints
+// a beat after the window is revealed — a second visible flash on top of the
+// wrong-colour first one. Skipping a no-op application removes that repaint
+// while leaving a genuine theme change untouched.
+let appliedMode: Mode | null = null;
+let appliedAccent: string | null = null;
+let appliedAccentKey: AccentSelection | null = null;
+let appliedTextSignature: string | null = null;
+
+function applyAccent(hex: string, accentKey: AccentSelection) {
+  // Both the CSS write and the two pushes are keyed on the pair, because the
+  // overlay stores the KEY ("indigo") while CSS needs the resolved hex — a
+  // custom swatch equal to a named one must still update the overlay.
+  if (appliedAccent === hex && appliedAccentKey === accentKey) return;
+  appliedAccent = hex;
+  appliedAccentKey = accentKey;
   const root = document.documentElement;
   const rgb = hexToRgb(hex);
   root.style.setProperty("--accent", hex);
@@ -128,13 +148,30 @@ function applyAccent(hex: string) {
     invoke("browser_set_chrome", { bg: resolveHeaderHex(hex) })
       .catch(() => { /* ignore */ });
   } catch { /* not in Tauri ctx */ }
+  // Push to the overlay-frame webview so its corners flip immediately on a
+  // picker click. Rust relays this with `eval`; the overlay can neither
+  // receive Tauri events (no capability covers that window) nor read
+  // localStorage (binding it to the origin's storage area leaked GBs — see
+  // src-tauri/src/overlay_frame.rs). Cold boot is injected at window creation
+  // from the SQLite state mirror, so this sits behind the memo above: at boot
+  // it fires once from bootstrapTheme instead of again from useTheme's mount
+  // effect, which used to re-eval the overlay right as the window was revealed.
+  try {
+    invoke("overlay_frame_set_accent", { accent: accentKey })
+      .catch(() => { /* overlay disabled or not in Tauri ctx */ });
+  } catch { /* not in Tauri ctx */ }
 }
 
 function applyMode(mode: Mode) {
+  if (appliedMode === mode) return;
+  appliedMode = mode;
   document.documentElement.setAttribute("data-theme", mode);
 }
 
 function applyTextColor(selection: TextColorSelection, mode: Mode, guiColor: string) {
+  const signature = `${selection}|${mode}|${guiColor}`;
+  if (appliedTextSignature === signature) return;
+  appliedTextSignature = signature;
   const root = document.documentElement;
   const preferred = resolveTextColor(selection, mode);
   const tokens = buildTextThemeTokens(preferred, mode, guiColor);
@@ -163,17 +200,8 @@ export function useTheme() {
   }, [mode]);
 
   useEffect(() => {
-    applyAccent(guiColor);
+    applyAccent(guiColor, accentKey);
     saveGuiColor(accentKey);
-    // Push to the overlay-frame webview so its corners flip immediately on a
-    // picker click. Rust relays this with `eval`; the overlay can neither
-    // receive Tauri events (no capability covers that window) nor read
-    // localStorage (binding it to the origin's storage area leaked GBs — see
-    // src-tauri/src/overlay_frame.rs). Cold boot is injected at window
-    // creation from the SQLite state mirror.
-    invoke("overlay_frame_set_accent", { accent: accentKey }).catch(() => {
-      /* overlay disabled or not in Tauri ctx */
-    });
   }, [accentKey, guiColor]);
 
   useEffect(() => {
@@ -190,13 +218,22 @@ export function useTheme() {
   };
 }
 
-// Bootstrap apply — call once before React mounts so the very first
-// frame paints with the correct theme (no flash of unstyled content).
+// Bootstrap apply — run before React mounts so the very first frame paints
+// with the correct theme (no flash of unstyled content).
+//
+// Safe (and expected) to call more than once: main.tsx calls it again once
+// restoreStateMirror() has rehydrated localStorage, because on a WebView
+// profile change the theme keys are absent on the first call and the app
+// would otherwise paint the DEFAULT dark/indigo and only switch to the user's
+// real theme when useTheme's state initialisers read the restored values at
+// mount. The appliers above are memoised, so the repeat call is free when
+// nothing changed and repaints exactly once when it did.
 export function bootstrapTheme() {
   const mode = readMode();
-  const guiColor = resolveGuiColor(readGuiColor());
+  const accentKey = readGuiColor();
+  const guiColor = resolveGuiColor(accentKey);
   const textColor = readTextColor();
   applyMode(mode);
-  applyAccent(guiColor);
+  applyAccent(guiColor, accentKey);
   applyTextColor(textColor, mode, guiColor);
 }

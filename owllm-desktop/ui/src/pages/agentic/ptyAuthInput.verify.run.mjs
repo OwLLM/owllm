@@ -27,5 +27,11 @@ check("macOS command-paste is bridged before xterm can drop it", /onPasteCapture
 check("terminal exposes an explicit clipboard paste control", /navigator\.clipboard\.readText\(\)/.test(terminal) && /Paste clipboard into terminal/.test(terminal));
 check("Claude callback codes return to the matching live PTY", /owllm:claude-auth-code/.test(terminal) && /authProvider !== "claude_cli"/.test(terminal));
 check("Accounts identifies the PTY provider for safe callback routing", /authProvider=\{activeTerm\.backend\}/.test(accounts));
+// Reconnecting to the SAME provider used to reuse the exited terminal: identical
+// props meant no remount, so the visible terminal wrote to a session Rust had
+// already dropped and silently ignored every keystroke and paste.
+check("every same-provider Connect remounts a fresh PTY", /launchId:\s*number/.test(accounts) && /key=\{activeTerm\.launchId\}/.test(accounts) && /launchId:\s*\+\+terminalLaunchId\.current/.test(accounts));
+check("late async spawns are killed instead of adopted", /if \(disposed\)[\s\S]{0,240}pty_kill/.test(terminal) && /disposed = true/.test(terminal));
+check("PTY write failures are visible and actionable", /\[input error\][\s\S]{0,200}click Connect/.test(terminal));
 
 console.log(`PTY auth input verification: ${passed}/${passed} passed`);

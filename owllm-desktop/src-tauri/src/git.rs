@@ -75,6 +75,43 @@ pub struct GitStatus {
 /// Cap on the per-poll `files` payload (see GitStatus::total).
 const MAX_STATUS_FILES: usize = 2000;
 
+const TRACKED_RUNTIME_PATHS: &[&str] = &[
+    ".owllm-inbox",
+    ".owllm/brainstorm.json",
+    ".owllm/eval-traces.jsonl",
+    ".tmp_wheels",
+];
+
+fn is_tracked_runtime_path(path: &str) -> bool {
+    let p = path.trim().replace('\\', "/");
+    crate::fleet::is_app_scratch(&p)
+        || p == ".tmp_wheels"
+        || p.starts_with(".tmp_wheels/")
+}
+
+fn compact_tracked_runtime_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut has_tmp_wheels = false;
+    for path in paths {
+        let p = path.trim().replace('\\', "/");
+        if p.is_empty() || !is_tracked_runtime_path(&p) {
+            continue;
+        }
+        if p == ".tmp_wheels" || p.starts_with(".tmp_wheels/") {
+            has_tmp_wheels = true;
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &p) {
+            out.push(p);
+        }
+    }
+    if has_tmp_wheels {
+        out.push(".tmp_wheels".to_string());
+    }
+    out.sort();
+    out
+}
+
 /// `git status --porcelain=v1 -b` parsed into a compact summary.
 #[tauri::command]
 pub async fn git_status(dir: String) -> Result<GitStatus, String> {
@@ -137,27 +174,15 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
         }
         // Query only known runtime paths; scanning every tracked file on the
         // Code page's five-second status poll is wasteful on large repos.
-        let nuisance_files = git(
-            &dir,
-            &[
-                "ls-files",
-                "--",
-                ".owllm-inbox",
-                ".owllm/brainstorm.json",
-                ".owllm/eval-traces.jsonl",
-            ],
-        )
-        .ok()
-        .filter(|(ok, _, _)| *ok)
-        .map(|(_, tracked, _)| {
-            tracked
-                .lines()
-                .map(str::trim)
-                .filter(|path| crate::fleet::is_app_scratch(path))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+        let mut args = vec!["ls-files", "--"];
+        args.extend_from_slice(TRACKED_RUNTIME_PATHS);
+        let nuisance_files = git(&dir, &args)
+            .ok()
+            .filter(|(ok, _, _)| *ok)
+            .map(|(_, tracked, _)| {
+                compact_tracked_runtime_paths(tracked.lines().map(str::to_string))
+            })
+            .unwrap_or_default();
         Ok(GitStatus {
             is_repo: true,
             branch,
@@ -172,9 +197,51 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
     .map_err(|e| format!("join: {e}"))?
 }
 
+/// Remove only app-generated runtime paths from Git tracking while preserving
+/// their working-tree bytes. The cleanup is root-based and argument-based, so
+/// it cannot collapse a full `git ls-files` listing into one overlong pathspec.
+#[tauri::command]
+pub async fn git_untrack_runtime_files(dir: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        match git(&dir, &["rev-parse", "--is-inside-work-tree"]) {
+            Ok((true, out, _)) if out.trim() == "true" => {}
+            _ => return Err("not a Git worktree".to_string()),
+        }
+
+        let mut ls_args = vec!["ls-files", "--"];
+        ls_args.extend_from_slice(TRACKED_RUNTIME_PATHS);
+        let (ok, tracked, err) = git(&dir, &ls_args)?;
+        if !ok {
+            return Err(format!("git ls-files: {}", err.trim()));
+        }
+        let paths = compact_tracked_runtime_paths(tracked.lines().map(str::to_string));
+        if paths.is_empty() {
+            return Ok("No tracked OWLLM runtime files found.".to_string());
+        }
+
+        let mut rm_args = vec!["rm", "--cached", "-r", "--"];
+        rm_args.extend(paths.iter().map(String::as_str));
+        let (rm_ok, out, rm_err) = git(&dir, &rm_args)?;
+        if !rm_ok {
+            return Err(format!("git rm --cached: {}", rm_err.trim()));
+        }
+        Ok(format!(
+            "Removed from Git tracking, kept on disk:\n{}{}",
+            paths.join("\n"),
+            if out.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{}", out.trim())
+            }
+        ))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{git_status, truncate_on_char_boundary};
+    use super::{compact_tracked_runtime_paths, git_status, truncate_on_char_boundary};
     use std::{fs, process::Command};
 
     #[tokio::test]
@@ -231,6 +298,24 @@ mod tests {
         let s = format!("{}💥", "x".repeat(199_999));
         let t = truncate_on_char_boundary(&s, 200_000);
         assert_eq!(t.len(), 199_999); // backed off past the 4-byte emoji start
+    }
+
+    #[test]
+    fn tracked_runtime_paths_are_compacted_before_cleanup() {
+        let paths = compact_tracked_runtime_paths([
+            ".tmp_wheels/browser-verify/package.json".to_string(),
+            ".tmp_wheels/browser-verify/node_modules/playwright/package.json".to_string(),
+            ".owllm/brainstorm.json".to_string(),
+            ".owllm/project.json".to_string(),
+            "src/main.rs".to_string(),
+        ]);
+        assert_eq!(
+            paths,
+            vec![
+                ".owllm/brainstorm.json".to_string(),
+                ".tmp_wheels".to_string(),
+            ]
+        );
     }
 }
 

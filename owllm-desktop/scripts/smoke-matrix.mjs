@@ -64,6 +64,7 @@ const TRIPWIRES = [
   ["src-tauri/src/browser.rs", /browser_start_inner\(&app\)\?/, "serialized browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18/v0.8.96)"],
   ["src-tauri/src/paths.rs", /fn webview_profile_scope[\s\S]*exe\.parent\(\)\.map\(Path::to_path_buf\)/, "installed app never reuses poisoned default EBWebView profile (v0.8.97)"],
   ["src-tauri/src/paths.rs", /(?=[\s\S]*isolated-webview-v2)(?=[\s\S]*Default\/Local Storage)(?=[\s\S]*max_by_key)/, "isolated WebView upgrades preserve the richest chat/notebook profile (v0.8.98)"],
+  ["src-tauri/src/autostart.rs", /fn stable_autostart_exe[\s\S]*!is_volatile_path\(path\)/, "an AppImage run from /tmp is never written into login autostart — the next reboot wiped it and the entry could only self-repair on a launch that no longer happened (v1.0.8)"],
   ["src-tauri/Cargo.toml", /tao[\s\S]*rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92"/, "Tao PeekMessageW runs outside input mutexes — no keyboard re-entrancy deadlock (v0.9.2)"],
   ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
   ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
@@ -79,6 +80,19 @@ const TRIPWIRES = [
   ["src-tauri/src/browser.rs", /WindowEvent::CloseRequested \{ api, \.\. \}[\s\S]{0,500}api\.prevent_close\(\)/, "Linux title-bar close retains WebKitGTK windows instead of aborting Thor with X11 BadDrawable"],
   ["src-tauri/src/browser.rs", /#\[cfg\(not\(target_os = "linux"\)\)\]\s*fn destroy_browser_windows/, "Linux browser stop never destroys a WebKitGTK top-level window on NVIDIA/Tegra"],
   ["src-tauri/src/browser.rs", /fn apply_linux_device[\s\S]{0,900}settings\.set_user_agent/, "Linux device emulation changes WebKitGTK in place instead of destroy/rebuild"],
+  // Every agent-browser window is built by a #[tauri::command(async)], i.e. on a
+  // tokio worker. Touching AppKit/GTK window state there crashed OwLLM three
+  // times on 2026-08-09 — twice trapping in NSWMWindowCoordinator under
+  // setStyleMask: (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
+  // NSViewUpdateVibrancyForSubtree from the half-swapped NSThemeFrame (v1.0.7).
+  // GTK is the same story with a louder failure: it asserts rather than
+  // corrupting state, so linux_expose_resize_edges off-thread panicked a
+  // v1.0.10 session outright ("GTK may only be used from the main thread",
+  // tokio-rt-worker, 2026-08-09 22:52).
+  // The native tweaks must stay behind the on_ui_thread hop; the negative
+  // lookaheads are what actually fail if a bare call comes back.
+  ["src-tauri/src/browser.rs", /^(?![\s\S]*mac_enable_native_resize\(&win\);)(?![\s\S]*apply_chrome\(&win\);)(?![\s\S]*linux_expose_resize_edges\(&win\);)(?=[\s\S]*fn on_ui_thread\(win: &Window)(?=[\s\S]*on_ui_thread\(&win, mac_enable_native_resize\))(?=[\s\S]*on_ui_thread\(&win, apply_chrome\))(?=[\s\S]*on_ui_thread\(&win, linux_expose_resize_edges\))[\s\S]*$/, "agent-browser native window setup runs on the UI thread, never on the tokio worker that built the window (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
+  ["src-tauri/src/lib.rs", /^(?=[\s\S]*UI_THREAD\.set\(std::thread::current\(\)\.id\(\)\))(?=[\s\S]*fn is_ui_thread\(\) -> bool)[\s\S]*$/, "the event-loop thread is recorded at startup so native window code can tell it apart from a worker (fixes the v1.0.7/v1.0.10 random crashes of 2026-08-09)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamMoonshot/, "shared dispatch routes kimi — Code page 'unknown model_id' (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
@@ -112,6 +126,23 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,200}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
+  // A THIRD corruption shape, and the one that actually bit: an orphaned
+  // `.git/index.lock` (app killed mid-write). Git then refuses add/commit/reset
+  // alike, and nothing removed it — a 0-byte lock from 2026-07-29 left one
+  // device's clone 31,997 commits behind origin for eleven days. Device sync
+  // still looked healthy because its `reset --hard` was best-effort: it kept
+  // re-ingesting an eleven-day-old state/devices/ and reporting "no change".
+  ["src-tauri/src/vault.rs", /fn is_lock_contention[\s\S]{0,300}file exists/, "an orphaned git lock is recognized, not mistaken for a healthy repo (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /is_lock_contention\(&e\) && repair_stale_lock\(&e\)/, "run_git's self-heal ladder clears an orphaned lock and retries (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
+  // The breaker's own doc says "any success clears it immediately", but the
+  // ladder's fallthrough arm returned Ok without ever calling note_repo_health —
+  // so only a successful POST-HEAL retry could reset it. Once armed, the backoff
+  // stayed pinned at its 1 h cap forever. Seen on a second device: one "owllm
+  // sync" commit per hour, on the hour, with no reset/merge in between.
+  ["src-tauri/src/vault.rs", /other => \{\s*note_repo_health\(&other\);/, "a successful git command clears the sync circuit breaker (v1.0.9)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).
@@ -123,6 +154,15 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/AgentsPage.tsx", /toolCalls\.slice\(toolsWin\.start\)/, "Tool Calls view renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
   ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
+  // Orphaned WebKit helpers — Ubuntu's recurring "internal error" (SIGBUS).
+  // A helper that outlives us keeps executing code mmap'd out of the AppImage
+  // mount the runtime tears down the moment we leave, so its next cold page
+  // fault is a SIGBUS. Measured on the reference Jetson: with an unresponsive
+  // web process both helpers survived the app process for the full 30s
+  // observation window, and apport archived six such SIGBUS reports.
+  ["src-tauri/src/lib.rs", /RunEvent::Exit =>[\s\S]{0,900}webkit_children::reap\(/, "WebKit helpers are reaped before the process leaves, so none can outlive the AppImage mount"],
+  ["src-tauri/src/lib.rs", /\.setup\(\|app\|[\s\S]{0,400}webkit_children::install_shutdown_signals\(/, "SIGHUP/SIGINT/SIGTERM route through the normal exit path so the reaper actually runs"],
+  ["src-tauri/src/webkit_children.rs", /process\.parent\(\) != Some\(me\)[\s\S]{0,200}continue/, "the reaper kills only this instance's own helpers, never a second OwLLM instance's"],
   ["../.github/workflows/release.yml", /UPDATER_OUTPUT="stage\/latest-\$\{\{ matrix\.rust_target \}\}\.json"[\s\S]{0,100}generate-updater-manifest\.mjs/, "release builds generate target-qualified updater manifests instead of expecting Tauri to emit latest.json"],
   ["../.github/workflows/release.yml", /Verify updater manifest generation[\s\S]{0,180}generate-updater-manifest\.verify\.run\.mjs/, "updater manifest regression check runs before every release build"],
   ["../.github/workflows/release.yml", /TAURI_BUILD_MAX_ATTEMPTS=3[\s\S]{0,900}retrying in 15 seconds/, "transient platform-bundler downloads retry without discarding a completed native build"],
@@ -145,6 +185,36 @@ function runStatic() {
     try { ok = re.test(fs.readFileSync(p, "utf8")); }
     catch { note = `${guard} — FILE MISSING: ${rel}`; }
     record("S", `${rel} :: ${re.source.slice(0, 32)}`, ok ? "PASS" : "FAIL", ok ? guard : note);
+  }
+  runVaultAtomicWriteInvariant();
+}
+
+// An invariant, not a single pattern: NO production vault writer may truncate a
+// file in place. `git add`/`commit` hashes through mmap, and shortening the
+// inode under an active read faults past EOF — SIGBUS, which Ubuntu surfaces as
+// "internal error". Proven from a core dump on the reference Jetson: git faulted
+// at byte 143156 of a 193558-byte project JSON the sync had just rewritten.
+// Enumerating writers (rather than pinning one call site) is what stops the next
+// vault feature from quietly reintroducing it.
+function runVaultAtomicWriteInvariant() {
+  const rel = "src-tauri/src/vault.rs";
+  try {
+    const production = fs.readFileSync(path.join(APP, rel), "utf8").split("#[cfg(test)]", 1)[0];
+    const truncating = [...production.matchAll(/std::fs::(?:write|copy)\s*\(|\.truncate\s*\(\s*true\s*\)/g)];
+    const helper = /fn atomic_write[\s\S]{0,2200}create_new\(true\)[\s\S]{0,500}file\.sync_all\(\)[\s\S]{0,300}replace_file\(&temp, path\)/.test(production);
+    const unix = /#\[cfg\(not\(windows\)\)\][\s\S]{0,260}std::fs::rename\(temp, path\)/.test(production);
+    const windows = /#\[cfg\(windows\)\][\s\S]{0,900}MoveFileExW[\s\S]{0,500}MOVEFILE_REPLACE_EXISTING/.test(production);
+    const ok = truncating.length === 0 && helper && unix && windows;
+    record(
+      "S",
+      `${rel} :: vault working-tree writes are atomic`,
+      ok ? "PASS" : "FAIL",
+      ok
+        ? "a Git mmap reader keeps a stable inode; no SIGBUS during vault sync"
+        : `${truncating.length} truncating writer(s); helper=${helper} unix=${unix} windows=${windows}`,
+    );
+  } catch (e) {
+    record("S", `${rel} :: vault working-tree writes are atomic`, "FAIL", `cannot inspect vault.rs: ${e.message}`);
   }
 }
 

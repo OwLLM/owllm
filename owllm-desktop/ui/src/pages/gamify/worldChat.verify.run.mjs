@@ -316,6 +316,29 @@ check("focus is never stolen without a selection",
   "target starts empty, so merely opening the map must not grab the caret");
 
 // ------------------------------------------------------------------
+// 6c. The panel must not let the user send to a node that cannot receive
+// ------------------------------------------------------------------
+
+check("the panel detects when the selected dot is the user's own",
+  /const isSelf = Boolean\(target && target === chat\.selfId\)/.test(panelTsx),
+  "messaging yourself only produces a confusing server error");
+check("the panel checks that a peer has published chat keys",
+  /const hasKeys = Boolean\(peer\?\.edPub && peer\?\.xPub\)/.test(panelTsx),
+  "without keys there is nothing to seal a message to");
+check("the composer is hidden for the user's own dot",
+  /!isSelf/.test(panelTsx) && /\(openRoom \|\| hasKeys\)/.test(panelTsx));
+check("the panel explains why a node cannot be messaged",
+  /data-ui="WorldChat:hint"/.test(panelTsx));
+check("chat errors are surfaced as readable text",
+  /chatErrorText/.test(worldChatTs) && /chat_request_invalid/.test(worldChatTs));
+// A bare /catch \(reason\)[\s\S]*?commit\(\{ error:/ would match the unrelated
+// decode catch that has always been there, so count the seal-failure handlers
+// themselves: request, say and sayToRoom must each report instead of dropping.
+check("a seal failure is reported instead of silently dropping the message",
+  (worldChatTs.match(/\} catch \(reason\) \{\s*commit\(\{ error: chatErrorText\(String\(reason\)\) \}\);\s*\}/g) || []).length >= 3,
+  "sealFor throws when a peer has no keys — all three send paths must surface that");
+
+// ------------------------------------------------------------------
 // 7. Execute the real helpers, rather than only reading them
 // ------------------------------------------------------------------
 

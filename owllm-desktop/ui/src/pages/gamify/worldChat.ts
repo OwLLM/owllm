@@ -156,6 +156,24 @@ function trimText(value: unknown): string {
   return typeof value === "string" ? value.slice(0, MAX_CHAT_TEXT) : "";
 }
 
+/** Turn terse protocol error codes into something a human can read. */
+export function chatErrorText(code: string): string {
+  switch (code) {
+    case "chat_request_invalid": return "You cannot send a chat request to that node.";
+    case "chat_send_invalid": return "That message could not be sent.";
+    case "peer_unknown": return "The person you tried to reach is not on the map right now.";
+    case "peer_blocked": return "You have blocked this person.";
+    case "peer_not_reachable": return "This person is not accepting new conversations right now.";
+    case "sender_suspended": return "Your account has been temporarily suspended from first contact.";
+    case "request_quota_exhausted": return "You have sent too many chat requests recently. Try again later.";
+    case "not_a_contact": return "You cannot message someone until they have accepted your request.";
+    case "no_pending_request": return "There is no pending request to accept.";
+    case "not_authenticated": return "World Chat is not connected.";
+    case "rate_limited": return "You are sending messages too quickly. Slow down.";
+    default: return code;
+  }
+}
+
 function asIdList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -333,7 +351,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
         return;
       }
       case "chat_error": {
-        commit({ error: String(frame.error ?? "chat error") });
+        commit({ error: chatErrorText(String(frame.error ?? "chat error")) });
         return;
       }
       default:
@@ -376,30 +394,42 @@ export function createWorldChatStore(deps: WorldChatDeps) {
 
     /** First contact. The intro line is sealed just like any other message. */
     async request(id: string, text: string) {
-      lookup([id]);
-      const box = await sealFor(id, trimText(text) || "Hello from OwLLM");
-      if (write({ type: "chat_request", to: id, box })) {
-        appendMessage(threadKey(id), { id: 0, kind: "request", from: id, room: "", text: trimText(text), ts: now(), mine: true });
+      try {
+        lookup([id]);
+        const box = await sealFor(id, trimText(text) || "Hello from OwLLM");
+        if (write({ type: "chat_request", to: id, box })) {
+          appendMessage(threadKey(id), { id: 0, kind: "request", from: id, room: "", text: trimText(text), ts: now(), mine: true });
+        }
+      } catch (reason) {
+        commit({ error: chatErrorText(String(reason)) });
       }
     },
 
     async say(id: string, text: string) {
-      const body = trimText(text).trim();
-      if (!body) return;
-      const box = await sealFor(id, body);
-      if (write({ type: "chat_send", to: id, box })) {
-        appendMessage(threadKey(id), { id: 0, kind: "message", from: id, room: "", text: body, ts: now(), mine: true });
+      try {
+        const body = trimText(text).trim();
+        if (!body) return;
+        const box = await sealFor(id, body);
+        if (write({ type: "chat_send", to: id, box })) {
+          appendMessage(threadKey(id), { id: 0, kind: "message", from: id, room: "", text: body, ts: now(), mine: true });
+        }
+      } catch (reason) {
+        commit({ error: chatErrorText(String(reason)) });
       }
     },
 
     /** One sealed box per member, so a room stays end to end. */
     async sayToRoom(room: string, text: string) {
-      const body = trimText(text).trim();
-      if (!body || !room) return;
-      const members = Object.values(state.peers).filter((peer) => peer.id !== state.selfId && peer.edPub && peer.xPub);
-      const boxes = await Promise.all(members.map(async (peer) => ({ to: peer.id, box: await sealFor(peer.id, body) })));
-      if (write({ type: "room_send", room, boxes })) {
-        appendMessage(threadKey("", room), { id: 0, kind: "room", from: state.selfId, room, text: body, ts: now(), mine: true });
+      try {
+        const body = trimText(text).trim();
+        if (!body || !room) return;
+        const members = Object.values(state.peers).filter((peer) => peer.id !== state.selfId && peer.edPub && peer.xPub);
+        const boxes = await Promise.all(members.map(async (peer) => ({ to: peer.id, box: await sealFor(peer.id, body) })));
+        if (write({ type: "room_send", room, boxes })) {
+          appendMessage(threadKey("", room), { id: 0, kind: "room", from: state.selfId, room, text: body, ts: now(), mine: true });
+        }
+      } catch (reason) {
+        commit({ error: chatErrorText(String(reason)) });
       }
     },
 

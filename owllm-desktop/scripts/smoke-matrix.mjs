@@ -108,6 +108,16 @@ const TRIPWIRES = [
   // the moment a project opened the agent browser (v0.9.64, gdb-confirmed).
   ["src-tauri/src/browser.rs", /fn is_active_tab[\s\S]{0,900}TABS\.try_lock\(\)/, "is_active_tab never blocks the native UI-thread callback (v0.9.65 agent-browser freeze)"],
   ["src-tauri/src/browser.rs", /fn capture_reply[\s\S]{0,900}REPLIES\.try_lock\(\)/, "capture_reply never blocks the native UI-thread callback (v0.8.96)"],
+  // Disk-writes storm (2026-08-10): the project list is polled every few seconds
+  // and selects graph_json / chat_json / agent_logs_json — megabytes per row. With
+  // no index behind its ORDER BY, SQLite sorted that payload through the external
+  // merge sorter and spilled it back to disk on EVERY poll. macOS microstackshots
+  // put 745/770 samples in read_projects -> vdbeSorterFlushPMA -> pwrite, dirtying
+  // 8.6 GB in 90 min (v1.0.13) and 34 GB in one session (v1.0.11), which trips the
+  // daily disk-writes limit and stalls the app. The index makes the sort a plain
+  // ordered scan. Guarded here because the gate does not run `cargo test`.
+  ["src-tauri/src/projects.rs", /CREATE INDEX IF NOT EXISTS idx_agent_projects_updated_at/, "project list orders from an index, so polling never spills the JSON columns to disk (v1.0.11/v1.0.13 disk-writes storm)"],
+  ["src-tauri/src/projects.rs", /ORDER BY updated_at DESC/, "the project list read still orders by updated_at — the column the index above covers"],
   // Zeroed-ref git storm (2026-08-01): a crash mid-ref-write left refs/heads/main
   // as 41 NUL bytes, every sync retried forever, and a failing gc --auto wrote a
   // pack per attempt — 5,046 packs / 11.5 GB, ~2 git procs/sec, which starved

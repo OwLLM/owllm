@@ -16,7 +16,9 @@ set -euo pipefail
 VERSION="${VERSION:?set VERSION, e.g. VERSION=1.0.14}"
 TAG="v$VERSION"
 REPO="${REPO:-OwLLM/owllm}"
-KEY="${KEY:-$HOME/.tauri-keys/owllm-updater.key}"
+APP="${APP:-/c/1_Git/LocaLLM/owllm-desktop}"
+# publish-release.sh reads the key as repo-relative .tauri-keys/, not from $HOME.
+KEY="${KEY:-$APP/.tauri-keys/owllm-updater.key}"
 W="${W:-$HOME/rel-$VERSION}"
 LXROOT="${LXROOT:-owllm-build/owllm-desktop/src-tauri/target/release/bundle}"
 
@@ -61,7 +63,6 @@ done
 #    Same invocation as publish-release.sh step 2/5: on Windows the tauri CLI is
 #    a native binary that cannot read a /c/... path, so hand it Windows paths.
 say "signing"
-APP="${APP:-/c/1_Git/LocaLLM/owllm-desktop}"
 to_windows_path() { cygpath -w "$1" 2>/dev/null || wslpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
 NODE_RUNNER="${OWLLM_NODE:-}"
 [ -n "$NODE_RUNNER" ] || NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)"

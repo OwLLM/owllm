@@ -163,6 +163,12 @@ type CodeState = {
   utilityPanelOpen?: boolean;
   secondaryMessages?: Msg[];
   secondaryDraft?: string;
+  /// The second agent's run flag — persisted in the SAME chatRuntime payload as
+  /// the primary coder's `busy`, not component state. A second-agent turn must
+  /// survive navigating away exactly like the coder's does: the store outlives
+  /// the page, so a remounted page re-paints the still-growing transcript and
+  /// still shows Stop, instead of coming back idle over a half-written reply.
+  secondaryBusy?: boolean;
   /// Selectable last-reply auto-feed between the two panes (per direction):
   /// when on, an agent's finished reply is fed to the OTHER agent as its next
   /// user turn (labelled ⇄). Both on = agent-to-agent conversation, capped.
@@ -331,12 +337,27 @@ const PSYCHEDELIC_AURA_HALO = "0 0 12px rgba(176,124,255,.22), 0 0 20px rgba(127
 // another page. The primary coder's `busy` already lives per-page in
 // chatRuntime and keeps updating after the page unmounts (module singleton), so
 // a run started on page A stays visible while you work on page B — the parent
-// reads it straight from chatRuntime. The MOUNTED page additionally reports its
-// aggregate busy (coder OR second agent OR just-chat) here so the visible tab
-// glows for ANY active agent; that extra signal is cleared on unmount (the
-// second agent is aborted on unmount anyway, so it can't run in the background).
+// reads it straight from chatRuntime. The second agent's busy lives in that same
+// payload for the same reason, so it glows across pages too. The MOUNTED page
+// additionally reports its aggregate busy here, which is what covers just-chat
+// (still page-local); that extra signal is cleared on unmount.
 // `done` marks a page whose run FINISHED while you were on another tab — a badge
 // that persists on its tab until you open it.
+// The second agent's live AbortController, keyed by chatRuntime session id.
+// MODULE-level on purpose: a component ref dies with the page, so Stop after
+// navigating away and back could no longer reach the run it was pointing at.
+// Mirrors chatRuntime's own live-handle map (runtime/chatRuntime.ts).
+const secondaryAborts = new Map<string, AbortController>();
+const secondAgentRun = {
+  arm(sid: string, ctrl: AbortController): void { secondaryAborts.set(sid, ctrl); },
+  /// Clear only if `ctrl` is still the armed one, so a finished turn never
+  /// disarms the NEXT turn's controller.
+  disarm(sid: string, ctrl: AbortController): void {
+    if (secondaryAborts.get(sid) === ctrl) secondaryAborts.delete(sid);
+  },
+  stop(sid: string): void { secondaryAborts.get(sid)?.abort(); },
+};
+
 const pageBusyExtra = new Map<string, boolean>();
 const pageDone = new Set<string>();
 const activityListeners = new Set<() => void>();
@@ -373,7 +394,7 @@ function loadPageSession(pageId: string): CodeState | null {
     const raw = readHotBlob(pageSessionKey(pageId));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    const st = closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
+    const st = closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false, secondaryBusy: false });
     // The chosen model lives in the sync-ready settings layer (owllm:settings),
     // NOT only in this blob: this blob carries the machine-specific workspace
     // path and is denied from vault sync, so a model kept only here could never
@@ -390,7 +411,9 @@ function savePageSession(pageId: string, s: CodeState | null | undefined): void 
   // NOT localStorage: this ~1 MB blob is rewritten every 250 ms while a stream
   // runs, and Blink copies every localStorage mutation into every same-origin
   // renderer — see HOT_BLOB_PREFIXES in runtime/stateMirror.
-  writeHotBlob(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false }, dropImages));
+  // Both run flags are persisted false: a run cannot survive app close, so a
+  // stored `true` would strand the pane permanently (Send blocked, Stop dead).
+  writeHotBlob(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false, secondaryBusy: false }, dropImages));
   // Mirror the model choice into the sync-ready settings layer (see load).
   // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
   // so this neither persists an empty pick nor churns on unrelated state saves.
@@ -645,7 +668,6 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model. Rule-based popup — no auto-pick happens behind it.
   const [modelRequired, setModelRequired] = useState<{ where: string; detail?: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const secondaryAbortRef = useRef<AbortController | null>(null);
 
   // ---- Right column: Super User (rules + notebook) — user spec 2026-07-04 ----
   // Rules/notebook scope: reuse the AGENTIC project's id when this folder is
@@ -958,7 +980,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   }, [SID, catalogProjects, stx.projectId, stx.workspace, stx.projectRoot,
     stx.repoUrl, stx.isolated, stx.busy, stx.preparing]);
 
-  const [secondaryBusy, setSecondaryBusy] = useState(false);
+  // Read from chatRuntime (see CodeState.secondaryBusy), NOT component state:
+  // a page change must not report the second agent as idle while its turn is
+  // still streaming.
+  const secondaryBusy: boolean = stx.secondaryBusy ?? false;
   // `chatBusy` belongs to the global no-project Just Chat surface. Including it
   // here made every project chat glow while an unrelated chat was running (and
   // could look permanently active after navigation). This pane is the coder.
@@ -991,12 +1016,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       notify(`Could not open the browser: ${String(e)}`, "error");
     }
   };
-  useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
+  // NO abort-on-unmount here. Switching page unmounts this component, and
+  // aborting the second agent from a cleanup froze its transcript mid-reply —
+  // the exact orphaning chatRuntime exists to prevent (the coder never did
+  // this). The run keeps streaming into the store; closing the TAB is what
+  // stops it (see closePage), which is also where the coder is stopped.
   // Tell the tab strip this page has an agent running (coder, second agent, or
   // just-chat) so its tab glows for ANY active agent while it's the visible
-  // page. The coder's cross-page glow comes from chatRuntime directly; this
-  // extra is cleared on unmount, so a background page never falsely glows for a
-  // second-agent/just-chat run it can no longer sustain.
+  // page. The coder's AND the second agent's cross-page glow come from
+  // chatRuntime directly; this extra is cleared on unmount, so a background page
+  // never falsely glows for a just-chat run it can no longer sustain.
   useEffect(() => {
     pageActivity.reportExtra(pageId, busy || secondaryBusy || chatBusy);
   }, [pageId, busy, secondaryBusy, chatBusy]);
@@ -1168,6 +1197,14 @@ function CodeWorkspace({ pageId, onTitle }: {
       return { ...cur, busy: false, runEndedAt: live ? Date.now() : cur.runEndedAt };
     });
   };
+  // Second-agent run flag — same store as the coder's `busy`, so it keeps being
+  // written (and read back) after this page unmounts.
+  const setSecondaryBusy = (v: boolean) => setField("secondaryBusy", v);
+  /// The LIVE flag, read past this render's closure. `sendSecondary` can be
+  /// invoked from ⇄ auto-feed long after the render that captured it, and a
+  /// stale `false` there would start a second overlapping turn.
+  const isSecondaryBusyNow = (): boolean =>
+    ((chatRuntime.getSnapshot(SID).payload as CodeState | null)?.secondaryBusy ?? false);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
   const setChatMode = (v: boolean) => setField("chatMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
@@ -2483,7 +2520,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const attachments = fromComposer ? secondaryAttachments : [];
     const images = imageAttachments(attachments);
     if (!text && attachments.length === 0) return;
-    if (secondaryBusy) {
+    if (isSecondaryBusyNow()) {
       // No steer queue on the second pane (yet) — say so instead of dropping.
       setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏸ Second agent is mid-turn — this message was not delivered. Wait or press Stop, then resend.", ts: Date.now() }]);
       return;
@@ -2499,7 +2536,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     setSecondaryUndo(null);
     setSecondaryBusy(true);
     const ctrl = new AbortController();
-    secondaryAbortRef.current = ctrl;
+    secondAgentRun.arm(SID, ctrl);
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
@@ -2537,7 +2574,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         return msgs;
       });
       setSecondaryBusy(false);
-      secondaryAbortRef.current = null;
+      secondAgentRun.disarm(SID, ctrl);
     }
     // ⇄ Selectable auto-feed back to the primary (send() steers if it's busy).
     if (!aborted && replyText.trim() && feedSecondaryToPrimary) feedAcross("primary", replyText);
@@ -2629,7 +2666,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       value={secondaryDraft}
       onChange={setSecondaryDraft}
       onSend={() => { void sendSecondary(); }}
-      onStop={() => { secondaryAbortRef.current?.abort(); }}
+      onStop={() => { secondAgentRun.stop(SID); }}
       busy={secondaryBusy}
       disabled={secondaryBusy}
       placeholder="Message the second agent… (same workspace, its own conversation & model)"
@@ -4309,6 +4346,10 @@ export default function CodePage() {
         args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
       }).catch(() => { /* best-effort */ });
     }
+    // The second agent survives page CHANGE (it streams into chatRuntime), so
+    // closing the tab is what has to stop it — otherwise its turn would keep
+    // running against a workspace that is being removed, unreachable by Stop.
+    secondAgentRun.stop(sidForPage(id));
     dropPageSession(id);
     pageActivity.clearDone(id);   // drop any lingering finished-badge for the closed page
     setPages((ps) => {
@@ -4336,11 +4377,12 @@ export default function CodePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages.map((p) => p.id).join(",")]);
 
-  // A page is "working" if its coder is busy (read straight from chatRuntime, so
-  // background pages stay lit) OR the mounted page reports a second-agent/chat run.
+  // A page is "working" if its coder OR its second agent is busy (both read
+  // straight from chatRuntime, so background pages stay lit) OR the mounted page
+  // reports a just-chat run.
   const pageWorking = (id: string): boolean => {
     const snap = chatRuntime.getSnapshot(sidForPage(id)).payload as CodeState | null;
-    return !!snap?.busy || pageActivity.extraBusy(id);
+    return !!snap?.busy || !!snap?.secondaryBusy || pageActivity.extraBusy(id);
   };
 
   // Badge a page whose run FINISHED while you were on another tab (busy→idle on a

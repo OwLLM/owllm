@@ -222,7 +222,9 @@ Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
 Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
-divided composer). The chat pane carries its own header — model picker +
+divided composer). Both agents' runs live in `chatRuntime`, so navigating away
+mid-turn keeps them streaming and the tab keeps glowing; closing the tab stops
+them. The chat pane carries its own header — model picker +
 `Clear` (run state) + `Clear history` (chat window **and** saved threads) —
 and the composer lives in the same column as the chat, so input and window
 stay width-aligned beside the full-height file rail and right column.

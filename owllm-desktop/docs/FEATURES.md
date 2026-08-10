@@ -222,7 +222,16 @@ Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
 Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
-divided composer). Both agents' runs live in `chatRuntime`, so navigating away
+divided composer). The second agent works in **its own worktree** (`code-2`,
+cut from the project alongside the page's), so the two never overwrite each
+other's files; its header carries **⤵ Merge into agent 1**, which commits its
+work, seals the primary's uncommitted edits first, then merges into the page
+branch and names any conflicting files. A non-git folder can't be split, so
+both share it — the pane says so rather than implying isolation. The page's
+Chat mode governs **both** panes (the second used to keep write tools in
+"discuss only" mode), and closing/switching the project is blocked while
+*either* agent runs — it deletes the checkouts. Both agents' runs live in
+`chatRuntime`, so navigating away
 mid-turn keeps them streaming and the tab keeps glowing; closing the tab stops
 them. **Each pane's Stop is independent**: a run registers its own cancel scope
 (`setCliCancelScope`, keyed by the run's AbortSignal) before dispatching, so

@@ -153,10 +153,19 @@ type CodeState = {
   // Mirrors the Agents-page team timer; rendered as the header RunTimerChip.
   runStartedAt?: number;
   runEndedAt?: number;
-  // Second-agent chat pane — a parallel coder sharing the SAME project/session
-  // (workspace, worktree, page id) as the primary chat, but with its OWN
-  // independent, owner-tagged message history, draft, and model selection.
+  // Second-agent chat pane — a parallel coder on the same project/session as
+  // the primary chat, with its OWN independent, owner-tagged message history,
+  // draft, model selection AND (on a git project) its own git worktree.
   secondaryOpen?: boolean;
+  /// The second agent's private worktree + branch, cut from the SAME project
+  /// HEAD as the primary's. Two agents editing one checkout is last-writer-wins
+  /// — and a subscription CLI writes files itself, so no in-app lock can reach
+  /// it. Separate worktrees are the only mechanism that makes the two panes
+  /// genuinely parallel. Empty on a non-git project: there is nothing to cut a
+  /// worktree from, so both agents fall back to sharing the folder (disclosed
+  /// in the pane) exactly as they always did.
+  secondaryWorkspace?: string;
+  secondaryBranch?: string;
   // Outer coding-page columns. Missing values preserve the historical default
   // (both visible); explicit user choices persist with this page's session.
   projectRailOpen?: boolean;
@@ -214,6 +223,17 @@ type WtCreate =
   | { status: "ready"; path: string; branch: string; baseSha: string }
   | { status: "notAGitRepo" }
   | { status: "dirtyWorkingTree"; details: string }
+  | { status: "error"; message: string };
+// fleet_worktree_finalize / fleet_worktree_merge — used to fold the SECOND
+// agent's private worktree into the page (1st agent's) branch on request.
+type WtFinalize =
+  | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
+  | { status: "noChanges" }
+  | { status: "error"; message: string };
+type WtMerge =
+  | { status: "merged"; commitSha: string; filesChanged: number }
+  | { status: "noChanges" }
+  | { status: "conflict"; files: string[] }
   | { status: "error"; message: string };
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
@@ -988,6 +1008,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const transcriptWin = useStreamWindow(messages.length, SID);
   const secondaryWin = useStreamWindow(secondaryMessages.length, SID);
   const secondaryDraft: string = stx.secondaryDraft ?? "";
+  // The directory the SECOND agent actually edits. Its own worktree on a git
+  // project; the shared folder when there is nothing to cut a worktree from.
+  const secondaryWorkspace: string = stx.secondaryWorkspace ?? "";
+  const secondaryBranch: string = stx.secondaryBranch ?? "";
+  const secondaryCwd: string = secondaryWorkspace || workspace;
+  const secondaryIsolated: boolean = !!secondaryWorkspace;
   const secondaryModelId: string = stx.secondaryModelId ?? "";
   const feedPrimaryToSecondary: boolean = stx.feedPrimaryToSecondary ?? false;
   const feedSecondaryToPrimary: boolean = stx.feedSecondaryToPrimary ?? false;
@@ -1361,7 +1387,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // real folder stays untouched until "Merge to main". A non-git folder can't be
   // isolated — fall back to editing it directly (old behaviour) with a notice.
   const openWorkspace = async (dir: string) => {
-    if (!dir || busy) return;
+    // Switching project drops both worktrees (see removeWorktree) — never while
+    // either agent is mid-run.
+    if (!dir || busy || secondaryBusy) return;
     const name = dir.replace(/^.*[\\/]/, "");
     const catalogProject = await ensureCatalogProject(dir, name);
     const normPath = (p: string | undefined) =>
@@ -1396,6 +1424,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       createdDeviceName: catalogProject?.created_device_name || base.createdDeviceName || deviceIdentity.name,
       projectRoot: dir,
       workspace: "",
+      // The old worktrees are being dropped above — a stale second-agent path
+      // here would point the pane at a deleted checkout.
+      secondaryWorkspace: "",
+      secondaryBranch: "",
       modelId: base.modelId || modelId,
       pageRename: keepRename,
       busy: false,
@@ -1456,6 +1488,15 @@ function CodeWorkspace({ pageId, onTitle }: {
   // the worktree, so callers warn the user first when there may be unmerged work.
   const removeWorktree = async (st: CodeState): Promise<void> => {
     if (!st.isolated || !st.workspace || !st.projectRoot) return;
+    // The second agent has its OWN worktree on the same project — dropping only
+    // the primary's would leak a checkout (and its build caches) forever.
+    if (st.secondaryWorkspace) {
+      try {
+        await invoke("fleet_worktree_remove", {
+          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false },
+        });
+      } catch { /* best-effort cleanup */ }
+    }
     try {
       await invoke("fleet_worktree_remove", {
         args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
@@ -1463,8 +1504,88 @@ function CodeWorkspace({ pageId, onTitle }: {
     } catch { /* best-effort cleanup */ }
   };
 
+  /// The second agent's private checkout, created on first use.
+  ///
+  /// Cut from the project's HEAD exactly like the primary's, so both panes start
+  /// from the same committed state and then diverge without touching each
+  /// other's files. Created LAZILY: a page whose second pane is never used must
+  /// not pay for (or leave behind) a second checkout. Returns the cwd the second
+  /// agent should run in — the shared folder when the project isn't a git repo,
+  /// which is the only case where the two panes still share a tree.
+  const ensureSecondaryWorktree = async (): Promise<string> => {
+    const cur = (chatRuntime.getSnapshot(SID).payload as CodeState | null) ?? DEFAULT_CODE_STATE;
+    if (cur.secondaryWorkspace) return cur.secondaryWorkspace;
+    // Non-git (or non-isolated) project: nothing to cut. Share the folder and
+    // say so, rather than silently pretending the panes are independent.
+    if (!cur.isolated || !cur.projectRoot || !cur.workspace) return cur.workspace;
+    let outcome: WtCreate;
+    try {
+      outcome = await invoke<WtCreate>("fleet_worktree_create", {
+        projectCwd: cur.projectRoot, agentName: "code-2", runId: pageId, branchPrefix: "owllm-page",
+      });
+    } catch (e: any) {
+      outcome = { status: "error", message: String(e?.message ?? e) };
+    }
+    if (outcome.status !== "ready") {
+      const why = outcome.status === "dirtyWorkingTree"
+        ? `"${cur.projectRoot.replace(/^.*[\\/]/, "")}" has uncommitted changes — commit or stash them, then send again.`
+        : outcome.status === "notAGitRepo" ? "not a git repo" : outcome.message;
+      notify(`Second agent couldn't get its own copy (${why}) — it is sharing the 1st agent's files for now.`, "error");
+      return cur.workspace;
+    }
+    chatRuntime.setPayload(SID, (p) => ({
+      ...((p as CodeState) ?? DEFAULT_CODE_STATE),
+      secondaryWorkspace: outcome.path, secondaryBranch: outcome.branch,
+    }));
+    notify(`Second agent works on its own copy (${outcome.branch}) — use "⇩ Merge into 1st" to bring its work over.`);
+    return outcome.path;
+  };
+
+  /// Fold the second agent's private worktree into the page (1st agent's)
+  /// branch. From there the existing Publisher card commits/merges to main —
+  /// there is deliberately no second publish path.
+  ///
+  /// The primary's work is COMMITTED first: a conflicting squash-merge resets
+  /// the target checkout to HEAD, which would otherwise throw away whatever the
+  /// 1st agent had uncommitted in it.
+  const [mergingSecondary, setMergingSecondary] = useState(false);
+  const mergeSecondaryIntoPrimary = async () => {
+    const cur = (chatRuntime.getSnapshot(SID).payload as CodeState | null) ?? DEFAULT_CODE_STATE;
+    if (!cur.secondaryWorkspace || !cur.secondaryBranch || !cur.workspace) return;
+    if (mergingSecondary) return;
+    if (isSecondaryBusyNow()) { notify("Second agent is still working — Stop it or wait, then merge.", "error"); return; }
+    setMergingSecondary(true);
+    try {
+      const sealed = await invoke<WtFinalize>("fleet_worktree_finalize", {
+        worktreePath: cur.secondaryWorkspace, agentName: "code-2", summary: "second agent",
+      });
+      if (sealed.status === "error") { notify(`Couldn't commit the 2nd agent's work: ${sealed.message}`, "error"); return; }
+      if (sealed.status === "noChanges") { notify("Second agent hasn't changed any files yet — nothing to merge."); return; }
+      // Seal the 1st agent's own edits before a merge that may reset it.
+      await invoke<WtFinalize>("fleet_worktree_finalize", {
+        worktreePath: cur.workspace, agentName: "code", summary: "before merging the 2nd agent",
+      }).catch(() => null);
+      const merged = await invoke<WtMerge>("fleet_worktree_merge", {
+        projectCwd: cur.workspace, agentName: "code-2", branch: cur.secondaryBranch,
+      });
+      if (merged.status === "merged") {
+        notify(`⇩ Merged the 2nd agent's work into ${cur.branch ?? "this page"} (${merged.filesChanged} file(s)). Use the Publish card to send it on.`);
+      } else if (merged.status === "noChanges") {
+        notify("Nothing new from the 2nd agent — already up to date.");
+      } else if (merged.status === "conflict") {
+        notify(`Both agents edited the same lines in: ${merged.files.slice(0, 6).join(", ")}. Nothing was overwritten — the 2nd agent's branch (${cur.secondaryBranch}) still holds its version. Ask one of them to reconcile those files.`, "error");
+      } else {
+        notify(`Merge failed: ${merged.message}`, "error");
+      }
+    } catch (e: any) {
+      notify(`Merge failed: ${String(e?.message ?? e)}`, "error");
+    } finally {
+      setMergingSecondary(false);
+    }
+  };
+
   const pickWorkspace = async () => {
-    if (busy) return;
+    if (busy || secondaryBusy) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const dir = await open({ directory: true, multiple: false, title: translateUiText("Pick a project folder") });
@@ -1514,12 +1635,14 @@ function CodeWorkspace({ pageId, onTitle }: {
   // Close the current project back to the onboarding screen (its session stays
   // saved on disk and reappears in Recent projects).
   const closeProject = async () => {
-    if (busy) return;
+    // Both agents' worktrees are deleted below — a run in EITHER pane would lose
+    // its checkout mid-edit, so both flags gate this.
+    if (busy || secondaryBusy) return;
     if (stx.isolated && stx.workspace) {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          translateUiText(`Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`),
+          translateUiText(`Close this project? Unmerged changes in its worktree (${stx.branch})${stx.secondaryWorkspace ? ` and the 2nd agent's (${stx.secondaryBranch})` : ""} will be discarded. Merge to main first to keep them.`),
           { title: translateUiText("Close project"), kind: "warning" },
         );
         if (!ok) return;
@@ -2311,6 +2434,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
+    cwd: string,
     opts?: { withEvents?: boolean; attachments?: Attachment[] },
   ): Promise<string> => {
     // The second agent runs its OWN model (falling back to the primary's when
@@ -2320,10 +2444,16 @@ function CodeWorkspace({ pageId, onTitle }: {
     const isLocal = provider === "local" || provider === "tuned";
     const attachments = opts?.attachments ?? [];
     const imgs = imageAttachments(attachments);
+    // The page's Chat/Plan mode governs BOTH panes. "Discuss only, nothing is
+    // modified" was a lie while the second agent still held write tools.
+    const chatOnly = agentMode === "chat";
+    const roTools = ["read_file", "list_dir", "grep", "glob", "web_search", "web_fetch"];
+    const runtimeTools = chatOnly ? roTools : ["all"];
     await refreshBrowserState();
     const browserLine = getBrowserStateLine();
     const sys = system + formatDirectivesBlock(directivesRef.current)
-      + (browserLine ? `\n\n${browserLine}` : "");
+      + (browserLine ? `\n\n${browserLine}` : "")
+      + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
     const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     showSecondaryMemoryPack(pack);
     if (isLocal) {
@@ -2333,13 +2463,13 @@ function CodeWorkspace({ pageId, onTitle }: {
       return streamLocalChat({
         port, modelId: secModel, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
-        signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
+        signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: cwd,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
-        allowedTools: ["all"],
+        allowedTools: runtimeTools,
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, ["all"], imgs.length ? imgs : undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, cwd, history, true, onSecondaryThought, runtimeTools, imgs.length ? imgs : undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -2590,7 +2720,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     let replyText = "";
     try {
       notify("Second agent working…");
-      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
+      // Its own checkout, cut on first use — so the two agents can edit the same
+      // project at the same time without overwriting each other.
+      const cwd = await ensureSecondaryWorktree();
+      replyText = await runSecondaryTurn(CODING_SYSTEM(cwd), text || "(read the attached file)", history, ctrl.signal, cwd, { withEvents: true, attachments });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -3660,8 +3793,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       `}</style>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
-        <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        <button onClick={closeProject} disabled={busy || secondaryBusy} title={secondaryBusy && !busy ? "The 2nd agent is working — closing would delete its copy" : "Back to the project list (your files stay on disk)"} style={btn}>← Projects</button>
+        <button onClick={pickWorkspace} disabled={busy || secondaryBusy} title={secondaryBusy && !busy ? "The 2nd agent is working — switching would delete its copy" : workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
         <span title={`This chat was created on ${stx.createdDeviceName || deviceIdentity.name}. Its active folder belongs only to this computer.`} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--fg-muted)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px", whiteSpace: "nowrap" }}>
           🖥 {stx.createdDeviceName || deviceIdentity.name}
         </span>
@@ -3997,11 +4130,30 @@ function CodeWorkspace({ pageId, onTitle }: {
           }}>
             <div data-ui="code-secondary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
+              {/* Where it actually edits. A shared tree is the one case where
+                  the two agents CAN overwrite each other, so it is never left
+                  implicit. */}
+              <span
+                data-ui="code-secondary-workspace-badge"
+                title={secondaryIsolated
+                  ? `Its own copy of the project on branch ${secondaryBranch} — the 1st agent's files are untouched until you merge.`
+                  : "This project isn't a git repo, so both agents edit the SAME folder and can overwrite each other. Run \"git init\" in it to give each agent its own copy."}
+                style={{ fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 999, whiteSpace: "nowrap", border: "1px solid var(--border)", color: secondaryIsolated ? "#8fe3a8" : "#ffb877" }}
+              >{secondaryIsolated ? "own copy" : "⚠ shared folder"}</span>
               <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
                 <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
                 ⇄ to 1st
               </label>
               <span style={{ flex: 1 }} />
+              {secondaryIsolated && (
+                <button
+                  data-ui="code-secondary-merge"
+                  onClick={() => { void mergeSecondaryIntoPrimary(); }}
+                  disabled={secondaryBusy || mergingSecondary}
+                  title={`Bring the 2nd agent's work into ${branch ?? "this page"}, where the Publish card can send it on. Overlapping edits stop with both sides kept.`}
+                  style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}
+                >{mergingSecondary ? "⇩ Merging…" : "⇩ Merge into 1st"}</button>
+              )}
               {secondaryUndo && (
                 <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
               )}
@@ -4013,7 +4165,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             <div className="selectable-chat" data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
             {secondaryMessages.length === 0 ? (
               <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
-                Second agent — a parallel coder on the same workspace, with its own conversation and its own model (pick one above, or it uses the primary chat's model).
+                Second agent — a parallel coder on this project, with its own conversation, its own model (pick one above, or it uses the primary chat's model) and its own copy of the files, so the two never overwrite each other. Use ⇩ Merge into 1st to bring its work over.
               </div>
             ) : (
               secondaryMessages.slice(secondaryWin.start).map((m, i0) => {
@@ -4390,7 +4542,7 @@ export default function CodePage() {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          translateUiText(`Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`),
+          translateUiText(`Close this page? Its private worktree (${st.branch})${st.secondaryWorkspace ? ` and the 2nd agent's (${st.secondaryBranch})` : ""} and any unmerged changes are removed. Merge first to keep them.`),
           { title: translateUiText("Close page"), kind: "warning" },
         );
         if (!ok) return;
@@ -4401,6 +4553,13 @@ export default function CodePage() {
       void invoke("fleet_worktree_remove", {
         args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
       }).catch(() => { /* best-effort */ });
+      // The second agent has its own checkout on this page — leaving it behind
+      // would leak a worktree (and its build caches) that nothing ever sweeps.
+      if (st.secondaryWorkspace) {
+        void invoke("fleet_worktree_remove", {
+          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false },
+        }).catch(() => { /* best-effort */ });
+      }
     }
     // The second agent survives page CHANGE (it streams into chatRuntime), so
     // closing the tab is what has to stop it — otherwise its turn would keep

@@ -52,7 +52,7 @@ import {
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
 import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
-import { detectRunBlocker, type RunBlocker } from "./runBlockers";
+import { detectRunBlocker, detectRunFailure, type RunBlocker } from "./runBlockers";
 import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
@@ -1881,6 +1881,13 @@ export async function withCliAuthRetry<T>(
       return result;
     } catch (e: any) {
       const msg = e?.message ?? String(e);
+      // A CLI that was KILLED (OOM, Stop) writes nothing, so the only place its
+      // real cause can be explained is here — same single funnel the refusal
+      // check uses, for the same reason: ~20 call sites would drift apart.
+      // Reported before the abort check, so a run the user stopped still gets
+      // an honest "you stopped it" instead of a bare exit code.
+      const failure = detectRunFailure(msg);
+      if (failure) _blockerHandler?.({ ...failure, backend });
       if (signal.aborted) throw e;
       // A WSL project executes its own distro-local Codex, independently of
       // the green Windows Accounts binary. New subscription models can reject

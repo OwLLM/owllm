@@ -119,6 +119,30 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   step that clears it, in the thread and as a toast — detected once for every
   backend inside `withCliAuthRetry`, since a refusal arrives as a normal reply,
   not an error.
+- **Silent-death diagnostics** (`detectRunFailure` in `runBlockers.ts`): a CLI
+  that is KILLED writes nothing, so it used to surface only as
+  `claude CLI exited 1 — no stdout or stderr`. Two causes now get named instead,
+  on the error side of the same `withCliAuthRetry` funnel:
+  * **Linux out-of-memory.** A WSL-isolated project runs the CLI *inside* the
+    distro, whose default cap is 50% of host RAM; the kernel SIGKILLs the
+    biggest process. `sandbox::wsl_oom_report` reads `/var/log/kern.log` +
+    `dmesg` (ignoring any kill older than 10 min, so a stale OOM is never
+    blamed) and reports the process and the sizes. The notice carries a
+    one-click **⬆ Raise WSL memory** button → `sandbox_raise_memory`, which
+    merges `[wsl2] memory`/`swap` into `%USERPROFILE%\.wslconfig` (75% of host
+    RAM, never lowering a higher value the user set) and deliberately does NOT
+    run `wsl --shutdown`, which would kill every running agent.
+  * **You pressed Stop.** Kills we perform are recorded per-pid, so the run
+    reports "you cancelled this run" rather than a fault.
+  A real diagnostic — especially an auth envelope — still wins, so the
+  token-refresh retry keeps firing.
+- **Stop is scoped**: the agentic page's per-run Cancel calls `cli_cancel_scope`
+  with the project dir instead of `cli_cancel_all`, so stopping one run no
+  longer tree-kills every other project's live CLI (each survivor then reported
+  a bare non-zero exit). Children register under their `cwd` automatically; the
+  dock's Stop stays global. MCP-gateway tool results are capped at 60k chars
+  with an explicit truncation notice, so OwLLM's own tools can't be what blows
+  up an agent's context.
 - **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane +
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue

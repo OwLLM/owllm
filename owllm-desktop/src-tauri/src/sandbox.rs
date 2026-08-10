@@ -1361,6 +1361,310 @@ pub(crate) fn ensure_sparse_config() -> Result<bool, String> {
     }
 }
 
+// ---- WSL MEMORY: the OOM-killer that reads as "CLI exited 1, no output" -----
+// A WSL-isolated project runs the agent CLI INSIDE the distro, and WSL2's
+// default memory cap is 50% of host RAM. A context-heavy run (minified bundles,
+// large greps) can pass that cap, at which point the Linux OOM killer SIGKILLs
+// the biggest process on the box — usually the CLI itself. It dies without
+// flushing, so the app only sees a non-zero exit with empty stdout/stderr while
+// the real cause sits in the distro's kernel log. Host runs never hit this:
+// Windows pages to disk instead of killing.
+//
+// Two halves, both here: raise the cap (`ensure_memory_config`) and, when it
+// still happens, READ the kernel log and say so (`wsl_oom_report`).
+
+/// Recommended WSL2 `[wsl2] memory` / `swap` for this host, in GB.
+/// 75% of physical RAM (vs WSL's 50% default) leaves Windows headroom while
+/// giving a context-heavy agent room to finish; swap = half of that, capped, so
+/// a spike pages instead of being killed. Floors keep tiny hosts usable.
+/// Pure given `host_ram_gb` so it is unit-testable on every OS.
+fn recommended_wsl_memory_gb(host_ram_gb: u32) -> (u32, u32) {
+    let mem = ((host_ram_gb as u64 * 3) / 4).clamp(4, 64) as u32;
+    let swap = (mem / 2).clamp(2, 16);
+    (mem, swap)
+}
+
+/// Merge `memory=`/`swap=` into a `.wslconfig`'s `[wsl2]` section, mirroring
+/// `merge_sparse_into_wslconfig`. Returns the new file text, or `None` when the
+/// file ALREADY grants at least this much (never lowers a user's own higher
+/// limit). Preserves every other setting/section. Pure + unit-tested.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_memory_into_wslconfig(existing: &str, memory_gb: u32, swap_gb: u32) -> Option<String> {
+    let cur_mem = wslconfig_key_gb(existing, "memory");
+    let cur_swap = wslconfig_key_gb(existing, "swap");
+    if cur_mem.is_some_and(|m| m >= memory_gb) && cur_swap.is_some_and(|s| s >= swap_gb) {
+        return None;
+    }
+    let want_mem = cur_mem.unwrap_or(0).max(memory_gb);
+    let want_swap = cur_swap.unwrap_or(0).max(swap_gb);
+    let is_key = |l: &str, k: &str| {
+        l.trim_start()
+            .to_ascii_lowercase()
+            .starts_with(&format!("{k}="))
+            || l.trim_start()
+                .to_ascii_lowercase()
+                .starts_with(&format!("{k} ="))
+    };
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    let mut wrote_mem = false;
+    let mut wrote_swap = false;
+    for l in lines.iter_mut() {
+        if is_key(l, "memory") {
+            *l = format!("memory={want_mem}GB");
+            wrote_mem = true;
+        } else if is_key(l, "swap") {
+            *l = format!("swap={want_swap}GB");
+            wrote_swap = true;
+        }
+    }
+    if !wrote_mem || !wrote_swap {
+        let mut pending: Vec<String> = Vec::new();
+        if !wrote_mem {
+            pending.push(format!("memory={want_mem}GB"));
+        }
+        if !wrote_swap {
+            pending.push(format!("swap={want_swap}GB"));
+        }
+        match lines
+            .iter()
+            .position(|l| l.trim().eq_ignore_ascii_case("[wsl2]"))
+        {
+            // A [wsl2] section exists → add the missing keys just under it.
+            Some(i) => {
+                for (n, k) in pending.into_iter().enumerate() {
+                    lines.insert(i + 1 + n, k);
+                }
+            }
+            // No section at all → append a fresh one, keeping existing content.
+            None => {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push("[wsl2]".to_string());
+                lines.extend(pending);
+            }
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Some(out)
+}
+
+/// Read a `.wslconfig` size value ("24GB", "16384MB", "8") as whole GB.
+/// Anything unparsable reads as absent, so we then treat it as "not granted".
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wslconfig_key_gb(text: &str, key: &str) -> Option<u32> {
+    for l in text.lines() {
+        let Some((k, v)) = l.trim().split_once('=') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let v = v.trim().to_ascii_lowercase();
+        let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(n) = digits.parse::<u64>() else {
+            continue;
+        };
+        return Some(if v.ends_with("mb") {
+            (n / 1024) as u32
+        } else if v.ends_with("kb") {
+            (n / 1024 / 1024) as u32
+        } else {
+            n as u32
+        });
+    }
+    None
+}
+
+/// What the OOM killer recorded, in units the user can act on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OomHit {
+    /// Process the kernel killed, e.g. "claude.exe".
+    pub task: String,
+    /// Resident memory it held when killed.
+    pub used_gb: f32,
+    /// The distro's total RAM (its WSL cap), when readable.
+    pub limit_gb: Option<f32>,
+}
+
+/// Parse the kernel's OOM verdict out of a `/var/log/kern.log` + `dmesg` dump.
+///
+/// Only accepts a kill whose ISO timestamp is at or after `cutoff_iso` — an OOM
+/// from last week must never be blamed for today's exit. ISO-8601 sorts
+/// lexicographically, so a string compare of the leading 19 chars IS the time
+/// compare. Lines with no parsable timestamp are ignored for the same reason.
+/// Pure + unit-tested against a real captured log line.
+pub(crate) fn parse_oom_report(text: &str, cutoff_iso: &str) -> Option<OomHit> {
+    const MARK: &str = "Out of memory: Killed process";
+    let limit_gb = text.lines().find_map(|l| {
+        let rest = l.trim().strip_prefix("MemTotal:")?;
+        let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+        Some(kb as f32 / 1024.0 / 1024.0)
+    });
+    // Last matching kill wins — it is the most recent.
+    let mut hit: Option<OomHit> = None;
+    for line in text.lines() {
+        let Some(at) = line.find(MARK) else { continue };
+        // Leading ISO stamp (kern.log, and `dmesg --time-format=iso`).
+        let stamp: String = line.chars().take(19).collect();
+        let dated = stamp.len() == 19
+            && stamp.as_bytes()[4] == b'-'
+            && (stamp.as_bytes()[10] == b'T' || stamp.as_bytes()[10] == b' ');
+        if !dated || stamp.as_str() < cutoff_iso {
+            continue;
+        }
+        let tail = &line[at + MARK.len()..];
+        // "… 26855 (claude.exe) total-vm:…kB, anon-rss:12863744kB, …"
+        let task = tail
+            .split_once('(')
+            .and_then(|(_, r)| r.split_once(')'))
+            .map(|(n, _)| n.to_string())
+            .unwrap_or_default();
+        if task.is_empty() {
+            continue;
+        }
+        let used_gb = tail
+            .split("anon-rss:")
+            .nth(1)
+            .and_then(|r| {
+                let d: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+                d.parse::<u64>().ok()
+            })
+            .map(|kb| kb as f32 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+        hit = Some(OomHit {
+            task,
+            used_gb,
+            limit_gb,
+        });
+    }
+    hit
+}
+
+/// Human sentence for an OOM hit, naming the cause AND the one action that
+/// fixes it. Pure so the wording is gate-assertable.
+pub(crate) fn oom_message(cli: &str, hit: &OomHit) -> String {
+    let limit = match hit.limit_gb {
+        Some(g) => format!(" of a {g:.1} GB WSL limit"),
+        None => String::new(),
+    };
+    format!(
+        "{cli} CLI was killed by Linux out-of-memory — this project runs in WSL, \
+         and {} was using {:.1} GB{limit}. Nothing is wrong with your account, the \
+         model or the task. Raise the WSL memory limit (Settings → Sandbox → \
+         \"Raise WSL memory\"), then run it again.",
+        hit.task, hit.used_gb
+    )
+}
+
+/// Ask the distro's kernel whether it killed this CLI in the last 10 minutes.
+/// Windows-only: a WSL-isolated run is the only shape with a hard memory cap —
+/// Linux agents run on the host and macOS uses Lima, neither of which produces
+/// this failure mode. Best-effort; any probe failure reads as "no evidence".
+#[cfg(windows)]
+pub(crate) fn wsl_oom_report(cli: &str, cwd: Option<&str>) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    if !is_isolated(cwd) {
+        return None;
+    }
+    let distro = resolve_linux_distro(None).ok()?;
+    // One round trip: the cutoff is computed INSIDE the distro so it is in the
+    // same clock/zone as the log stamps we compare it against.
+    const PROBE: &str = "date -d '-10 minutes' '+OWLLM_CUTOFF=%Y-%m-%dT%H:%M:%S' 2>/dev/null; \
+         grep MemTotal /proc/meminfo 2>/dev/null; \
+         { cat /var/log/kern.log 2>/dev/null; dmesg --time-format=iso 2>/dev/null; } \
+         | grep -F 'Out of memory: Killed process' | tail -n 20";
+    let out = std::process::Command::new("wsl.exe")
+        .args(["-d", &distro, "--", "sh", "-lc", PROBE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cutoff = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("OWLLM_CUTOFF="))?
+        .to_string();
+    let hit = parse_oom_report(&text, &cutoff)?;
+    Some(oom_message(cli, &hit))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn wsl_oom_report(_cli: &str, _cwd: Option<&str>) -> Option<String> {
+    None
+}
+
+/// Raise `%USERPROFILE%\.wslconfig`'s `[wsl2] memory`/`swap` to this host's
+/// recommendation. Never lowers an existing higher value. Takes effect on the
+/// next WSL start — deliberately does NOT run `wsl --shutdown`, which would kill
+/// every running agent and any other distro work the user has open.
+/// Returns the (memory_gb, swap_gb) now configured, and whether it wrote.
+#[cfg(windows)]
+pub(crate) fn ensure_memory_config() -> Result<(u32, u32, bool), String> {
+    let host_gb = {
+        use sysinfo::System;
+        let mut s = System::new();
+        s.refresh_memory();
+        ((s.total_memory() as f64) / 1024.0 / 1024.0 / 1024.0).round() as u32
+    };
+    let (mem, swap) = recommended_wsl_memory_gb(host_gb);
+    let p = wslconfig_path().ok_or_else(|| "no USERPROFILE".to_string())?;
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    match merge_memory_into_wslconfig(&existing, mem, swap) {
+        None => Ok((
+            wslconfig_key_gb(&existing, "memory").unwrap_or(mem),
+            wslconfig_key_gb(&existing, "swap").unwrap_or(swap),
+            false,
+        )),
+        Some(updated) => {
+            std::fs::write(&p, &updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+            Ok((
+                wslconfig_key_gb(&updated, "memory").unwrap_or(mem),
+                wslconfig_key_gb(&updated, "swap").unwrap_or(swap),
+                true,
+            ))
+        }
+    }
+}
+
+/// Result of the "Raise WSL memory" action, for the UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WslMemoryPlan {
+    pub memory_gb: u32,
+    pub swap_gb: u32,
+    /// True when the config file was changed by this call.
+    pub changed: bool,
+    /// True when a WSL restart is still needed for it to take effect.
+    pub restart_required: bool,
+}
+
+/// User-triggered: raise the WSL memory cap so a context-heavy agent stops
+/// being OOM-killed. No-op (reported, not failed) off Windows, where agents do
+/// not run inside a memory-capped VM.
+#[tauri::command]
+pub async fn sandbox_raise_memory() -> Result<WslMemoryPlan, String> {
+    #[cfg(windows)]
+    {
+        let (memory_gb, swap_gb, changed) = ensure_memory_config()?;
+        let restart_required = changed && !running_distros().is_empty();
+        Ok(WslMemoryPlan {
+            memory_gb,
+            swap_gb,
+            changed,
+            restart_required,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(WslMemoryPlan {
+            memory_gb: 0,
+            swap_gb: 0,
+            changed: false,
+            restart_required: false,
+        })
+    }
+}
+
 /// Convert an existing distro's disk to sparse in place. `--set-sparse` needs the
 /// distro stopped, so terminate it first (brief — same trick ensure_user uses).
 ///
@@ -2513,6 +2817,101 @@ mod tests {
         assert!(!is_managed_sandbox_copy("/etc"));
         // deeper than one level under owllm → NEVER (only the project dir matches)
         assert!(!is_managed_sandbox_copy("/home/mc/owllm/proj/sub"));
+    }
+
+    // ---- WSL memory cap + OOM forensics ------------------------------------
+    // The captured kernel verdict that made "claude CLI exited 1 — no stdout or
+    // stderr" explicable. Kept VERBATIM so the parser is tested against reality,
+    // not against a shape I invented.
+    const REAL_OOM_LOG: &str = "\
+2026-08-10T11:54:37.041233+09:00 owllm kernel: systemd invoked oom-killer: gfp_mask=0x1100cca, order=0, global_oom
+2026-08-10T11:54:37.041301+09:00 owllm kernel: oom-kill:constraint=CONSTRAINT_NONE,task=claude.exe,pid=26855,uid=1000
+2026-08-10T11:54:37.041400+09:00 owllm kernel: Out of memory: Killed process 26855 (claude.exe) total-vm:17026816kB, anon-rss:12863744kB, file-rss:0kB, shmem-rss:0kB, UID:1000 pgtables:29184kB oom_score_adj:0
+";
+
+    #[test]
+    fn oom_parser_reads_the_real_kernel_verdict() {
+        let text = format!("MemTotal:       16385236 kB\n{REAL_OOM_LOG}");
+        let hit = parse_oom_report(&text, "2026-08-10T11:44:37").expect("recent OOM is reported");
+        assert_eq!(hit.task, "claude.exe");
+        // 12863744 kB ≈ 12.3 GB resident, inside a ~15.6 GB VM.
+        assert!(
+            (hit.used_gb - 12.27).abs() < 0.1,
+            "used_gb was {}",
+            hit.used_gb
+        );
+        assert!(hit.limit_gb.is_some_and(|g| (g - 15.63).abs() < 0.1));
+        // The sentence must name the cause AND the one action.
+        let msg = oom_message("claude", &hit);
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("claude.exe"), "{msg}");
+        assert!(msg.contains("Raise the WSL memory limit"), "{msg}");
+    }
+
+    #[test]
+    fn oom_parser_never_blames_a_stale_kill() {
+        // Same log, but the failure we are explaining happened days later.
+        // An old OOM must NOT be reported as today's cause.
+        assert!(parse_oom_report(REAL_OOM_LOG, "2026-08-14T00:00:00").is_none());
+        // …and a line with no timestamp is equally untrustworthy.
+        let undated = "kernel: Out of memory: Killed process 1 (claude.exe) anon-rss:100kB";
+        assert!(parse_oom_report(undated, "2026-08-10T11:44:37").is_none());
+        // No OOM at all → nothing to report.
+        assert!(parse_oom_report("MemTotal: 16385236 kB\n", "2026-01-01T00:00:00").is_none());
+    }
+
+    #[test]
+    fn wsl_memory_recommendation_beats_the_50pct_default() {
+        // A 32 GB host: WSL's default cap is 16 GB — exactly what got killed.
+        let (mem, swap) = recommended_wsl_memory_gb(32);
+        assert_eq!((mem, swap), (24, 12));
+        assert!(mem > 16, "must exceed WSL's 50% default");
+        // Floors/ceilings keep tiny and huge hosts sane.
+        assert_eq!(recommended_wsl_memory_gb(4), (4, 2));
+        assert_eq!(recommended_wsl_memory_gb(256), (64, 16));
+    }
+
+    #[test]
+    fn memory_merge_adds_section_and_is_idempotent() {
+        let out = merge_memory_into_wslconfig("", 24, 12).unwrap();
+        assert!(out.contains("[wsl2]"), "{out}");
+        assert!(out.contains("memory=24GB"), "{out}");
+        assert!(out.contains("swap=12GB"), "{out}");
+        assert!(merge_memory_into_wslconfig(&out, 24, 12).is_none(), "{out}");
+    }
+
+    #[test]
+    fn memory_merge_never_lowers_a_users_own_higher_limit() {
+        let existing = "[wsl2]\nmemory=48GB\nswap=32GB\nprocessors=8\n";
+        assert!(merge_memory_into_wslconfig(existing, 24, 12).is_none());
+        // A LOWER existing value is raised, and siblings survive.
+        let out = merge_memory_into_wslconfig("[wsl2]\nmemory=8GB\nprocessors=8\n", 24, 12).unwrap();
+        assert!(out.contains("memory=24GB"), "{out}");
+        assert!(out.contains("swap=12GB"), "{out}");
+        assert!(out.contains("processors=8"), "{out}");
+        assert_eq!(out.matches("[wsl2]").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn memory_merge_coexists_with_the_sparse_setting() {
+        // Both writers touch the same file; neither may clobber the other.
+        let sparse = merge_sparse_into_wslconfig("").unwrap();
+        let both = merge_memory_into_wslconfig(&sparse, 24, 12).unwrap();
+        assert!(both.contains("sparseVhd=true"), "{both}");
+        assert!(both.contains("memory=24GB"), "{both}");
+        assert!(merge_sparse_into_wslconfig(&both).is_none(), "{both}");
+    }
+
+    #[test]
+    fn wslconfig_key_gb_reads_the_documented_unit_suffixes() {
+        assert_eq!(wslconfig_key_gb("[wsl2]\nmemory=24GB\n", "memory"), Some(24));
+        assert_eq!(
+            wslconfig_key_gb("[wsl2]\nmemory=16384MB\n", "memory"),
+            Some(16)
+        );
+        assert_eq!(wslconfig_key_gb("[wsl2]\nmemory = 12 \n", "memory"), Some(12));
+        assert_eq!(wslconfig_key_gb("[wsl2]\nswap=0\n", "swap"), Some(0));
+        assert_eq!(wslconfig_key_gb("[wsl2]\nprocessors=8\n", "memory"), None);
     }
 
     #[test]

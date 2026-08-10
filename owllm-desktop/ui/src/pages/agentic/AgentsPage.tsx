@@ -473,8 +473,10 @@ type GoalMsg = {
   /// Optional inline recovery action rendered as a one-click button under the
   /// bubble. "wsl-restart" → "⟳ Restart WSL networking" (fires owllm:wsl-restart);
   /// "retry-goal" → "⟳ Retry" (fires owllm:retry-goal, re-runs the last goal).
+  /// "raise-wsl-memory" → "⬆ Raise WSL memory" (fires owllm:raise-wsl-memory,
+  /// widens the WSL2 memory cap that the Linux OOM killer enforces).
   /// Set on failure messages so users never type a terminal cmd / retype a goal.
-  action?: "wsl-restart" | "retry-goal";
+  action?: "wsl-restart" | "retry-goal" | "raise-wsl-memory";
   /// For a paired tool entry (kind "tool", role "🛠 <name>"): the matching tool
   /// RESULT text + its status. Set only by pairToolEntries at render time so a
   /// call+result render as ONE collapsed input|output line. Never persisted.
@@ -5166,6 +5168,22 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           ⟳ Restart WSL networking
         </button>
       ) : null}
+      {m.action === "raise-wsl-memory" ? (
+        // One-click recovery for a Linux OOM kill — raises the WSL2 memory cap
+        // (the default is only 50% of host RAM) so a context-heavy agent is not
+        // killed mid-task. Same module-level → window-event shape as above.
+        <button
+          data-ui="RaiseWslMemoryBtn"
+          onClick={() => window.dispatchEvent(new CustomEvent("owllm:raise-wsl-memory"))}
+          style={{
+            marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
+            borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
+            color: "var(--accent-ink)", cursor: "pointer",
+          }}
+        >
+          ⬆ Raise WSL memory
+        </button>
+      ) : null}
       {m.action === "retry-goal" ? (
         // One-click re-run for a failed second-agent / forwarded send — fires
         // owllm:retry-goal (handled by the listener that re-dispatches the last
@@ -8880,6 +8898,36 @@ export function AgentsPage({
     window.addEventListener("owllm:wsl-restart", onRestart);
     return () => window.removeEventListener("owllm:wsl-restart", onRestart);
   }, [setSupChat]);
+  // One-click WSL memory raise — fired by the "⬆ Raise WSL memory" button under
+  // an out-of-memory failure. WSL2 caps a distro at 50% of host RAM by default,
+  // and an isolated project's agent CLI runs INSIDE that cap, so a context-heavy
+  // task gets SIGKILLed by the Linux OOM killer. Widens the cap in .wslconfig.
+  // Deliberately does NOT restart WSL: that would kill every running agent. The
+  // new limit applies on the next natural WSL start, and we say so.
+  const wslMemoryRaisingRef = useRef(false);
+  useEffect(() => {
+    const onRaise = async () => {
+      if (!isActiveRef.current) return; // the button lives in the visible tab
+      if (wslMemoryRaisingRef.current) return; // ignore double-clicks while in flight
+      wslMemoryRaisingRef.current = true;
+      try {
+        const plan = await invoke<{ memoryGb: number; swapGb: number; changed: boolean; restartRequired: boolean }>("sandbox_raise_memory");
+        const limits = `${plan.memoryGb} GB memory + ${plan.swapGb} GB swap`;
+        const text = !plan.changed
+          ? `✓ WSL is already configured for ${limits} — the memory cap was not the limit here. Tell me and I'll dig in.`
+          : plan.restartRequired
+            ? `✓ WSL memory raised to ${limits}. WSL is running right now, so it keeps the old limit until it next restarts — click “⟳ Restart WSL networking” on an earlier message, or just close the app once.`
+            : `✓ WSL memory raised to ${limits}. It applies the next time WSL starts. Send your message again.`;
+        setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text, ts: Date.now(), seq: nextSeq() }]);
+      } catch (e: any) {
+        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: `Couldn't raise the WSL memory limit: ${String(e?.message ?? e)}`, ts: Date.now(), seq: nextSeq() }]);
+      } finally {
+        wslMemoryRaisingRef.current = false;
+      }
+    };
+    window.addEventListener("owllm:raise-wsl-memory", onRaise);
+    return () => window.removeEventListener("owllm:raise-wsl-memory", onRaise);
+  }, [setSupChat]);
   // One-click retry — fired by the "⟳ Retry" button under a failed second-agent
   // or forwarded send. Re-runs the last goal through onSupSend (which queues it
   // as a steer if a run is somehow still active, so it's never dropped).
@@ -9409,17 +9457,32 @@ export function AgentsPage({
         : info.backend === "kimi_cli" ? "Kimi"
         : info.backend === "grok_cli" ? "Grok"
         : "Claude";
-      // Auto mode already ON means the diagnosis above is wrong — say less
-      // rather than send the user to a toggle that is not the problem.
-      const action = autoApproveRef.current
+      // The Auto-mode override applies ONLY to a self-refusal. A process the
+      // kernel (or Stop) killed has nothing to do with the ⚡ toggle, and
+      // sending the user there would be a confident wrong answer.
+      const isRefusal = info.code === "cli_tool_permission";
+      const action = isRefusal && autoApproveRef.current
         ? "Auto mode is already ON for this project, so this is not the toggle — tell me and I'll dig in."
         : info.action;
+      // Lead with what actually happened. "Stopped itself" is true of a refusal
+      // and false of a kill — the whole point of this notice is to stop guessing.
+      const lead = info.code === "wsl_out_of_memory" ? `🧠 ${cli} ran out of memory —`
+        : info.code === "run_cancelled" ? `⏹ ${cli} was stopped —`
+        : info.code === "cli_died_silently" ? `⚠ ${cli} was killed from outside —`
+        : `⚡ ${cli} stopped itself, not the task —`;
+      // Offer the one-click fix only where it IS the fix.
+      const recovery = info.code === "wsl_out_of_memory" || info.code === "cli_died_silently"
+        ? "raise-wsl-memory" as const
+        : undefined;
       setSupChat(prev => [...prev, {
         role: "system", color: "#ffb74d",
-        text: `⚡ ${cli} stopped itself, not the task — ${info.why} ${action}`,
+        text: `${lead} ${info.why} ${action}`,
+        action: recovery,
         ts: Date.now(), seq: nextSeq(),
       }]);
-      notify(`${cli} blocked its own tool call. ${action}`);
+      // A cancel is expected, not news — never toast the user about their own
+      // Stop. Everything else is a surprise worth surfacing above the thread.
+      if (info.code !== "run_cancelled") notify(`${lead.replace(/^\S+\s/, "")} ${action}`);
     });
     return () => { setRunBlockerHandler(null); };
   }, [setSupChat]);
@@ -13392,12 +13455,18 @@ export function AgentsPage({
     // before a page change, the remounted page's `abortRef` is null but the
     // original controller is still in the registry, so Cancel can reach it.
     agentRunAborts.get(agentSessId)?.abort();
-    // KILL THE CLI CHILDREN. The JS abort above never reached a spawned
-    // claude/codex/kimi/gemini process — it ran to completion and the awaited
-    // invoke kept the run "busy" (the "Stop never works" bug). Tree-kill every
-    // live agent CLI child host-side. Global by design: Stop means stop
-    // everything, same as the dock's Stop.
-    void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    // KILL THIS PROJECT'S CLI CHILDREN. The JS abort above never reached a
+    // spawned claude/codex/kimi/gemini process — it ran to completion and the
+    // awaited invoke kept the run "busy" (the "Stop never works" bug). SCOPED to
+    // the project dir: this used to call cli_cancel_all, so cancelling one run
+    // tree-killed every OTHER project's live CLI too and each survivor surfaced
+    // a bare "exited 1 — no stdout or stderr". A run with no project dir has no
+    // scope to match, so it still needs the global kill. The dock's Stop stays
+    // global by design.
+    const cancelScope = (selectedProject?.location || "").trim();
+    void invoke(cancelScope ? "cli_cancel_scope" : "cli_cancel_all",
+      cancelScope ? { scope: cancelScope } : undefined,
+    ).catch(() => { /* best-effort */ });
     // Kill any in-flight TTS — if the user cancelled the dispatch
     // they don't want the agent to keep talking from a queued reply.
     ttsStopAll();

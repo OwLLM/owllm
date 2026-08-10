@@ -11,7 +11,11 @@
 // plus one imperative step. It is deliberately pure — no React, no Tauri — so
 // the mapping is testable on its own (runBlockers.verify.run.mjs).
 
-export type RunBlockerCode = "cli_tool_permission";
+export type RunBlockerCode =
+  | "cli_tool_permission"
+  | "wsl_out_of_memory"
+  | "run_cancelled"
+  | "cli_died_silently";
 
 export type RunBlocker = {
   /// Stable id, so a notice can key off the cause rather than the wording.
@@ -73,4 +77,60 @@ export function detectRunBlocker(reply: string | null | undefined): RunBlocker |
       "or type /auto — then send the same request again.",
     tools,
   };
+}
+
+/// The OTHER silent class: the CLI didn't refuse, it DIED. The process is gone,
+/// so there is no prose to read — only an exit code and, historically, the
+/// useless "no stdout or stderr". The Rust side now names the two causes that
+/// produce that shape (sandbox::wsl_oom_report, and Stop marking its own kills);
+/// this maps whatever came back to the step that ends it.
+///
+/// Runs on the error path of every subscription-CLI call, so it must stay cheap
+/// and must never claim a cause it cannot see.
+export function detectRunFailure(error: string | null | undefined): RunBlocker | null {
+  const text = (error ?? "").trim();
+  if (!text) return null;
+
+  // Linux OOM — the message is composed in Rust from the distro's kernel log,
+  // so the numbers here are measured, not guessed.
+  if (/killed by Linux out-of-memory/i.test(text)) {
+    return {
+      code: "wsl_out_of_memory",
+      // The Rust sentence already names the process and the sizes; keep it
+      // verbatim rather than paraphrasing measured values into vaguer ones.
+      why: text,
+      action:
+        "Click “Raise WSL memory” below (it applies the next time WSL starts), " +
+        "then send the same request again.",
+      tools: [],
+    };
+  }
+
+  // We killed it. Not a fault, and nothing for the user to fix.
+  if (/CLI stopped — you cancelled this run/i.test(text)) {
+    return {
+      code: "run_cancelled",
+      why: "This run was stopped by you, so the agent's CLI was terminated mid-task. It did not fail.",
+      action: "Send the request again when you want it to continue.",
+      tools: [],
+    };
+  }
+
+  // Fell through both: the process still vanished without a word. Say what that
+  // means rather than leaving a bare exit code, and name the usual causes — but
+  // do NOT assert which one, because at this point we genuinely do not know.
+  if (/CLI exited\s+-?\d+\s+—\s+no stdout or stderr/i.test(text)) {
+    return {
+      code: "cli_died_silently",
+      why:
+        "The agent's CLI process disappeared without writing anything — it was " +
+        "killed from outside rather than failing on its own. The usual causes are " +
+        "the machine running out of memory, another Stop, or the app closing.",
+      action:
+        "Run it again. If it keeps happening on this project, click “Raise WSL memory” " +
+        "below — a context-heavy task is the common trigger.",
+      tools: [],
+    };
+  }
+  return null;
 }

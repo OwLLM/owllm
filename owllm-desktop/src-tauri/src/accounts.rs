@@ -154,16 +154,64 @@ fn is_batch_shim(p: &std::path::Path) -> bool {
 // all (tree-kill on Windows — the npm .cmd shims wrap a node child that must
 // die with the shim). Global on purpose: Stop means "stop everything", the
 // same semantics the dock's Stop already promises.
-fn cli_children() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
-        std::sync::OnceLock::new();
-    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+///
+/// Each child carries an optional CANCEL SCOPE — the id of the run that owns
+/// it. Stopping one agentic run must not kill the sibling runs, whose children
+/// then died with an unexplained "exited 1 — no stdout or stderr". `None` means
+/// "unscoped": only a global Stop reaches it.
+fn cli_children() -> &'static std::sync::Mutex<std::collections::HashMap<u32, Option<String>>> {
+    static S: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u32, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn register_cli_child(child: &std::process::Child) -> u32 {
+/// PIDs WE killed. A killed child flushes nothing, so its exit looks identical
+/// to a crash — this is what lets the error path say "you stopped it" instead of
+/// the meaningless "exited 1 — no stdout or stderr". Bounded: a run is read once,
+/// right after it exits, and the set is trimmed so it can never grow unbounded.
+fn cancelled_cli_children() -> &'static std::sync::Mutex<std::collections::VecDeque<u32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<u32>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+const CANCELLED_PID_MEMORY: usize = 256;
+
+fn mark_cli_child_cancelled(pid: u32) {
+    if let Ok(mut q) = cancelled_cli_children().lock() {
+        q.push_back(pid);
+        while q.len() > CANCELLED_PID_MEMORY {
+            q.pop_front();
+        }
+    }
+}
+
+/// True when `pid` was terminated by Stop. Consuming: a pid is reported once,
+/// so a later process that happens to reuse the number is not mislabelled.
+fn take_cli_child_cancelled(pid: u32) -> bool {
+    match cancelled_cli_children().lock() {
+        Ok(mut q) => match q.iter().position(|p| *p == pid) {
+            Some(i) => {
+                q.remove(i);
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn register_cli_child_scoped(child: &std::process::Child, scope: Option<&str>) -> u32 {
     let pid = child.id();
     if let Ok(mut s) = cli_children().lock() {
-        s.insert(pid);
+        s.insert(
+            pid,
+            scope
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
     }
     pid
 }
@@ -402,12 +450,53 @@ where
 /// running. Returns how many processes were signalled.
 #[tauri::command]
 pub fn cli_cancel_all() -> Result<u32, String> {
+    kill_cli_children(None)
+}
+
+/// Kill only the CLI children belonging to ONE run. The agentic page can have
+/// several runs live at once; its per-run Cancel used to call `cli_cancel_all`,
+/// so stopping one killed every other run's CLI too and each survivor surfaced
+/// a bare "exited 1 — no stdout or stderr". Unscoped children are never touched
+/// here — only a global Stop reaches those.
+#[tauri::command]
+pub fn cli_cancel_scope(scope: String) -> Result<u32, String> {
+    let scope = scope.trim().to_string();
+    if scope.is_empty() {
+        // An empty scope must NOT silently degrade into "kill everything".
+        return Err("cli_cancel_scope: empty scope".to_string());
+    }
+    kill_cli_children(Some(&scope))
+}
+
+/// Does a registered child belong to the scope being cancelled?
+/// `want: None` is the global Stop and matches everything. A scoped Stop matches
+/// ONLY an exact owner — never an unscoped child, whose owner is unknown and so
+/// might belong to any other run. Pure, so the rule that actually caused the
+/// "one Stop killed every run" bug is testable on its own.
+pub(crate) fn cli_child_in_scope(owner: Option<&str>, want: Option<&str>) -> bool {
+    match want {
+        None => true,
+        Some(want) => owner == Some(want),
+    }
+}
+
+/// Shared kill loop. `scope: None` = every live child (global Stop);
+/// `Some(s)` = only children registered under exactly that scope.
+fn kill_cli_children(scope: Option<&str>) -> Result<u32, String> {
     let pids: Vec<u32> = cli_children()
         .lock()
-        .map(|s| s.iter().copied().collect())
+        .map(|s| {
+            s.iter()
+                .filter(|(_, owner)| cli_child_in_scope(owner.as_deref(), scope))
+                .map(|(pid, _)| *pid)
+                .collect()
+        })
         .unwrap_or_default();
     let mut killed = 0u32;
     for pid in pids {
+        // Mark BEFORE killing: the child's wait may return on another thread
+        // the instant it dies, and it must find the flag already set.
+        mark_cli_child_cancelled(pid);
         let ok = terminate_cli_child(pid);
         if ok {
             killed += 1;
@@ -2440,6 +2529,13 @@ pub async fn claude_cli_complete(
     // TRUE for a read-only agent — see claude_cli_stream. This one-shot path is
     // what a bridge run (no Thought pane) takes, so it needs the same boundary.
     read_only: Option<bool>,
+    // Who owns this child, so a per-run Cancel (`cli_cancel_scope`) kills only
+    // its own CLI processes instead of every live run's. DEFAULTS to `cwd` — the
+    // project directory is already threaded to every CLI path, so scoping works
+    // without a caller remembering to pass anything, and a run with no project
+    // stays unscoped (reachable only by the global Stop). Pass an explicit value
+    // only when a finer boundary than "this project" is wanted.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         // Collect args once → run as the Windows CLI or inside WSL (isolated).
@@ -2588,7 +2684,7 @@ pub async fn claude_cli_complete(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             if let Some(mut stdin) = child.stdin.take() {
                 // Best-effort, like every OTHER CLI spawn here (`let _ =`). If claude
                 // exited early — a rejected --model, a bad flag, an auth failure — its
@@ -2606,11 +2702,13 @@ pub async fn claude_cli_complete(
                 // surface the auth text (not a generic "exited N") so the retry fires.
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "claude",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             let stdout =
@@ -2722,6 +2820,39 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     format!("{cli} CLI exited {code} — {detail}")
 }
 
+/// `cli_exit_err` plus the two causes the exit code alone cannot express, both
+/// of which produced the same useless "exited N — no stdout or stderr":
+///
+///   * WE killed it (Stop). A tree-killed child flushes nothing, so its exit is
+///     indistinguishable from a crash — say so instead of reporting a fault.
+///   * LINUX killed it (OOM). A WSL-isolated run lives under a hard memory cap;
+///     the kernel SIGKILLs the biggest process and the real verdict is in the
+///     distro's kernel log, which the app never read. See sandbox::wsl_oom_report.
+///
+/// Only consulted when there is nothing better to report — a real diagnostic on
+/// stdout/stderr, and especially an auth envelope, still wins so the existing
+/// token-refresh retry keeps firing.
+fn cli_exit_err_ctx(
+    cli: &str,
+    code: i32,
+    body: &str,
+    stderr: &str,
+    pid: Option<u32>,
+    cwd: Option<&str>,
+) -> String {
+    let generic = cli_exit_err(cli, code, body, stderr);
+    if !generic.ends_with("no stdout or stderr") {
+        return generic;
+    }
+    if pid.is_some_and(take_cli_child_cancelled) {
+        return format!("{cli} CLI stopped — you cancelled this run.");
+    }
+    if let Some(msg) = crate::sandbox::wsl_oom_report(cli, cwd) {
+        return msg;
+    }
+    generic
+}
+
 /// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
 /// analogue of `claude_cli_complete`. Without this the chat fell back to
 /// demanding OPENAI_API_KEY even when a ChatGPT/Codex subscription was
@@ -2743,6 +2874,8 @@ pub async fn codex_cli_complete(
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let prompt = if system_prompt.trim().is_empty() {
@@ -2791,7 +2924,7 @@ pub async fn codex_cli_complete(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             let mut stdin = child
                 .stdin
                 .take()
@@ -2804,11 +2937,13 @@ pub async fn codex_cli_complete(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "codex",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             let reply = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -2864,7 +2999,7 @@ pub async fn codex_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         let mut stdin = child
             .stdin
             .take()
@@ -2881,11 +3016,13 @@ pub async fn codex_cli_complete(
             let body = from_file
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).into_owned());
-            return Err(cli_exit_err(
+            return Err(cli_exit_err_ctx(
                 "codex",
                 output.status.code().unwrap_or(-1),
                 &body,
                 &stderr,
+                Some(pid),
+                cwd.as_deref(),
             ));
         }
         let reply = from_file
@@ -3267,6 +3404,8 @@ pub async fn claude_cli_stream(
     // whose open work then gets swept into a checkpoint commit instead of into
     // the specialist worktree that was supposed to make the change.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3546,7 +3685,7 @@ pub async fn claude_cli_stream(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
-        let child_pid = register_cli_child(&child);
+        let child_pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         if let Some(mut stdin) = child.stdin.take() {
             // Best-effort: the CLI can read what it needs and exit while we're still
             // writing the (large agentic) payload → "pipe has been ended (os error
@@ -3766,11 +3905,13 @@ pub async fn claude_cli_stream(
                     return Err(err.clone());
                 }
             }
-            return Err(cli_exit_err(
+            return Err(cli_exit_err_ctx(
                 "claude",
                 status.code().unwrap_or(-1),
                 assembled.trim(),
                 &stderr_buf,
+                Some(child_pid),
+                cwd.as_deref(),
             ));
         }
         // Exit 0 but the CLI flagged the run as failed via a `result` event
@@ -3887,6 +4028,8 @@ pub async fn codex_cli_stream(
     // specialist worktree afterwards failed to cut — deadlocking the whole run.
     // The sandbox is the boundary.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -4080,7 +4223,7 @@ pub async fn codex_cli_stream(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-        let child_pid = register_cli_child(&child);
+        let child_pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         // `codex exec --json` writes progress and diagnostics to stderr.  The
         // old stream path did not read that pipe until *after* stdout closed;
         // a verbose model turn could fill the OS pipe buffer, leaving Codex
@@ -4338,11 +4481,13 @@ pub async fn codex_cli_stream(
                 .lock()
                 .map(|buf| String::from_utf8_lossy(&buf).into_owned())
                 .unwrap_or_default();
-            let child_error = cli_exit_err(
+            let child_error = cli_exit_err_ctx(
                 "codex",
                 status.code().unwrap_or(-1),
                 &stream_errors.join("\n"),
                 &stderr_buf,
+                Some(child_pid),
+                cwd.as_deref(),
             );
             // A CLI that fails during startup can close stdin before OwLLM
             // writes the prompt. The old early `?` returned only Windows error
@@ -5402,6 +5547,8 @@ pub async fn gemini_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     // Host runs get the in-app browser gateway. Gemini CLI has no per-run
     // MCP flag — it reads project-scoped `<cwd>/.gemini/settings.json`
@@ -5484,7 +5631,7 @@ pub async fn gemini_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn gemini: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         if fold_prompt_into_stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 // Best-effort like the kimi/claude folds: if gemini exited early
@@ -5499,7 +5646,7 @@ pub async fn gemini_cli_complete(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            return Err(cli_exit_err("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            return Err(cli_exit_err_ctx("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr, Some(pid), cwd.as_deref()));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         let reply = stdout.trim().to_string();
@@ -5526,6 +5673,8 @@ pub async fn grok_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let composed = if system_prompt.trim().is_empty() {
@@ -5579,7 +5728,7 @@ pub async fn grok_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn grok: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         if fold_prompt_into_stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
@@ -5590,7 +5739,7 @@ pub async fn grok_cli_complete(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            return Err(cli_exit_err("grok", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            return Err(cli_exit_err_ctx("grok", output.status.code().unwrap_or(-1), &stdout, &stderr, Some(pid), cwd.as_deref()));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         let reply = stdout.trim().to_string();
@@ -5763,6 +5912,8 @@ async fn kimi_cli_run(
     // auto-approves every tool call, so without this a Kimi orchestrator had no
     // write boundary at all; `--plan` is kimi's read-only mode.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every reachable Kimi agent
@@ -6021,7 +6172,7 @@ async fn kimi_cli_run(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             if !use_prompt_flag {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
@@ -6082,11 +6233,13 @@ async fn kimi_cli_run(
                     .filter(|l| !l.to_ascii_lowercase().contains("to resume this session"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "kimi",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &clean_stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
@@ -6158,6 +6311,8 @@ pub async fn kimi_cli_complete(
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     kimi_cli_run(
         app,
@@ -6167,6 +6322,7 @@ pub async fn kimi_cli_complete(
         model,
         allowed_tools,
         read_only,
+        cancel_scope,
         None,
     )
     .await
@@ -6181,6 +6337,8 @@ pub async fn kimi_cli_stream(
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     kimi_cli_run(
@@ -6191,6 +6349,7 @@ pub async fn kimi_cli_stream(
         model,
         allowed_tools,
         read_only,
+        cancel_scope,
         Some(on_event),
     )
     .await

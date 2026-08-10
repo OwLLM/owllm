@@ -153,9 +153,17 @@ check(
   /autoApproveRef\.current\s*$|autoApproveRef\.current/.test(agentsPage),
   "the notice checks the LIVE toggle before blaming it",
 );
+// Same invariant, re-expressed: the notice now branches on info.code (a CLI
+// that was KILLED is not "blocked"), so the toast text is composed from the
+// per-cause lead rather than one hardcoded sentence. What must hold is that a
+// toast still fires and still carries the action.
 check(
-  /notify\(`\$\{cli\} blocked its own tool call/.test(agentsPage),
+  /notify\(`\$\{lead\.replace\([^)]*\)\} \$\{action\}`\)/.test(agentsPage),
   "the user gets a toast, not just a line buried in a long thread",
+);
+check(
+  /const action = isRefusal && autoApproveRef\.current/.test(agentsPage),
+  "the toast still carries the ONE action the user should take",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

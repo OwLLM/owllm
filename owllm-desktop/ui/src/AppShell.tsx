@@ -41,6 +41,7 @@ import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncMo
 import { githubStatus, GITHUB_CHANGED_EVENT } from "./pages/agentic/github";
 import WatcherDrawer from "./support/WatcherDrawer";
 import GenSpeedBadge from "./components/GenSpeedBadge";
+import { notify } from "./components/Toast";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
@@ -227,6 +228,37 @@ function useLocalServerKeySync() {
       .then((c) => setLocalServerKey(c.enabled ? c.apiKey : ""))
       .catch(() => {});
   }, []);
+}
+
+// If OwLLM died last time instead of closing, say so — once, on the launch that
+// discovered it. Users who report "it keeps closing on its own" have no way to
+// tell us what happened; the details are already attached to any support report
+// they send from here, so the notice's job is just to prompt them to send one.
+function useUncleanShutdownNotice() {
+  const { t } = useLocalization();
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke<{ newThisLaunch: number; reports: { reason: string }[] }>("session_health_pending")
+      .then((health) => {
+        if (health.newThisLaunch < 1) return;
+        const last = health.reports[health.reports.length - 1];
+        // The reason is a sentence fragment ("that session's process
+        // disappeared…"), so join it with a dash and punctuate it here rather
+        // than letting two half-sentences run together.
+        const cause = last?.reason ? ` — ${t(last.reason)}.` : ".";
+        notify(
+          `${t("OwLLM closed unexpectedly last time")}${cause} ${t(
+            "Sending a report from the Support page includes what we recorded.",
+          )}`,
+          "error",
+          // Stays until clicked: this asks the user to do something, and the
+          // 12s error timeout expires long before someone returning to their
+          // desk would ever see it.
+          { sticky: true },
+        );
+      })
+      .catch(() => {});
+  }, [t]);
 }
 
 // Live state shown in the header SysInfoBlock — polled every 2s
@@ -1669,6 +1701,7 @@ const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.use
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   useLocalServerKeySync();
+  useUncleanShutdownNotice();
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
   // straight to the page it wants to diff (e.g. ?page=train).
   const initialDeep = useMemo(() => {

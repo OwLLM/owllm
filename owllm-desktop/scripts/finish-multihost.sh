@@ -57,13 +57,23 @@ for pat in "OwLLM.Desktop_${VERSION}_aarch64.AppImage" "OwLLM.Desktop_universal.
   gh release download "$TAG" --repo "$REPO" --pattern "$pat" --dir "$W" --clobber
 done
 
-# 4. sign every updater artifact that did not come from this host
+# 4. sign every updater artifact that did not come from this host.
+#    Same invocation as publish-release.sh step 2/5: on Windows the tauri CLI is
+#    a native binary that cannot read a /c/... path, so hand it Windows paths.
 say "signing"
+APP="${APP:-/c/1_Git/LocaLLM/owllm-desktop}"
+to_windows_path() { cygpath -w "$1" 2>/dev/null || wslpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
+NODE_RUNNER="${OWLLM_NODE:-}"
+[ -n "$NODE_RUNNER" ] || NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)"
+TAURI_CLI="$(to_windows_path "$APP/node_modules/@tauri-apps/cli/tauri.js")"
 for f in "OwLLM.Desktop_${VERSION}_amd64.AppImage" \
          "OwLLM.Desktop_${VERSION}_aarch64.AppImage" \
          "OwLLM.Desktop_universal.app.tar.gz"; do
-  npx --yes @tauri-apps/cli signer sign --private-key-path "$KEY" --password= "$W/$f" < /dev/null
-  [ -s "$W/$f.sig" ] || { echo "no signature produced for $f" >&2; exit 1; }
+  "$NODE_RUNNER" "$TAURI_CLI" signer sign \
+    --private-key-path "$(to_windows_path "$KEY")" --password= \
+    "$(to_windows_path "$W/$f")" < /dev/null
+  SIG="$(cat "$W/$f.sig" 2>/dev/null || true)"
+  [ "${#SIG}" -ge 200 ] || { echo "signature for $f looks wrong (${#SIG} chars)" >&2; exit 1; }
 done
 
 echo "FINISH_MULTIHOST_ARTIFACTS_OK $VERSION"

@@ -6,8 +6,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { useLocalization } from "../../localization";
-import { threadKey, worldChatLabel, type WorldChatState } from "./worldChat";
+import { readAppLanguage, useLocalization } from "../../localization";
+import { threadKey, worldChatConversations, worldChatLabel, type WorldChatState } from "./worldChat";
 import {
   saveWorldChatProfile,
   setWorldChatEnabled,
@@ -17,6 +17,8 @@ import {
   worldChatReachable,
   worldChatSnapshot,
   worldChatStore,
+  WORLD_CHAT_OPEN_EVENT,
+  type WorldChatOpenEventDetail,
 } from "./worldChatRuntime";
 
 export function useWorldChat(): WorldChatState {
@@ -48,6 +50,22 @@ function buttonStyle(tone: "accent" | "plain" | "danger" = "plain"): CSSProperti
   };
 }
 
+/**
+ * When a line was said. Today's messages show the clock; anything older also
+ * shows the date, because "14:02" on its own is a lie about a message from
+ * last week.
+ */
+function messageStamp(ts: string): string {
+  if (!ts) return "";
+  const at = new Date(ts);
+  if (Number.isNaN(at.getTime())) return "";
+  const language = readAppLanguage();
+  const clock = at.toLocaleTimeString(language, { hour: "2-digit", minute: "2-digit", hour12: false });
+  const now = new Date();
+  const sameDay = at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
+  return sameDay ? clock : `${at.toLocaleDateString(language, { day: "2-digit", month: "short" })} ${clock}`;
+}
+
 type Props = {
   /** The dot the map has selected, if it is a World node rather than a fleet orbit. */
   selectedNodeId: string;
@@ -63,6 +81,11 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const [draft, setDraft] = useState("");
   const [invite, setInvite] = useState("");
   const [openRoom, setOpenRoom] = useState("");
+  // A conversation opened from the inbox rather than by clicking a dot. The
+  // globe cannot be the only way back into a chat: the person who wrote to you
+  // may not be on screen, may be off the map entirely, and after a restart you
+  // would have no idea which dot they were.
+  const [pickedPeer, setPickedPeer] = useState("");
   // Nickname, reachability and group invites are setup, not conversation. They
   // are folded away so the card reads as a chat rather than a settings form
   // with a one-line box wedged underneath it.
@@ -74,10 +97,35 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const [collapsed, setCollapsed] = useState(false);
 
   const store = worldChatStore();
-  const target = openRoom ? "" : selectedNodeId;
+  const target = openRoom ? "" : (pickedPeer || selectedNodeId);
   const key = openRoom ? threadKey("", openRoom) : threadKey(target);
   const messages = useMemo(() => chat.threads[key] ?? [], [chat.threads, key]);
   const sticky = useStickyScroll<HTMLDivElement>(messages.length);
+  const conversations = useMemo(() => worldChatConversations(chat), [chat]);
+
+  // Clicking a dot on the globe always wins over whatever the inbox had open,
+  // otherwise selecting someone would appear to do nothing.
+  useEffect(() => { if (selectedNodeId) { setPickedPeer(""); setOpenRoom(""); } }, [selectedNodeId]);
+
+  // The chrome's notice points at one conversation; opening it lands here.
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const wanted = (event as CustomEvent<WorldChatOpenEventDetail>).detail?.key ?? "";
+      if (!wanted) return;
+      setCollapsed(false);
+      if (wanted.startsWith("room:")) { setOpenRoom(wanted.slice(5)); setPickedPeer(""); }
+      else { setOpenRoom(""); setPickedPeer(wanted); }
+    };
+    window.addEventListener(WORLD_CHAT_OPEN_EVENT, onOpen as EventListener);
+    return () => window.removeEventListener(WORLD_CHAT_OPEN_EVENT, onOpen as EventListener);
+  }, []);
+
+  // Looking at a thread is what marks it read — nothing else does, so a notice
+  // can never be cleared by a message the user did not actually see.
+  useEffect(() => {
+    if (!enabled || collapsed || !key) return;
+    store.markRead(key);
+  }, [enabled, collapsed, key, messages.length, store]);
 
   const isContact = chat.contacts.includes(target);
   const isBlocked = chat.blocked.includes(target);
@@ -210,6 +258,59 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         </div>
       )}
 
+      {/* The inbox. Every conversation this device has ever had, newest first,
+          with who, the last line, when, and how many are unread. Without it the
+          only route back to a message was finding the sender's dot on the globe
+          again — which does not survive them going offline, or a restart. */}
+      {conversations.length > 0 && (
+        <div style={{ marginTop: 10 }} data-ui="WorldChat:inbox">
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ flex: 1, fontSize: 10.5, fontWeight: 800, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: .4 }}>
+              {t("Conversations")}
+            </div>
+            {conversations.some((entry) => entry.unread > 0) && (
+              <button type="button" style={buttonStyle()} data-ui="WorldChat:mark-all-read" onClick={() => store.markAllRead()}>
+                {t("Mark all read")}
+              </button>
+            )}
+          </div>
+          <div style={{ marginTop: 5, maxHeight: 132, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+            {conversations.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                data-ui="WorldChat:conversation"
+                onClick={() => {
+                  if (entry.room) { setOpenRoom(entry.room); setPickedPeer(""); }
+                  else { setOpenRoom(""); setPickedPeer(entry.peerId); }
+                }}
+                style={{
+                  display: "flex", alignItems: "baseline", gap: 7, width: "100%", textAlign: "left",
+                  borderRadius: 9, cursor: "pointer", padding: "4px 7px",
+                  border: `1px solid ${entry.key === key ? "var(--accent-strong)" : "transparent"}`,
+                  background: entry.key === key ? "rgba(var(--accent-rgb),.12)" : "transparent",
+                  color: "var(--fg)",
+                }}
+              >
+                <span style={{ fontWeight: entry.unread ? 800 : 700, fontSize: 11.5, color: "var(--fg-strong)", whiteSpace: "nowrap" }}>
+                  {entry.label || t("Unknown")}
+                </span>
+                <span style={{ flex: 1, fontSize: 11, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {entry.last?.mine ? `${t("You")}: ` : ""}{entry.last?.text ?? ""}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{messageStamp(entry.last?.ts ?? "")}</span>
+                {entry.unread > 0 && (
+                  <span
+                    data-ui="WorldChat:unread"
+                    style={{ minWidth: 16, textAlign: "center", borderRadius: 999, background: "var(--accent-strong)", color: "var(--accent-ink)", fontSize: 10, fontWeight: 800, padding: "1px 5px" }}
+                  >{entry.unread}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Only worth the vertical space once the user actually belongs to a
           group — with none joined this row was a lone "Direct" button naming
           the only mode there is. */}
@@ -288,9 +389,12 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
               color: message.mine ? "var(--accent-ink)" : "var(--fg)",
             }}
           >
-            {!message.mine && message.room && (
-              <div style={{ fontSize: 10, fontWeight: 800, opacity: .75 }}>{worldChatLabel(chat.peers[message.from], message.from)}</div>
-            )}
+            {/* Who and when, on every line. A history with neither is a wall
+                of text you cannot place. */}
+            <div style={{ display: "flex", gap: 7, alignItems: "baseline", fontSize: 10, fontWeight: 800, opacity: .75 }} data-ui="WorldChat:message-meta">
+              <span>{message.mine ? t("You") : worldChatLabel(chat.peers[message.from], message.from)}</span>
+              <span style={{ fontWeight: 600 }}>{messageStamp(message.ts)}</span>
+            </div>
             {message.text}
           </div>
         ))}

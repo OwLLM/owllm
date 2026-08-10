@@ -58,10 +58,11 @@ import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
 import {
+  openWorldChatThread,
+  subscribeWorldChat,
   worldChatHooks,
-  WORLD_CHAT_MESSAGE_EVENT,
-  type WorldChatMessageEventDetail,
 } from "./pages/gamify/worldChatRuntime";
+import { worldChatConversations, worldChatUnreadCount } from "./pages/gamify/worldChat";
 import { getIdentity } from "./pages/advanced/remoteDevices";
 import { openWebUrl } from "./utils/openWebUrl";
 
@@ -670,7 +671,7 @@ function ModeBar({
   /// World Chat: a message just arrived, so the owl says so. Chat can land on
   /// any page, which is why the notice belongs to the chrome and not to the
   /// World Map.
-  chatNotice?: boolean;
+  chatNotice?: { key: string; label: string; text: string; count: number } | null;
   onOpenChatNotice?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
@@ -1253,7 +1254,7 @@ function ModeBar({
             data-ui="WorldChatNotice"
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); onOpenChatNotice?.(); }}
-            title="World Chat — open the conversation"
+            title={`World Chat — ${chatNotice.label}: ${chatNotice.text}`}
             style={{
               position: "absolute",
               left: "50%", top: 6,
@@ -1265,14 +1266,17 @@ function ModeBar({
               border: "1px solid rgba(var(--accent-rgb),1)",
               color: "#fff", fontSize: 12, fontWeight: 800,
               letterSpacing: 0.3, whiteSpace: "nowrap",
+              maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
               cursor: "pointer", zIndex: 8,
               boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
             }}
           >
+            {/* The sender's name, because "got a message" from nobody in
+                particular is a riddle rather than a notification. */}
             <span style={{
               display: "inline-block",
               animation: continuousUiAnimation("owllm-chat-pop 220ms ease-out 1 both"),
-            }}>💬 Got a message</span>
+            }}>💬 Got a message{chatNotice.label ? ` from ${chatNotice.label}` : ""}{chatNotice.count > 1 ? ` (${chatNotice.count})` : ""}</span>
           </button>
         </>
       )}
@@ -1818,27 +1822,20 @@ export default function AppShell() {
   };
   // World Chat push notice. A message can arrive on any page — the World Map
   // is one tab among many — so the owl in the top-centre of the frame is where
-  // it is announced. It clears itself, and clicking it opens the conversation.
-  const [chatNotice, setChatNotice] = useState<boolean>(false);
-  useEffect(() => {
-    let hideTimer: number | undefined;
-    const onMessage = (event: Event) => {
-      const detail = (event as CustomEvent<WorldChatMessageEventDetail>).detail;
-      if (!detail?.from && !detail?.room) return;
-      setChatNotice(true);
-      // A second message restarts the dwell instead of stacking a bubble.
-      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
-      hideTimer = window.setTimeout(() => setChatNotice(false), 8000);
-    };
-    window.addEventListener(WORLD_CHAT_MESSAGE_EVENT, onMessage as EventListener);
-    return () => {
-      window.removeEventListener(WORLD_CHAT_MESSAGE_EVENT, onMessage as EventListener);
-      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
-    };
-  }, []);
+  // it is announced.
+  //
+  // It is derived from the unread counts and NOT from a timer: a notice that
+  // faded after a few seconds took the message with it — you were left knowing
+  // something had arrived and with no way back to it. This one names the
+  // sender, survives a restart, and stays until the conversation is opened.
+  const [chatNotice, setChatNotice] = useState<{ key: string; label: string; text: string; count: number } | null>(null);
+  useEffect(() => subscribeWorldChat((state) => {
+    const count = worldChatUnreadCount(state);
+    const newest = count ? worldChatConversations(state).find((entry) => entry.unread > 0) : undefined;
+    setChatNotice(newest ? { key: newest.key, label: newest.label, text: newest.last?.text ?? "", count } : null);
+  }), []);
   const openChatNotice = () => {
-    setChatNotice(false);
-    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "world-map" } }));
+    if (chatNotice) openWorldChatThread(chatNotice.key);
   };
 
   // The always-visible "🦉 Watcher" chrome button (and any other surface)

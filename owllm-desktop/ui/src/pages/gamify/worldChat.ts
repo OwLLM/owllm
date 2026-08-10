@@ -58,6 +58,25 @@ export type WorldChatState = {
   rooms: string[];
   /** Keyed by peer id, or `room:<id>` for a group. */
   threads: Record<string, WorldChatMessage[]>;
+  /**
+   * How many lines in each thread the user has not looked at yet, same keys as
+   * `threads`. A count and not a boolean: an inbox has to say *how much* is
+   * waiting, and it has to survive a restart — a notice that clears itself on a
+   * timer loses the message, which is the whole reason this exists.
+   */
+  unread: Record<string, number>;
+};
+
+/** One row of the inbox: who, the last thing said, when, and how much is new. */
+export type WorldChatConversation = {
+  key: string;
+  /** Empty for a group. */
+  peerId: string;
+  /** Empty for a direct conversation. */
+  room: string;
+  label: string;
+  last: WorldChatMessage | undefined;
+  unread: number;
 };
 
 /** Seal/open live in Rust because the private keys do. */
@@ -77,6 +96,8 @@ export type WorldChatDeps = {
    * history is the client's job.
    */
   initialThreads?: Record<string, WorldChatMessage[]>;
+  /** Unread counts from the previous run, so a missed message stays missed. */
+  initialUnread?: Record<string, number>;
   onChange: (state: WorldChatState) => void;
   /**
    * A message that just arrived from someone else. Fires once per line and
@@ -105,6 +126,7 @@ export function emptyWorldChatState(): WorldChatState {
     blocked: [],
     rooms: [],
     threads: {},
+    unread: {},
   };
 }
 
@@ -158,6 +180,45 @@ export function sanitizeWorldChatThreads(value: unknown): Record<string, WorldCh
   return threads;
 }
 
+/** Same contract as the threads: storage is user-writable, so nothing is trusted. */
+export function sanitizeWorldChatUnread(value: unknown): Record<string, number> {
+  const unread: Record<string, number> = {};
+  if (!value || typeof value !== "object") return unread;
+  for (const [key, count] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = Math.floor(Number(count));
+    if (key && Number.isFinite(parsed) && parsed > 0) unread[key] = Math.min(parsed, MAX_THREAD_MESSAGES);
+  }
+  return unread;
+}
+
+/**
+ * The inbox, newest first. Derived from the threads rather than stored beside
+ * them: a second list of conversations could disagree with the messages it
+ * claims to summarise, and then the panel and the history would tell the user
+ * two different stories.
+ */
+export function worldChatConversations(state: WorldChatState): WorldChatConversation[] {
+  return Object.entries(state.threads)
+    .flatMap(([key, messages]): WorldChatConversation[] => {
+      if (!messages.length) return [];
+      const room = key.startsWith("room:") ? key.slice(5) : "";
+      const peerId = room ? "" : key;
+      return [{
+        key,
+        peerId,
+        room,
+        label: room ? `# ${room.slice(0, 10)}` : worldChatLabel(state.peers[peerId], peerId),
+        last: messages[messages.length - 1],
+        unread: state.unread[key] ?? 0,
+      }];
+    })
+    .sort((a, b) => (b.last?.ts ?? "").localeCompare(a.last?.ts ?? ""));
+}
+
+export function worldChatUnreadCount(state: WorldChatState): number {
+  return Object.values(state.unread).reduce((total, count) => total + count, 0);
+}
+
 function trimText(value: unknown): string {
   return typeof value === "string" ? value.slice(0, MAX_CHAT_TEXT) : "";
 }
@@ -190,7 +251,11 @@ function asIdList(value: unknown): string[] {
  * so an action taken while offline reports that rather than vanishing.
  */
 export function createWorldChatStore(deps: WorldChatDeps) {
-  let state = { ...emptyWorldChatState(), threads: sanitizeWorldChatThreads(deps.initialThreads) };
+  let state = {
+    ...emptyWorldChatState(),
+    threads: sanitizeWorldChatThreads(deps.initialThreads),
+    unread: sanitizeWorldChatUnread(deps.initialUnread),
+  };
   let send: ((value: unknown) => boolean) | null = null;
   const now = deps.now ?? (() => new Date().toISOString());
 
@@ -332,7 +397,13 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           const message: WorldChatMessage = {
             id, kind, from, room, text: trimText(opened.text), ts: typeof frame.ts === "string" ? frame.ts : now(), mine: false,
           };
-          if (appendMessage(threadKey(from, room), message)) deps.onIncoming?.(message);
+          const key = threadKey(from, room);
+          if (appendMessage(key, message)) {
+            // Counted before the host is told, so a notice raised from
+            // `onIncoming` reads a state that already includes this line.
+            commit({ unread: { ...state.unread, [key]: (state.unread[key] ?? 0) + 1 } });
+            deps.onIncoming?.(message);
+          }
           lookup([from]);
         } catch (reason) {
           commit({ error: `Could not read a message: ${String(reason)}` });
@@ -393,6 +464,19 @@ export function createWorldChatStore(deps: WorldChatDeps) {
 
     clearError() {
       commit({ error: "" });
+    },
+
+    /** The user is looking at this conversation, so it is no longer waiting. */
+    markRead(key: string) {
+      if (!key || !state.unread[key]) return;
+      const unread = { ...state.unread };
+      delete unread[key];
+      commit({ unread });
+    },
+
+    markAllRead() {
+      if (!Object.keys(state.unread).length) return;
+      commit({ unread: {} });
     },
 
     setProfile(nick: string, reachable: boolean) {

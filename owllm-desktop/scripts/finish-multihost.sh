@@ -78,3 +78,32 @@ for f in "OwLLM.Desktop_${VERSION}_amd64.AppImage" \
 done
 
 echo "FINISH_MULTIHOST_ARTIFACTS_OK $VERSION"
+
+# 5. merge the foreign platform keys into this tag's latest.json.
+#    Seed from THIS TAG (not releases/latest) for the same reason
+#    publish-release.sh does: before promotion, releases/latest still serves an
+#    older version and the version guard would discard everything.
+say "merging latest.json"
+BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+EXISTING_LATEST="$(curl -sL "$BASE_URL/latest.json" 2>/dev/null || true)"
+case "$EXISTING_LATEST" in '{'*) : ;; *) EXISTING_LATEST="" ;; esac
+
+VERSION="$VERSION" BASE_URL="$BASE_URL" W="$W" EXISTING_LATEST="$EXISTING_LATEST" node -e '
+  const fs=require("fs"), path=require("path");
+  const V=process.env.VERSION, W=process.env.W, B=process.env.BASE_URL;
+  let prev={}; try{ prev=JSON.parse(process.env.EXISTING_LATEST||"{}"); }catch{}
+  const platforms=(prev.version===V && prev.platforms)?{...prev.platforms}:{};
+  const sig=f=>fs.readFileSync(path.join(W,f+".sig"),"utf8").trim();
+  const add=(keys,f)=>{ const s=sig(f), u=B+"/"+encodeURIComponent(f);
+    if(s.length<200) throw new Error("signature for "+f+" looks wrong ("+s.length+" chars)");
+    for(const k of keys) platforms[k]={signature:s,url:u}; };
+  add(["linux-x86_64"],  `OwLLM.Desktop_${V}_amd64.AppImage`);
+  add(["linux-aarch64"], `OwLLM.Desktop_${V}_aarch64.AppImage`);
+  add(["darwin-aarch64","darwin-x86_64"], "OwLLM.Desktop_universal.app.tar.gz");
+  const m={version:V,notes:(prev.version===V&&prev.notes)||("Release "+V),
+    pub_date:new Date().toISOString(),platforms};
+  fs.writeFileSync(path.join(W,"latest.json"),JSON.stringify(m,null,2));
+  console.log("  platforms in manifest:",Object.keys(platforms).sort().join(", "));'
+
+gh release upload "$TAG" "$W/latest.json" --repo "$REPO" --clobber
+echo "FINISH_MULTIHOST_OK $VERSION"

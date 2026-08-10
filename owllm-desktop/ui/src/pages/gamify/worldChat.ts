@@ -25,6 +25,8 @@ export type WorldChatKind = "message" | "request" | "room";
 export type WorldChatPeer = {
   id: string;
   nick: string;
+  /** Picture URL, always on GitHub's avatar CDN — see `sanitizeChatAvatar`. */
+  avatar: string;
   xPub: string;
   edPub: string;
   reachable: boolean;
@@ -48,6 +50,8 @@ export type WorldChatState = {
   status: WorldChatStatus;
   selfId: string;
   nick: string;
+  /** This device's own published picture, as the relay echoed it back. */
+  avatar: string;
   reachable: boolean;
   error: string;
   peers: Record<string, WorldChatPeer>;
@@ -75,6 +79,8 @@ export type WorldChatConversation = {
   /** Empty for a direct conversation. */
   room: string;
   label: string;
+  /** The peer's picture, or empty for a group and for anyone without one. */
+  avatar: string;
   last: WorldChatMessage | undefined;
   unread: number;
 };
@@ -117,6 +123,7 @@ export function emptyWorldChatState(): WorldChatState {
     status: "off",
     selfId: "",
     nick: "",
+    avatar: "",
     reachable: false,
     error: "",
     peers: {},
@@ -144,6 +151,44 @@ export function worldChatLabel(peer: WorldChatPeer | undefined, id: string): str
   const nick = peer?.nick?.trim();
   if (nick) return nick;
   return id ? `OW-${id.slice(0, 6).toUpperCase()}` : "";
+}
+
+/**
+ * The only host a chat picture may come from.
+ *
+ * A picture URL is chosen by the *other* side and then loaded by our renderer,
+ * so an unrestricted field would let any dot on the map point us at a URL of
+ * its choosing — which fetches on sight, reveals our IP, and can be swapped for
+ * anything at any time. Pinning it to GitHub's avatar CDN keeps this what it
+ * says it is, a GitHub profile picture, and nothing else.
+ */
+export const CHAT_AVATAR_HOST = "avatars.githubusercontent.com";
+export const MAX_CHAT_AVATAR_CHARS = 200;
+
+/** The picture for a GitHub login, sized for the small circles we draw. */
+export function githubAvatarUrl(login: string, size = 64): string {
+  const handle = login.trim();
+  if (!handle) return "";
+  return `https://${CHAT_AVATAR_HOST}/${encodeURIComponent(handle)}?size=${size}`;
+}
+
+/** Empty unless the value is an https URL on the avatar CDN. Never throws. */
+export function sanitizeChatAvatar(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > MAX_CHAT_AVATAR_CHARS) return "";
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== CHAT_AVATAR_HOST) return "";
+    return url.toString().slice(0, MAX_CHAT_AVATAR_CHARS);
+  } catch {
+    return "";
+  }
+}
+
+/** The letter drawn in place of a picture, so every row has the same shape. */
+export function chatAvatarInitial(label: string): string {
+  const first = label.trim().replace(/^OW-/, "").charAt(0);
+  return first ? first.toUpperCase() : "?";
 }
 
 export function threadKey(peerId: string, room = ""): string {
@@ -208,6 +253,7 @@ export function worldChatConversations(state: WorldChatState): WorldChatConversa
         peerId,
         room,
         label: room ? `# ${room.slice(0, 10)}` : worldChatLabel(state.peers[peerId], peerId),
+        avatar: room ? "" : state.peers[peerId]?.avatar ?? "",
         last: messages[messages.length - 1],
         unread: state.unread[key] ?? 0,
       }];
@@ -332,6 +378,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           status: "ready",
           selfId: typeof frame.id === "string" ? frame.id : "",
           nick: typeof frame.nick === "string" ? frame.nick : "",
+          avatar: sanitizeChatAvatar(frame.avatar),
           reachable: frame.reachable === true,
           error: "",
         });
@@ -361,6 +408,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           peers[id] = {
             id,
             nick: typeof row.nick === "string" ? row.nick : "",
+            avatar: sanitizeChatAvatar(row.avatar),
             xPub: typeof row.xPub === "string" ? row.xPub : "",
             edPub: typeof row.edPub === "string" ? row.edPub : "",
             reachable: row.reachable === true,
@@ -376,7 +424,11 @@ export function createWorldChatStore(deps: WorldChatDeps) {
         return;
       }
       case "chat_profile_ok": {
-        commit({ nick: typeof frame.nick === "string" ? frame.nick : "", reachable: frame.reachable === true });
+        commit({
+          nick: typeof frame.nick === "string" ? frame.nick : "",
+          avatar: sanitizeChatAvatar(frame.avatar),
+          reachable: frame.reachable === true,
+        });
         return;
       }
       case "chat_message": {
@@ -422,6 +474,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           peers[id] = {
             id,
             nick: typeof row.nick === "string" ? row.nick : "",
+            avatar: sanitizeChatAvatar(row.avatar),
             xPub: typeof row.xPub === "string" ? row.xPub : "",
             edPub: typeof row.edPub === "string" ? row.edPub : "",
             reachable: row.reachable === true,
@@ -479,8 +532,8 @@ export function createWorldChatStore(deps: WorldChatDeps) {
       commit({ unread: {} });
     },
 
-    setProfile(nick: string, reachable: boolean) {
-      write({ type: "chat_profile", nick, reachable });
+    setProfile(nick: string, reachable: boolean, avatar = "") {
+      write({ type: "chat_profile", nick, reachable, avatar: sanitizeChatAvatar(avatar) });
     },
 
     lookup,

@@ -671,7 +671,7 @@ function ModeBar({
   /// World Chat: a message just arrived, so the owl says so. Chat can land on
   /// any page, which is why the notice belongs to the chrome and not to the
   /// World Map.
-  chatNotice?: { key: string; label: string; text: string; count: number } | null;
+  chatNotice?: { key: string; label: string; avatar: string; text: string; count: number } | null;
   onOpenChatNotice?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
@@ -1274,9 +1274,25 @@ function ModeBar({
             {/* The sender's name, because "got a message" from nobody in
                 particular is a riddle rather than a notification. */}
             <span style={{
-              display: "inline-block",
+              display: "inline-flex", alignItems: "center", gap: 6,
               animation: continuousUiAnimation("owllm-chat-pop 220ms ease-out 1 both"),
-            }}>💬 Got a message{chatNotice.label ? ` from ${chatNotice.label}` : ""}{chatNotice.count > 1 ? ` (${chatNotice.count})` : ""}</span>
+            }}>
+              {/* Their picture when they publish one. Only ever a GitHub
+                  avatar URL — the relay refuses any other host — so the
+                  bubble cannot be made to fetch from somewhere else. */}
+              {chatNotice.avatar && (
+                <span
+                  data-ui="WorldChatNotice:avatar"
+                  aria-hidden="true"
+                  style={{
+                    width: 16, height: 16, borderRadius: "50%",
+                    backgroundImage: `url("${chatNotice.avatar}")`,
+                    backgroundSize: "cover", backgroundPosition: "center",
+                  }}
+                />
+              )}
+              💬 Got a message{chatNotice.label ? ` from ${chatNotice.label}` : ""}{chatNotice.count > 1 ? ` (${chatNotice.count})` : ""}
+            </span>
           </button>
         </>
       )}
@@ -1828,11 +1844,11 @@ export default function AppShell() {
   // faded after a few seconds took the message with it — you were left knowing
   // something had arrived and with no way back to it. This one names the
   // sender, survives a restart, and stays until the conversation is opened.
-  const [chatNotice, setChatNotice] = useState<{ key: string; label: string; text: string; count: number } | null>(null);
+  const [chatNotice, setChatNotice] = useState<{ key: string; label: string; avatar: string; text: string; count: number } | null>(null);
   useEffect(() => subscribeWorldChat((state) => {
     const count = worldChatUnreadCount(state);
     const newest = count ? worldChatConversations(state).find((entry) => entry.unread > 0) : undefined;
-    setChatNotice(newest ? { key: newest.key, label: newest.label, text: newest.last?.text ?? "", count } : null);
+    setChatNotice(newest ? { key: newest.key, label: newest.label, avatar: newest.avatar, text: newest.last?.text ?? "", count } : null);
   }), []);
   const openChatNotice = () => {
     if (chatNotice) openWorldChatThread(chatNotice.key);

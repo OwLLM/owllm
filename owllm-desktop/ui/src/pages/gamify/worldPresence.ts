@@ -426,8 +426,8 @@ export type WorldChatHooks = {
   identity: () => Promise<{ publicKey: string; xPub: string } | null>;
   /** Sign the relay's 64-hex challenge with the native device key. */
   sign: (nonce: string) => Promise<string>;
-  /** Display name and whether strangers may send a first-contact request. */
-  profile: () => { nick: string; reachable: boolean };
+  /** Display name, picture, and whether strangers may send a first contact. */
+  profile: () => { nick: string; avatar: string; reachable: boolean };
   /** Every chat and room frame the relay sends. */
   onFrame: (frame: Record<string, unknown>) => void;
   /** Called with a writer when authenticated, and with null when it drops. */
@@ -492,6 +492,7 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
         xPub: identity.xPub,
         signature: await chatHooks.sign(nonce),
         nick: profile.nick,
+        avatar: profile.avatar,
         reachable: profile.reachable,
       });
     } catch (reason) {

@@ -630,6 +630,7 @@ pub fn run() {
             git::git_branches,
             git::git_checkout,
             git::git_commit,
+            git::git_untrack_runtime_files,
             git::git_diff,
             code::launch_external_editor,
             dialog::pick_folder,

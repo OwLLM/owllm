@@ -195,6 +195,7 @@ export default function PublishCards({
   const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [checksOpen, setChecksOpen] = useState(false);
+  const [runtimeCleanOpen, setRuntimeCleanOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
@@ -334,6 +335,12 @@ export default function PublishCards({
     const out = await invoke<string>("repo_commit", { repoDir: gitDir, message: commitMsg });
     setCommitMsg("");
     setCommitOpen(false);
+    return out;
+  });
+
+  const cleanRuntimeFiles = () => run("Cleaning tracked runtime files", async () => {
+    const out = await invoke<string>("git_untrack_runtime_files", { dir: gitDir });
+    await refresh();
     return out;
   });
 
@@ -605,7 +612,31 @@ export default function PublishCards({
           )}
           {nuisanceFiles.length > 0 && (
             <div style={{ padding: "3px 5px", borderRadius: 5, background: "rgba(255,217,122,0.1)", color: "#ffd97a", fontSize: 10.5, lineHeight: 1.4 }}>
-              {nuisanceFiles.length} tracked OWLLM runtime file{nuisanceFiles.length === 1 ? "" : "s"} can keep Git dirty. Use Fix with agent to safely de-track them.
+              <div>
+                {nuisanceFiles.length} tracked OWLLM runtime path{nuisanceFiles.length === 1 ? "" : "s"} can keep Git dirty.
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 3 }}>
+                <button
+                  onClick={cleanRuntimeFiles}
+                  disabled={disabled || loading}
+                  title="Remove only OWLLM runtime paths from Git tracking; files stay on disk"
+                  style={{ ...chipBtn, padding: "2px 6px", fontSize: 10.5, color: "#ffd97a", borderColor: "rgba(255,217,122,0.45)" }}
+                >
+                  Clean tracked runtime
+                </button>
+                <button
+                  onClick={() => setRuntimeCleanOpen((v) => !v)}
+                  disabled={disabled || loading}
+                  style={{ ...chipBtn, padding: "2px 6px", fontSize: 10.5 }}
+                >
+                  {runtimeCleanOpen ? "Hide" : "Show"}
+                </button>
+              </div>
+              {runtimeCleanOpen && (
+                <pre style={{ margin: "4px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg-muted)", fontSize: 10 }}>
+                  {nuisanceFiles.join("\n")}
+                </pre>
+              )}
             </div>
           )}
           <div style={{ display: "flex", gap: 6, width: "100%" }}>

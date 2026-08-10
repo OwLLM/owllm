@@ -90,7 +90,10 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Project Card** (`.owllm/project.json`): committed per-repo config — goal,
   verify command(s), release config, solo/team default. Steward role lints it
   (rule-based, `cardLint.ts`). Releases run **deterministically on the host**
-  (bump → commit → tag → build → sign → publish → verify updater).
+  (bump → commit → tag → build → sign → publish → verify updater). The
+  Publisher card surfaces tracked app scratch such as `.tmp_wheels/` and can
+  de-track only those known runtime roots with `git rm --cached`, preserving
+  bytes on disk and avoiding model-invented cleanup shell.
 - **Job-specific project environments** (`projectEnvironment.ts`): new-project
   intent cards now persist a versioned workspace recipe, not only a team name.
   Web/React work opens a localhost preview beside OwLLM; responsive work uses a

@@ -159,7 +159,10 @@ gh() {
       GH_STUB,
       carryFn,
       "}",
-      pending ? `export OWLLM_PENDING_PLATFORMS='${pending}'` : "",
+      // Always export, even when empty: a real release run exports this in the
+      // publishing shell, and the control case must measure the no-pending
+      // behaviour rather than inherit that host's value.
+      `export OWLLM_PENDING_PLATFORMS='${pending}'`,
       'carry_forward_assets "OwLLM/owllm" "v9.9.9"',
     ].join("\n");
 

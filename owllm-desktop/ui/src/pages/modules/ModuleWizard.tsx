@@ -5,8 +5,9 @@
 //
 //   • Overlay (first run): mounted by AppShell when no modules are
 //     installed yet. Full-screen, can be dismissed to skip.
-//   • Settings page: addressable from Advanced > Modules to install /
-//     uninstall / update later.
+//   • Settings page: mounted by AppShell's ModulesPageMount on the
+//     OPEN_MODULES_EVENT, fired by Settings (⚙) > Modules and by the
+//     "Engine update" chip in the chrome. Install / uninstall / update later.
 //
 // Talks to the Rust ModuleManager via these Tauri commands:
 //   module_hardware_snapshot  → HardwareSnapshot
@@ -111,7 +112,16 @@ export default function ModuleWizard({ mode, onClose }: ModuleWizardProps) {
         setHardware(hw);
         setModules(mods);
         // Pre-select supported, non-installed, recommended modules
-        // when in first-run mode. Settings mode starts empty.
+        // when in first-run mode. Settings mode starts empty EXCEPT for
+        // modules with a newer build waiting: the user who opens this page
+        // from an "engine update" badge (or from a crash hint telling them
+        // their engine is too old) came to install exactly that, and leaving
+        // the box unticked makes the Install button look disabled.
+        {
+          const pre = new Set<string>();
+          for (const m of mods) if (m.state === "update-available") pre.add(m.id);
+          if (pre.size > 0) setSelected(pre);
+        }
         if (mode === "first-run") {
           const pre = new Set<string>();
           for (const m of mods) {

@@ -226,8 +226,8 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
             "alloc",
             "A buffer failed to allocate while loading the model. Two common causes: (1) GPU VRAM (not system RAM) \
              is too small — lower the GPU layers (-ngl) or use a smaller quant; (2) the GGUF uses a newer model \
-             architecture this llama.cpp build can't run yet — update the local-inference runtime (Home → reinstall) \
-             or re-export the GGUF with a current converter.",
+             architecture this llama.cpp build can't run yet — update the engine (Settings ⚙ → Modules → \
+             Local Inference) or re-export the GGUF with a current converter.",
         ));
     }
     // Engine too OLD for this GGUF. The file is fine — llama.cpp simply has no
@@ -240,9 +240,9 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
             "arch_unsupported",
             "This model's architecture is not supported by the installed inference engine — \
              the file is NOT corrupt and re-downloading will not help. The GGUF is newer than \
-             the bundled llama.cpp build. Update the Local Inference module (Home → Modules → \
-             reinstall Local Inference) and try again; if there is still no build that supports \
-             it, this model cannot run locally yet — pick another one.",
+             the installed llama.cpp build. Update the engine: Settings (⚙, top right) → Modules → \
+             Local Inference → Install, then try again. If no newer build is offered there, \
+             llama.cpp does not support this architecture yet and the model cannot run locally.",
         ));
     }
     // Broken / incompatible model file.

@@ -118,6 +118,18 @@ const TRIPWIRES = [
   // ordered scan. Guarded here because the gate does not run `cargo test`.
   ["src-tauri/src/projects.rs", /CREATE INDEX IF NOT EXISTS idx_agent_projects_updated_at/, "project list orders from an index, so polling never spills the JSON columns to disk (v1.0.11/v1.0.13 disk-writes storm)"],
   ["src-tauri/src/projects.rs", /ORDER BY updated_at DESC/, "the project list read still orders by updated_at — the column the index above covers"],
+  // Engine upgrades were silently ignored (2026-08-11). Installing a module
+  // extracts to a NEW <variant-id>-<version>/ and leaves the old directory in
+  // place, so versions coexist and module_binary has to choose. It chose by
+  // name, descending — and llama.cpp build tags break that: "b9488" sorts ABOVE
+  // "b10357". Measured on this box: Muse-Glimmer-30B (arch `muse-glimmer`) is
+  // refused by b9488 in 0.44 s and loads and generates on b10357, so the wrong
+  // pick is the difference between a working model and none. installed.json is
+  // the installer's own record of what is current, so it wins. Guarded here
+  // because the gate does not run `cargo test`.
+  ["src-tauri/src/paths.rs", /fn order_module_candidates[\s\S]{0,600}installed\.iter\(\)\.any/, "the module version the installer RECORDED wins over a higher-sorting older build (v1.0.14 engine upgrade)"],
+  ["src-tauri/src/paths.rs", /order_module_candidates\(&mut candidates, &installed_module_dirs\(&modules_root\)\)/, "module_binary actually applies that ordering instead of a bare name sort"],
+  ["src-tauri/src/paths.rs", /fn installed_module_dirs[\s\S]{0,700}Err\(_\) => return Vec::new\(\)/, "a missing or malformed installed.json degrades to the name sort, never to 'no module'"],
   // Zeroed-ref git storm (2026-08-01): a crash mid-ref-write left refs/heads/main
   // as 41 NUL bytes, every sync retried forever, and a failing gc --auto wrote a
   // pack per attempt — 5,046 packs / 11.5 GB, ~2 git procs/sec, which starved

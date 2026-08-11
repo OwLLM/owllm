@@ -36,7 +36,7 @@ import {
 } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
-import { samplingFor } from "./modelProfiles";
+import { samplingFor, sanitizeSampling } from "./modelProfiles";
 // Per-agent SKILL injection — the SAME builder the desktop path (AgentsPage)
 // uses, so bridge runs (Telegram/WhatsApp/…) get equipped-skill bodies and the
 // .owllm/skills self-load guidance too, not just the mirrored files on disk.
@@ -2733,7 +2733,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   let answeredWithoutTools = false;
   // Per-family sampling from the data-driven profile, with optional
   // caller overrides (ChatPage per-column controls).
-  const sampling = { ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) };
+  const sampling = sanitizeSampling({ ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) });
   // Where to send inference: the local managed server (default) or a remote
   // llama-server on another host (the Windows-GPU / Linux-agents split).
   // resolveInferenceBase() reads the persisted endpoint; local mode uses the

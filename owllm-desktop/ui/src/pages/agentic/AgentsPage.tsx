@@ -124,6 +124,7 @@ import { requiresManagedLocalServer } from "./peerCatalogue";
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
+import { claudeCliUnavailableMessage, type ClaudeCliStatus } from "./cliAuthMessage";
 import { runMemoryCurator } from "./memoryCurator";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -7655,9 +7656,12 @@ async function streamAnthropic(
   const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
   // forceSub: skip the API path entirely and go straight to the CLI.
   if (wantSub) {
-    const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+    const status = await invoke<ClaudeCliStatus>("accounts_status");
     if (!status?.claude_cli) {
-      throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+      throw new Error(claudeCliUnavailableMessage({
+        loggedIn: false,
+        installed: status?.claude_cli_installed === true,
+      }));
     }
     // Refresh the CLI token once per session (cold-start 401 fix). Pass the cwd so
     // a sandboxed project ALSO re-mirrors the refreshed creds into its WSL sandbox
@@ -7713,8 +7717,10 @@ async function streamAnthropic(
   if (!key) {
     if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
     // Default (unforced) path: try CLI subscription as a fallback.
+    let cliInstalled = false;
     try {
-      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+      const status = await invoke<ClaudeCliStatus>("accounts_status");
+      cliInstalled = status?.claude_cli_installed === true;
       if (status?.claude_cli) {
         await ensureCliWarm("claude_cli", claudeCwd);
         if (onThought) {
@@ -7741,8 +7747,9 @@ async function streamAnthropic(
       console.error("claude_cli_complete failed", e);
     }
     throw new Error(
-      "No ANTHROPIC_API_KEY saved and Claude Code CLI not detected. " +
-      "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
+      "No ANTHROPIC_API_KEY saved. " +
+      claudeCliUnavailableMessage({ loggedIn: false, installed: cliInstalled }) +
+      " Or save a key on the Accounts page instead."
     );
   }
   const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {

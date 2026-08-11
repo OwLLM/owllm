@@ -56,6 +56,16 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   (`agentic/localServerFailure.ts`) makes every local-model wait loop — agentic
   dock, team dispatch, fine-tuning chat — stop the moment the child dies and
   show that reason. Guarded by `localModelStartFailure.verify.run.mjs`.
+- **Linux/macOS crashes are named too, not just Windows ones.** A child killed
+  by a signal reports *no* exit code, so every Unix crash used to collapse into
+  "Process ended unexpectedly" while Windows got full NTSTATUS decoding.
+  `signal_hint_for` (`server.rs`) is the Unix counterpart — SIGKILL is reported
+  as the kernel OOM killer *with the `dmesg` command to confirm it*, SIGSEGV /
+  SIGBUS / SIGILL / SIGABRT / SIGTERM each get their own cause, and none of them
+  blames the model file. Every death path now also quotes llama-server's own
+  fatal line. The gate compiles and runs the shipped Rust on a Unix builder
+  against a **real** SIGKILL; it reports SKIP on Windows rather than passing
+  silently.
 - **A parked message is never destroyed.** The dock clears the composer when it
   accepts a draft for load→send; if the load fails, aborts, times out or throws,
   the text is handed back (`owllm:dock:restore-draft`, restored in `finally`).

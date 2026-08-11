@@ -48,6 +48,15 @@ function check(condition, message) {
   else { failed += 1; console.log(`FAIL ${message}`); }
 }
 
+// A platform-gated check must SAY it was skipped. Silently omitting it reads
+// as coverage that never ran — the Unix branch is exactly the kind of code
+// that regresses because the only builder that could catch it stayed quiet.
+let skipped = 0;
+function skip(message) {
+  skipped += 1;
+  console.log(`SKIP ${message}`);
+}
+
 const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch { return ""; } };
 const stripRustComments = (s) =>
   s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
@@ -88,9 +97,12 @@ function sliceItem(src, header) {
   return null;
 }
 
-const rustWanted = ["fn classify_crash(", "fn fatal_line("];
+const rustWanted = ["fn classify_crash(", "fn fatal_line(", "fn signal_hint_for("];
 const rustSlices = rustWanted.map((h) => sliceItem(serverRaw, h));
-check(rustSlices.every(Boolean), "classify_crash + fatal_line could be sliced out of server.rs");
+check(
+  rustSlices.every(Boolean),
+  "classify_crash + fatal_line + signal_hint_for could be sliced out of server.rs",
+);
 
 if (rustSlices.every(Boolean)) {
   // Verbatim stderr from llama-server b3850 refusing the user's model on
@@ -137,6 +149,25 @@ if (rustSlices.every(Boolean)) {
     `  assert!(line.contains("unknown model architecture: 'muse-glimmer'"), "{line}");`,
     `  assert!(!line.starts_with("0.01"), "the log-level prefix is stripped: {line}");`,
     `  assert!(fatal_line("main: server is listening").is_none(), "a healthy log quotes nothing");`,
+    // Linux/macOS: a signalled child reports NO exit code, so the signal is the
+    // only thing that names the death. Without this branch every Unix crash —
+    // including the kernel OOM kill that is the commonest Jetson failure —
+    // rendered as a bare "Process ended unexpectedly".
+    `  let (k, kh) = signal_hint_for(9).expect("SIGKILL is named");`,
+    `  assert!(k.contains("SIGKILL"), "{k}");`,
+    `  assert!(kh.contains("out-of-memory"), "the OOM killer is named: {kh}");`,
+    `  assert!(kh.contains("dmesg"), "and the user is told how to confirm it: {kh}");`,
+    `  assert!(signal_hint_for(11).expect("SIGSEGV").0.contains("SIGSEGV"));`,
+    `  assert!(signal_hint_for(7).expect("SIGBUS").0.contains("SIGBUS"));`,
+    `  assert!(signal_hint_for(4).expect("SIGILL").0.contains("SIGILL"));`,
+    // Never invent a cause for a signal we do not actually know.
+    `  assert!(signal_hint_for(31).is_none(), "an unknown signal must not be guessed at");`,
+    // The whole point: do not send anyone to re-download a good 17 GB file for
+    // a failure that has nothing to do with the file.
+    `  for s in [9, 4, 15] {`,
+    `    let (_, h) = signal_hint_for(s).expect("named");`,
+    `    assert!(!h.to_lowercase().contains("re-download"), "signal {s} blames the file: {h}");`,
+    `  }`,
     `  println!("RUST_START_FAILURE_OK");`,
     "}",
   ].join("\n");
@@ -157,6 +188,58 @@ if (rustSlices.every(Boolean)) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 1b. Linux/macOS ONLY: the `#[cfg(unix)]` half, compiled and RUN for real.
+// ---------------------------------------------------------------------------
+// Windows never compiles `exit_signal`'s Unix body, so a Windows-green gate
+// says nothing about it. On a Unix builder we kill a real child with a real
+// SIGKILL and assert the exact thing the crash path depends on: a signalled
+// child has NO exit code, and the signal alone must name the death.
+if (process.platform !== "win32" && rustSlices.every(Boolean)) {
+  const unixSrc = [
+    "#![allow(dead_code)]",
+    sliceItem(serverRaw, "fn signal_hint_for("),
+    // Verbatim from server.rs, minus the cfg attribute rustc would strip anyway.
+    "fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {",
+    "    use std::os::unix::process::ExitStatusExt;",
+    "    status.signal()",
+    "}",
+    "fn main() {",
+    `  let mut c = std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep");`,
+    `  unsafe { libc_kill(c.id() as i32, 9); }`,
+    `  let st = c.wait().expect("wait");`,
+    // THE invariant: on Unix there is no exit code to reason about.
+    `  assert!(st.code().is_none(), "a signalled child must report no exit code");`,
+    `  let sig = exit_signal(&st).expect("the signal is readable");`,
+    `  assert_eq!(sig, 9, "we sent SIGKILL");`,
+    `  let (name, hint) = signal_hint_for(sig).expect("SIGKILL is named on this platform");`,
+    `  assert!(name.contains("SIGKILL"), "{name}");`,
+    `  assert!(hint.contains("out-of-memory"), "{hint}");`,
+    `  println!("RUST_UNIX_SIGNAL_OK");`,
+    "}",
+    `extern "C" { #[link_name = "kill"] fn libc_kill(pid: i32, sig: i32) -> i32; }`,
+  ].join("\n");
+  const udir = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-unixsig-"));
+  const usrc = path.join(udir, "unixsig.rs");
+  const uexe = path.join(udir, "unixsig");
+  try {
+    fs.writeFileSync(usrc, unixSrc, "utf8");
+    execFileSync("rustc", ["--edition", "2021", "-A", "warnings", "-o", uexe, usrc], { stdio: "pipe" });
+    const out = execFileSync(uexe, { encoding: "utf8" });
+    check(
+      out.includes("RUST_UNIX_SIGNAL_OK"),
+      "on Unix, a REAL SIGKILL is read off the child and named (no exit code exists)",
+    );
+  } catch (e) {
+    const detail = String(e?.stderr ?? e?.message ?? e).split("\n").slice(0, 14).join("\n");
+    check(false, `the Unix signal path failed its live check:\n${detail}`);
+  } finally {
+    try { fs.rmSync(udir, { recursive: true, force: true }); } catch { /* temp dir */ }
+  }
+} else if (process.platform === "win32") {
+  skip("the Unix signal path (this is Windows — run this gate on a Linux/macOS builder)");
+}
+
 // server_status must actually USE both — a classifier nobody calls protects nothing.
 const serverCode = stripRustComments(serverRaw);
 check(
@@ -167,6 +250,27 @@ check(
   /classify_crash\(&tail_text\)/.test(serverCode),
   "server_status still classifies the crash from the stderr tail",
 );
+// The Unix half must be WIRED, not merely present: read the signal off the
+// dead child, and consult it on the no-exit-code branch. A hint function
+// nobody calls protects nobody on Linux.
+check(
+  /exit_signal\(&status\)/.test(serverCode),
+  "server_status reads the terminating signal off the dead child (Unix has no exit code then)",
+);
+check(
+  /term_signal\.and_then\(signal_hint_for\)/.test(serverCode),
+  "the no-exit-code branch names the signal instead of shrugging",
+);
+// Every death path must quote what llama-server itself printed — the Unix and
+// unknown-code branches used to drop it, which is how a diagnosable failure
+// reached the user as "Check the log for details".
+for (const [branch, re] of [
+  ["unknown exit code", /Crashed \(exit code \{code\}\)\.\{quoted\}/],
+  ["signal death", /Killed by \{name\}\.\{quoted\}/],
+  ["unexplained death", /Process ended unexpectedly\.\{quoted\}/],
+]) {
+  check(re.test(serverCode), `the ${branch} branch quotes llama-server's own words`);
+}
 
 // ---------------------------------------------------------------------------
 // 2. The UI stops waiting on a corpse (behaviour, executed)
@@ -361,5 +465,5 @@ check(
   "pressing Resume on an already-running download explains itself rather than doing nothing",
 );
 
-console.log(`\n${passed} passed, ${failed} failed`);
+console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
 if (failed > 0) process.exit(1);

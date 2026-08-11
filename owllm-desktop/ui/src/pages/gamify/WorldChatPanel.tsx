@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { readAppLanguage, useLocalization } from "../../localization";
 import { chatAvatarInitial, threadKey, worldChatConversations, worldChatLabel, type WorldChatState } from "./worldChat";
+import { presenceServerCode } from "./worldPresence";
 import {
   applyGithubChatIdentity,
   githubChatIdentity,
@@ -107,9 +108,11 @@ type Props = {
   /** The dot the map has selected, if it is a World node rather than a fleet orbit. */
   selectedNodeId: string;
   selectedLabel: string;
+  /** Where the map last saw each public node ("🇸🇬 · Punggol"), keyed by id. */
+  nodePlaces?: Map<string, string>;
 };
 
-export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props) {
+export default function WorldChatPanel({ selectedNodeId, selectedLabel, nodePlaces }: Props) {
   const { t } = useLocalization();
   const chat = useWorldChat();
   const [enabled, setEnabled] = useState(worldChatEnabled);
@@ -139,6 +142,15 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const [collapsed, setCollapsed] = useState(false);
 
   const store = worldChatStore();
+
+  // A place beside the code whenever the map knows one: "🇸🇬 · Punggol ·
+  // OW-0UVYMD5" says who that is; "OW-0UVYMD5" alone is noise. A chosen
+  // nickname already names the person, so it is left untouched.
+  const placed = (id: string, label: string): string => {
+    const place = id ? nodePlaces?.get(id) ?? "" : "";
+    return place && label === presenceServerCode(id) ? `${place} · ${label}` : label;
+  };
+
   const target = openRoom ? "" : (pickedPeer || selectedNodeId);
   const key = openRoom ? threadKey("", openRoom) : threadKey(target);
   const messages = useMemo(() => chat.threads[key] ?? [], [chat.threads, key]);
@@ -347,7 +359,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
           <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: .4 }}>{t("Chat requests")}</div>
           {chat.requests.map((id) => (
             <div key={id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
-              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg)" }}>{worldChatLabel(chat.peers[id], id)}</span>
+              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg)" }}>{placed(id, worldChatLabel(chat.peers[id], id))}</span>
               <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:accept" onClick={() => store.accept(id)}>{t("Accept")}</button>
               <button type="button" style={buttonStyle()} data-ui="WorldChat:block" onClick={() => store.block(id)}>{t("Block")}</button>
               <button type="button" style={buttonStyle("danger")} data-ui="WorldChat:report" onClick={() => store.report(id)}>{t("Report")}</button>
@@ -392,7 +404,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
               >
                 <ChatAvatar src={entry.avatar} label={entry.label} />
                 <span style={{ fontWeight: entry.unread ? 800 : 700, fontSize: 11.5, color: "var(--fg-strong)", whiteSpace: "nowrap" }}>
-                  {entry.label || t("Unknown")}
+                  {placed(entry.peerId, entry.label) || t("Unknown")}
                 </span>
                 <span style={{ flex: 1, fontSize: 11, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {entry.last?.mine ? `${t("You")}: ` : ""}{entry.last?.text ?? ""}
@@ -443,7 +455,7 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
           )}
           {openRoom
             ? `${t("Group")} # ${openRoom.slice(0, 10)}`
-            : worldChatLabel(chat.peers[target], target) || selectedLabel}
+            : placed(target, worldChatLabel(chat.peers[target], target)) || selectedLabel}
         </div>
       )}
       {(missingFleet || isSelf || (!openRoom && target && !hasKeys)) && (

@@ -20,6 +20,8 @@
 // and would be broadcast to every other renderer that never asked for it. The
 // relay's own queue is the durability layer.
 
+import { presenceServerCode } from "./worldPresence";
+
 export type WorldChatKind = "message" | "request" | "room";
 
 export type WorldChatPeer = {
@@ -146,11 +148,19 @@ export async function roomIdFromInvite(secret: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Short, human-readable label for a dot that has not chosen a nickname. */
+/**
+ * Short, human-readable label for a dot that has not chosen a nickname.
+ *
+ * The fallback is `presenceServerCode`, the SAME code the map and the country
+ * list print for that node — one machine, one name. An earlier version sliced
+ * the raw id instead, so the dot you clicked ("Server OW-0UVYMD5") and the
+ * thread it opened ("OW-523DF1") wore two unrelated codes, and a history full
+ * of them could not be matched to anything on the globe.
+ */
 export function worldChatLabel(peer: WorldChatPeer | undefined, id: string): string {
   const nick = peer?.nick?.trim();
   if (nick) return nick;
-  return id ? `OW-${id.slice(0, 6).toUpperCase()}` : "";
+  return id ? presenceServerCode(id) : "";
 }
 
 /**

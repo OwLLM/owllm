@@ -49,6 +49,10 @@ import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
 import { isRunActive, isRunActiveMatching, getRunActivityVersion, subscribeRunActivity } from "./runtime/runActivity";
 import { continuousUiAnimation } from "./runtime/renderingPolicy";
 import {
+  getUpdateAvailability, markUpdateAnnounced, requestUpdateInstall,
+  shouldAnnounceUpdate, subscribeUpdateAvailability,
+} from "./runtime/updateAvailability";
+import {
   initTabActivity, isWorkflowAwarePage, runPrefixesForPage, showFinishedBadge, stepTabActivity,
 } from "./runtime/headerTabActivity";
 import {
@@ -57,6 +61,7 @@ import {
 } from "./chatFontPreferences";
 import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
+import { getVersion } from "@tauri-apps/api/app";
 import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
 import {
   openWorldChatThread,
@@ -332,6 +337,10 @@ const MIN_PARENT_H = 500;
 // ---------------------------------------------------------------------
 const BADGE_W = 300;
 const BADGE_H = 195;
+
+// How long the owl's update balloon stays before handing over to the small
+// badge under the OWLLM mark.
+const UPDATE_NOTICE_MS = 10_000;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
@@ -678,6 +687,7 @@ function ModeBar({
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor,
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
   onWatcher, watcherHint, chatNotice, onOpenChatNotice,
+  updateNotice, updateBadge, onOpenUpdate,
   keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -705,6 +715,13 @@ function ModeBar({
   /// World Map.
   chatNotice?: { key: string; label: string; avatar: string; text: string; count: number } | null;
   onOpenChatNotice?: () => void;
+  /// A new version is out: the owl says so once, in a comic speech bubble, for
+  /// UPDATE_NOTICE_MS. After that the bubble is replaced by `updateBadge` — a
+  /// small chip tucked under the OWLLM mark — so the offer never vanishes
+  /// without a trace, and never blocks the app either.
+  updateNotice?: string | null;
+  updateBadge?: string | null;
+  onOpenUpdate?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
   chatFontStep: number;
@@ -1329,6 +1346,80 @@ function ModeBar({
         </>
       )}
 
+      {/* Update announcement — the owl asks, comic-book style, on the LEFT of
+          its head so it can never collide with the World Chat bubble on the
+          right. Ten seconds, clickable, then it hands over to the badge under
+          the OWLLM mark. Deliberately not a modal: an update is an invitation,
+          not an interruption. */}
+      {updateNotice && (
+        <>
+          <style>{`
+            @keyframes owllm-update-bubble-in {
+              0%   { opacity: 0; transform: scale(0.7) rotate(-6deg); }
+              60%  { opacity: 1; transform: scale(1.06) rotate(1.5deg); }
+              100% { opacity: 1; transform: scale(1) rotate(-1.2deg); }
+            }
+            @keyframes owllm-update-bubble-nudge {
+              0%, 100% { transform: rotate(-1.2deg) translateY(0); }
+              50%      { transform: rotate(-1.2deg) translateY(-2.5px); }
+            }
+            .owllm-update-bubble:hover { filter: brightness(1.06); }
+          `}</style>
+          <button
+            data-ui="UpdateNotice"
+            className="owllm-update-bubble"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenUpdate?.(); }}
+            title={`OwLLM Desktop ${updateNotice} is available — click to update`}
+            style={{
+              position: "absolute",
+              left: "50%", top: 5,
+              transform: "translateX(-100%) translateX(-92px)",
+              zIndex: 9,
+              width: 268, textAlign: "left",
+              padding: "9px 13px 10px",
+              // Manga speech balloon: paper-white, thick ink outline, hard
+              // offset shadow — the comic vocabulary, not a UI toast.
+              background: "#fdfdf7",
+              border: "2.5px solid #14181f",
+              borderRadius: "18px 18px 20px 18px",
+              color: "#14181f",
+              boxShadow: "3px 4px 0 rgba(20,24,31,0.85)",
+              cursor: "pointer",
+              animation: continuousUiAnimation(
+                "owllm-update-bubble-in 320ms cubic-bezier(.2,1.4,.4,1) 1 both, owllm-update-bubble-nudge 2.4s ease-in-out 320ms infinite",
+              ),
+            }}
+          >
+            <span style={{ display: "block", fontSize: 13.5, fontWeight: 900, lineHeight: 1.28, letterSpacing: 0.1 }}>
+              Please, update your app!
+            </span>
+            <span style={{ display: "block", marginTop: 2, fontSize: 12, fontWeight: 700, lineHeight: 1.3, color: "#2b3444" }}>
+              We fixed a few bugs and added cool features!
+            </span>
+            <span style={{ display: "block", marginTop: 5, fontSize: 10.5, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: "#b8330f" }}>
+              ⬆ Tap to install v{updateNotice}
+            </span>
+            {/* The tail, aimed at the owl's beak. Two stacked triangles so the
+                ink outline reads as one continuous balloon edge. */}
+            <span aria-hidden="true" style={{
+              position: "absolute", right: -17, top: 20,
+              width: 0, height: 0,
+              borderTop: "8px solid transparent",
+              borderBottom: "11px solid transparent",
+              borderLeft: "18px solid #14181f",
+            }} />
+            <span aria-hidden="true" style={{
+              position: "absolute", right: -12, top: 21,
+              width: 0, height: 0,
+              borderTop: "6px solid transparent",
+              borderBottom: "9px solid transparent",
+              borderLeft: "14px solid #fdfdf7",
+            }} />
+          </button>
+        </>
+      )}
+
       {/* The OWLLM title stays a drag surface, and hovering it restores the
           decorative frame. Clicking the compact owl hotspot above still
           summons the Watcher drawer. */}
@@ -1349,6 +1440,33 @@ function ModeBar({
           pointerEvents: "auto",
         }}
       >OWLLM</div>
+
+      {/* Where the offer LIVES once the bubble has had its say: under the
+          OWLLM mark, at its bottom-right. Small, quiet, and permanent until the
+          update is installed — the previous design had no such resting place, so
+          dismissing the dialog lost the update entirely. */}
+      {updateBadge && (
+        <button
+          data-ui="UpdateBadge"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onOpenUpdate?.(); }}
+          title={`OwLLM Desktop ${updateBadge} is available — click to update`}
+          style={{
+            position: "absolute",
+            left: "50%", top: "50%",
+            transform: "translate(38px, 22px)",
+            padding: "2px 9px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.9)",
+            border: "1px solid rgba(var(--accent-rgb),1)",
+            color: "#fff", fontSize: 10.5, fontWeight: 900,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            cursor: "pointer", zIndex: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+          }}
+        >
+          ⬆ Update available
+        </button>
+      )}
       {watcherHint && (
         <>
           <style>{`
@@ -1887,6 +2005,22 @@ export default function AppShell() {
     if (chatNotice) openWorldChatThread(chatNotice.key);
   };
 
+  // Update offer. The owl greets ONCE per version per session (the bubble), then
+  // the badge under the OWLLM mark carries it for as long as the update stands.
+  const updateVersion = React.useSyncExternalStore(
+    subscribeUpdateAvailability,
+    () => getUpdateAvailability().version,
+  );
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!updateVersion) { setUpdateNotice(null); return; }
+    if (!shouldAnnounceUpdate(updateVersion)) return;
+    markUpdateAnnounced(updateVersion);
+    setUpdateNotice(updateVersion);
+    const t = window.setTimeout(() => setUpdateNotice(null), UPDATE_NOTICE_MS);
+    return () => window.clearTimeout(t);
+  }, [updateVersion]);
+
   // The always-visible "🦉 Watcher" chrome button (and any other surface)
   // summons via this window event, so it never depends on the click-through
   // owl's geometry.
@@ -2096,6 +2230,11 @@ export default function AppShell() {
             watcherHint={watcherHint && overlayFrame}
             chatNotice={chatNotice}
             onOpenChatNotice={openChatNotice}
+            updateNotice={updateNotice}
+            // The badge takes over the moment the bubble is done, and is the
+            // only surface while a later session re-finds the same version.
+            updateBadge={updateVersion && !updateNotice ? updateVersion : null}
+            onOpenUpdate={requestUpdateInstall}
             keepFrameVisible={keepFrameVisible}
             onKeepFrameVisible={setKeepFrameVisible}
             chatFontStep={chatFontStep}
@@ -2221,12 +2360,18 @@ function WorldPresenceRunner() {
         // case no key is ever presented and the socket stays anonymous.
         if (!disposed) stop = installWorldPresenceConnection({ nodeId, appVersion, chatHooks: worldChatHooks() });
       })
-      .catch(() => {
+      .catch(async () => {
         // No native identity (browser-only development, or a device that cannot
         // read its own keypair): connect with NO id. The service shows the dot
         // while it is live and records nothing, so repeated launches can never
         // become repeated "users" — that is what a random fallback id did.
-        if (!disposed) stop = installWorldPresenceConnection();
+        //
+        // The VERSION is still sent. It does not come from the identity — the
+        // app knows its own build without any keypair — and dropping it here was
+        // the one code path that could put an ONLINE dot on the map with
+        // "Version unknown" beside it.
+        const appVersion = await getVersion().catch(() => undefined);
+        if (!disposed) stop = installWorldPresenceConnection({ appVersion });
       });
     return () => {
       disposed = true;

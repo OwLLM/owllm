@@ -6,15 +6,18 @@
 // background, owl mark, and a real download progress bar wired to
 // the updater's per-chunk events.
 //
-// Self-mounting: drop <UpdateController /> at the AppShell root and
-// it fires its own check() 2.5s after mount, then renders the modal
-// only when there's actually a newer version on the server. Routine offline
-// failures stay non-blocking; release/configuration failures are surfaced so a
-// platform cannot silently lose auto-update support again.
+// Self-mounting: drop <UpdateController /> at the AppShell root and it checks
+// 2.5s after mount and every RECHECK_MS after that. A found update is NOT shown
+// as a modal — it is published to runtime/updateAvailability, which the chrome
+// turns into the owl's speech bubble and then a small badge; this modal opens
+// only when the user asks (OPEN_UPDATE_EVENT). Routine offline failures stay
+// non-blocking; release/configuration failures are surfaced so a platform cannot
+// silently lose auto-update support again.
 
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "./utils/openWebUrl";
+import { OPEN_UPDATE_EVENT, setUpdateAvailable } from "./runtime/updateAvailability";
 
 const ICONS = "/Page_icons";
 
@@ -22,6 +25,11 @@ const ICONS = "/Page_icons";
 // version by hand — the public dist repo's latest release, same target as
 // the download page cards.
 const RELEASES_URL = "https://github.com/OwLLM/owllm/releases/latest";
+
+// How often the running app looks for a new release. Long enough to be
+// invisible, short enough that a machine left running for days still finds
+// out the same day.
+const RECHECK_MS = 6 * 60 * 60 * 1000;
 
 type Phase = "hidden" | "prompt" | "downloading" | "installing" | "error";
 
@@ -89,46 +97,62 @@ export default function UpdateController() {
   // AppImage. deb/rpm remain manual because the package manager owns them.
   const [installMode, setInstallMode] = useState<"auto" | "linux-appimage" | "manual">("auto");
 
-  // One-shot check on mount. We don't poll — Tauri's updater is
-  // designed for once-per-launch checks. Users who keep the app
-  // running for days won't see new versions until next launch, which
-  // matches every other desktop app's behaviour.
+  // First check 2.5s after mount, then REPEATED every RECHECK_MS. A one-shot
+  // per-launch check is why long-running installs sat on old versions: the
+  // check fired once, found nothing newer at that instant, and never looked
+  // again — a release published an hour later was invisible until the user
+  // happened to quit and relaunch.
+  //
+  // Finding an update no longer opens this modal. It publishes the fact to
+  // runtime/updateAvailability, and the chrome greets the user with the owl
+  // bubble; the modal opens only when they ask for it (OPEN_UPDATE_EVENT).
   useEffect(() => {
     if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
-    const t = window.setTimeout(async () => {
+    let disposed = false;
+    const runCheck = async () => {
       try {
         const { check } = await import("@tauri-apps/plugin-updater");
         const u = await check();
+        if (disposed) return;
         if (u && (u as any).available !== false) {
-          // Remount resilience: a webview reload (vault sync adoption) re-runs
-          // this check — don't re-nag about a version the user already
-          // dismissed this session (sessionStorage survives reloads).
-          try {
-            if (sessionStorage.getItem("owllm:update:dismissed") === (u as any).version) return;
-          } catch { /* storage blocked — show as normal */ }
           try {
             const mode = await invoke<string>("update_install_mode");
-            if (mode === "manual" || mode === "linux-appimage") setInstallMode(mode);
+            if (!disposed && (mode === "manual" || mode === "linux-appimage")) setInstallMode(mode);
           } catch { /* older backend without the command — assume auto */ }
+          if (disposed) return;
           setUpdate(u as unknown as Update);
-          setPhase("prompt");
+          setUpdateAvailable(String((u as any).version ?? ""));
         }
       } catch (e) {
         console.warn("[updater] check failed:", e);
         const actionable = actionableCheckError(e);
-        if (actionable) {
+        if (actionable && !disposed) {
           setError(actionable);
           setPhase("error");
         }
       }
-    }, 2500);
-    return () => window.clearTimeout(t);
+    };
+    const first = window.setTimeout(runCheck, 2500);
+    const iv = window.setInterval(runCheck, RECHECK_MS);
+    return () => {
+      disposed = true;
+      window.clearTimeout(first);
+      window.clearInterval(iv);
+    };
   }, []);
 
-  const dismiss = () => {
-    setPhase("hidden");
-    try { sessionStorage.setItem("owllm:update:dismissed", update?.version ?? ""); } catch { /* best effort */ }
-  };
+  // Opened on demand — from the owl's bubble, the chrome badge, or the Info
+  // page. Never auto-shown, so it can't interrupt work.
+  useEffect(() => {
+    const open = () => setPhase((p) => (p === "downloading" || p === "installing" ? p : "prompt"));
+    window.addEventListener(OPEN_UPDATE_EVENT, open as EventListener);
+    return () => window.removeEventListener(OPEN_UPDATE_EVENT, open as EventListener);
+  }, []);
+
+  // Closing the modal only hides it. The badge under the OWLLM mark stays, so
+  // "Later" is never a dead end — the previous behaviour recorded a dismissal
+  // and left no way back to the update at all.
+  const dismiss = () => setPhase("hidden");
 
   // Manual-mode path (Linux deb/rpm): open the releases page in the
   // OwLLM browser and dismiss — there is nothing we can install in place.

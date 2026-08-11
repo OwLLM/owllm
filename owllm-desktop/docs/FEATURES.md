@@ -706,6 +706,28 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   (`frame_shape.rs`), mirroring the Windows overlay behaviour.
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
+- **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
+  `ui/src/runtime/updateAvailability.ts`): the updater checks 2.5 s after launch
+  **and every 6 h after that** — a one-shot per-launch check meant an install
+  left running never learned about a release published an hour later, which is
+  why live presence nodes sat on old versions. Finding one no longer opens a
+  modal. It publishes to the `updateAvailability` store, and the owl at the
+  top-centre of the frame says so in a **manga speech balloon** on its LEFT (so
+  it can never collide with the World Chat bubble on its right) — *"Please,
+  update your app! We fixed a few bugs and added cool features!"* — clickable,
+  for `UPDATE_NOTICE_MS` (10 s), once per version per session. After that the
+  offer **rests** in a small **⬆ Update available** badge under the OWLLM mark
+  (bottom-right of the wordmark) and stays there until the update is installed;
+  the Info page's Application card carries the same badge. The install modal
+  opens only on demand (`OPEN_UPDATE_EVENT`), so "Later" hides a dialog instead
+  of losing the update — the previous design recorded a dismissal and left no
+  other surface anywhere. Gate: `ui/src/updateNotice.verify.run.mjs`.
+- **World presence always reports the release.** The version is a query
+  parameter the client puts on its own socket (`worldPresence.ts` → `?v=`), so a
+  VPN cannot strip it; blank versions on the map are installs older than v1.0.7.
+  The identity-failure path in `WorldPresenceRunner` (`AppShell.tsx`) now still
+  sends `appVersion` from `getVersion()` — it used to connect with no arguments
+  at all, the one path that could show an ONLINE dot as "Version unknown".
 - Frameless HybridFrame window (transparent — NEVER make it opaque),
   sticky-scroll chats (`useStickyScroll`), shared `ChatBubble` renderer,
   shared `LogBox` for all logs.

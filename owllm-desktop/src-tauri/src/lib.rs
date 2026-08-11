@@ -80,6 +80,7 @@ mod release;
 mod remote_devices;
 mod sandbox;
 mod server;
+mod session_health;
 mod signing;
 mod skill_library;
 mod slack;
@@ -103,35 +104,58 @@ mod wsl_setup;
 fn install_crash_log_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let entry = format!(
+        append_crash_log(&format!(
             "[{}] panic on thread '{}': {}\nbacktrace:\n{}\n\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             std::thread::current().name().unwrap_or("<unnamed>"),
             info,
             std::backtrace::Backtrace::force_capture(),
-        );
-        for base in [
-            std::env::var_os("TEMP"),
-            std::env::var_os("USERPROFILE"),
-            std::env::var_os("HOME"),
-            Some(std::ffi::OsString::from("/tmp")),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let path = std::path::PathBuf::from(base).join("owllm-crash.log");
-            use std::io::Write;
-            let ok = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .and_then(|mut f| f.write_all(entry.as_bytes()));
-            if ok.is_ok() {
-                break;
-            }
-        }
+        ));
         default(info);
     }));
+}
+
+/// Append to the crash file, trying each base until one accepts the write.
+fn append_crash_log(entry: &str) {
+    for base in [
+        std::env::var_os("TEMP"),
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOME"),
+        Some(std::ffi::OsString::from("/tmp")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = std::path::PathBuf::from(base).join("owllm-crash.log");
+        use std::io::Write;
+        let ok = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(entry.as_bytes()));
+        if ok.is_ok() {
+            break;
+        }
+    }
+}
+
+/// Record an exit-path event to stderr and the crash file.
+///
+/// The Linux "it just vanishes" reports of 2026-08 had no trace of a crash at
+/// all: no panic in `owllm-crash.log`, no signal death (apport logs every one,
+/// including for unpackaged AppImage binaries — its log had no OwLLM entry
+/// across the whole window in which the app vanished repeatedly), and no OOM
+/// kill. The app was leaving through an ordinary Tauri shutdown, and that path
+/// printed nothing, so a normal exit and a crash looked identical from the
+/// outside. These breadcrumbs make the difference legible: whoever asked for
+/// the exit now says so before the process goes.
+fn log_exit_path(entry: &str) {
+    let line = format!(
+        "[{}] exit-path: {entry}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+    );
+    eprint!("[owllm] {line}");
+    append_crash_log(&line);
 }
 
 /// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
@@ -316,6 +340,19 @@ pub fn run() {
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // Immediately after the data root is known, and before anything heavy can
+    // fail: claim this session and collect any predecessor that never reached
+    // its exit path. This is the only detector that survives the app being
+    // killed outright, so it must not sit behind work that might not run.
+    // APP_VERSION, not CARGO_PKG_VERSION: releases bump tauri.conf.json only,
+    // so the Cargo version would stamp every crash report with 0.4.7 and make
+    // the reports useless for telling which build died.
+    let unclean = session_health::begin(&APP_VERSION);
+    if unclean > 0 {
+        log_exit_path(&format!(
+            "startup found {unclean} previous session(s) that ended without running their shutdown"
+        ));
+    }
     // Both migrations must happen BEFORE WebView2 starts. In particular, the
     // legacy localStorage importer needs to copy/open old LevelDB stores while
     // no browser process holds their LOCK file. Keeping this inside setup()
@@ -730,6 +767,8 @@ pub fn run() {
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,
+            session_health::session_health_pending,
+            session_health::session_health_dismiss,
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,
@@ -879,6 +918,7 @@ pub fn run() {
                     event: tauri::WindowEvent::CloseRequested { .. },
                     ..
                 } if label == "main" => {
+                    log_exit_path("main window received CloseRequested");
                     MAIN_WINDOW_CLOSE_REQUESTED.store(true, Ordering::SeqCst);
                     overlay_frame::close_if_present(app);
                     // Reap llama-server HERE too, not only on ExitRequested —
@@ -893,6 +933,20 @@ pub fn run() {
                         server::kill_all_llama_servers("last-window-close");
                     }
                 }
+                // A window going away without a CloseRequested first is a
+                // window we did not close: a dead webview, or the WM
+                // destroying it. When it is "main", it is also what turns into
+                // an ExitRequested nobody asked for.
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    log_exit_path(&format!(
+                        "window '{label}' destroyed (main close requested={})",
+                        MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
+                    ));
+                }
                 tauri::RunEvent::ExitRequested { code, api, .. }
                     if code.is_none()
                         && !MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst)
@@ -902,10 +956,26 @@ pub fn run() {
                     // main window is still registered and the user did not
                     // close it, so accepting this request would turn a tab
                     // failure into a clean whole-app exit.
-                    eprintln!("[owllm] prevented auxiliary-window failure from exiting the app");
+                    log_exit_path("prevented auxiliary-window failure from exiting the app");
                     api.prevent_exit();
                 }
-                tauri::RunEvent::ExitRequested { .. } => {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    // The exit is going through. Name its origin: a code means
+                    // someone called `app.exit(n)` (the deferred AppImage
+                    // updater, or the SIGHUP/INT/TERM handler), and the
+                    // backtrace points straight at which. No code means the
+                    // event loop decided — every window is gone.
+                    match code {
+                        Some(code) => log_exit_path(&format!(
+                            "ExitRequested(code={code}) — requested in-process\nbacktrace:\n{}",
+                            std::backtrace::Backtrace::force_capture()
+                        )),
+                        None => log_exit_path(&format!(
+                            "ExitRequested(no code) — accepted; main window present={}, close requested={}",
+                            app.get_window("main").is_some(),
+                            MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
+                        )),
+                    }
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
@@ -913,6 +983,7 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
+                    log_exit_path("Exit — process is leaving");
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
@@ -924,6 +995,10 @@ pub fn run() {
                     // we go. Its next cold page fault is a SIGBUS and an
                     // "Ubuntu has experienced an internal error" dialog.
                     webkit_children::reap("app-exit");
+                    // Last of all: we got here, so this session ended the way
+                    // it should. Drop the marker — anything that skips this
+                    // line is exactly what the next startup should report.
+                    session_health::end_clean();
                 }
                 _ => {}
             }

@@ -393,12 +393,35 @@ function fakeStorage(seed = {}) {
   };
 }
 
+// The one presence-client function worldChat.ts actually calls. Kept byte-equal
+// to the real source by the check below, so a change there cannot leave the
+// bundled runtime asserting against a thread code the app never produces.
+const PRESENCE_SERVER_CODE_BODY = [
+  ' {',
+  '  let hash = 2166136261;',
+  '  for (let index = 0; index < nodeId.length; index += 1) {',
+  '    hash = Math.imul(hash ^ nodeId.charCodeAt(index), 16777619);',
+  '  }',
+  '  return `OW-${(hash >>> 0).toString(36).toUpperCase().padStart(7, "0")}`;',
+  '}',
+].join("\n");
+
+const PRESENCE_SERVER_CODE_STUB =
+  "export function presenceServerCode(nodeId)" + PRESENCE_SERVER_CODE_BODY;
+
+check("the stubbed thread-code helper matches the real presence implementation",
+  presenceTs.includes("export function presenceServerCode(nodeId: string): string" + PRESENCE_SERVER_CODE_BODY),
+  "a drifted stub would assert thread codes the app never produces");
+
 const runtimeStubs = {
   name: "world-chat-runtime-stubs",
   setup(build) {
-    // worldChat.ts is deliberately NOT stubbed: it has no imports of its own,
-    // and the history round-trip below has to exercise the real sanitizer —
-    // a stubbed one would only prove the stub works.
+    // worldChat.ts is deliberately NOT stubbed: the history round-trip below
+    // has to exercise the real sanitizer — a stubbed one would only prove the
+    // stub works. It does import `presenceServerCode` from the presence client,
+    // which is stubbed for its Tauri imports; that one function is pure, so the
+    // stub carries the real implementation and a check below fails if the two
+    // ever diverge.
     build.onResolve({ filter: /(@tauri-apps\/api\/core|remoteDevices|\/worldPresence)$/ },
       (args) => ({ path: args.path, namespace: "stub" }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
@@ -406,7 +429,8 @@ const runtimeStubs = {
       contents: `export const invoke = async () => "";
            export const getIdentity = async () => ({});
            export const listDevices = async () => [];
-           export const presenceNodeIdForDevice = async () => "";`,
+           export const presenceNodeIdForDevice = async () => "";
+           ${PRESENCE_SERVER_CODE_STUB}`,
     }));
   },
 };

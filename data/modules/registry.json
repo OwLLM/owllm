@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.07.11",
-  "publishedAt": "2026-07-11T00:00:00Z",
+  "registryVersion": "2026.08.11",
+  "publishedAt": "2026-08-11T09:51:12Z",
   "channels": [
     "stable",
     "beta",
@@ -30,13 +30,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 285212672,
+          "sizeBytes": 653361802,
           "channels": {
             "stable": {
-              "version": "b3850-cuda12.4",
-              "releasedAt": "2026-05-28T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cuda-b3850.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "version": "b10358-cuda12.4",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-cuda-b10358-cuda12.4.zip",
+              "sha256": "5e54c79ffaedaf09e7e802d2396167aa24e79c62ba82c1316439b88e53025426",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -50,13 +50,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 67108864,
+          "sizeBytes": 34660001,
           "channels": {
             "stable": {
-              "version": "b3850-vulkan",
-              "releasedAt": "2026-05-28T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-vulkan-b3850.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "version": "b10358-vulkan",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-vulkan-b10358-vulkan.zip",
+              "sha256": "e47de3fbbb3636ef039ae9ddd32cdf19736eaf5c20f8644553b6bf790c8ec244",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -69,13 +69,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 33554432,
+          "sizeBytes": 18469624,
           "channels": {
             "stable": {
-              "version": "b3850-cpu",
-              "releasedAt": "2026-05-28T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cpu-b3850.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "version": "b10358-cpu",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-cpu-b10358-cpu.zip",
+              "sha256": "0f5734e1cdc34c90d7f25e91f3e19307552acc0f9189853368a2f6675334c056",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -88,13 +88,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 18362870,
+          "sizeBytes": 20617352,
           "channels": {
             "stable": {
-              "version": "b9488-metal",
-              "releasedAt": "2026-07-04T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-metal-b9488.zip",
-              "sha256": "6fd2f052935dfea1147a7efcc2e5c7a5092b62060825abfbe1435c93984b9bbe",
+              "version": "b10358-metal",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-metal-b10358-metal.zip",
+              "sha256": "780b810ff5bd2ecccb1374e5da133a43dd3ad023c9c67a45ec973f6df37eb1d7",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -108,13 +108,13 @@
             "vramGb": 2,
             "diskGb": 1
           },
-          "sizeBytes": 39544175,
+          "sizeBytes": 40546796,
           "channels": {
             "stable": {
-              "version": "b9488-vulkan",
-              "releasedAt": "2026-07-04T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-vulkan-b9488.zip",
-              "sha256": "08e6cd95663a3d787c8dd7124f6dcb9fce59d0f41d49b7ce04606fa1a807adb0",
+              "version": "b10358-vulkan",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-linux-vulkan-b10358-vulkan.zip",
+              "sha256": "0ea2e805bf2ee9d40d86bea5319dbbfdafdadcd3f53ae236aa339c1dea58c162",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -127,13 +127,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 21832443,
+          "sizeBytes": 24550794,
           "channels": {
             "stable": {
-              "version": "b9488-cpu",
-              "releasedAt": "2026-07-04T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-cpu-b9488.zip",
-              "sha256": "ee4c814037e16d5ffdb0eb001a4529983828f9fa29f4f42992ee3a0202630d9b",
+              "version": "b10358-cpu",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-linux-cpu-b10358-cpu.zip",
+              "sha256": "f8a51d584ff3683dbd8c2c99964c9afa3c32964a29f9239fcbaf6086b58e4b00",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -149,13 +149,13 @@
             "diskGb": 2,
             "cudaMajorMin": 13
           },
-          "sizeBytes": 637984830,
+          "sizeBytes": 647027293,
           "channels": {
             "stable": {
-              "version": "b9488-cuda13.2",
-              "releasedAt": "2026-07-11T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-arm64-cuda-b9488.zip",
-              "sha256": "b576c9e7f181d8df72a25aa9f257ec1df8c696d8eafc3a2a3cfbc25fdab53cc5",
+              "version": "b10357-cuda13.2",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-linux-arm64-cuda-b10357-cuda13.2.zip",
+              "sha256": "bcc3cf46cf9d95a9448c49d3a5aea56a7dbe825cdd6ca46fd88198fc00e4800f",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -168,13 +168,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 3979341,
+          "sizeBytes": 21115592,
           "channels": {
             "stable": {
-              "version": "b9488-cpu",
-              "releasedAt": "2026-07-11T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-arm64-cpu-b9488.zip",
-              "sha256": "ee5dd2e72430b72c68a212ad63a41eebc1186d6780c76bd173b145b67199ebd0",
+              "version": "b10358-cpu",
+              "releasedAt": "2026-08-11T09:51:12Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-linux-arm64-cpu-b10358-cpu.zip",
+              "sha256": "4c83eec0a797bcc3451474da0b5b16254ee39bfeac8f09c6bc42a7a28f2407ce",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -503,7 +503,7 @@
     {
       "id": "tools-python",
       "displayName": "Python Tools (Screenshot)",
-      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight \u2014 under 50 MB on top of python-runtime.",
+      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
       "category": "content",
       "required": false,
       "uiSlots": [
@@ -588,7 +588,7 @@
     ]
   },
   "futureModules": {
-    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet \u2014 listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
+    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet — listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
     "items": [
       "audio-tts-piper",
       "vision-inference-llava",

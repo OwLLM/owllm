@@ -55,6 +55,7 @@ import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, abortable, isAbortError, sleepAbortable, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
+import { startupFailureReason } from "../agentic/localServerFailure";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { notify } from "../../components/Toast";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -948,6 +949,14 @@ export default function ChatPage() {
             if (recoverLocalInference(String(e?.message ?? e))) {
               continue;
             }
+            // The engine may already be DEAD — llama-server exits in ~1 s on an
+            // unsupported GGUF architecture. server_status reaps the child and
+            // classifies its stderr, so ask it before burning the remaining
+            // ~3 minutes retrying a socket nobody is listening on.
+            const dead = await invoke<ServerStatus>("server_status")
+              .then((s) => startupFailureReason(s, wantedModelId))
+              .catch(() => null);
+            if (dead) throw new Error(dead);
             const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
             updateCol(col.id, {
               error: `⏳ Waiting for llama-server to respond (no reply in ${attemptTimeoutMs / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,

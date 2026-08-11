@@ -230,11 +230,24 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
              or re-export the GGUF with a current converter.",
         ));
     }
+    // Engine too OLD for this GGUF. The file is fine — llama.cpp simply has no
+    // implementation for its architecture yet. Kept ahead of the broken-file
+    // branch because "error loading model" appears on the SAME line, and
+    // telling the user to re-download a perfectly good 17 GB file is both wrong
+    // and expensive.
+    if t.contains("unknown model architecture") || t.contains("unknown architecture") {
+        return Some((
+            "arch_unsupported",
+            "This model's architecture is not supported by the installed inference engine — \
+             the file is NOT corrupt and re-downloading will not help. The GGUF is newer than \
+             the bundled llama.cpp build. Update the Local Inference module (Home → Modules → \
+             reinstall Local Inference) and try again; if there is still no build that supports \
+             it, this model cannot run locally yet — pick another one.",
+        ));
+    }
     // Broken / incompatible model file.
     if t.contains("invalid magic")
         || t.contains("gguf_init_from_file")
-        || t.contains("unknown model architecture")
-        || t.contains("unknown architecture")
         || t.contains("error loading model")
         || t.contains("failed to load model")
         || t.contains("unsupported model")
@@ -246,6 +259,41 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
              Re-download the GGUF (it may be truncated), or update the local-inference module \
              if the model is newer than the engine.",
         ));
+    }
+    None
+}
+
+/// Pull the one line from a llama-server stderr tail that actually names the
+/// failure, stripped of llama.cpp's `<timestamp> <level> ` prefix. The
+/// classifier says what to DO; this says what the engine literally reported,
+/// so the user is never asked to take our word for it (or to go hunting in
+/// the Server tab for a line we already read).
+fn fatal_line(stderr_tail: &str) -> Option<String> {
+    // FIRST match wins, not last. llama.cpp prints the specific cause
+    // ("unknown model architecture: 'muse-glimmer'") and then cascades into
+    // generic ones ("failed to load model"), so scanning backwards would quote
+    // the least useful line of the four.
+    for raw in stderr_tail.lines() {
+        let low = raw.to_lowercase();
+        if !(low.contains("error loading model")
+            || low.contains("failed to load model")
+            || low.contains("unknown model architecture")
+            || low.contains("invalid magic")
+            || low.contains("out of memory")
+            || low.contains("failed to allocate"))
+        {
+            continue;
+        }
+        // llama.cpp prefixes every line with `0.01.001.908 E ` — drop it.
+        let cleaned = raw
+            .split_once(" E ")
+            .or_else(|| raw.split_once(" W "))
+            .map(|(_, rest)| rest)
+            .unwrap_or(raw)
+            .trim();
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
     }
     None
 }
@@ -305,15 +353,19 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         // FIRST try to classify from what llama-server actually printed —
         // stderr names the cause (OOM vs broken GGUF) where the exit code
         // is ambiguous (both often die with the same NTSTATUS).
-        let stderr_cause = inner
+        let tail_text = inner
             .stderr_tail
             .as_ref()
             .and_then(|t| t.lock().ok().map(|v| v.join("\n")))
-            .and_then(|tail| classify_crash(&tail).map(|(_, msg)| msg));
+            .unwrap_or_default();
+        let stderr_cause = classify_crash(&tail_text).map(|(_, msg)| msg);
+        let quoted = fatal_line(&tail_text)
+            .map(|l| format!(" llama-server said: \"{l}\"."))
+            .unwrap_or_default();
         inner.message = match (exit_code, stderr_cause) {
             (Some(0), _) => "Stopped cleanly.".to_string(),
             (code, Some(cause)) => format!(
-                "Crashed{}. {cause} See log for the full trace.",
+                "Crashed{}.{quoted} {cause}",
                 code.map(|c| format!(" (exit code {c})"))
                     .unwrap_or_default()
             ),
@@ -1038,9 +1090,31 @@ mod tests {
 
     #[test]
     fn classifies_unknown_architecture() {
-        let tail = "llama_model_load: error loading model: unknown model architecture: 'qwen3next'";
-        let (kind, _) = classify_crash(tail).expect("classified");
-        assert_eq!(kind, "bad_model");
+        // An unsupported architecture is an ENGINE-too-old problem, not a
+        // corrupt file — telling the user to re-download a good 17 GB GGUF is
+        // wrong. Real shape captured from llama.cpp b3850 refusing
+        // meta-models/Muse-Glimmer-30B-GGUF on 2026-08-11.
+        let tail = "llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'";
+        let (kind, msg) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "arch_unsupported");
+        assert!(msg.contains("NOT corrupt"));
+        assert!(msg.contains("Local Inference"));
+    }
+
+    #[test]
+    fn fatal_line_quotes_what_llama_server_actually_said() {
+        let tail = "0.00.6 I srv load_model: loading model\n\
+                    0.01.0 E llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'\n\
+                    0.01.0 E srv llama_server: exiting due to model loading error";
+        let line = fatal_line(tail).expect("a fatal line");
+        assert!(line.contains("unknown model architecture: 'muse-glimmer'"));
+        // The log-level/timestamp prefix is noise the user should not have to read.
+        assert!(!line.starts_with("0.01.0"));
+    }
+
+    #[test]
+    fn fatal_line_is_none_on_a_healthy_log() {
+        assert!(fatal_line("main: server is listening on http://127.0.0.1:8080").is_none());
     }
 
     #[test]

@@ -169,9 +169,17 @@ check(
   "fine-tuning chat: the send passes its live signal into the server start",
   /ensureLocalServer\(wantedModelId, signal\)/.test(ftChat),
 );
+// The invariant is "a deliberate Stop paints NO error", not the wording of the
+// error it isn't painting. The message itself moved to localStartFailureText
+// (which now carries the engine's real reason instead of a fixed "within 90s"
+// sentence), so pin the abort branch — that is the part Stop depends on.
 check(
-  "agents: Stop during load is not reported as a 90s timeout",
-  /ctrl\.signal\.aborted[\s\S]{0,120}?Local server failed to start/.test(agents),
+  "agents: Stop during load is not reported as a start failure",
+  /ctrl\.signal\.aborted\s*\?\s*null\s*:\s*localStartFailureText\(wantedLocal/.test(agents),
+);
+check(
+  "agents: a real (non-Stop) start failure still reports the engine's own reason",
+  /localStartFailureText\(wantedLocal, localStartFailureRef\.current\)/.test(agents),
 );
 check(
   "agents: solo chat passes its live signal into the server start",

@@ -39,7 +39,26 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
   cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
   downloads keep their `.partial` and resume via HTTP Range — the Downloaded
-  card shows ⏬ Resume download (no quant re-pick, no restart from 0%).
+  card shows ⏬ Resume download (no quant re-pick, no restart from 0%). A failed
+  row in the Downloads banner offers **↻ Retry** (resumes the remaining queue)
+  and **Dismiss**; Resume with nothing half-written on disk says so instead of
+  silently reopening the picker.
+- **The weight picker names what each file IS** (`weightRoles.ts`). GGUF repos
+  mix runnable weights with companions — `mmproj-*` (vision projector, fetched
+  automatically), `dflash*`/`draft*` (speculative-decoding draft), `*-lora-*`.
+  They are listed under **COMPANION FILES — cannot run on their own**, and a
+  selection with no primary weights is refused with the reason, instead of
+  downloading something that can never load.
+- **A model the engine can't run says so in one second**, not after a 3-minute
+  wait. `server_status` classifies llama-server's stderr and quotes its own
+  fatal line; `unknown model architecture` is reported as *engine too old — the
+  file is NOT corrupt* (not "re-download the GGUF"). `startupFailureReason`
+  (`agentic/localServerFailure.ts`) makes every local-model wait loop — agentic
+  dock, team dispatch, fine-tuning chat — stop the moment the child dies and
+  show that reason. Guarded by `localModelStartFailure.verify.run.mjs`.
+- **A parked message is never destroyed.** The dock clears the composer when it
+  accepts a draft for load→send; if the load fails, aborts, times out or throws,
+  the text is handed back (`owllm:dock:restore-draft`, restored in `finally`).
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).

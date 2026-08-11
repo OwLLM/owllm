@@ -14,7 +14,7 @@
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
@@ -2520,9 +2520,19 @@ function ModuleUpdateWatcher() {
     if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
     const first = window.setTimeout(() => { void checkModuleUpdates(); }, 4000);
     const iv = window.setInterval(() => { void checkModuleUpdates(); }, 6 * 60 * 60 * 1000);
+    // The backend now installs these on its own (modules::spawn_auto_maintenance).
+    // Re-check the moment one lands, or the badge would advertise an update
+    // that is already installed for up to six more hours.
+    let unlisten: UnlistenFn | null = null;
+    let dropped = false;
+    void listen<{ stage?: string }>("module-progress", (evt) => {
+      if (evt.payload?.stage === "completed") void checkModuleUpdates();
+    }).then((fn) => { if (dropped) { try { fn(); } catch {} } else { unlisten = fn; } });
     return () => {
+      dropped = true;
       window.clearTimeout(first);
       window.clearInterval(iv);
+      try { unlisten?.(); } catch {}
     };
   }, []);
   return null;

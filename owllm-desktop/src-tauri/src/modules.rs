@@ -509,6 +509,8 @@ pub struct ModuleManager {
     root: PathBuf,
     installed: Mutex<Installed>,
     cached_registry: Mutex<Option<Registry>>,
+    /// Serializes install(). Async, because install() awaits across it.
+    install_lock: tokio::sync::Mutex<()>,
 }
 
 impl ModuleManager {
@@ -526,6 +528,7 @@ impl ModuleManager {
             root,
             installed: Mutex::new(installed),
             cached_registry: Mutex::new(None),
+            install_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -650,6 +653,13 @@ impl ModuleManager {
         module_id: &str,
         hardware: &HardwareSnapshot,
     ) -> Result<InstalledModule, String> {
+        // One install at a time, app-wide. Three callers can now ask for the
+        // same module at once — the wizard, server.rs's engine auto-install,
+        // and the background maintenance sweep — and they share a staging file
+        // and a destination directory per (variant, version). Two of them
+        // extracting into the same directory is how a "successful" install ends
+        // up with a truncated payload.
+        let _install_guard = self.install_lock.lock().await;
         let registry = self.fetch_registry().await?;
         let channel = self.channel();
         let chain = topo_install_order(&registry, module_id)?;
@@ -761,6 +771,98 @@ impl ModuleManager {
         let mut installed = self.installed.lock().unwrap();
         installed.update_channel = channel;
         save_installed(&self.root, &installed)
+    }
+}
+
+// ---------- automatic maintenance ----------
+
+/// Modules the app installs unasked because a shipped feature silently
+/// degrades without them. `tools-python` backs the agents' screenshot tool;
+/// making the user hand-install a dependency of a feature they already have is
+/// how that feature stays broken forever. `python-runtime` comes with it as its
+/// declared dependency, via topo_install_order.
+const AUTO_INSTALL_IDS: &[&str] = &["tools-python"];
+
+/// Far enough past launch that a cold start never competes with a download,
+/// then the same 6h cadence as the app updater and the UI's module watcher.
+const AUTO_MAINTAIN_FIRST_DELAY: Duration = Duration::from_secs(45);
+const AUTO_MAINTAIN_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Keep installed modules current, and install the ones a feature needs,
+/// without prompting.
+///
+/// `local-inference` IS llama.cpp. A build that predates a GGUF architecture
+/// cannot load models published after it, which reads to a user as "the app is
+/// broken", not "a module is old". Leaving that to a badge meant an install
+/// could sit for months on a dead engine: the offer is easy to decline once,
+/// and a fix a user has to accept is a fix most users never get.
+///
+/// Entirely in the background — it never blocks startup and never opens a
+/// window. install() extracts into a NEW version-named directory and only then
+/// rewrites installed.json, so a llama-server already running out of the old
+/// directory is not disturbed; the next model start picks up the new binary.
+pub fn spawn_auto_maintenance<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(AUTO_MAINTAIN_FIRST_DELAY).await;
+        loop {
+            auto_maintain(&app).await;
+            tokio::time::sleep(AUTO_MAINTAIN_INTERVAL).await;
+        }
+    });
+}
+
+async fn auto_maintain<R: Runtime>(app: &AppHandle<R>) {
+    let Some(mgr) = app.try_state::<ModuleManager>() else {
+        return;
+    };
+    // First run isn't over until something is installed. The wizard is the
+    // owner of that moment — downloading behind it would race it for the same
+    // staging directory and, worse, spend a new user's bandwidth on modules
+    // they are still being asked about. The next sweep picks this up.
+    if mgr.installed.lock().map(|i| i.modules.is_empty()).unwrap_or(true) {
+        return;
+    }
+
+    let snap = HardwareSnapshot::probe().await;
+    let statuses = match mgr.list(&snap).await {
+        Ok(s) => s,
+        // Offline, or the registry is unreachable. Say so and retry on the next
+        // sweep — "could not check" must never be silently read as "nothing to
+        // do", which is exactly how an engine goes stale unnoticed.
+        Err(e) => {
+            eprintln!("[owllm] module auto-maintenance: registry check failed: {e}");
+            return;
+        }
+    };
+
+    let mut wanted: Vec<String> = statuses
+        .iter()
+        .filter(|s| s.state == ModuleState::UpdateAvailable)
+        .map(|s| s.id.clone())
+        .collect();
+    for id in AUTO_INSTALL_IDS {
+        // NotInstalled only. A module this platform has no build for resolves
+        // to NotSupported (tools-python is Windows-only today), and asking to
+        // install it there would fail on every sweep, forever.
+        if statuses
+            .iter()
+            .any(|s| s.id == *id && s.state == ModuleState::NotInstalled)
+        {
+            wanted.push((*id).to_string());
+        }
+    }
+
+    for id in wanted {
+        eprintln!("[owllm] module auto-maintenance: installing {id}");
+        match mgr.inner().install(app, &id, &snap).await {
+            Ok(im) => eprintln!(
+                "[owllm] module auto-maintenance: {id} is now {}",
+                im.version
+            ),
+            // Leave installed.json untouched so list() keeps reporting the
+            // update: the badge is the fallback when this cannot do it.
+            Err(e) => eprintln!("[owllm] module auto-maintenance: {id} failed: {e}"),
+        }
     }
 }
 

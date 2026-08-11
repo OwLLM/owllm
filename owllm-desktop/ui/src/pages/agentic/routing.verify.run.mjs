@@ -134,11 +134,13 @@ check(
 const codePageSource = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
 check(
   "unrestricted Code-page CLI turns carry the explicit all-tools relay sentinel",
-  codePageSource.includes('const runtimeTools = chatOnly ? roTools : ["all"];')
-    && codePageSource.includes("allowedTools: runtimeTools")
+  // BOTH panes resolve the same way: read-only set in Chat mode, otherwise the
+  // explicit all-tools sentinel. Never `undefined`, which the relay reads as
+  // "no tools at all".
+  codePageSource.split('const runtimeTools = chatOnly ? roTools : ["all"];').length - 1 === 2
+    && codePageSource.split("allowedTools: runtimeTools").length - 1 === 2
     && codePageSource.includes("dThought, runtimeTools,")
-    && codePageSource.includes('allowedTools: ["all"]')
-    && codePageSource.includes('onSecondaryThought, ["all"],'),
+    && codePageSource.includes("onSecondaryThought, runtimeTools,"),
 );
 for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   const data = JSON.parse(fs.readFileSync(path.join(teamsDir, tf), "utf8"));

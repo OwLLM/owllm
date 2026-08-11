@@ -6,17 +6,25 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { useLocalization } from "../../localization";
-import { threadKey, worldChatLabel, type WorldChatState } from "./worldChat";
+import { readAppLanguage, useLocalization } from "../../localization";
+import { chatAvatarInitial, threadKey, worldChatConversations, worldChatLabel, type WorldChatState } from "./worldChat";
+import { presenceServerCode } from "./worldPresence";
 import {
+  applyGithubChatIdentity,
+  githubChatIdentity,
   saveWorldChatProfile,
   setWorldChatEnabled,
   subscribeWorldChat,
+  worldChatAvatar,
   worldChatEnabled,
+  worldChatGithubChoice,
   worldChatNick,
   worldChatReachable,
   worldChatSnapshot,
   worldChatStore,
+  WORLD_CHAT_OPEN_EVENT,
+  type GithubChatIdentity,
+  type WorldChatOpenEventDetail,
 } from "./worldChatRuntime";
 
 export function useWorldChat(): WorldChatState {
@@ -48,21 +56,81 @@ function buttonStyle(tone: "accent" | "plain" | "danger" = "plain"): CSSProperti
   };
 }
 
+/**
+ * When a line was said. Today's messages show the clock; anything older also
+ * shows the date, because "14:02" on its own is a lie about a message from
+ * last week.
+ */
+function messageStamp(ts: string): string {
+  if (!ts) return "";
+  const at = new Date(ts);
+  if (Number.isNaN(at.getTime())) return "";
+  const language = readAppLanguage();
+  const clock = at.toLocaleTimeString(language, { hour: "2-digit", minute: "2-digit", hour12: false });
+  const now = new Date();
+  const sameDay = at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
+  return sameDay ? clock : `${at.toLocaleDateString(language, { day: "2-digit", month: "short" })} ${clock}`;
+}
+
+/**
+ * A chat picture, or the initial in its place. Always the same circle either
+ * way, so a row does not jump about depending on whether the person opposite
+ * happens to have published one.
+ */
+function ChatAvatar({ src, label, size = 20 }: { src: string; label: string; size?: number }) {
+  const shell: CSSProperties = {
+    width: size,
+    height: size,
+    flex: `0 0 ${size}px`,
+    borderRadius: "50%",
+    overflow: "hidden",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(var(--accent-rgb),.18)",
+    color: "var(--fg-strong)",
+    fontSize: Math.round(size * 0.48),
+    fontWeight: 800,
+    // Only a GitHub avatar URL ever reaches here (`sanitizeChatAvatar`), so
+    // this can never become a beacon pointed at us by whoever we are talking to.
+    backgroundImage: src ? `url("${src}")` : undefined,
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+  };
+  return (
+    <span style={shell} data-ui="WorldChat:avatar" aria-hidden="true">
+      {src ? "" : chatAvatarInitial(label)}
+    </span>
+  );
+}
+
 type Props = {
   /** The dot the map has selected, if it is a World node rather than a fleet orbit. */
   selectedNodeId: string;
   selectedLabel: string;
+  /** Where the map last saw each public node ("🇸🇬 · Punggol"), keyed by id. */
+  nodePlaces?: Map<string, string>;
 };
 
-export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props) {
+export default function WorldChatPanel({ selectedNodeId, selectedLabel, nodePlaces }: Props) {
   const { t } = useLocalization();
   const chat = useWorldChat();
   const [enabled, setEnabled] = useState(worldChatEnabled);
   const [nick, setNick] = useState(worldChatNick);
+  const [avatar, setAvatar] = useState(worldChatAvatar);
   const [reachable, setReachable] = useState(worldChatReachable);
+  // The connected GitHub account, if there is one. Looked up once per mount:
+  // there is nothing to ask about until we know whether an account exists.
+  const [github, setGithub] = useState<GithubChatIdentity | null>(null);
+  const [githubChoice, setGithubChoice] = useState(worldChatGithubChoice);
   const [draft, setDraft] = useState("");
   const [invite, setInvite] = useState("");
   const [openRoom, setOpenRoom] = useState("");
+  // A conversation opened from the inbox rather than by clicking a dot. The
+  // globe cannot be the only way back into a chat: the person who wrote to you
+  // may not be on screen, may be off the map entirely, and after a restart you
+  // would have no idea which dot they were.
+  const [pickedPeer, setPickedPeer] = useState("");
   // Nickname, reachability and group invites are setup, not conversation. They
   // are folded away so the card reads as a chat rather than a settings form
   // with a one-line box wedged underneath it.
@@ -74,10 +142,60 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
   const [collapsed, setCollapsed] = useState(false);
 
   const store = worldChatStore();
-  const target = openRoom ? "" : selectedNodeId;
+
+  // A place beside the code whenever the map knows one: "🇸🇬 · Punggol ·
+  // OW-0UVYMD5" says who that is; "OW-0UVYMD5" alone is noise. A chosen
+  // nickname already names the person, so it is left untouched.
+  const placed = (id: string, label: string): string => {
+    const place = id ? nodePlaces?.get(id) ?? "" : "";
+    return place && label === presenceServerCode(id) ? `${place} · ${label}` : label;
+  };
+
+  const target = openRoom ? "" : (pickedPeer || selectedNodeId);
   const key = openRoom ? threadKey("", openRoom) : threadKey(target);
   const messages = useMemo(() => chat.threads[key] ?? [], [chat.threads, key]);
   const sticky = useStickyScroll<HTMLDivElement>(messages.length);
+  const conversations = useMemo(() => worldChatConversations(chat), [chat]);
+
+  useEffect(() => {
+    let live = true;
+    void githubChatIdentity().then((identity) => { if (live) setGithub(identity); });
+    return () => { live = false; };
+  }, []);
+
+  /** Answer the question, and fold the settings back to their saved values. */
+  const answerGithub = (choice: "yes" | "no") => {
+    applyGithubChatIdentity(choice, github);
+    setGithubChoice(choice);
+    // Mirror whatever the runtime settled on, so the fields never disagree
+    // with what was actually published.
+    setNick(worldChatNick());
+    setAvatar(worldChatAvatar());
+  };
+
+  // Clicking a dot on the globe always wins over whatever the inbox had open,
+  // otherwise selecting someone would appear to do nothing.
+  useEffect(() => { if (selectedNodeId) { setPickedPeer(""); setOpenRoom(""); } }, [selectedNodeId]);
+
+  // The chrome's notice points at one conversation; opening it lands here.
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const wanted = (event as CustomEvent<WorldChatOpenEventDetail>).detail?.key ?? "";
+      if (!wanted) return;
+      setCollapsed(false);
+      if (wanted.startsWith("room:")) { setOpenRoom(wanted.slice(5)); setPickedPeer(""); }
+      else { setOpenRoom(""); setPickedPeer(wanted); }
+    };
+    window.addEventListener(WORLD_CHAT_OPEN_EVENT, onOpen as EventListener);
+    return () => window.removeEventListener(WORLD_CHAT_OPEN_EVENT, onOpen as EventListener);
+  }, []);
+
+  // Looking at a thread is what marks it read — nothing else does, so a notice
+  // can never be cleared by a message the user did not actually see.
+  useEffect(() => {
+    if (!enabled || collapsed || !key) return;
+    store.markRead(key);
+  }, [enabled, collapsed, key, messages.length, store]);
 
   const isContact = chat.contacts.includes(target);
   const isBlocked = chat.blocked.includes(target);
@@ -159,8 +277,36 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
         >{collapsed ? "▴" : "▾"}</button>
       </div>
 
+      {/* Asked once, and only of someone with a GitHub account connected. The
+          alternative is a stranger's dot labelled OW-3F91A2 forever, because
+          nobody opens a settings pane to name themselves. Answering either way
+          is remembered, so this never comes back on its own. */}
+      {!collapsed && github && githubChoice === "" && (
+        <div
+          style={{ display: "flex", gap: 9, marginTop: 9, alignItems: "center", flexWrap: "wrap", borderRadius: 11, border: "1px solid var(--border-strong)", background: "rgba(var(--accent-rgb),.08)", padding: "8px 10px" }}
+          data-ui="WorldChat:github-ask"
+        >
+          <ChatAvatar src={github.avatar} label={github.login} size={30} />
+          <div style={{ flex: 1, minWidth: 150 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: "var(--fg-strong)" }}>
+              {t("Use your GitHub name and picture here?")}
+            </div>
+            <div style={{ fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+              {t("You are signed in to GitHub as")} <strong>{github.login}</strong>. {t("Anyone you chat with would see that name and picture instead of your node code.")}
+            </div>
+          </div>
+          <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:github-yes" onClick={() => answerGithub("yes")}>
+            {t("Use it")}
+          </button>
+          <button type="button" style={buttonStyle()} data-ui="WorldChat:github-no" onClick={() => answerGithub("no")}>
+            {t("No thanks")}
+          </button>
+        </div>
+      )}
+
       {!collapsed && settingsOpen && (
         <div style={{ display: "flex", gap: 6, marginTop: 9, alignItems: "center", flexWrap: "wrap" }} data-ui="WorldChat:settings-panel">
+          <ChatAvatar src={avatar} label={nick || chat.selfId} size={24} />
           <input
             value={nick}
             onChange={(event) => setNick(event.target.value.slice(0, 32))}
@@ -172,9 +318,21 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
             <input type="checkbox" checked={reachable} data-ui="WorldChat:reachable" onChange={(event) => setReachable(event.target.checked)} />
             {t("Let strangers ask")}
           </label>
-          <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:save-profile" onClick={() => saveWorldChatProfile(nick, reachable)}>
+          <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:save-profile" onClick={() => saveWorldChatProfile(nick, reachable, avatar)}>
             {t("Save")}
           </button>
+          {/* The way back in after answering "No thanks", and the way out after
+              answering "Use it" — neither answer may be a one-way door. */}
+          {github && (
+            <button
+              type="button"
+              style={buttonStyle()}
+              data-ui="WorldChat:github-toggle"
+              onClick={() => answerGithub(avatar === github.avatar && nick === github.login ? "no" : "yes")}
+            >
+              {avatar === github.avatar && nick === github.login ? t("Stop using GitHub identity") : t("Use my GitHub name and picture")}
+            </button>
+          )}
           <input
             value={invite}
             onChange={(event) => setInvite(event.target.value)}
@@ -201,12 +359,66 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
           <div style={{ fontSize: 10.5, fontWeight: 800, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: .4 }}>{t("Chat requests")}</div>
           {chat.requests.map((id) => (
             <div key={id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
-              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg)" }}>{worldChatLabel(chat.peers[id], id)}</span>
+              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg)" }}>{placed(id, worldChatLabel(chat.peers[id], id))}</span>
               <button type="button" style={buttonStyle("accent")} data-ui="WorldChat:accept" onClick={() => store.accept(id)}>{t("Accept")}</button>
               <button type="button" style={buttonStyle()} data-ui="WorldChat:block" onClick={() => store.block(id)}>{t("Block")}</button>
               <button type="button" style={buttonStyle("danger")} data-ui="WorldChat:report" onClick={() => store.report(id)}>{t("Report")}</button>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* The inbox. Every conversation this device has ever had, newest first,
+          with who, the last line, when, and how many are unread. Without it the
+          only route back to a message was finding the sender's dot on the globe
+          again — which does not survive them going offline, or a restart. */}
+      {conversations.length > 0 && (
+        <div style={{ marginTop: 10 }} data-ui="WorldChat:inbox">
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ flex: 1, fontSize: 10.5, fontWeight: 800, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: .4 }}>
+              {t("Conversations")}
+            </div>
+            {conversations.some((entry) => entry.unread > 0) && (
+              <button type="button" style={buttonStyle()} data-ui="WorldChat:mark-all-read" onClick={() => store.markAllRead()}>
+                {t("Mark all read")}
+              </button>
+            )}
+          </div>
+          <div style={{ marginTop: 5, maxHeight: 132, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+            {conversations.map((entry) => (
+              <button
+                key={entry.key}
+                type="button"
+                data-ui="WorldChat:conversation"
+                onClick={() => {
+                  if (entry.room) { setOpenRoom(entry.room); setPickedPeer(""); }
+                  else { setOpenRoom(""); setPickedPeer(entry.peerId); }
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 7, width: "100%", textAlign: "left",
+                  borderRadius: 9, cursor: "pointer", padding: "4px 7px",
+                  border: `1px solid ${entry.key === key ? "var(--accent-strong)" : "transparent"}`,
+                  background: entry.key === key ? "rgba(var(--accent-rgb),.12)" : "transparent",
+                  color: "var(--fg)",
+                }}
+              >
+                <ChatAvatar src={entry.avatar} label={entry.label} />
+                <span style={{ fontWeight: entry.unread ? 800 : 700, fontSize: 11.5, color: "var(--fg-strong)", whiteSpace: "nowrap" }}>
+                  {placed(entry.peerId, entry.label) || t("Unknown")}
+                </span>
+                <span style={{ flex: 1, fontSize: 11, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {entry.last?.mine ? `${t("You")}: ` : ""}{entry.last?.text ?? ""}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{messageStamp(entry.last?.ts ?? "")}</span>
+                {entry.unread > 0 && (
+                  <span
+                    data-ui="WorldChat:unread"
+                    style={{ minWidth: 16, textAlign: "center", borderRadius: 999, background: "var(--accent-strong)", color: "var(--accent-ink)", fontSize: 10, fontWeight: 800, padding: "1px 5px" }}
+                  >{entry.unread}</span>
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -237,10 +449,13 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
           empty thread below already says what to do, and a heading repeating it
           made the card look like it was stuttering. */}
       {(openRoom || target) && (
-        <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--fg-strong)", fontWeight: 700 }} data-ui="WorldChat:thread-title">
+        <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--fg-strong)", fontWeight: 700, display: "flex", alignItems: "center", gap: 7 }} data-ui="WorldChat:thread-title">
+          {!openRoom && (
+            <ChatAvatar src={chat.peers[target]?.avatar ?? ""} label={worldChatLabel(chat.peers[target], target) || selectedLabel} size={22} />
+          )}
           {openRoom
             ? `${t("Group")} # ${openRoom.slice(0, 10)}`
-            : worldChatLabel(chat.peers[target], target) || selectedLabel}
+            : placed(target, worldChatLabel(chat.peers[target], target)) || selectedLabel}
         </div>
       )}
       {(missingFleet || isSelf || (!openRoom && target && !hasKeys)) && (
@@ -288,9 +503,17 @@ export default function WorldChatPanel({ selectedNodeId, selectedLabel }: Props)
               color: message.mine ? "var(--accent-ink)" : "var(--fg)",
             }}
           >
-            {!message.mine && message.room && (
-              <div style={{ fontSize: 10, fontWeight: 800, opacity: .75 }}>{worldChatLabel(chat.peers[message.from], message.from)}</div>
-            )}
+            {/* Who and when, on every line. A history with neither is a wall
+                of text you cannot place. */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 10, fontWeight: 800, opacity: .75 }} data-ui="WorldChat:message-meta">
+              <ChatAvatar
+                src={message.mine ? avatar : chat.peers[message.from]?.avatar ?? ""}
+                label={message.mine ? (nick || t("You")) : worldChatLabel(chat.peers[message.from], message.from)}
+                size={15}
+              />
+              <span>{message.mine ? t("You") : worldChatLabel(chat.peers[message.from], message.from)}</span>
+              <span style={{ fontWeight: 600 }}>{messageStamp(message.ts)}</span>
+            </div>
             {message.text}
           </div>
         ))}

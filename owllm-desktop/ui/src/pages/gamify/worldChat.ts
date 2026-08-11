@@ -20,11 +20,15 @@
 // and would be broadcast to every other renderer that never asked for it. The
 // relay's own queue is the durability layer.
 
+import { presenceServerCode } from "./worldPresence";
+
 export type WorldChatKind = "message" | "request" | "room";
 
 export type WorldChatPeer = {
   id: string;
   nick: string;
+  /** Picture URL, always on GitHub's avatar CDN — see `sanitizeChatAvatar`. */
+  avatar: string;
   xPub: string;
   edPub: string;
   reachable: boolean;
@@ -48,6 +52,8 @@ export type WorldChatState = {
   status: WorldChatStatus;
   selfId: string;
   nick: string;
+  /** This device's own published picture, as the relay echoed it back. */
+  avatar: string;
   reachable: boolean;
   error: string;
   peers: Record<string, WorldChatPeer>;
@@ -58,6 +64,27 @@ export type WorldChatState = {
   rooms: string[];
   /** Keyed by peer id, or `room:<id>` for a group. */
   threads: Record<string, WorldChatMessage[]>;
+  /**
+   * How many lines in each thread the user has not looked at yet, same keys as
+   * `threads`. A count and not a boolean: an inbox has to say *how much* is
+   * waiting, and it has to survive a restart — a notice that clears itself on a
+   * timer loses the message, which is the whole reason this exists.
+   */
+  unread: Record<string, number>;
+};
+
+/** One row of the inbox: who, the last thing said, when, and how much is new. */
+export type WorldChatConversation = {
+  key: string;
+  /** Empty for a group. */
+  peerId: string;
+  /** Empty for a direct conversation. */
+  room: string;
+  label: string;
+  /** The peer's picture, or empty for a group and for anyone without one. */
+  avatar: string;
+  last: WorldChatMessage | undefined;
+  unread: number;
 };
 
 /** Seal/open live in Rust because the private keys do. */
@@ -77,6 +104,8 @@ export type WorldChatDeps = {
    * history is the client's job.
    */
   initialThreads?: Record<string, WorldChatMessage[]>;
+  /** Unread counts from the previous run, so a missed message stays missed. */
+  initialUnread?: Record<string, number>;
   onChange: (state: WorldChatState) => void;
   /**
    * A message that just arrived from someone else. Fires once per line and
@@ -96,6 +125,7 @@ export function emptyWorldChatState(): WorldChatState {
     status: "off",
     selfId: "",
     nick: "",
+    avatar: "",
     reachable: false,
     error: "",
     peers: {},
@@ -105,6 +135,7 @@ export function emptyWorldChatState(): WorldChatState {
     blocked: [],
     rooms: [],
     threads: {},
+    unread: {},
   };
 }
 
@@ -117,11 +148,57 @@ export async function roomIdFromInvite(secret: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Short, human-readable label for a dot that has not chosen a nickname. */
+/**
+ * Short, human-readable label for a dot that has not chosen a nickname.
+ *
+ * The fallback is `presenceServerCode`, the SAME code the map and the country
+ * list print for that node — one machine, one name. An earlier version sliced
+ * the raw id instead, so the dot you clicked ("Server OW-0UVYMD5") and the
+ * thread it opened ("OW-523DF1") wore two unrelated codes, and a history full
+ * of them could not be matched to anything on the globe.
+ */
 export function worldChatLabel(peer: WorldChatPeer | undefined, id: string): string {
   const nick = peer?.nick?.trim();
   if (nick) return nick;
-  return id ? `OW-${id.slice(0, 6).toUpperCase()}` : "";
+  return id ? presenceServerCode(id) : "";
+}
+
+/**
+ * The only host a chat picture may come from.
+ *
+ * A picture URL is chosen by the *other* side and then loaded by our renderer,
+ * so an unrestricted field would let any dot on the map point us at a URL of
+ * its choosing — which fetches on sight, reveals our IP, and can be swapped for
+ * anything at any time. Pinning it to GitHub's avatar CDN keeps this what it
+ * says it is, a GitHub profile picture, and nothing else.
+ */
+export const CHAT_AVATAR_HOST = "avatars.githubusercontent.com";
+export const MAX_CHAT_AVATAR_CHARS = 200;
+
+/** The picture for a GitHub login, sized for the small circles we draw. */
+export function githubAvatarUrl(login: string, size = 64): string {
+  const handle = login.trim();
+  if (!handle) return "";
+  return `https://${CHAT_AVATAR_HOST}/${encodeURIComponent(handle)}?size=${size}`;
+}
+
+/** Empty unless the value is an https URL on the avatar CDN. Never throws. */
+export function sanitizeChatAvatar(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > MAX_CHAT_AVATAR_CHARS) return "";
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== CHAT_AVATAR_HOST) return "";
+    return url.toString().slice(0, MAX_CHAT_AVATAR_CHARS);
+  } catch {
+    return "";
+  }
+}
+
+/** The letter drawn in place of a picture, so every row has the same shape. */
+export function chatAvatarInitial(label: string): string {
+  const first = label.trim().replace(/^OW-/, "").charAt(0);
+  return first ? first.toUpperCase() : "?";
 }
 
 export function threadKey(peerId: string, room = ""): string {
@@ -158,6 +235,46 @@ export function sanitizeWorldChatThreads(value: unknown): Record<string, WorldCh
   return threads;
 }
 
+/** Same contract as the threads: storage is user-writable, so nothing is trusted. */
+export function sanitizeWorldChatUnread(value: unknown): Record<string, number> {
+  const unread: Record<string, number> = {};
+  if (!value || typeof value !== "object") return unread;
+  for (const [key, count] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = Math.floor(Number(count));
+    if (key && Number.isFinite(parsed) && parsed > 0) unread[key] = Math.min(parsed, MAX_THREAD_MESSAGES);
+  }
+  return unread;
+}
+
+/**
+ * The inbox, newest first. Derived from the threads rather than stored beside
+ * them: a second list of conversations could disagree with the messages it
+ * claims to summarise, and then the panel and the history would tell the user
+ * two different stories.
+ */
+export function worldChatConversations(state: WorldChatState): WorldChatConversation[] {
+  return Object.entries(state.threads)
+    .flatMap(([key, messages]): WorldChatConversation[] => {
+      if (!messages.length) return [];
+      const room = key.startsWith("room:") ? key.slice(5) : "";
+      const peerId = room ? "" : key;
+      return [{
+        key,
+        peerId,
+        room,
+        label: room ? `# ${room.slice(0, 10)}` : worldChatLabel(state.peers[peerId], peerId),
+        avatar: room ? "" : state.peers[peerId]?.avatar ?? "",
+        last: messages[messages.length - 1],
+        unread: state.unread[key] ?? 0,
+      }];
+    })
+    .sort((a, b) => (b.last?.ts ?? "").localeCompare(a.last?.ts ?? ""));
+}
+
+export function worldChatUnreadCount(state: WorldChatState): number {
+  return Object.values(state.unread).reduce((total, count) => total + count, 0);
+}
+
 function trimText(value: unknown): string {
   return typeof value === "string" ? value.slice(0, MAX_CHAT_TEXT) : "";
 }
@@ -190,7 +307,11 @@ function asIdList(value: unknown): string[] {
  * so an action taken while offline reports that rather than vanishing.
  */
 export function createWorldChatStore(deps: WorldChatDeps) {
-  let state = { ...emptyWorldChatState(), threads: sanitizeWorldChatThreads(deps.initialThreads) };
+  let state = {
+    ...emptyWorldChatState(),
+    threads: sanitizeWorldChatThreads(deps.initialThreads),
+    unread: sanitizeWorldChatUnread(deps.initialUnread),
+  };
   let send: ((value: unknown) => boolean) | null = null;
   const now = deps.now ?? (() => new Date().toISOString());
 
@@ -267,6 +388,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           status: "ready",
           selfId: typeof frame.id === "string" ? frame.id : "",
           nick: typeof frame.nick === "string" ? frame.nick : "",
+          avatar: sanitizeChatAvatar(frame.avatar),
           reachable: frame.reachable === true,
           error: "",
         });
@@ -296,6 +418,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           peers[id] = {
             id,
             nick: typeof row.nick === "string" ? row.nick : "",
+            avatar: sanitizeChatAvatar(row.avatar),
             xPub: typeof row.xPub === "string" ? row.xPub : "",
             edPub: typeof row.edPub === "string" ? row.edPub : "",
             reachable: row.reachable === true,
@@ -311,7 +434,11 @@ export function createWorldChatStore(deps: WorldChatDeps) {
         return;
       }
       case "chat_profile_ok": {
-        commit({ nick: typeof frame.nick === "string" ? frame.nick : "", reachable: frame.reachable === true });
+        commit({
+          nick: typeof frame.nick === "string" ? frame.nick : "",
+          avatar: sanitizeChatAvatar(frame.avatar),
+          reachable: frame.reachable === true,
+        });
         return;
       }
       case "chat_message": {
@@ -332,7 +459,13 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           const message: WorldChatMessage = {
             id, kind, from, room, text: trimText(opened.text), ts: typeof frame.ts === "string" ? frame.ts : now(), mine: false,
           };
-          if (appendMessage(threadKey(from, room), message)) deps.onIncoming?.(message);
+          const key = threadKey(from, room);
+          if (appendMessage(key, message)) {
+            // Counted before the host is told, so a notice raised from
+            // `onIncoming` reads a state that already includes this line.
+            commit({ unread: { ...state.unread, [key]: (state.unread[key] ?? 0) + 1 } });
+            deps.onIncoming?.(message);
+          }
           lookup([from]);
         } catch (reason) {
           commit({ error: `Could not read a message: ${String(reason)}` });
@@ -351,6 +484,7 @@ export function createWorldChatStore(deps: WorldChatDeps) {
           peers[id] = {
             id,
             nick: typeof row.nick === "string" ? row.nick : "",
+            avatar: sanitizeChatAvatar(row.avatar),
             xPub: typeof row.xPub === "string" ? row.xPub : "",
             edPub: typeof row.edPub === "string" ? row.edPub : "",
             reachable: row.reachable === true,
@@ -395,8 +529,21 @@ export function createWorldChatStore(deps: WorldChatDeps) {
       commit({ error: "" });
     },
 
-    setProfile(nick: string, reachable: boolean) {
-      write({ type: "chat_profile", nick, reachable });
+    /** The user is looking at this conversation, so it is no longer waiting. */
+    markRead(key: string) {
+      if (!key || !state.unread[key]) return;
+      const unread = { ...state.unread };
+      delete unread[key];
+      commit({ unread });
+    },
+
+    markAllRead() {
+      if (!Object.keys(state.unread).length) return;
+      commit({ unread: {} });
+    },
+
+    setProfile(nick: string, reachable: boolean, avatar = "") {
+      write({ type: "chat_profile", nick, reachable, avatar: sanitizeChatAvatar(avatar) });
     },
 
     lookup,

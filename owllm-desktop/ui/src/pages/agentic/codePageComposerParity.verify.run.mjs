@@ -63,7 +63,8 @@ check("submission remains routed to the matching agent history/backend",
   && codePage.includes("const sendSecondary = async (textOverride?: string) =>")
   && codePage.includes("setMessages((msgs) => [...msgs, { role: \"user\"")
   && codePage.includes("setSecondaryMessages((m) => [...m, {")
-  && codePage.includes("runSecondaryTurn(CODING_SYSTEM(workspace)"));
+  // The second agent is rooted in ITS own checkout (`cwd`), not the primary's.
+  && codePage.includes("runSecondaryTurn(CODING_SYSTEM(cwd)"));
 check("wide layout aligns both composers as equal columns",
   codePage.includes("secondaryOpen && wideView")
   && codePage.includes('gridTemplateColumns: "1fr 1fr"')

@@ -8,11 +8,15 @@
 // we show what we genuinely measure: build, environment readiness, hardware,
 // live GPU memory, the model server, the model library, and sandbox disk.
 
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { Card, Row } from "./infoCards";
 import SandboxDiskCard from "./SandboxDiskCard";
+import { openWebUrl } from "../../utils/openWebUrl";
+import {
+  getUpdateAvailability, requestUpdateInstall, subscribeUpdateAvailability,
+} from "../../runtime/updateAvailability";
 import { CacheTab } from "../finetuning/ModelsPage";
 import {
   fetchReadiness,
@@ -23,6 +27,10 @@ import {
 } from "./readinessStore";
 
 const ICONS = "/Page_icons";
+
+/// The human to write to. Kept here (not inlined in JSX) so the address exists
+/// exactly once in the app.
+const DEVELOPER_EMAIL = "mc@far-island.com";
 
 type GpuInfo = { index: number; name: string; vram_gb: number };
 type HardwareInfo = {
@@ -81,6 +89,13 @@ export default function InfoPage() {
   const [server, setServer] = useState<ServerStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cacheMsg, setCacheMsg] = useState<string | null>(null);
+
+  // Same fact the owl's balloon and the chrome badge read, so Info can never
+  // claim "up to date" while the header offers an update.
+  const newVersion = useSyncExternalStore(
+    subscribeUpdateAvailability,
+    () => getUpdateAvailability().version,
+  );
 
   // Environment readiness shares the session cache with Home (readinessStore),
   // so opening Info doesn't re-shell wsl.exe/nvidia-smi unless you press Refresh.
@@ -237,7 +252,50 @@ export default function InfoPage() {
           <Row label="Version" value={version} />
           <Row label="Runtime" value="Tauri 2 · Rust + React" />
           <Row label="Update channel" value="GitHub Releases (auto-update)" />
+          <Row
+            label="Update"
+            value={
+              newVersion ? (
+                <button
+                  data-ui="InfoPage:update-badge"
+                  onClick={requestUpdateInstall}
+                  title={`OwLLM Desktop ${newVersion} is available — click to update`}
+                  style={{
+                    padding: "2px 10px", borderRadius: 999, cursor: "pointer",
+                    background: "rgba(var(--accent-rgb),0.9)",
+                    border: "1px solid rgba(var(--accent-rgb),1)",
+                    color: "var(--accent-fg)", fontSize: 11, fontWeight: 900, letterSpacing: 0.4,
+                  }}
+                >
+                  ⬆ Update available — v{newVersion}
+                </button>
+              ) : (
+                <span style={{ color: "var(--fg-muted)" }}>Up to date (checked automatically)</span>
+              )
+            }
+          />
           <Row label="Python" value="Invited on-demand only (fine-tuning)" />
+          {/* The person behind the app, reachable. mailto goes through the same
+              openWebUrl the rest of the app uses for outbound links. */}
+          <Row
+            label="Contact"
+            value={
+              <span>
+                Contact the main developer Ruigro at{" "}
+                <a
+                  href={`mailto:${DEVELOPER_EMAIL}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openWebUrl(`mailto:${DEVELOPER_EMAIL}`)
+                      .catch((err) => console.error("Could not open the mail client", err));
+                  }}
+                  style={{ color: "var(--accent-ink)", fontWeight: 700, textDecoration: "none" }}
+                >
+                  {DEVELOPER_EMAIL}
+                </a>
+              </span>
+            }
+          />
         </Card>
 
         <SandboxDiskCard />

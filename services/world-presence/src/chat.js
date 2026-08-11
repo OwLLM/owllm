@@ -27,6 +27,9 @@ export const PRESENCE_DOMAIN = "owllm-world-presence-device-v1\0";
 /** A sealed envelope is JSON with base64 fields; well clear of a chat message. */
 export const MAX_BOX_CHARS = 24_000;
 export const MAX_NICK_CHARS = 32;
+/** The only host a profile picture may be served from — see `sanitizeAvatar`. */
+export const AVATAR_HOST = "avatars.githubusercontent.com";
+export const MAX_AVATAR_CHARS = 200;
 /** Undelivered messages per recipient. Oldest is dropped past this. */
 export const MAX_INBOX_PER_PEER = 250;
 /** Undelivered messages expire even if the recipient never returns. */
@@ -110,6 +113,27 @@ export function sanitizeNick(raw) {
   return out.trim().slice(0, MAX_NICK_CHARS);
 }
 
+/**
+ * A profile picture, pinned to GitHub's avatar CDN.
+ *
+ * The URL is chosen by one client and then loaded by another's renderer, so an
+ * open field would make every profile a beacon: it fetches on sight, reveals
+ * the viewer's IP to whoever set it, and can be swapped for any image later.
+ * Restricting the host keeps this exactly what it is offered as — a GitHub
+ * profile picture — and leaves nothing for a hostile profile to point at.
+ */
+export function sanitizeAvatar(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text || text.length > MAX_AVATAR_CHARS) return "";
+  try {
+    const url = new URL(text);
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== AVATAR_HOST) return "";
+    return url.toString().slice(0, MAX_AVATAR_CHARS);
+  } catch {
+    return "";
+  }
+}
+
 /** Opaque ciphertext. Never parsed, never inspected — only length-checked. */
 export function sanitizeBox(raw) {
   const text = typeof raw === "string" ? raw : "";
@@ -170,6 +194,7 @@ export function publicPeer(row) {
   return {
     id: sanitizeChatId(row?.chat_id ?? row?.id),
     nick: sanitizeNick(row?.nick),
+    avatar: sanitizeAvatar(row?.avatar),
     xPub: String(row?.x_pub ?? row?.xPub ?? "").slice(0, 64),
     edPub: String(row?.ed_pub ?? row?.edPub ?? "").slice(0, 64),
     reachable: Boolean(Number(row?.reachable ?? 0)),

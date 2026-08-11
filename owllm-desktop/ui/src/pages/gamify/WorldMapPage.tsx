@@ -1228,6 +1228,12 @@ export default function WorldMapPage() {
 
   const onlineCount = nodes.filter((node) => node.online).length;
   const countries = useMemo(() => groupPresenceByCountry(publicNodes), [publicNodes]);
+  // Where the map last saw each public node, for the chat's labels — so a
+  // conversation reads "🇸🇬 · Punggol · OW-0UVYMD5", the same name as the dot.
+  const nodePlaces = useMemo(
+    () => new Map(publicNodes.filter((node) => node.region).map((node) => [node.id, regionWithFlag(node.region)])),
+    [publicNodes],
+  );
   const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   return (
@@ -1395,6 +1401,7 @@ export default function WorldMapPage() {
                 <WorldChatPanel
                   selectedNodeId={selected ? (selected.kind === "world" ? selected.id : fleetPresenceIds.get(selected.id) ?? "") : ""}
                   selectedLabel={selected?.label ?? ""}
+                  nodePlaces={nodePlaces}
                 />
               </div>
             </div>

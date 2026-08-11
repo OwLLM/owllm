@@ -13,6 +13,12 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  weightRole,
+  roleInfo,
+  selectionProblem,
+  autoIncludedNote,
+} from "../weightRoles";
 
 export type HfFile = {
   path: string;
@@ -80,6 +86,11 @@ function fmtSize(bytes: number | null): string {
 
 export default function WeightPickerDialog(p: WeightPickerDialogProps) {
   const [files, setFiles] = React.useState<HfFile[]>([]);
+  // Two different failures, deliberately separate: `loadError` means we have no
+  // file list at all, `error` is a problem with the CURRENT selection. They
+  // used to share one state, so telling the user their pick was wrong also
+  // erased the list they needed in order to fix it.
+  const [loadError, setLoadError] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [picked, setPicked] = React.useState<Set<string>>(new Set());
@@ -106,7 +117,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
         });
         setFiles(list);
       })
-      .catch((e) => { if (!dead) setError(String(e)); })
+      .catch((e) => { if (!dead) setLoadError(String(e)); })
       .finally(() => { if (!dead) setLoading(false); });
     return () => { dead = true; };
   }, [p.modelId]);
@@ -123,6 +134,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
     setPicked((curr) => {
       const next = new Set(curr);
       if (next.has(path)) next.delete(path); else next.add(path);
+      setError(null); // the complaint was about the OLD selection
       return next;
     });
 
@@ -131,12 +143,22 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
       p.onConfirm([]); // empty means "download all" downstream
       return;
     }
-    if (picked.size === 0) {
-      setError("Pick at least one file, or check 'Download all'.");
+    // A selection of companions only (vision projector / draft / LoRA) is not a
+    // model. Downloading it "succeeds" and then nothing loads — say so here
+    // instead of letting the user find out after 1.3 GB and a failed launch.
+    const problem = selectionProblem([...picked]);
+    if (problem) {
+      setError(problem);
       return;
     }
     p.onConfirm([...picked]);
   };
+
+  // Sort heaviest-first already ran; group so the runnable weights are never
+  // buried among the companions they depend on.
+  const primaries = files.filter((f) => weightRole(f.path) === "primary");
+  const companions = files.filter((f) => weightRole(f.path) !== "primary");
+  const extraNote = autoIncludedNote(files.map((f) => f.path), [...picked]);
 
   return (
     <div
@@ -171,19 +193,20 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
 
         <div style={{ padding: "10px 18px", overflowY: "auto", flex: 1 }}>
           {loading && <div style={{ color: "var(--fg-muted)", padding: 20 }}>Loading file list…</div>}
-          {error && (
+          {(loadError || error) && (
             <div style={{
               background: "rgba(244,67,54,0.1)", border: "1px solid rgba(244,67,54,0.4)",
               borderRadius: 6, padding: 10, color: "#ff8080", fontSize: 12,
-            }}>{error}</div>
+              marginBottom: 10,
+            }}>{loadError ?? error}</div>
           )}
-          {!loading && !error && files.length === 0 && (
+          {!loading && !loadError && files.length === 0 && (
             <div style={{ color: "var(--fg-muted)", padding: 20 }}>
               No quantization variants found — this repo ships a single weight set, just hit "Download all".
             </div>
           )}
 
-          {!loading && !error && files.length > 0 && (
+          {!loading && !loadError && files.length > 0 && (
             <>
               <label style={{
                 display: "flex", alignItems: "center", gap: 8,
@@ -205,14 +228,68 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
               </label>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {files.map((f) => {
-                  const ok = fits(f);
-                  const quant = guessQuant(f.path);
-                  const sel = picked.has(f.path);
-                  return (
+                {primaries.length > 0 && companions.length > 0 && (
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", margin: "2px 0 2px 2px" }}>
+                    MODEL WEIGHTS — pick one
+                  </div>
+                )}
+                {primaries.map((f) => renderRow(f))}
+                {companions.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", margin: "10px 0 2px 2px" }}>
+                      COMPANION FILES — cannot run on their own
+                    </div>
+                    {companions.map((f) => renderRow(f))}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{
+          padding: "12px 18px",
+          borderTop: "1px solid rgba(var(--accent-rgb),0.3)",
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <span style={{ flex: 1, fontSize: 11, color: "var(--fg-muted)", minWidth: 0 }}>
+            {extraNote}
+          </span>
+          <button
+            onClick={p.onCancel}
+            style={{
+              padding: "8px 16px",
+              background: "transparent", border: "1px solid #2a3242",
+              color: "var(--fg)", borderRadius: 6, fontSize: 12, cursor: "pointer",
+            }}
+          >Cancel</button>
+          <button
+            onClick={submit}
+            disabled={loading || !!loadError}
+            style={{
+              padding: "8px 18px",
+              background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
+              border: "none", color: "var(--accent-fg)",
+              borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer",
+              boxShadow: "0 0 14px -4px var(--accent)88",
+            }}
+          >Download {picked.size > 0 && !downloadAll ? `(${picked.size})` : ""}</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  /** One selectable file row. Declared after the JSX (hoisted) so the grouped
+   *  weights / companions lists can share it without duplicating the markup. */
+  function renderRow(f: HfFile) {
+    const ok = fits(f);
+    const quant = guessQuant(f.path);
+    const sel = picked.has(f.path);
+    const info = roleInfo(weightRole(f.path));
+    return (
                     <label
                       key={f.path}
-                      title={ok ? "Fits your VRAM" : "Likely won't load"}
+                      title={info.hint}
                       style={{
                         display: "flex", alignItems: "center", gap: 10,
                         padding: "6px 10px",
@@ -242,43 +319,17 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                         background: "rgba(var(--accent-rgb),0.18)",
                         color: "#9cc3ff",
                       }}>{quant}</span>
+                      {info.role !== "primary" && (
+                        <span style={{
+                          fontSize: 10, padding: "2px 6px", borderRadius: 3,
+                          background: "rgba(255,181,106,0.18)",
+                          color: "#ffb56a", whiteSpace: "nowrap",
+                        }}>{info.label}</span>
+                      )}
                       <span style={{ fontSize: 11, color: "var(--fg-muted)", minWidth: 70, textAlign: "right" }}>
                         {fmtSize(f.size)}
                       </span>
                     </label>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
-
-        <div style={{
-          padding: "12px 18px",
-          borderTop: "1px solid rgba(var(--accent-rgb),0.3)",
-          display: "flex", justifyContent: "flex-end", gap: 8,
-        }}>
-          <button
-            onClick={p.onCancel}
-            style={{
-              padding: "8px 16px",
-              background: "transparent", border: "1px solid #2a3242",
-              color: "var(--fg)", borderRadius: 6, fontSize: 12, cursor: "pointer",
-            }}
-          >Cancel</button>
-          <button
-            onClick={submit}
-            disabled={loading || !!error}
-            style={{
-              padding: "8px 18px",
-              background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
-              border: "none", color: "var(--accent-fg)",
-              borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer",
-              boxShadow: "0 0 14px -4px var(--accent)88",
-            }}
-          >Download {picked.size > 0 && !downloadAll ? `(${picked.size})` : ""}</button>
-        </div>
-      </div>
-    </div>
-  );
+    );
+  }
 }

@@ -20,7 +20,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Core** (always) | Home, Server, Info | hardware probe, llama-server lifecycle, sandbox-disk care |
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
-| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline. **World Chat** (on by default — every identity on the map is already anonymous; one click turns it off and that choice sticks across restarts) rides the same socket. Its card sits over the **top-right of the globe canvas**, not in the side rail, so clicking a dot and typing to it are one gesture — selecting a dot puts the caret straight in the message box. The client proves it owns a dot by signing a server nonce with the device key the dot's id is derived from (`remote_devices::world_chat`, `services/world-presence/src/chat.js`), so a public id cannot be claimed by anyone else. Messages are `crypto::seal` envelopes the relay only stores and forwards — 1:1 after an explicit accept, group rooms addressed by hash of an invite code that never leaves the client, with block, report, per-day first-contact quotas and an offline queue. Requests from this user's own fleet devices auto-accept. UI: `ui/src/pages/gamify/WorldChatPanel.tsx` — a conversation surface, not a settings form: nickname, reachability and group invites fold behind a ⚙ toggle, the thread keeps real height with an empty-state prompt, and the composer is a multi-line textarea (Enter sends, Shift+Enter continues) whose button always reads **Send**. The card folds to its header (▾): it floats over the globe and takes pointer events, so while open it is also a hole in the map and dots behind it cannot be clicked — picking a new dot re-opens it. A message that lands while the user is on any other page pops a **💬 Got a message** speech bubble beside the owl at the top-centre of the frame (`AppShell.tsx`, fed by the `owllm:world-chat:message` window event that `worldChatRuntime.ts` raises from the store's `onIncoming` hook); it clears itself after a few seconds and clicking it jumps to the World Map. It fires once per line — never for our own echoes, never for a relay replay. Conversation history **survives a restart** (`owllm:world-chat:threads` in localStorage, capped at `MAX_THREAD_MESSAGES`, sanitized on restore) because the relay only replays what it still holds *undelivered*; it must never go to the shared state mirror, which replicates every write to every window and device. **The relay half must be deployed for any of this to work** — `npm run deploy` in `services/world-presence/` (needs Cloudflare auth). Against a Worker built before the chat commit no `chat_challenge` is ever issued, so the card sits on "Connecting…" forever |
+| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline. **World Chat** (on by default — every identity on the map is already anonymous; one click turns it off and that choice sticks across restarts) rides the same socket. Its card sits over the **top-right of the globe canvas**, not in the side rail, so clicking a dot and typing to it are one gesture — selecting a dot puts the caret straight in the message box. The client proves it owns a dot by signing a server nonce with the device key the dot's id is derived from (`remote_devices::world_chat`, `services/world-presence/src/chat.js`), so a public id cannot be claimed by anyone else. Messages are `crypto::seal` envelopes the relay only stores and forwards — 1:1 after an explicit accept, group rooms addressed by hash of an invite code that never leaves the client, with block, report, per-day first-contact quotas and an offline queue. Requests from this user's own fleet devices auto-accept. UI: `ui/src/pages/gamify/WorldChatPanel.tsx` — a conversation surface, not a settings form: nickname, reachability and group invites fold behind a ⚙ toggle, the thread keeps real height with an empty-state prompt, and the composer is a multi-line textarea (Enter sends, Shift+Enter continues) whose button always reads **Send**. The card folds to its header (▾): it floats over the globe and takes pointer events, so while open it is also a hole in the map and dots behind it cannot be clicked — picking a new dot re-opens it. A message that lands while the user is on any other page pops a **💬 Got a message from ‹sender›** speech bubble beside the owl at the top-centre of the frame (`AppShell.tsx`). It is derived from the per-thread **unread counts** and NOT from a dwell timer — it names the sender, carries a count when more than one is waiting, survives a restart, and stays until the conversation is actually opened; clicking it jumps to the World Map and opens that exact thread (`openWorldChatThread` → the `owllm:world-chat:open` event). Unread is raised once per line — never for our own echoes, never for a relay replay — persisted at `owllm:world-chat:unread`, and cleared only by looking at the thread (or **Mark all read**). On first use the panel **asks** whether to use the connected GitHub account's name and picture (`WorldChat:github-ask`) — the alternative is talking to a dot labelled `OW-3F91A2`, and nobody opens a settings pane to name themselves. It is asked once, only when a GitHub account is connected, and either answer is remembered (`owllm:world-chat:github`, tri-state so *unanswered* is distinct from *no*) and reversible from the ⚙ row. "Yes" publishes the login and `https://avatars.githubusercontent.com/<login>` with the profile; pictures are drawn on inbox rows, thread titles, every message and the chrome notice. A picture URL is **pinned to GitHub's avatar CDN** on both sides (`sanitizeChatAvatar`, relay `sanitizeAvatar`) — an arbitrary URL rendered by another user's renderer is a beacon, not an avatar. The panel opens on an **inbox**: every conversation ever had, newest first, with the sender, the last line, its time and an unread badge, so a message is reachable without hunting for its dot on the globe. Every line in a thread is stamped with who said it and when (clock today, date + clock older). Conversation history **survives a restart** (`owllm:world-chat:threads` in localStorage, capped at `MAX_THREAD_MESSAGES`, sanitized on restore) because the relay only replays what it still holds *undelivered*; it must never go to the shared state mirror, which replicates every write to every window and device. **The relay half must be deployed for any of this to work** — `npm run deploy` in `services/world-presence/` (needs Cloudflare auth). Against a Worker built before the chat commit no `chat_challenge` is ever issued, so the card sits on "Connecting…" forever |
 | **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference
@@ -39,7 +39,36 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
   cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
   downloads keep their `.partial` and resume via HTTP Range — the Downloaded
-  card shows ⏬ Resume download (no quant re-pick, no restart from 0%).
+  card shows ⏬ Resume download (no quant re-pick, no restart from 0%). A failed
+  row in the Downloads banner offers **↻ Retry** (resumes the remaining queue)
+  and **Dismiss**; Resume with nothing half-written on disk says so instead of
+  silently reopening the picker.
+- **The weight picker names what each file IS** (`weightRoles.ts`). GGUF repos
+  mix runnable weights with companions — `mmproj-*` (vision projector, fetched
+  automatically), `dflash*`/`draft*` (speculative-decoding draft), `*-lora-*`.
+  They are listed under **COMPANION FILES — cannot run on their own**, and a
+  selection with no primary weights is refused with the reason, instead of
+  downloading something that can never load.
+- **A model the engine can't run says so in one second**, not after a 3-minute
+  wait. `server_status` classifies llama-server's stderr and quotes its own
+  fatal line; `unknown model architecture` is reported as *engine too old — the
+  file is NOT corrupt* (not "re-download the GGUF"). `startupFailureReason`
+  (`agentic/localServerFailure.ts`) makes every local-model wait loop — agentic
+  dock, team dispatch, fine-tuning chat — stop the moment the child dies and
+  show that reason. Guarded by `localModelStartFailure.verify.run.mjs`.
+- **Linux/macOS crashes are named too, not just Windows ones.** A child killed
+  by a signal reports *no* exit code, so every Unix crash used to collapse into
+  "Process ended unexpectedly" while Windows got full NTSTATUS decoding.
+  `signal_hint_for` (`server.rs`) is the Unix counterpart — SIGKILL is reported
+  as the kernel OOM killer *with the `dmesg` command to confirm it*, SIGSEGV /
+  SIGBUS / SIGILL / SIGABRT / SIGTERM each get their own cause, and none of them
+  blames the model file. Every death path now also quotes llama-server's own
+  fatal line. The gate compiles and runs the shipped Rust on a Unix builder
+  against a **real** SIGKILL; it reports SKIP on Windows rather than passing
+  silently.
+- **A parked message is never destroyed.** The dock clears the composer when it
+  accepts a draft for load→send; if the load fails, aborts, times out or throws,
+  the text is handed back (`owllm:dock:restore-draft`, restored in `finally`).
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
@@ -222,7 +251,23 @@ Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
 Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
-divided composer). The chat pane carries its own header — model picker +
+divided composer). The second agent works in **its own worktree** (`code-2`,
+cut from the project alongside the page's), so the two never overwrite each
+other's files; its header carries **⤵ Merge into agent 1**, which commits its
+work, seals the primary's uncommitted edits first, then merges into the page
+branch and names any conflicting files. A non-git folder can't be split, so
+both share it — the pane says so rather than implying isolation. The page's
+Chat mode governs **both** panes (the second used to keep write tools in
+"discuss only" mode), and closing/switching the project is blocked while
+*either* agent runs — it deletes the checkouts. Both agents' runs live in
+`chatRuntime`, so navigating away
+mid-turn keeps them streaming and the tab keeps glowing; closing the tab stops
+them. **Each pane's Stop is independent**: a run registers its own cancel scope
+(`setCliCancelScope`, keyed by the run's AbortSignal) before dispatching, so
+Stop kills that agent's spawned CLI via `cli_cancel_scope` and leaves the other
+agent running. The second agent's Stop used to only abort the JS controller —
+which a spawned `claude`/`codex`/`kimi` never sees — so on every subscription
+model it did nothing at all. The chat pane carries its own header — model picker +
 `Clear` (run state) + `Clear history` (chat window **and** saved threads) —
 and the composer lives in the same column as the chat, so input and window
 stay width-aligned beside the full-height file rail and right column.
@@ -650,12 +695,49 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+- **Crash / unclean-shutdown detection** (`session_health.rs`): every process
+  writes a marker on startup and deletes it on `RunEvent::Exit`. A marker whose
+  owner is gone means that session never reached its exit path — the only way to
+  detect a SIGKILL, an OOM kill, or a power cut, none of which leave anything
+  in-process. Markers are per-process (OwLLM is multi-instance) and matched on
+  pid **plus** process start time, so a recycled pid cannot make a dead session
+  look alive. The next launch shows one toast and the records ride along on
+  every support report (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`).
+  Showing the notice never deletes the records — only an explicit
+  `session_health_dismiss` does.
+- **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
+  window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
+  naming whoever called `app.exit`) and `Exit` are all recorded to stderr and
+  `owllm-crash.log`. Added because a normal Tauri shutdown used to log nothing,
+  so a spurious quit and a crash were indistinguishable from outside.
 - **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
   the main window is transparent (`tauri.linux.conf.json`) and the see-through
   headroom band above the frame is click-through via GTK input-shape
   (`frame_shape.rs`), mirroring the Windows overlay behaviour.
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
+- **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
+  `ui/src/runtime/updateAvailability.ts`): the updater checks 2.5 s after launch
+  **and every 6 h after that** — a one-shot per-launch check meant an install
+  left running never learned about a release published an hour later, which is
+  why live presence nodes sat on old versions. Finding one no longer opens a
+  modal. It publishes to the `updateAvailability` store, and the owl at the
+  top-centre of the frame says so in a **manga speech balloon** on its LEFT (so
+  it can never collide with the World Chat bubble on its right) — *"Please,
+  update your app! We fixed a few bugs and added cool features!"* — clickable,
+  for `UPDATE_NOTICE_MS` (10 s), once per version per session. After that the
+  offer **rests** in a small **⬆ Update available** badge under the OWLLM mark
+  (bottom-right of the wordmark) and stays there until the update is installed;
+  the Info page's Application card carries the same badge. The install modal
+  opens only on demand (`OPEN_UPDATE_EVENT`), so "Later" hides a dialog instead
+  of losing the update — the previous design recorded a dismissal and left no
+  other surface anywhere. Gate: `ui/src/updateNotice.verify.run.mjs`.
+- **World presence always reports the release.** The version is a query
+  parameter the client puts on its own socket (`worldPresence.ts` → `?v=`), so a
+  VPN cannot strip it; blank versions on the map are installs older than v1.0.7.
+  The identity-failure path in `WorldPresenceRunner` (`AppShell.tsx`) now still
+  sends `appVersion` from `getVersion()` — it used to connect with no arguments
+  at all, the one path that could show an ONLINE dot as "Version unknown".
 - Frameless HybridFrame window (transparent — NEVER make it opaque),
   sticky-scroll chats (`useStickyScroll`), shared `ChatBubble` renderer,
   shared `LogBox` for all logs.
@@ -676,6 +758,7 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 | vault sync | `src-tauri/src/vault.rs` |
 | worktrees/fleet | `src-tauri/src/fleet.rs` |
 | user-facing page docs | `ui/src/support/WatcherDrawer.tsx` (`PAGE_DOCS`) |
+| "why did the app close?" | `src-tauri/src/session_health.rs`, `log_exit_path` in `lib.rs` |
 
 **Known trap for agents**: `AgentsPage.tsx` duplicates parts of `dispatch.ts`
 (prompt builders + cloud dispatch). A fix in one usually needs the other —

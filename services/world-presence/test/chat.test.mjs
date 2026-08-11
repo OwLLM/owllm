@@ -15,6 +15,7 @@ import {
   presenceIdFromEdPub,
   sanitizeBox,
   sanitizeChatId,
+  sanitizeAvatar,
   sanitizeNick,
 } from "../src/chat.js";
 
@@ -413,6 +414,20 @@ test("sanitizers reject anything that is not the exact expected shape", () => {
   assert.equal(sanitizeNick("x".repeat(80)).length, 32);
   assert.equal(sanitizeBox(""), "");
   assert.equal(sanitizeBox("x".repeat(24_001)), "", "an oversized body is refused, not truncated");
+  // A profile picture is chosen by one client and loaded by another's
+  // renderer, so anything off GitHub's avatar CDN is a beacon with an image
+  // on it: it fetches on sight and reveals the viewer to whoever set it.
+  assert.equal(
+    sanitizeAvatar("https://avatars.githubusercontent.com/ada?size=64"),
+    "https://avatars.githubusercontent.com/ada?size=64",
+  );
+  assert.equal(sanitizeAvatar("https://evil.example.com/track.png"), "", "another host is refused");
+  assert.equal(sanitizeAvatar("http://avatars.githubusercontent.com/ada"), "", "plain http is refused");
+  assert.equal(sanitizeAvatar("https://avatars.githubusercontent.com.evil.example/ada"), "", "a lookalike host is refused");
+  assert.equal(sanitizeAvatar("javascript:alert(1)"), "");
+  assert.equal(sanitizeAvatar("data:image/png;base64,AAAA"), "");
+  assert.equal(sanitizeAvatar(`https://avatars.githubusercontent.com/${"a".repeat(400)}`), "", "an oversized URL is refused, not truncated");
+  assert.equal(sanitizeAvatar(null), "");
 });
 
 test("the flood window admits a burst then refuses until it rolls over", () => {

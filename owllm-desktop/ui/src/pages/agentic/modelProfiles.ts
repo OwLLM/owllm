@@ -85,6 +85,9 @@ export type ModelProfile = {
 //   - repeat_penalty kept MILD (1.1) and frequency/presence at ZERO,
 //     because high values there CAUSE the novel-token spiral by
 //     penalising reuse of common tokens.
+/// Default DRY scan window in tokens (see dry_penalty_last_n below).
+export const DRY_WINDOW = 4096;
+
 const BASE_SAMPLING: SamplingProfile = {
   max_tokens: 4096,
   repeat_penalty: 1.1,
@@ -94,7 +97,13 @@ const BASE_SAMPLING: SamplingProfile = {
   dry_multiplier: 0.8,
   dry_base: 1.75,
   dry_allowed_length: 4,
-  dry_penalty_last_n: -1,
+  // How many trailing tokens DRY scans. MUST be >= 0: llama-server's
+  // request schema hard-limits this to [0, INT32_MAX], so the old -1
+  // ("whole context", accepted by pre-b10xxx builds) now makes every
+  // request fail with HTTP 400. A concrete window is also what the
+  // sampler does internally — it allocates a buffer of this size, so
+  // "whole context" was never free. 4096 covers realistic loops.
+  dry_penalty_last_n: DRY_WINDOW,
   min_p: 0.05,
   top_k: 40,
   top_p: 0.95,
@@ -265,5 +274,24 @@ export function resolveModelProfile(modelId: string): ModelProfile {
 /// /v1/chat/completions request body. This is the ONE place the
 /// dispatch code reads sampling from — no inline literals anywhere else.
 export function samplingFor(modelId: string): SamplingProfile {
-  return resolveModelProfile(modelId).sampling;
+  return sanitizeSampling(resolveModelProfile(modelId).sampling);
+}
+
+/// Clamp sampling values llama-server rejects outright. The DRY window
+/// fields carry a hard [0, INT32_MAX] limit in the server request schema
+/// (tools/server/server-schema.cpp), so a negative — the legacy "-1 =
+/// whole context" idiom, still sitting in old localStorage overrides and
+/// remote profiles — fails the WHOLE request with HTTP 400 before a
+/// single token is generated. Sanitising here (and again over merged
+/// per-call overrides in dispatch) keeps that impossible.
+export function sanitizeSampling<T extends Record<string, unknown>>(s: T): T {
+  const out: Record<string, unknown> = { ...s };
+  // Scan windows: a legacy -1 meant "whole context", so fall back to a
+  // concrete window rather than 0, which would silently DISABLE them.
+  for (const key of ["dry_penalty_last_n", "repeat_last_n"]) {
+    const v = out[key];
+    if (typeof v === "number" && v < 0) out[key] = DRY_WINDOW;
+  }
+  if (typeof out.dry_allowed_length === "number" && out.dry_allowed_length < 0) out.dry_allowed_length = 0;
+  return out as T;
 }

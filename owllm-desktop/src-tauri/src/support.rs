@@ -33,6 +33,14 @@ pub struct SupportSnapshot {
     pub wsl_distros: Vec<String>,
     /// Installed module ids (e.g. local-inference, python-runtime).
     pub modules: Vec<String>,
+    /// Sessions that ended without running their shutdown — the app being
+    /// killed, an OOM, a hard crash, a power cut. Rides along on every support
+    /// report because the user who files "it keeps closing by itself" is
+    /// exactly the user who cannot tell you why.
+    pub unclean_shutdowns: Vec<crate::session_health::UncleanShutdown>,
+    /// Tail of the crash log: panic backtraces and the exit-path breadcrumbs
+    /// that say who asked for the last shutdown.
+    pub crash_log_tail: String,
 }
 
 /// Result of a user-approved app-window capture (Slice 3). The PNG comes
@@ -704,5 +712,7 @@ pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, 
         wsl_detail: wsl.detail,
         wsl_distros: crate::wsl::wsl_status().distros,
         modules,
+        unclean_shutdowns: crate::session_health::pending(),
+        crash_log_tail: crate::session_health::crash_log_tail(16 * 1024),
     })
 }

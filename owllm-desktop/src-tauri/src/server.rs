@@ -226,15 +226,28 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
             "alloc",
             "A buffer failed to allocate while loading the model. Two common causes: (1) GPU VRAM (not system RAM) \
              is too small — lower the GPU layers (-ngl) or use a smaller quant; (2) the GGUF uses a newer model \
-             architecture this llama.cpp build can't run yet — update the local-inference runtime (Home → reinstall) \
-             or re-export the GGUF with a current converter.",
+             architecture this llama.cpp build can't run yet — update the engine (Settings ⚙ → Modules → \
+             Local Inference) or re-export the GGUF with a current converter.",
+        ));
+    }
+    // Engine too OLD for this GGUF. The file is fine — llama.cpp simply has no
+    // implementation for its architecture yet. Kept ahead of the broken-file
+    // branch because "error loading model" appears on the SAME line, and
+    // telling the user to re-download a perfectly good 17 GB file is both wrong
+    // and expensive.
+    if t.contains("unknown model architecture") || t.contains("unknown architecture") {
+        return Some((
+            "arch_unsupported",
+            "This model's architecture is not supported by the installed inference engine — \
+             the file is NOT corrupt and re-downloading will not help. The GGUF is newer than \
+             the installed llama.cpp build. Update the engine: Settings (⚙, top right) → Modules → \
+             Local Inference → Install, then try again. If no newer build is offered there, \
+             llama.cpp does not support this architecture yet and the model cannot run locally.",
         ));
     }
     // Broken / incompatible model file.
     if t.contains("invalid magic")
         || t.contains("gguf_init_from_file")
-        || t.contains("unknown model architecture")
-        || t.contains("unknown architecture")
         || t.contains("error loading model")
         || t.contains("failed to load model")
         || t.contains("unsupported model")
@@ -246,6 +259,41 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
              Re-download the GGUF (it may be truncated), or update the local-inference module \
              if the model is newer than the engine.",
         ));
+    }
+    None
+}
+
+/// Pull the one line from a llama-server stderr tail that actually names the
+/// failure, stripped of llama.cpp's `<timestamp> <level> ` prefix. The
+/// classifier says what to DO; this says what the engine literally reported,
+/// so the user is never asked to take our word for it (or to go hunting in
+/// the Server tab for a line we already read).
+fn fatal_line(stderr_tail: &str) -> Option<String> {
+    // FIRST match wins, not last. llama.cpp prints the specific cause
+    // ("unknown model architecture: 'muse-glimmer'") and then cascades into
+    // generic ones ("failed to load model"), so scanning backwards would quote
+    // the least useful line of the four.
+    for raw in stderr_tail.lines() {
+        let low = raw.to_lowercase();
+        if !(low.contains("error loading model")
+            || low.contains("failed to load model")
+            || low.contains("unknown model architecture")
+            || low.contains("invalid magic")
+            || low.contains("out of memory")
+            || low.contains("failed to allocate"))
+        {
+            continue;
+        }
+        // llama.cpp prefixes every line with `0.01.001.908 E ` — drop it.
+        let cleaned = raw
+            .split_once(" E ")
+            .or_else(|| raw.split_once(" W "))
+            .map(|(_, rest)| rest)
+            .unwrap_or(raw)
+            .trim();
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
     }
     None
 }
@@ -290,13 +338,15 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         });
     }
     // Reap dead child so the "running" bit doesn't lie after a crash.
-    let (alive, exit_code) = match inner.child.as_mut() {
+    // On Unix a child killed by a signal has NO exit code at all, so the
+    // signal is the only thing that names the death — grab both.
+    let (alive, exit_code, term_signal) = match inner.child.as_mut() {
         Some(c) => match c.try_wait() {
-            Ok(None) => (true, None),
-            Ok(Some(status)) => (false, status.code()),
-            Err(_) => (false, None),
+            Ok(None) => (true, None, None),
+            Ok(Some(status)) => (false, status.code(), exit_signal(&status)),
+            Err(_) => (false, None, None),
         },
-        None => (false, None),
+        None => (false, None, None),
     };
     if !alive && inner.child.is_some() {
         // Transition from running -> dead: overwrite the stale
@@ -305,15 +355,19 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         // FIRST try to classify from what llama-server actually printed —
         // stderr names the cause (OOM vs broken GGUF) where the exit code
         // is ambiguous (both often die with the same NTSTATUS).
-        let stderr_cause = inner
+        let tail_text = inner
             .stderr_tail
             .as_ref()
             .and_then(|t| t.lock().ok().map(|v| v.join("\n")))
-            .and_then(|tail| classify_crash(&tail).map(|(_, msg)| msg));
+            .unwrap_or_default();
+        let stderr_cause = classify_crash(&tail_text).map(|(_, msg)| msg);
+        let quoted = fatal_line(&tail_text)
+            .map(|l| format!(" llama-server said: \"{l}\"."))
+            .unwrap_or_default();
         inner.message = match (exit_code, stderr_cause) {
             (Some(0), _) => "Stopped cleanly.".to_string(),
             (code, Some(cause)) => format!(
-                "Crashed{}. {cause} See log for the full trace.",
+                "Crashed{}.{quoted} {cause}",
                 code.map(|c| format!(" (exit code {c})"))
                     .unwrap_or_default()
             ),
@@ -326,12 +380,20 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
             (Some(code), None) => {
                 let hint = crash_hint_for(code);
                 if let Some(h) = hint {
-                    format!("Crashed (exit code {code}). {h} See log for full trace.")
+                    format!("Crashed (exit code {code}).{quoted} {h} See log for full trace.")
                 } else {
-                    format!("Crashed (exit code {code}). Check the log for details.")
+                    format!("Crashed (exit code {code}).{quoted} Check the log for details.")
                 }
             }
-            (None, None) => "Process ended unexpectedly. Check the log for details.".to_string(),
+            // Unix signal death — the Linux/macOS counterpart of the NTSTATUS
+            // branch above. Without this the single most common Jetson/Linux
+            // failure (the kernel OOM killer) rendered as a bare "Process ended
+            // unexpectedly", throwing away both the signal and the line
+            // llama-server had already printed.
+            (None, None) => match term_signal.and_then(signal_hint_for) {
+                Some((name, hint)) => format!("Killed by {name}.{quoted} {hint}"),
+                None => format!("Process ended unexpectedly.{quoted} Check the log for details."),
+            },
         };
     } else if !alive && inner.message.is_empty() {
         inner.message = "Not running.".to_string();
@@ -1038,9 +1100,58 @@ mod tests {
 
     #[test]
     fn classifies_unknown_architecture() {
-        let tail = "llama_model_load: error loading model: unknown model architecture: 'qwen3next'";
-        let (kind, _) = classify_crash(tail).expect("classified");
-        assert_eq!(kind, "bad_model");
+        // An unsupported architecture is an ENGINE-too-old problem, not a
+        // corrupt file — telling the user to re-download a good 17 GB GGUF is
+        // wrong. Real shape captured from llama.cpp b3850 refusing
+        // meta-models/Muse-Glimmer-30B-GGUF on 2026-08-11.
+        let tail = "llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'";
+        let (kind, msg) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "arch_unsupported");
+        assert!(msg.contains("NOT corrupt"));
+        assert!(msg.contains("Local Inference"));
+    }
+
+    #[test]
+    fn fatal_line_quotes_what_llama_server_actually_said() {
+        let tail = "0.00.6 I srv load_model: loading model\n\
+                    0.01.0 E llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'\n\
+                    0.01.0 E srv llama_server: exiting due to model loading error";
+        let line = fatal_line(tail).expect("a fatal line");
+        assert!(line.contains("unknown model architecture: 'muse-glimmer'"));
+        // The log-level/timestamp prefix is noise the user should not have to read.
+        assert!(!line.starts_with("0.01.0"));
+    }
+
+    #[test]
+    fn signal_deaths_are_named_on_unix() {
+        // A signalled child has NO exit code, so before this the whole Linux
+        // crash surface collapsed into "Process ended unexpectedly".
+        let (name, hint) = signal_hint_for(9).expect("SIGKILL named");
+        assert!(name.contains("SIGKILL"));
+        assert!(hint.contains("out-of-memory"), "the OOM killer must be named");
+        assert!(hint.contains("dmesg"), "and the user told how to confirm it");
+        assert!(signal_hint_for(11).unwrap().0.contains("SIGSEGV"));
+        assert!(signal_hint_for(7).unwrap().0.contains("SIGBUS"));
+        // An unknown signal must not invent a cause.
+        assert!(signal_hint_for(31).is_none());
+    }
+
+    #[test]
+    fn no_signal_hint_claims_the_file_is_broken() {
+        // The whole point of this work: never send a user to re-download a
+        // good 17 GB GGUF for a failure that is not about the file.
+        for sig in [9, 4, 15] {
+            let (_, hint) = signal_hint_for(sig).expect("named");
+            assert!(
+                !hint.to_lowercase().contains("re-download"),
+                "signal {sig} must not blame the model file"
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_line_is_none_on_a_healthy_log() {
+        assert!(fatal_line("main: server is listening on http://127.0.0.1:8080").is_none());
     }
 
     #[test]
@@ -1111,6 +1222,68 @@ fn crash_hint_for(code: i32) -> Option<&'static str> {
         0xC000_0409 => Some(
             "STATUS_STACK_BUFFER_OVERRUN — likely a corrupt model file. Re-download or re-export the GGUF."
         ),
+        _ => None,
+    }
+}
+
+/// The terminating signal of a dead child, or None on platforms without them.
+/// Split out (rather than inlined behind `cfg!`) because `ExitStatusExt` only
+/// exists on Unix — the call site must stay platform-neutral.
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+/// Name a Unix signal death and say what to do about it — the Linux/macOS
+/// counterpart of `crash_hint_for`'s NTSTATUS decoding. A signalled child
+/// reports NO exit code, so without this the user got "Process ended
+/// unexpectedly" and nothing else on exactly the platform where the most
+/// actionable failure (the kernel OOM killer) lives.
+///
+/// Deliberately NOT `#[cfg(unix)]`: it is a pure lookup with no platform API,
+/// so it compiles and is testable everywhere, and the Linux branch can be
+/// verified from a Windows checkout.
+fn signal_hint_for(sig: i32) -> Option<(&'static str, &'static str)> {
+    match sig {
+        9 => Some((
+            "SIGKILL (signal 9)",
+            "Nothing in the app can survive SIGKILL — this is almost always the kernel's \
+             out-of-memory killer reclaiming RAM, not a problem with the model file. \
+             Confirm with `dmesg -T | grep -i oom` (or `journalctl -k`). Use a smaller quant, \
+             lower the context size, or close other apps.",
+        )),
+        11 => Some((
+            "SIGSEGV (signal 11)",
+            "llama.cpp segfaulted with no message. Most often a GGUF using a newer architecture \
+             this build cannot run yet (update the Local Inference module), or too little GPU \
+             VRAM — lower -ngl or pick a smaller quant.",
+        )),
+        7 => Some((
+            "SIGBUS (signal 7)",
+            "The model file changed or is truncated while mapped into memory. Re-download the \
+             GGUF, and do not overwrite a model file while it is loaded.",
+        )),
+        4 => Some((
+            "SIGILL (signal 4)",
+            "This llama.cpp build needs a CPU instruction set this machine lacks. Reinstall the \
+             Local Inference module and pick the build that matches this CPU.",
+        )),
+        6 => Some((
+            "SIGABRT (signal 6)",
+            "llama.cpp aborted on an internal assertion — usually a tensor or architecture the \
+             bundled engine cannot handle. The line above names it; updating the Local Inference \
+             module is the fix if so.",
+        )),
+        15 => Some((
+            "SIGTERM (signal 15)",
+            "Something outside OwLLM asked the server to stop — a system shutdown, a resource \
+             manager, or a manual kill. Start the model again.",
+        )),
         _ => None,
     }
 }

@@ -98,7 +98,7 @@ pin("second-agent documents and images use the same model payload path as the fi
   codePageSrc.includes("opts?: { withEvents?: boolean; attachments?: Attachment[] }")
   && codePageSrc.includes("enrichSecondaryCodePromptWithMemory(appendDocumentAttachmentText(user, attachments))")
   && codePageSrc.includes("userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser")
-  && codePageSrc.includes('["all"], imgs.length ? imgs : undefined'));
+  && codePageSrc.includes("runtimeTools, imgs.length ? imgs : undefined"));
 pin("second-agent history retains document context and image thumbnails",
   codePageSrc.includes("context: appendDocumentAttachmentText(text, attachments)")
   && codePageSrc.includes("images: images.length ? attachmentThumbs(images) : undefined")

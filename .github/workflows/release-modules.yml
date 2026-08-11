@@ -92,10 +92,15 @@ jobs:
               foreach ($v in $mod.variants) {
                 if ($v.id -eq $built.variant) {
                   $v.sizeBytes = $built.sizeBytes
+                  # Artifacts are named <variant>-<version>.zip; trust the
+                  # builder's own filename rather than re-deriving it, or the
+                  # registry points at a URL that was never uploaded.
+                  $asset = if ($built.zipName) { $built.zipName } else { "$($built.variant).zip" }
                   foreach ($channelName in $v.channels.PSObject.Properties.Name) {
                     $rel = $v.channels.$channelName
                     $rel.sha256 = $built.sha256
-                    $rel.downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$($built.variant).zip"
+                    if ($built.version) { $rel.version = $built.version }
+                    $rel.downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$asset"
                   }
                 }
               }

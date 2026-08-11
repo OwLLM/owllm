@@ -183,6 +183,7 @@ import {
 } from "./worktreeIsolation";
 import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
 import { historyBudgetFor } from "./contextBudget";
+import { startupFailureReason, localStartFailureText } from "./localServerFailure";
 import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 // Native tool_call shape harvested by consumeOpenAISse from
@@ -5351,6 +5352,28 @@ function ChatInputDock({
       }
     }
   };
+
+  // A parked draft coming BACK because the model never loaded. The dock clears
+  // the textarea when it hands a message to the load→send path; if that path
+  // ends without sending, AgentsPage returns the text here so the user's typing
+  // is never destroyed. Only fill an empty composer — whatever they typed since
+  // is newer and must win.
+  // `draft` is read through a ref so the listener can be attached once and
+  // still see what is in the box right now (setDraft here is a plain setter,
+  // not a React state updater, so there is no functional form to use).
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  useEffect(() => {
+    const onRestore = (e: Event) => {
+      const detail = (e as CustomEvent<{ text: string }>).detail;
+      const text = detail?.text ?? "";
+      if (!text.trim()) return;
+      if (draftRef.current.trim()) return; // newer typing wins
+      setDraft(text);
+    };
+    window.addEventListener("owllm:dock:restore-draft", onRestore as EventListener);
+    return () => window.removeEventListener("owllm:dock:restore-draft", onRestore as EventListener);
+  }, [setDraft]);
 
   // Droplist state — open whenever the draft is exactly "/" or starts
   // with "/<token>" (matched against command names). We also open
@@ -10585,7 +10608,7 @@ export function AgentsPage({
           if (supSendAbort.signal.aborted) return;
           const errMsg: GoalMsg = {
             role: "system", color: "#ff8c8c",
-            text: `(failed to start local model '${supModelId}' — check the Server tab and retry)`,
+            text: localStartFailureText(supModelId, localStartFailureRef.current),
           };
           setSupChat(prev => [...prev, errMsg]);
           appendLog("system", errMsg);
@@ -10946,6 +10969,15 @@ export function AgentsPage({
   // not actually use.
   const [serverAutoStarting, setServerAutoStarting] = useState<string | null>(null);
 
+  // WHY the last ensureLocalServer() returned false. server_status ALREADY
+  // classifies a llama-server crash from its stderr ("unknown model
+  // architecture: 'muse-glimmer'" → "the engine is too old, the file is fine"),
+  // but the poll loop used to throw that away and every caller printed the same
+  // useless "check the Server tab". Verified 2026-08-11: llama-server exits in
+  // 1.0 s on an unsupported architecture, yet the user waited the full 180 s
+  // timeout and was told nothing.
+  const localStartFailureRef = useRef<string | null>(null);
+
   // Start the llama-server for `wanted` and poll server_status until
   // it's actually running on that model, or until `timeoutMs` elapses.
   // Returns true when ready, false on timeout. Used by dispatchGoal
@@ -10963,6 +10995,7 @@ export function AgentsPage({
     signal?: AbortSignal | null,
   ): Promise<boolean> {
     if (serverState.running && serverState.model_id === wanted) return true;
+    localStartFailureRef.current = null;
     setServerAutoStarting(wanted);
     try {
       if (serverState.running) {
@@ -10973,7 +11006,10 @@ export function AgentsPage({
       }
       await abortable(invoke("server_start", { modelId: wanted, ctx: getServerCtx() }), signal);
     } catch (e) {
-      if (!isAbortError(e)) console.warn("[agents] lazy server start failed:", e);
+      if (!isAbortError(e)) {
+        console.warn("[agents] lazy server start failed:", e);
+        localStartFailureRef.current = String((e as { message?: string })?.message ?? e);
+      }
       setServerAutoStarting(null);
       return false;
     }
@@ -10987,6 +11023,15 @@ export function AgentsPage({
           setServerAutoStarting(null);
           return true;
         }
+        // The child is GONE — waiting out the rest of the timeout can only
+        // waste the user's minutes. server_status has already classified the
+        // crash from llama-server's stderr; carry that verdict to the caller.
+        const reason = startupFailureReason(s, wanted);
+        if (reason) {
+          localStartFailureRef.current = reason;
+          setServerAutoStarting(null);
+          return false;
+        }
       } catch (e) {
         if (isAbortError(e)) break;
         // otherwise ignore, retry
@@ -10998,6 +11043,10 @@ export function AgentsPage({
       }
     }
     setServerAutoStarting(null);
+    if (!signal?.aborted && !localStartFailureRef.current) {
+      localStartFailureRef.current =
+        `It was still loading after ${Math.round(timeoutMs / 1000)}s. Large models can take longer — the Server tab shows the engine log and will say when it is ready.`;
+    }
     return false;
   }
 
@@ -11124,6 +11173,20 @@ export function AgentsPage({
     requiresManagedLocalServer(dockModelId, dockProvider) &&
     dockModelId.length > 0 &&
     !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
+  // Hand the parked message BACK to the composer. The dock clears the textarea
+  // the moment it accepts a draft for auto-send, and the text then lives only
+  // in pendingSendRef — which is never rendered. So every path that ends
+  // without sending (crash, abort, timeout, throw) used to DESTROY what the
+  // user typed: no chat bubble, no draft, nothing. Verified 2026-08-11 on
+  // project "Web App Test Glimmer" — its saved transcript holds the "⚡ Loading
+  // local model" line and not one word of the user's message.
+  const restoreParkedDraft = () => {
+    const parked = pendingSendRef.current;
+    pendingSendRef.current = "";
+    if (!parked.trim()) return;
+    window.dispatchEvent(new CustomEvent("owllm:dock:restore-draft", { detail: { text: parked } }));
+  };
+
   const dockLoadModel = async () => {
     if (dockLoadingModel) return;
     if (!dockModelId) return;
@@ -11168,7 +11231,7 @@ export function AgentsPage({
         }
         const errMsg: GoalMsg = {
           role: "system", color: "#ff8c8c",
-          text: `✗ Failed to start local model '${dockModelId}' — check the Server tab and retry.`,
+          text: localStartFailureText(dockModelId, localStartFailureRef.current),
         };
         setSupChat(prev => [...prev, errMsg]);
         return;
@@ -11202,6 +11265,12 @@ export function AgentsPage({
       pendingSendRef.current = "";
       if (text) onSupSend(text);
     } finally {
+      // Single-point invariant: anything still parked here did NOT get sent —
+      // crash, abort, timeout or a throw. Give it back to the composer instead
+      // of dropping it on the floor. Doing this in `finally` (rather than at
+      // each early return) means a future early return can't reintroduce the
+      // data loss.
+      restoreParkedDraft();
       setDockLoadingModel(false);
       if (dockLoadAbortRef.current === loadAbort) dockLoadAbortRef.current = null;
     }
@@ -11392,7 +11461,7 @@ export function AgentsPage({
           // a 90 s timeout the user never actually waited for.
           setRunError(ctrl.signal.aborted
             ? null
-            : `Local server failed to start for "${wantedLocal}" within 90s — try the Server tab manually.`);
+            : localStartFailureText(wantedLocal, localStartFailureRef.current));
           if (ctrl.signal.aborted) setPhase("idle");
           dispatchInFlightRef.current = false;
           releaseRunAbort();

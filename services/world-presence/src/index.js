@@ -28,6 +28,7 @@ import {
   allowSend,
   publicPeer,
   randomNonce,
+  sanitizeAvatar,
   sanitizeBox,
   sanitizeChatId,
   sanitizeNick,
@@ -215,9 +216,16 @@ export class WorldPresence {
   createChatTables() {
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS peers (chat_id TEXT PRIMARY KEY, ed_pub TEXT NOT NULL DEFAULT '', " +
-      "x_pub TEXT NOT NULL DEFAULT '', nick TEXT NOT NULL DEFAULT '', reachable INTEGER NOT NULL DEFAULT 0, " +
-      "first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)",
+      "x_pub TEXT NOT NULL DEFAULT '', nick TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', " +
+      "reachable INTEGER NOT NULL DEFAULT 0, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)",
     );
+    // The table above already exists in production without `avatar`, and
+    // CREATE TABLE IF NOT EXISTS will not add a column to it. Adding one is the
+    // whole migration: it is additive, defaulted, and an object that already
+    // has the column simply throws "duplicate column name", which is the
+    // success case on every run after the first.
+    try { this.sql.exec("ALTER TABLE peers ADD COLUMN avatar TEXT NOT NULL DEFAULT ''"); }
+    catch { /* already migrated */ }
     // One row per (owner, peer) holding OWNER's stance toward PEER:
     // 'requested' (owner asked), 'accepted' (mutual), 'blocked' (owner refuses).
     this.sql.exec(
@@ -514,17 +522,18 @@ export class WorldPresence {
     }
     const chatId = verdict.chatId;
     const nick = sanitizeNick(message.nick);
+    const avatar = sanitizeAvatar(message.avatar);
     const reachable = message.reachable === true ? 1 : 0;
     const xPub = String(message.xPub ?? "").slice(0, 64);
     const edPub = String(message.publicKey ?? "").slice(0, 64);
     this.sql.exec(
-      "INSERT INTO peers (chat_id, ed_pub, x_pub, nick, reachable, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO peers (chat_id, ed_pub, x_pub, nick, avatar, reachable, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
       "ON CONFLICT(chat_id) DO UPDATE SET ed_pub = excluded.ed_pub, x_pub = excluded.x_pub, " +
-      "nick = excluded.nick, reachable = excluded.reachable, last_seen = excluded.last_seen",
-      chatId, edPub, xPub, nick, reachable, now, now,
+      "nick = excluded.nick, avatar = excluded.avatar, reachable = excluded.reachable, last_seen = excluded.last_seen",
+      chatId, edPub, xPub, nick, avatar, reachable, now, now,
     );
     this.updateAttachment(socket, { chatId, nonce: "" });
-    safeSend(socket, { type: "chat_ready", id: chatId, nick, reachable: Boolean(reachable) });
+    safeSend(socket, { type: "chat_ready", id: chatId, nick, avatar, reachable: Boolean(reachable) });
     safeSend(socket, this.chatState(chatId));
     this.flushInbox(chatId, socket);
   }
@@ -538,11 +547,13 @@ export class WorldPresence {
 
     switch (message.type) {
       case "chat_profile": {
+        const nick = sanitizeNick(message.nick);
+        const avatar = sanitizeAvatar(message.avatar);
         this.sql.exec(
-          "UPDATE peers SET nick = ?, reachable = ?, last_seen = ? WHERE chat_id = ?",
-          sanitizeNick(message.nick), message.reachable === true ? 1 : 0, now, chatId,
+          "UPDATE peers SET nick = ?, avatar = ?, reachable = ?, last_seen = ? WHERE chat_id = ?",
+          nick, avatar, message.reachable === true ? 1 : 0, now, chatId,
         );
-        return safeSend(socket, { type: "chat_profile_ok", nick: sanitizeNick(message.nick), reachable: message.reachable === true });
+        return safeSend(socket, { type: "chat_profile_ok", nick, avatar, reachable: message.reachable === true });
       }
       case "chat_lookup": {
         // Public keys only. Knowing a key lets you encrypt TO someone, never

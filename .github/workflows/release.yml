@@ -1,12 +1,11 @@
 # Cross-platform release build for OwLLM Desktop.
 #
 # Trigger:
-#   * Tag push matching `v*.*.*`   → builds Windows + macOS (arm64) + Linux
-#                                     and publishes a GitHub Release (DRAFT) with
-#                                     every installer attached.
-#   * Manual `workflow_dispatch`   → same matrix; the release step still runs
-#                                     when invoked manually so you can iterate
-#                                     without cutting a tag.
+#   * Manual `workflow_dispatch` ONLY → builds Windows + macOS + Linux and
+#                                     publishes a GitHub Release with every
+#                                     installer attached. Tag pushes do NOT
+#                                     fire this workflow: the real releases are
+#                                     built locally (see the `on:` block below).
 #
 # Output formats per platform (matches the bundle.targets = "all" in
 # src-tauri/tauri.conf.json):
@@ -48,9 +47,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  # NOTE: deliberately NOT triggered by tag pushes. Releases are built on the
+  # local machines (Windows host + WSL x86_64 + THOR aarch64 + the paired Mac)
+  # because only the host can Authenticode-sign with the Certum EV cert and
+  # only the host holds the minisign updater key. A tag push used to fire this
+  # workflow too, producing an unsigned parallel build (and a billing failure).
+  # Run it by hand from the Actions tab if a local builder is unavailable.
   workflow_dispatch:
     inputs:
       version:

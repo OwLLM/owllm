@@ -493,6 +493,12 @@ pub fn run() {
                 Ok(mgr) => {
                     use tauri::Manager;
                     app.handle().manage(mgr);
+                    // Engine updates install themselves from here on. A
+                    // llama.cpp build that predates a model's GGUF architecture
+                    // reads as "the app is broken", and a badge the user
+                    // declines once is a badge they never see again — so this
+                    // does not wait to be asked. Background, never blocking.
+                    modules::spawn_auto_maintenance(app.handle().clone());
                 }
                 Err(e) => eprintln!("[owllm] ModuleManager init failed: {e}"),
             }

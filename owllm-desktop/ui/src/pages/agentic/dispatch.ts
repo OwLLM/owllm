@@ -52,6 +52,7 @@ import {
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
 import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { claudeCliUnavailableMessage, type ClaudeCliStatus } from "./cliAuthMessage";
 import { detectRunBlocker, detectRunFailure, type RunBlocker } from "./runBlockers";
 import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
@@ -3224,9 +3225,12 @@ async function streamAnthropic(
     }
   };
   if (wantSub) {
-    const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+    const status = await invoke<ClaudeCliStatus>("accounts_status");
     if (!status?.claude_cli) {
-      throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+      throw new Error(claudeCliUnavailableMessage({
+        loggedIn: false,
+        installed: status?.claude_cli_installed === true,
+      }));
     }
     // Refresh the CLI token once per session so the first chat doesn't hit
     // the cold-start 401 (what "Test" on the Accounts page worked around).
@@ -3256,8 +3260,10 @@ async function streamAnthropic(
   const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
   if (!key) {
     if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+    let cliInstalled = false;
     try {
-      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+      const status = await invoke<ClaudeCliStatus>("accounts_status");
+      cliInstalled = status?.claude_cli_installed === true;
       if (status?.claude_cli) {
         await ensureCliWarm("claude_cli");
         if (onThought) {
@@ -3283,8 +3289,9 @@ async function streamAnthropic(
       console.error("claude_cli_complete failed", e);
     }
     throw new Error(
-      "No ANTHROPIC_API_KEY saved and Claude Code CLI not detected. " +
-      "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
+      "No ANTHROPIC_API_KEY saved. " +
+      claudeCliUnavailableMessage({ loggedIn: false, installed: cliInstalled }) +
+      " Or save a key on the Accounts page instead."
     );
   }
   const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {

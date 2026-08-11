@@ -205,6 +205,69 @@ if (!server) {
     !/Home → Modules/.test(server.code) && !/Home → reinstall/.test(server.code));
 }
 
+// ---- 6. The engine updates ITSELF ------------------------------------------
+//
+// Reachable and announced was not enough. `local-inference` IS llama.cpp: a
+// build older than a model's GGUF architecture cannot load it, and the user
+// reads that as a broken app. An offer is easy to decline once, so on real
+// installs the engine sat on b3850 for months while b10358 was published.
+// The same argument applies to `tools-python`, which the agents' screenshot
+// tool needs and which no first-run default ever selected.
+
+const MODULES_RS = path.join(HERE, "..", "..", "src-tauri", "src", "modules.rs");
+const LIB_RS = path.join(HERE, "..", "..", "src-tauri", "src", "lib.rs");
+const mods = codeOf(MODULES_RS);
+const lib = codeOf(LIB_RS);
+
+if (!mods || !lib) {
+  check("src-tauri/src/modules.rs and lib.rs exist", false);
+} else {
+  check("a background maintenance sweep exists at all",
+    /pub fn spawn_auto_maintenance<R: Runtime>/.test(mods.code)
+    && /async fn auto_maintain<R: Runtime>/.test(mods.code));
+
+  check("it is actually spawned on startup, right where the manager is registered",
+    /modules::spawn_auto_maintenance\(app\.handle\(\)\.clone\(\)\)/.test(lib.code));
+
+  check("it installs every module with a newer build waiting",
+    /state == ModuleState::UpdateAvailable/.test(mods.code)
+    && /\.install\(app, &id, &snap\)/.test(mods.code));
+
+  check("the agents' Python tools are installed unasked",
+    /const AUTO_INSTALL_IDS: &\[&str\] = &\["tools-python"\]/.test(mods.code));
+
+  // NotSupported (no build for this platform — tools-python is Windows-only
+  // today) must not be retried forever, and Installed must not be reinstalled.
+  check("only NotInstalled auto-installs are attempted",
+    /state == ModuleState::NotInstalled/.test(mods.code));
+
+  check("it repeats — a one-shot sweep expires the same way a launch-time check does",
+    /AUTO_MAINTAIN_INTERVAL: Duration = Duration::from_secs\(6 \* 60 \* 60\)/.test(mods.code)
+    && /loop \{[\s\S]{0,200}auto_maintain\(&app\)\.await;[\s\S]{0,120}AUTO_MAINTAIN_INTERVAL/.test(mods.code));
+
+  check("a failed registry check is reported, never treated as 'nothing to do'",
+    /registry check failed/.test(mods.code));
+
+  // Three callers can now ask for the same module at once (wizard, server.rs
+  // engine auto-install, this sweep) and they share one staging file and one
+  // destination directory per (variant, version).
+  check("installs are serialized so concurrent callers cannot corrupt an extract",
+    /install_lock: tokio::sync::Mutex<\(\)>/.test(mods.code)
+    && /let _install_guard = self\.install_lock\.lock\(\)\.await;/.test(mods.code));
+
+  // The wizard owns first run. A sweep downloading behind it would race it for
+  // the same staging path and spend a new user's bandwidth mid-question.
+  check("first run is left to the wizard",
+    /modules\.is_empty\(\)/.test(mods.code));
+}
+
+if (shell) {
+  check("the badge clears as soon as a background install lands, not 6h later",
+    /listen<\{ stage\?: string \}>\("module-progress"/.test(shell.code)
+    && /stage === "completed"/.test(shell.code)
+    && /void checkModuleUpdates\(\)/.test(shell.code));
+}
+
 console.log("");
 if (failures > 0) {
   throw new Error(`FAILED: ${failures} module-update check(s) failed.`);

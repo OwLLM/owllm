@@ -666,6 +666,21 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+- **Crash / unclean-shutdown detection** (`session_health.rs`): every process
+  writes a marker on startup and deletes it on `RunEvent::Exit`. A marker whose
+  owner is gone means that session never reached its exit path — the only way to
+  detect a SIGKILL, an OOM kill, or a power cut, none of which leave anything
+  in-process. Markers are per-process (OwLLM is multi-instance) and matched on
+  pid **plus** process start time, so a recycled pid cannot make a dead session
+  look alive. The next launch shows one toast and the records ride along on
+  every support report (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`).
+  Showing the notice never deletes the records — only an explicit
+  `session_health_dismiss` does.
+- **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
+  window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
+  naming whoever called `app.exit`) and `Exit` are all recorded to stderr and
+  `owllm-crash.log`. Added because a normal Tauri shutdown used to log nothing,
+  so a spurious quit and a crash were indistinguishable from outside.
 - **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
   the main window is transparent (`tauri.linux.conf.json`) and the see-through
   headroom band above the frame is click-through via GTK input-shape
@@ -692,6 +707,7 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 | vault sync | `src-tauri/src/vault.rs` |
 | worktrees/fleet | `src-tauri/src/fleet.rs` |
 | user-facing page docs | `ui/src/support/WatcherDrawer.tsx` (`PAGE_DOCS`) |
+| "why did the app close?" | `src-tauri/src/session_health.rs`, `log_exit_path` in `lib.rs` |
 
 **Known trap for agents**: `AgentsPage.tsx` duplicates parts of `dispatch.ts`
 (prompt builders + cloud dispatch). A fix in one usually needs the other —

@@ -43,6 +43,9 @@ transpile("peerCatalogue.ts", AGENTIC, "peerCatalogue.js");
 // it is pure — a stub would hide a regression rather than isolate one.
 transpile("runBlockers.ts", AGENTIC, "runBlockers.js");
 transpile("accountHealth.ts", ADVANCED, "accountHealth.js", path.join(HERE, "../advanced"));
+// Real too: the subscription-CLI error text is pure string building, and a stub
+// would return undefined where dispatch expects a message.
+transpile("cliAuthMessage.ts", AGENTIC, "cliAuthMessage.js");
 
 // Heavy imports of dispatch.ts that the pure helpers under test never call.
 const STUB = "module.exports = new Proxy({}, { get: () => () => {} });";

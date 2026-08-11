@@ -7,8 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config ui/vite.config.ts",
-    "build": "vite build --config ui/vite.config.ts && npm run verify",
-    "verify": "node scripts/cli-auth-message.verify.run.mjs",
+    "build": "vite build --config ui/vite.config.ts",
     "build:exe": "build-release.bat",
     "preview": "vite preview --config ui/vite.config.ts",
     "tauri": "tauri"

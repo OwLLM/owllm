@@ -53,6 +53,10 @@ import {
   shouldAnnounceUpdate, subscribeUpdateAvailability,
 } from "./runtime/updateAvailability";
 import {
+  getModuleUpdates, openModulesPage, OPEN_MODULES_EVENT, setModuleUpdates,
+  subscribeModuleUpdates, type ModuleUpdate,
+} from "./runtime/moduleUpdates";
+import {
   initTabActivity, isWorkflowAwarePage, runPrefixesForPage, showFinishedBadge, stepTabActivity,
 } from "./runtime/headerTabActivity";
 import {
@@ -688,6 +692,7 @@ function ModeBar({
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
   onWatcher, watcherHint, chatNotice, onOpenChatNotice,
   updateNotice, updateBadge, onOpenUpdate,
+  moduleUpdates, onOpenModules,
   keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -722,6 +727,11 @@ function ModeBar({
   updateNotice?: string | null;
   updateBadge?: string | null;
   onOpenUpdate?: () => void;
+  /// Installed modules with a newer build waiting. Drives the Settings row's
+  /// dot and its own chrome chip — the app update badge can't carry these,
+  /// because a module update ships without any new app version.
+  moduleUpdates?: ModuleUpdate[];
+  onOpenModules?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
   chatFontStep: number;
@@ -1132,6 +1142,41 @@ function ModeBar({
                 ))}
               </div>
 
+              {/* Modules — install / update the local inference engine and the
+                  other optional runtimes. The ONLY entry point: the wizard's
+                  settings mode was unreachable after first run, so a published
+                  engine update (the one that teaches llama.cpp a new GGUF
+                  architecture) could not be installed at all. */}
+              <button
+                data-ui="SettingsModulesRow"
+                onClick={() => { setSettingsOpen(false); onOpenModules?.(); }}
+                title="Install or update the local inference engine and other optional modules"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🧱</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>Modules</span>
+                  <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>
+                    Local inference engine, speech, and other optional runtimes
+                  </span>
+                </span>
+                {moduleUpdates && moduleUpdates.length > 0 && (
+                  <span style={{
+                    flexShrink: 0, padding: "2px 8px", borderRadius: 999,
+                    background: "rgba(var(--accent-rgb),0.9)", color: "var(--accent-fg)",
+                    fontSize: 10.5, fontWeight: 900, whiteSpace: "nowrap",
+                  }}>
+                    {moduleUpdates.length} update{moduleUpdates.length === 1 ? "" : "s"}
+                  </span>
+                )}
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
               {/* Signing / credential hub entry — its own separate line.
                   Opens the Signing hub as a centered popup (PageModal); it is
                   no longer a header tab, so this dropdown row is its only entry. */}
@@ -1465,6 +1510,35 @@ function ModeBar({
           }}
         >
           ⬆ Update available
+        </button>
+      )}
+
+      {/* Engine/module offer. Sits one line BELOW the app-update chip so the
+          two can never overlap, and stands on its own when there is no app
+          update at all — which is the normal case, since the module registry
+          is republished without shipping a new app. */}
+      {moduleUpdates && moduleUpdates.length > 0 && (
+        <button
+          data-ui="ModuleUpdateBadge"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onOpenModules?.(); }}
+          title={moduleUpdates
+            .map((m) => `${m.displayName}: ${m.installedVersion} → ${m.availableVersion}`)
+            .join("\n")}
+          style={{
+            position: "absolute",
+            left: "50%", top: "50%",
+            transform: `translate(38px, ${updateBadge ? 40 : 22}px)`,
+            padding: "2px 9px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.75)",
+            border: "1px solid rgba(var(--accent-rgb),1)",
+            color: "var(--accent-fg)", fontSize: 10.5, fontWeight: 900,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            cursor: "pointer", zIndex: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+          }}
+        >
+          🧱 Engine update
         </button>
       )}
       {watcherHint && (
@@ -2021,6 +2095,12 @@ export default function AppShell() {
     return () => window.clearTimeout(t);
   }, [updateVersion]);
 
+  // Module offers (the local-inference engine above all). Separate from the app
+  // update: the registry is republished on its own schedule, and an engine that
+  // cannot load current models is worth its own badge rather than waiting for
+  // the next app release to mention it.
+  const moduleUpdates = React.useSyncExternalStore(subscribeModuleUpdates, getModuleUpdates);
+
   // The always-visible "🦉 Watcher" chrome button (and any other surface)
   // summons via this window event, so it never depends on the click-through
   // owl's geometry.
@@ -2235,6 +2315,8 @@ export default function AppShell() {
             // only surface while a later session re-finds the same version.
             updateBadge={updateVersion && !updateNotice ? updateVersion : null}
             onOpenUpdate={requestUpdateInstall}
+            moduleUpdates={moduleUpdates}
+            onOpenModules={openModulesPage}
             keepFrameVisible={keepFrameVisible}
             onKeepFrameVisible={setKeepFrameVisible}
             chatFontStep={chatFontStep}
@@ -2332,6 +2414,8 @@ export default function AppShell() {
       )}
       <TutorialRecorder enabled={true} />
       <FirstRunWizardMount />
+      <ModulesPageMount />
+      <ModuleUpdateWatcher />
       {/* Account/Sync onboarding — self-gates to first run + the
           `owllm:open-sync` event. Invites GitHub sign-in so chats/settings
           follow the user across devices (their own private owllm-vault). */}
@@ -2385,4 +2469,61 @@ function FirstRunWizardMount() {
   const { needed, setDismissed } = useNeedsFirstRunWizard();
   if (!needed) return null;
   return <ModuleWizard mode="first-run" onClose={setDismissed} />;
+}
+
+// The Modules page, on demand — the ONLY route to it after first run.
+//
+// `useNeedsFirstRunWizard()` goes false as soon as anything is installed, so
+// until this mount existed the settings mode of ModuleWizard was dead code and
+// a published module update was uninstallable: no button, no menu entry, no
+// route. The local-inference crash hint told users to go there by name.
+function ModulesPageMount() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_MODULES_EVENT, show as EventListener);
+    return () => window.removeEventListener(OPEN_MODULES_EVENT, show as EventListener);
+  }, []);
+  if (!open) return null;
+  return <ModuleWizard mode="settings" onClose={() => { setOpen(false); void checkModuleUpdates(); }} />;
+}
+
+/// Ask the backend which installed modules have a newer build waiting and
+/// publish the answer to runtime/moduleUpdates. Safe to call at any time; a
+/// backend that isn't ready yet just leaves the previous answer standing.
+async function checkModuleUpdates(): Promise<void> {
+  try {
+    const mods = await invoke<Array<{
+      id: string; displayName: string; state: string;
+      installedVersion: string | null; availableVersion: string | null;
+    }>>("module_list");
+    const pending: ModuleUpdate[] = mods
+      .filter((m) => m.state === "update-available")
+      .map((m) => ({
+        id: m.id,
+        displayName: m.displayName,
+        installedVersion: m.installedVersion ?? "",
+        availableVersion: m.availableVersion ?? "",
+      }));
+    setModuleUpdates(pending);
+  } catch {
+    // Module manager not up yet, or offline — the repeating check retries.
+  }
+}
+
+// Same cadence as the app updater (UpdatePrompt): once shortly after launch,
+// then every 6 hours. A one-shot check is how installs sit for months on an
+// engine that cannot load current models — the registry is republished
+// independently of the app, so "nothing new at launch" expires fast.
+function ModuleUpdateWatcher() {
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+    const first = window.setTimeout(() => { void checkModuleUpdates(); }, 4000);
+    const iv = window.setInterval(() => { void checkModuleUpdates(); }, 6 * 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(iv);
+    };
+  }, []);
+  return null;
 }

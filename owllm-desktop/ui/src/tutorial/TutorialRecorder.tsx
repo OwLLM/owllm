@@ -340,6 +340,16 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     setStatus(error instanceof Error ? error.message : "Could not save recording.");
   };
 
+  // The encoder can die mid-recording (GPU reset, surface lost). Stop and say so
+  // right away instead of letting the user keep "recording" for another hour and
+  // only discover the loss when saving fails.
+  const handleEncoderFailure = (error: Error) => {
+    const recorder = finalizedRecorderRef.current;
+    if (!recorder) return;
+    void recorder.cancel().catch(() => {});
+    failRecording(new Error(`Recording stopped — the video encoder failed: ${error.message}`));
+  };
+
   const start = async () => {
     if (!canRecord) {
       setStatus("Screen capture is not available in this WebView.");
@@ -374,7 +384,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       captureSettingsRef.current = settings;
       const bitrate = bitrateForCapture(fps, settings.width, settings.height, "video/mp4");
       const { createFinalizedVideoRecorder } = await import("./finalizedVideoRecorder");
-      const finalized = await createFinalizedVideoRecorder(videoTrack, fps, bitrate);
+      const finalized = await createFinalizedVideoRecorder(videoTrack, fps, bitrate, handleEncoderFailure);
       if (finalized) {
         finalizedRecorderRef.current = finalized;
       } else {

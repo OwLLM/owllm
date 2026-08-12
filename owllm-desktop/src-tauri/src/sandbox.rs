@@ -928,7 +928,7 @@ fn sandbox_home() -> Option<String> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     let p = cwd?;
-    if !crate::wsl::wsl_isolation_get().enabled {
+    if !crate::wsl::wsl_isolation_get_blocking().enabled {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
@@ -1047,7 +1047,7 @@ pub fn shell_argv(_cwd: Option<&str>, _command: &str) -> Option<(String, Vec<Str
 
 #[cfg(windows)]
 fn status_impl() -> SandboxStatus {
-    let w = crate::wsl::wsl_status();
+    let w = crate::wsl::wsl_status_blocking();
     // Report the distro the sandbox will actually use (best_linux_distro —
     // never docker-desktop); fall back to the raw default for display when
     // only system distros exist.

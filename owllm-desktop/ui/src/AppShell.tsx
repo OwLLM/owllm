@@ -2095,6 +2095,21 @@ export default function AppShell() {
     return () => window.clearTimeout(t);
   }, [updateVersion]);
 
+  // A balloon is the OWL talking, so the owl has to be on screen while it does.
+  // The decorative frame — which is where the owl lives, inline in HybridFrame
+  // on macOS and in the click-through overlay window on Windows — idles away
+  // FRAME_IDLE_HIDE_MS after launch, long before the updater's first check
+  // lands (2.5s) or a World Chat message arrives. The balloon then floated over
+  // the header with its tail pointing at nothing. Reveal the frame for as long
+  // as either notice is up, then hand back to the normal idle-hide (which
+  // keepFrameVisible still overrides).
+  const noticeShowing = Boolean(updateNotice || chatNotice);
+  useEffect(() => {
+    if (!noticeShowing) return;
+    revealFrame();
+    return () => hideFrameAfter(FRAME_LEAVE_HIDE_MS);
+  }, [noticeShowing]);
+
   // Module offers (the local-inference engine above all). Separate from the app
   // update: the registry is republished on its own schedule, and an engine that
   // cannot load current models is worth its own badge rather than waiting for

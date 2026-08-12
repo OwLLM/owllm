@@ -645,7 +645,17 @@ function isNetworkAgentError(raw: unknown): boolean {
   const low = String((raw as { message?: string })?.message ?? raw ?? "").toLowerCase();
   return low.includes("failed to lookup address") || low.includes("getaddrinfo") ||
     low.includes("stream disconnected") || low.includes("failed to connect to websocket") ||
-    low.includes("error sending request") || low.includes("dns");
+    low.includes("error sending request") || low.includes("dns") ||
+    isSandboxNetDownError(raw);
+}
+/// True when the Rust-side preflight (sandbox.rs `net_down_argv`) refused to
+/// launch the CLI because the distro has no outbound network at all. Distinct
+/// from the patterns above: those are a connection that FAILED, this one is a
+/// connection that would never have been attempted, so the remedy differs.
+function isSandboxNetDownError(raw: unknown): boolean {
+  return String((raw as { message?: string })?.message ?? raw ?? "")
+    .toLowerCase()
+    .includes("owllm_sandbox_net_down");
 }
 /// True when text (a thrown error OR an agent's REPLY) is an auth/401 failure.
 /// Critical: a subscription-CLI 401 often comes back as exit-0 REPLY TEXT (not a
@@ -669,6 +679,13 @@ function authReloginMessage(provider: string): string {
 function cleanAgentError(raw: unknown): string {
   const s = String((raw as { message?: string })?.message ?? raw ?? "").trim();
   const low = s.toLowerCase();
+  if (isSandboxNetDownError(raw)) {
+    // The preflight proved the sandbox has NO outbound network, so the run was
+    // stopped in seconds instead of hanging. Don't promise the restart button
+    // fixes it: when the Windows NAT behind WSL dies, `wsl --shutdown` is a
+    // measured no-op, and mirrored networking is what actually restores it.
+    return "the sandbox has no network at all — every outbound connection from inside WSL times out, so the run was stopped instead of hanging. This is Windows-side WSL networking, not the model or your login. Try “Restart WSL networking” below; if that doesn't help, add  networkingMode=mirrored  under [wsl2] in  C:\\Users\\<you>\\.wslconfig  and restart WSL.";
+  }
   if (isNetworkAgentError(raw) || low.includes("dns")) {
     // Plain language + a button does the fix — no terminal commands in the user's
     // face. The button (rendered under this bubble) runs `wsl --shutdown` for them.

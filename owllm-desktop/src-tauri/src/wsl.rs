@@ -261,6 +261,76 @@ pub fn run_in_distro_script_user(
     })
 }
 
+// ---- sandbox outbound-network preflight ----------------------------------
+
+/// Marker written to a run's stderr when the preflight finds the distro has no
+/// outbound network. The UI matches on it to name the real remedy.
+///
+/// Why this exists: on 2026-08-12 the Windows HNS NAT behind WSL stopped
+/// forwarding return traffic (guest sent 506 packets, received 5). Every
+/// outbound connect from the distro timed out, so the agent CLI sat in
+/// SYN-SENT for 10+ minutes and the run looked like a hung model — no error,
+/// no output. `wsl --shutdown` did NOT restore it. A dead sandbox network must
+/// fail in seconds and say so, not consume a whole run's timeout.
+pub const NET_DOWN_MARKER: &str = "OWLLM_SANDBOX_NET_DOWN";
+
+/// A good verdict is trusted long enough that a team run spawning many agents
+/// probes once; a bad one expires fast so the first attempt after a repair
+/// goes straight through instead of staying blocked.
+const NET_OK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const NET_DOWN_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+type NetCache = std::sync::Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>;
+
+fn net_cache() -> &'static NetCache {
+    static C: std::sync::OnceLock<NetCache> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Whether `distro` can actually open an outbound TCP connection. Cached with
+/// the TTLs above so the happy path costs one probe per five minutes.
+pub fn sandbox_net_ok(distro: &str) -> bool {
+    let cached = net_cache().lock().ok().and_then(|m| {
+        m.get(distro).copied().and_then(|(ok, at)| {
+            let ttl = if ok { NET_OK_TTL } else { NET_DOWN_TTL };
+            if at.elapsed() < ttl {
+                Some(ok)
+            } else {
+                None
+            }
+        })
+    });
+    if let Some(ok) = cached {
+        return ok;
+    }
+    let ok = probe_sandbox_net(distro);
+    if let Ok(mut m) = net_cache().lock() {
+        m.insert(distro.to_string(), (ok, std::time::Instant::now()));
+    }
+    ok
+}
+
+/// Forget every cached verdict. Called after a repair action so the next run
+/// re-probes instead of waiting out `NET_DOWN_TTL`.
+pub fn sandbox_net_forget() {
+    if let Ok(mut m) = net_cache().lock() {
+        m.clear();
+    }
+}
+
+fn probe_sandbox_net(distro: &str) -> bool {
+    // bash's /dev/tcp needs no curl and no root — ICMP is commonly filtered in
+    // WSL, so a ping-based probe would report false failures. Two anycast
+    // resolvers on 443, 2s each: a dead network costs ~4s instead of the CLI's
+    // multi-minute connect, and one reachable host is enough to prove routing.
+    let script = "for h in 1.1.1.1 8.8.8.8; do \
+if timeout 2 bash -c \"exec 3<>/dev/tcp/$h/443\" 2>/dev/null; then \
+echo OWLLM_NET_OK; exit 0; fi; done; exit 1";
+    run_in_distro_script(distro, script)
+        .map(|o| o.contains("OWLLM_NET_OK"))
+        .unwrap_or(false)
+}
+
 /// One `wsl.exe -l -q` call. Returns (distro names, definitive_none).
 /// `definitive_none` is true ONLY when we KNOW there are no distros — either
 /// wsl.exe isn't installed (spawn failed) or it printed "has no installed
@@ -454,6 +524,10 @@ pub fn wsl_restart() -> Result<(), String> {
             detail
         ));
     }
+    // The distro is about to cold-start, so any cached network verdict is
+    // stale. Drop it or a successful repair would still be refused for the
+    // remainder of NET_DOWN_TTL.
+    sandbox_net_forget();
     Ok(())
 }
 

@@ -261,6 +261,9 @@ function runHarnesses() {
     "browserCredentialVault.verify.run.mjs",
     "claudeCliConnection.verify.run.mjs",
     "isolatedWorktreeSync.verify.run.mjs",
+    // Source-text assertions over wsl.rs/sandbox.rs — no transpile needed, so
+    // it must not be parked behind the TypeScript-dependent SKIP.
+    "sandboxNetPreflight.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

@@ -7,7 +7,9 @@
 // out of the generation-time denominator. Active parallel streams are summed
 // so they cannot overwrite one another in the global badge.
 
-export type GenMeter = ((count?: number) => void) & { stop: () => void };
+export type GenMeter = ((count?: number) => void) & {
+  stop: (exactToksPerSec?: number) => void;
+};
 
 type ActiveMeter = {
   tokens: number;
@@ -16,6 +18,15 @@ type ActiveMeter = {
 
 const activeMeters = new Map<number, ActiveMeter>();
 let nextMeterId = 1;
+
+/// Extract llama-server's measured decode rate from its final OpenAI-style
+/// SSE object. Other local OpenAI-compatible servers may omit it; callers then
+/// keep using the client-side live estimate.
+export function timingTokensPerSecond(event: unknown): number | undefined {
+  const value = (event as { timings?: { predicted_per_second?: unknown } } | null)
+    ?.timings?.predicted_per_second;
+  return typeof value === "number" && isFinite(value) && value > 0 ? value : undefined;
+}
 
 function broadcastActiveMeters(): void {
   if (activeMeters.size === 0) return;
@@ -63,10 +74,26 @@ export function makeGenMeter(): GenMeter {
       }
     }
   }) as GenMeter;
-  tick.stop = () => {
+  tick.stop = (exactToksPerSec?: number) => {
     if (stopped) return;
     stopped = true;
     activeMeters.delete(id);
+    // llama-server puts its measured predicted_per_second in the final SSE
+    // chunk. Prefer that over the chunk-count estimate and keep the completed
+    // speed visible when this was the last active local stream.
+    if (typeof exactToksPerSec === "number" && isFinite(exactToksPerSec) && exactToksPerSec > 0
+        && activeMeters.size === 0) {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("owllm:gen-stats", {
+            detail: { toksPerSec: exactToksPerSec, tokens: n, streams: 0, complete: true },
+          }),
+        );
+      } catch {
+        /* never break the turn over a telemetry event */
+      }
+      return;
+    }
     // If other streams are still generating, remove this stream from the
     // aggregate immediately instead of leaving its last rate in the badge.
     broadcastActiveMeters();

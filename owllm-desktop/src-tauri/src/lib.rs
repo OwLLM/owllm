@@ -1036,6 +1036,7 @@ pub fn run() {
                             MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
                         )),
                     }
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
@@ -1044,6 +1045,7 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     log_exit_path("Exit — process is leaving");
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {

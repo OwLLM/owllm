@@ -280,7 +280,13 @@ type ServerStatusLite = {
   port: number | null;
   message: string;
 };
-type VramGpu = { index: number; used_mib: number; total_mib: number };
+type VramGpu = {
+  index: number;
+  used_mib: number;
+  total_mib: number;
+  unified?: boolean;
+  model_scoped?: boolean;
+};
 type VramStatusLite = { gpus: VramGpu[] };
 
 // Model ids commonly include the organisation, fine-tune recipe and quant.
@@ -1592,7 +1598,12 @@ function SysInfoBlock() {
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
     : vram.gpus
-        .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
+        .map(g => {
+          const value = `${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`;
+          if (g.unified && g.model_scoped) return `Unified model: ${value}`;
+          if (g.unified) return `Unified: ${value}`;
+          return `GPU${g.index}: ${value}`;
+        })
         .join("   ");
   return (
     <div
@@ -1612,7 +1623,7 @@ function SysInfoBlock() {
     >
       <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
-        <GenSpeedBadge variant="header" />
+        <GenSpeedBadge variant="header" active={server.running} />
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}

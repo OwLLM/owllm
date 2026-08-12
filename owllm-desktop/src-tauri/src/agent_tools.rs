@@ -309,7 +309,7 @@ pub async fn chat_scratch_dir() -> Result<String, String> {
     // distro (off the Windows disk), exactly like the Code page and agents.
     // wsl_create_project spawns wsl.exe (blocking), so run it off the async
     // executor; fall back to the host scratch dir if WSL provisioning fails.
-    let iso = crate::wsl::wsl_isolation_get();
+    let iso = crate::wsl::wsl_isolation_get_blocking();
     if iso.enabled {
         let distro = iso.distro.clone();
         let provisioned = tokio::task::spawn_blocking(move || {

@@ -2570,6 +2570,41 @@ pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, S
         .map_err(|e| format!("sandbox login sync task failed: {e}"))?
 }
 
+/// Result of the pre-flight reachability check. The UI uses `reachable` to decide
+/// whether to proceed, `host_fallback` to degrade gracefully from a broken WSL
+/// isolation path back to the real Windows folder, and `reason` to explain a
+/// failure instead of the generic "WSL is still starting up" message.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmCheckResult {
+    pub reachable: bool,
+    /// When a WSL UNC path is not reachable but the corresponding host folder
+    /// exists, this contains that host path so the UI can run un-isolated rather
+    /// than failing completely.
+    pub host_fallback: Option<String>,
+    /// Human-readable explanation when `reachable` is false.
+    pub reason: Option<String>,
+}
+
+#[cfg(windows)]
+fn wsl_unc_to_host_path(unc: &str) -> Option<String> {
+    let norm = unc.replace('\\', "/");
+    let rest = norm
+        .strip_prefix("//wsl.localhost/")
+        .or_else(|| norm.strip_prefix("//wsl$/"))?;
+    let mut parts = rest.splitn(3, '/');
+    let _distro = parts.next()?;
+    let mnt = parts.next()?;
+    let tail = parts.next()?;
+    if mnt != "mnt" {
+        return None;
+    }
+    let mut drive_tail = tail.splitn(2, '/');
+    let drive = drive_tail.next()?;
+    let path_tail = drive_tail.next().unwrap_or("");
+    Some(format!("{}:\\{}", drive.to_uppercase(), path_tail.replace('/', "\\")))
+}
+
 /// Pre-flight for an isolated run: make sure WSL is warm and the project folder is
 /// actually reachable BEFORE dispatching. After a PC reboot WSL comes back COLD —
 /// the distro isn't started and /mnt isn't mounted yet — so a project reached
@@ -2578,13 +2613,18 @@ pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, S
 /// report "can't find the code" (the post-reboot regression). For a WSL path this
 /// STARTS the distro (which mounts /mnt) and tests the folder — both warming AND
 /// verifying in one round-trip. For a plain host path it just stats it. Returns
-/// true when the agents will actually be able to see the folder.
+/// a `WarmCheckResult` so the UI can fall back to the host folder or surface a
+/// precise reason.
 #[tauri::command]
-pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String> {
+pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<WarmCheckResult, String> {
     let Some(cwd) = cwd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
-        return Ok(false);
+        return Ok(WarmCheckResult {
+            reachable: false,
+            host_fallback: None,
+            reason: Some("No project folder is set.".into()),
+        });
     };
-    let fut = tokio::task::spawn_blocking(move || -> bool {
+    let fut = tokio::task::spawn_blocking(move || -> WarmCheckResult {
         #[cfg(windows)]
         {
             if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&cwd) {
@@ -2596,26 +2636,83 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String>
                     crate::wsl::sh_quote(&linux_cwd)
                 );
                 return match crate::wsl::run_in_distro_script(&distro, &script) {
-                    Ok(o) => o.contains("OWLLM_REACH_OK"),
-                    Err(_) => false,
+                    Ok(o) if o.contains("OWLLM_REACH_OK") => WarmCheckResult {
+                        reachable: true,
+                        host_fallback: None,
+                        reason: None,
+                    },
+                    Ok(_) => {
+                        let host_fallback = wsl_unc_to_host_path(&cwd)
+                            .filter(|p| std::path::Path::new(p).is_dir());
+                        WarmCheckResult {
+                            reachable: false,
+                            host_fallback,
+                            reason: Some(format!(
+                                "Folder not reachable through WSL distro '{}'.",
+                                distro
+                            )),
+                        }
+                    }
+                    Err(e) => {
+                        let host_fallback = wsl_unc_to_host_path(&cwd)
+                            .filter(|p| std::path::Path::new(p).is_dir());
+                        WarmCheckResult {
+                            reachable: false,
+                            host_fallback,
+                            reason: Some(format!("WSL command failed: {e}")),
+                        }
+                    }
                 };
             }
         }
         // Plain host path (or non-Windows): stat it directly.
-        std::path::Path::new(&cwd).is_dir()
+        let reachable = std::path::Path::new(&cwd).is_dir();
+        WarmCheckResult {
+            reachable,
+            host_fallback: None,
+            reason: if reachable {
+                None
+            } else {
+                Some(format!("Project folder not found: {cwd}"))
+            },
+        }
     });
     // BOUND IT: starting a cold distro can take a bit, but a stuck WSL must never
     // hang the pre-flight forever. 45 s is generous for a cold-start; past that we
     // report not-reachable so the run surfaces a clear message instead of blocking.
     match tokio::time::timeout(std::time::Duration::from_secs(45), fut).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(_)) | Err(_) => Ok(false),
+        Ok(Err(_)) | Err(_) => Ok(WarmCheckResult {
+            reachable: false,
+            host_fallback: None,
+            reason: Some("WSL warm/check timed out — the distro may be starting.".into()),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_to_host_path_round_trips_windows_paths() {
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\mnt\c\Users\me\proj"),
+            Some(r"C:\Users\me\proj".to_string()),
+        );
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl$\Ubuntu\mnt\d\code\repo"),
+            Some(r"D:\code\repo".to_string()),
+        );
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\mnt\c"),
+            Some(r"C:\".to_string()),
+        );
+        // Non-mnt paths and plain Windows paths return None.
+        assert_eq!(wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\home\me\proj"), None);
+        assert_eq!(wsl_unc_to_host_path(r"C:\Users\me\proj"), None);
+    }
 
     #[test]
     fn mirror_report_covers_every_state() {

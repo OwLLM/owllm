@@ -139,15 +139,15 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
-  ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,900}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
+  ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,1200}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
   // A per-git-COMMAND lock is not enough: each sync channel is a read-modify-write
   // (reset --hard → rewrite state/ → commit+push), so a concurrent channel's reset
   // reverted another's pending write to a TRACKED file and commit_push then found
   // nothing to commit. Signing metadata silently stopped reaching the vault.
   ["src-tauri/src/vault.rs", /static VAULT_TXN_LOCK[\s\S]{0,400}fn vault_txn/, "whole vault sync transactions are serialized, not just single git commands (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
-  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
-  ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,200}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,700}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,400}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
   // A THIRD corruption shape, and the one that actually bit: an orphaned
   // `.git/index.lock` (app killed mid-write). Git then refuses add/commit/reset
   // alike, and nothing removed it — a 0-byte lock from 2026-07-29 left one
@@ -158,13 +158,35 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /is_lock_contention\(&e\) && repair_stale_lock\(&e\)/, "run_git's self-heal ladder clears an orphaned lock and retries (v1.0.9)"],
   ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
-  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,400}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,800}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
   // The breaker's own doc says "any success clears it immediately", but the
   // ladder's fallthrough arm returned Ok without ever calling note_repo_health —
   // so only a successful POST-HEAL retry could reset it. Once armed, the backoff
   // stayed pinned at its 1 h cap forever. Seen on a second device: one "owllm
   // sync" commit per hour, on the hour, with no reset/merge in between.
   ["src-tauri/src/vault.rs", /other => \{\s*note_repo_health\(&other\);/, "a successful git command clears the sync circuit breaker (v1.0.9)"],
+  // VAULT SYNC IS THE BACK-PRESSURE GATE ON THE WHOLE APP. 2026-08-12: the app
+  // ran 14 hours doing NOTHING — 552 threads all in Wait, ~2% CPU, no
+  // llama-server ever spawned, for any model, and restarting the prompt could
+  // not help because nothing was wrong with the prompt. `pushNow` had no
+  // inflight guard, so the 5s poll stacked a fresh vault_write_state on every
+  // push still waiting on git, and each queued command parked a WHOLE tokio
+  // blocking thread on the transaction lock. At tokio's default 512-thread
+  // blocking-pool ceiling every other spawn_blocking in the app — chat
+  // persistence, model listing, engine start — queued behind vault sync
+  // forever. The vault had reached 83,095 commits / 128,117 loose objects /
+  // 7.2 GB, which is what made a push slow enough to start the pileup, and
+  // maintain_repo's pack-count-only gate never fired on it (10 packs).
+  ["src-tauri/src/vault.rs", /fn vault_gate\(\) -> &'static tokio::sync::Semaphore/, "vault admission is an async gate, so a queued sync waits as a task not a thread (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn vault_write_state\(json: String\) -> Result<bool, String>/, "vault_write_state reports a coalesced tick so the caller can retry it (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn vault_write_state[\s\S]{0,600}let Some\(_gate\) = vault_admit_now\(\)/, "the 5s state push coalesces instead of queueing behind the running sync (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_projects[\s\S]{0,900}let Some\(_gate\) = vault_admit_now\(\)/, "the 60s project sync coalesces instead of queueing (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,600}let Some\(_gate\) = vault_admit_now\(\)/, "the 150s device heartbeat coalesces instead of queueing (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn loose_object_count\(common: &std::path::Path, cap: usize\) -> usize/, "loose objects are counted, so a 128k-object runaway is visible to maintenance (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /packs <= PACK_LIMIT && loose < LOOSE_LIMIT/, "consolidation is gated on loose objects too, not pack count alone (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn maintain_repo_if_due[\s\S]{0,700}maintain_repo\(dir\)/, "consolidation re-checks on an interval, not once per process (v1.0.18)"],
+  ["ui/src/runtime/vaultSync.ts", /if \(_pushing\) \{[\s\S]{0,300}_pushAgain = \{ force:/, "one vault push in flight at a time; the rest coalesce into one re-run (v1.0.18)"],
+  ["ui/src/runtime/vaultSync.ts", /if \(written === false\) return;/, "a coalesced write never advances the dedupe marker, so state is not lost (v1.0.18)"],
   ["src-tauri/src/git.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "Code-page git self-heals a zeroed ref"],
   ["src-tauri/src/fleet.rs", /is_broken_ref[\s\S]{0,200}repair_broken_ref/, "fleet worktree git self-heals a zeroed ref"],
   // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).

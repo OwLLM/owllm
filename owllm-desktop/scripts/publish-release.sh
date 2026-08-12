@@ -179,9 +179,14 @@ assert_installer_version() {
 # ---- per-platform artifact map -------------------------------------------
 # One script, three OSes. INSTALLER = the human-download asset (stable name),
 # UPDATER_ARTIFACT = what minisign signs and latest.json points at.
-# Windows keeps its historical /latest/ URL (unchanged behaviour); macOS and
-# Linux use VERSIONED URLs so a later Windows-only publish can never leave a
-# platform key pointing at an asset that no longer matches its signature.
+# EVERY platform uses a VERSIONED (tag-pinned) URL so a later publish can never
+# leave a platform key pointing at an asset that no longer matches its
+# signature. Windows kept a floating /releases/latest/download/ URL until
+# v1.0.18 and that is exactly how it broke: a client that fetched the v1.0.17
+# manifest before the v1.0.18 tag was promoted then downloaded the exe AFTER
+# promotion, so it checked the 1.0.18 binary against the 1.0.17 signature and
+# reported "The signature verification failed" — permanently, because retrying
+# re-downloads the binary but not the manifest.
 case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
   Darwin)               HOST_OS="macos" ;;
@@ -211,7 +216,7 @@ case "$HOST_OS" in
     PLATFORM_KEY="windows-x86_64"
     INSTALLER="dist/OwLLM Desktop Setup.exe"
     UPDATER_ARTIFACT="$INSTALLER"
-    URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop.Setup.exe"
     ;;
   macos)
     # macOS ships ONE universal (arm64 + x86_64) bundle, so both Apple platform

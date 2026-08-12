@@ -87,5 +87,10 @@ check(rust.includes("connect_web_process_terminated")
   "native Linux WebKit crashes and memory-limit terminations are logged and recovered");
 check(rust.includes('root.join("linux-webkit.log")'),
   "native WebKit termination reasons are written to the durable user-data directory");
+check(rust.includes("set_enable_media_stream(true)")
+    && rust.includes("enable_linux_webview_media_capture(app)")
+    && rust.includes("connect_permission_request")
+    && rust.includes("UserMediaPermissionRequest"),
+  "Linux main WebView enables media-stream and grants capture so the screen recorder and mic dictation work");
 
 console.log(`OK Linux WebKit stability: ${passed}/${passed} checks passed`);

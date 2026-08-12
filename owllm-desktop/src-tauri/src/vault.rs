@@ -70,8 +70,13 @@ fn connected_vault_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Apply the durability + maintenance policy to an existing clone, once per run.
+/// Apply the durability policy to an existing clone, once per run.
 /// Cheap no-op when there is no clone yet (`clone_vault` hardens the fresh one).
+///
+/// Config writes only. Consolidation used to run from here too, but this is
+/// reached from `connected_vault_dir` on the ASYNC runtime, at the top of every
+/// vault command — a repack there blocks an executor thread for minutes. It now
+/// runs as `maintain_repo_if_due` on the gated blocking thread instead.
 fn ensure_hardened(dir: &std::path::Path) {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     static DONE: AtomicBool = AtomicBool::new(false);
@@ -79,7 +84,6 @@ fn ensure_hardened(dir: &std::path::Path) {
         return;
     }
     harden_repo(dir);
-    maintain_repo(dir);
 }
 
 /// GET an authenticated GitHub API URL; return the parsed JSON body.
@@ -309,6 +313,60 @@ static VAULT_TXN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// must not wedge sync forever — recover the guard, same as run_git does.
 fn vault_txn() -> std::sync::MutexGuard<'static, ()> {
     VAULT_TXN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// ADMISSION GATE — the async half of VAULT_TXN_LOCK.
+//
+// Both locks above are BLOCKING mutexes, and every vault command runs its
+// transaction inside `spawn_blocking`. A transaction holds the lock across
+// `fetch` + `merge` + `push`, which is seconds against a large vault. So a tick
+// that arrives mid-transaction does not just wait — it occupies a whole tokio
+// blocking thread doing nothing but waiting.
+//
+// The UI drives four periodic channels PER WINDOW (5s state push, 10s notebook
+// pull, 60s projects, 150s devices) and none of them coalesce at the Rust
+// boundary. Once pushes take longer than the poll interval the queue grows
+// faster than it drains and pins tokio's blocking pool at its default 512-thread
+// ceiling. Past that point every `spawn_blocking` in the WHOLE APP — chat
+// persistence, model listing, engine start — queues behind vault sync forever:
+// the app renders fine and does absolutely nothing, for any model.
+//
+// Observed 2026-08-12: 552 threads (512 blocking pool + ~40), all in Wait, ~2%
+// CPU, against an 83,095-commit / 7.2 GB vault committing 660 times an hour.
+//
+// The fix is to wait HERE instead — on the async runtime, where a waiter is a
+// task and not a thread — and only enter `spawn_blocking` once the gate is ours.
+// A blocking thread is then held only while git actually runs.
+//
+// Lock ordering is gate → VAULT_TXN_LOCK → VAULT_GIT_LOCK, never the reverse.
+// The inner locks are kept: they still serialize the non-async callers (the
+// concurrency tests below drive `vault_txn` directly from plain threads), and
+// with the gate in front they are uncontended for command traffic.
+fn vault_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+/// Wait for exclusive vault access WITHOUT occupying a blocking thread. For the
+/// channels whose write must land: user actions and launch-time publishes.
+async fn vault_admit() -> tokio::sync::SemaphorePermit<'static> {
+    // The semaphore is never closed, so acquire() cannot fail.
+    vault_gate()
+        .acquire()
+        .await
+        .expect("vault gate is never closed")
+}
+
+/// Take the gate only if it is free RIGHT NOW, else `None`.
+///
+/// For the PERIODIC republishers. Each tick rewrites the same derived state from
+/// scratch, so a tick arriving while the previous one is still pushing has
+/// nothing to add that the in-flight one is not already carrying — dropping it
+/// is strictly better than queueing a duplicate behind it. Callers MUST report
+/// the skip to their caller (never a silent success) so the next tick retries;
+/// see `vault_write_state`, whose JS dedupe marker only advances on a real write.
+fn vault_admit_now() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    vault_gate().try_acquire().ok()
 }
 
 fn run_git_once(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
@@ -614,12 +672,45 @@ pub(crate) fn harden_repo(dir: &std::path::Path) {
     let _ = run_git_once(&["config", "maintenance.auto", "false"], Some(dir));
 }
 
+/// Loose objects across the 256 fan-out dirs, counting no further than `cap`.
+/// The result is only ever compared against a threshold and a runaway vault
+/// holds six figures of them, so enumerating past the cap is pure waste.
+fn loose_object_count(common: &std::path::Path, cap: usize) -> usize {
+    let Ok(rd) = std::fs::read_dir(common.join("objects")) else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for e in rd.flatten() {
+        // Only the hex fan-out dirs hold loose objects; skip pack/, info/, etc.
+        let name = e.file_name();
+        let is_fanout = name
+            .to_str()
+            .is_some_and(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if !is_fanout {
+            continue;
+        }
+        if let Ok(inner) = std::fs::read_dir(e.path()) {
+            n += inner.flatten().count();
+            if n >= cap {
+                return n;
+            }
+        }
+    }
+    n
+}
+
 /// Deliberate, bounded replacement for the auto-gc we disabled. The vault commits
-/// on every change (~47k commits in 50 days observed), so pack count grows without
-/// limit and every git command has to mmap each pack index. Consolidates only when
-/// actually needed, and never more than once per process.
+/// on every change (~47k commits in 50 days observed), so object count grows
+/// without limit and every git command has to mmap each pack index.
+///
+/// Gated on LOOSE OBJECTS as well as pack count. Pack count alone missed the
+/// failure mode that actually happened: a vault reached 83,095 commits, 128,117
+/// loose objects and 7.2 GB while sitting at just 10 packs, so this never once
+/// fired — and every 5-second sync had to walk that repo, which is what made
+/// each push slow enough to saturate the blocking pool.
 pub(crate) fn maintain_repo(dir: &std::path::Path) {
     const PACK_LIMIT: usize = 24;
+    const LOOSE_LIMIT: usize = 8192;
     let Some((common, _)) = git_dirs(Some(dir)) else {
         return;
     };
@@ -631,14 +722,41 @@ pub(crate) fn maintain_repo(dir: &std::path::Path) {
                 .count()
         })
         .unwrap_or(0);
-    if packs <= PACK_LIMIT {
+    let loose = loose_object_count(&common, LOOSE_LIMIT);
+    if packs <= PACK_LIMIT && loose < LOOSE_LIMIT {
         return;
     }
-    eprintln!("vault: {packs} packs (> {PACK_LIMIT}) — consolidating");
+    eprintln!("vault: {packs} packs / {loose}+ loose objects — consolidating");
     // Keep 30 days of reflog as the recovery source repair_broken_ref reads from;
-    // -ad folds every pack into one. Both take the shared git lock via run_git.
+    // -ad folds every pack into one. All take the shared git lock via run_git.
     let _ = run_git(&["reflog", "expire", "--expire=30.days", "--all"], Some(dir));
     let _ = run_git(&["repack", "-ad", "--quiet"], Some(dir));
+    // repack -ad packs everything REACHABLE; unreachable loose objects (dropped
+    // merge parents, expired reflog tips) survive it and are what actually pile
+    // up here, so prune them too.
+    let _ = run_git(&["prune", "--expire=30.days"], Some(dir));
+}
+
+/// Run `maintain_repo` at most once every 6 hours.
+///
+/// MUST be called from a blocking thread that already holds the vault gate —
+/// never from the async runtime, where a multi-minute repack would stall every
+/// other task. Re-checking on an interval rather than once per process is the
+/// point: this app is left open for days, and the runaway that wedged it grew
+/// entirely inside a single 14-hour session.
+fn maintain_repo_if_due(dir: &std::path::Path) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const INTERVAL_SECS: u64 = 6 * 3600;
+    static LAST_RUN: AtomicU64 = AtomicU64::new(0);
+    let now = now_secs();
+    let last = LAST_RUN.load(Relaxed);
+    // last == 0: first sync of the process, so a repo that arrived bloated gets
+    // consolidated promptly instead of waiting out the first interval.
+    if last != 0 && now.saturating_sub(last) < INTERVAL_SECS {
+        return;
+    }
+    LAST_RUN.store(now, Relaxed);
+    maintain_repo(dir);
 }
 
 /// Consecutive failures that persisted THROUGH a self-heal, plus the epoch second
@@ -958,6 +1076,7 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
         api_key,
         device: machine_name(),
     };
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -979,6 +1098,7 @@ pub async fn vault_unpublish_server() -> Result<(), String> {
     if !is_cloned(&dir) {
         return Ok(());
     }
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -1077,6 +1197,7 @@ pub async fn vault_sync_teams() -> Result<(), String> {
         (crate::paths::custom_teams_dir(), "teams"),
         (crate::paths::custom_agents_dir(), "roles"),
     ];
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -1706,6 +1827,11 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
     // if the keypair can't be loaded; then paths fall through as ghosted, which
     // is the safe default.
     let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
+    // Coalescing: a 60s republisher. Skipping a tick that lands mid-sync costs
+    // nothing — the next one rewrites the same rows from the DB.
+    let Some(_gate) = vault_admit_now() else {
+        return Ok(false);
+    };
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -1793,6 +1919,11 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
         return Ok(false);
     }
     let (self_id, self_json) = crate::remote_devices::self_vault_record()?;
+    // Coalescing: a 150s liveness heartbeat. A skipped beat is re-sent on the
+    // next tick, well inside isDeviceOnline's 5-minute freshness window.
+    let Some(_gate) = vault_admit_now() else {
+        return Ok(false);
+    };
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -1843,6 +1974,7 @@ pub async fn vault_sync_signing() -> Result<bool, String> {
     if !is_cloned(&dir) {
         return Ok(false);
     }
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
@@ -1890,6 +2022,10 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
     if !is_cloned(&dir) {
         return Ok(None);
     }
+    // Takes the gate even though it holds no transaction: it shells a network
+    // `git fetch`, and without the gate it parked a blocking thread on
+    // VAULT_GIT_LOCK behind whatever transaction was mid-push.
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
@@ -1907,13 +2043,24 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
 
 /// Write the sync blob, commit, integrate remote (ours wins on conflict — the
 /// JS layer already resolved which side is newer), and push.
+///
+/// Returns whether the blob was actually written. `false` means a sync was
+/// already in flight and this tick was coalesced into it — NOT that the state
+/// is safe. The caller must leave its dedupe marker alone on `false` so the
+/// next poll retries; see `pushNow` in vaultSync.ts.
 #[tauri::command]
-pub async fn vault_write_state(json: String) -> Result<(), String> {
+pub async fn vault_write_state(json: String) -> Result<bool, String> {
     let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
+    // Coalescing: this is the 5-second poll, the channel that produced the
+    // 512-thread pileup. A tick that cannot get the gate immediately carries
+    // nothing the in-flight push is not already writing.
+    let Some(_gate) = vault_admit_now() else {
+        return Ok(false);
+    };
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);
         let state_dir = dir.join("state");
@@ -1936,9 +2083,13 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
             ],
             Some(&dir),
         );
-        run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&dir))
-            .map(|_| ())
-            .map_err(|e| format!("push failed: {e}"))
+        let pushed = run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&dir))
+            .map(|_| true)
+            .map_err(|e| format!("push failed: {e}"));
+        // Bounded consolidation, here on the blocking thread while the gate is
+        // still ours: exclusive, off the async runtime, and at most 6-hourly.
+        maintain_repo_if_due(&dir);
+        pushed
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -1952,6 +2103,7 @@ pub async fn vault_align() -> Result<(), String> {
     if !is_cloned(&dir) {
         return Ok(());
     }
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);

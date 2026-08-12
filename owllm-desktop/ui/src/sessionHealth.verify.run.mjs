@@ -45,6 +45,7 @@ const lib = rustFile("lib.rs");
 const health = rustFile("session_health.rs");
 const support = rustFile("support.rs");
 const shell = uiFile("AppShell.tsx");
+const updatePrompt = uiFile("UpdatePrompt.tsx");
 const toast = uiFile("components/Toast.tsx");
 
 check(health.length > 0, "session_health.rs exists");
@@ -63,6 +64,34 @@ check(
 check(
   lib.indexOf("session_health::begin(") < lib.indexOf("bootstrap::migrate_user_state_if_needed"),
   "the marker is claimed before the heavy startup work that might itself crash",
+);
+
+// --- the update path ends the process OUTSIDE the exit path ---------------
+// `install()` does not return on Windows: tauri-plugin-updater hands the NSIS
+// installer to the shell and leaves through `std::process::exit(0)`, so
+// RunEvent::Exit never fires and `end_clean()` never runs. Without an explicit
+// "this death is expected" the marker survives, and every auto-update makes the
+// newly installed build open by accusing the previous one of crashing — which
+// is exactly what 1.0.16→1.0.17→1.0.18 did on the reference machine.
+check(
+  /pub fn expect_replacement\(/.test(health) && /pub fn rearm\(/.test(health),
+  "an installer-driven death can be declared expected, and undeclared if it doesn't happen",
+);
+check(
+  /session_health_expect_replacement/.test(lib) && /session_health_rearm/.test(lib),
+  "both commands are registered, or the frontend call is a no-op error",
+);
+check(
+  /session_health_expect_replacement[\s\S]*?update\.install\(\)/.test(updatePrompt),
+  "the marker is dropped BEFORE install(), which never returns on Windows",
+);
+check(
+  !/downloadAndInstall/.test(updatePrompt) && /update\.download\(/.test(updatePrompt),
+  "download and install stay separate, so a crash mid-download is still reported",
+);
+check(
+  /catch[\s\S]{0,200}session_health_rearm/.test(updatePrompt),
+  "a failed install re-arms the marker instead of leaving the session unwatched",
 );
 
 // --- identity: pid alone is not enough -----------------------------------

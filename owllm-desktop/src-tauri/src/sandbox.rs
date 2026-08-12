@@ -666,6 +666,32 @@ pub fn agent_full_access_set(cwd: String, enabled: bool) -> Result<(), String> {
     full_access_set_impl(cwd, enabled)
 }
 
+/// Argv that aborts the run at once because the distro has no outbound
+/// network. Returned INSTEAD of the CLI so a wedged WSL network costs seconds
+/// and names itself, rather than leaving the CLI blocked in `connect()` until
+/// the run times out with no output. See [`crate::wsl::NET_DOWN_MARKER`].
+#[cfg(windows)]
+fn net_down_argv(distro: String) -> (String, Vec<String>) {
+    let msg = format!(
+        "{}: the WSL sandbox cannot reach the network — outbound connections \
+from inside the distro time out, so the agent CLI would hang instead of \
+answering. This is a Windows-side WSL networking failure, not the model, your \
+login, or this project.",
+        crate::wsl::NET_DOWN_MARKER
+    );
+    (
+        "wsl.exe".to_string(),
+        vec![
+            "-d".into(),
+            distro,
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            format!("printf '%s\\n' {} >&2; exit 78", crate::wsl::sh_quote(&msg)),
+        ],
+    )
+}
+
 #[cfg(windows)]
 pub fn program_argv(
     cwd: Option<&str>,
@@ -673,6 +699,12 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    // Preflight the sandbox's outbound network before handing over to the CLI.
+    // Runs on the program_argv path only, which never applies --unshare-net, so
+    // a deliberately offline run can't be mistaken for a broken one.
+    if !crate::wsl::sandbox_net_ok(&distro) {
+        return Some(net_down_argv(distro));
+    }
     // A full-access (trusted) project opts OUT of the bwrap jail entirely — plain
     // WSL routing below, which can reach the Windows drives + interop. Otherwise
     // confine to the project folder when bubblewrap is available.
@@ -717,6 +749,9 @@ pub fn program_argv_unjailed(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    if !crate::wsl::sandbox_net_ok(&distro) {
+        return Some(net_down_argv(distro));
+    }
     let script = format!(
         "cd {} && {}",
         crate::wsl::sh_quote(&linux_cwd),
@@ -893,7 +928,7 @@ fn sandbox_home() -> Option<String> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     let p = cwd?;
-    if !crate::wsl::wsl_isolation_get().enabled {
+    if !crate::wsl::wsl_isolation_get_blocking().enabled {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
@@ -1012,7 +1047,7 @@ pub fn shell_argv(_cwd: Option<&str>, _command: &str) -> Option<(String, Vec<Str
 
 #[cfg(windows)]
 fn status_impl() -> SandboxStatus {
-    let w = crate::wsl::wsl_status();
+    let w = crate::wsl::wsl_status_blocking();
     // Report the distro the sandbox will actually use (best_linux_distro —
     // never docker-desktop); fall back to the raw default for display when
     // only system distros exist.

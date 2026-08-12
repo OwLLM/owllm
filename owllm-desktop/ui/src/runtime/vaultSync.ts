@@ -411,15 +411,67 @@ export async function pullNotebooksNow(): Promise<boolean> {
 
 /// Snapshot + push localStorage to the vault. No-op if nothing changed since
 /// the last push (cheap dedupe via the serialized snapshot).
+///
+/// ONE push in flight at a time. The 5-second poll used to stack a fresh
+/// `vault_write_state` on top of every push still waiting on git, and each one
+/// pinned a tokio blocking thread on the native side; once the pool hit its
+/// 512-thread ceiling every other `spawn_blocking` in the app — chat
+/// persistence, engine start — queued behind vault sync and the app stopped
+/// doing anything at all. Concurrent requests collapse into a single trailing
+/// re-run instead, so the newest state still goes out but never as a queue.
+let _pushing = false;
+let _pushAgain: { force: boolean } | null = null;
+
+/// Take the pending trailing request and clear it.
+///
+/// A function rather than an inline read: control-flow analysis narrows
+/// `_pushAgain` to `null` from the assignment above the `await` — it cannot see
+/// that a coalescing caller reassigns it while the push is suspended — and the
+/// truthy branch of an inline read is therefore typed `never`.
+function takePendingPush(): { force: boolean } | null {
+  const pending = _pushAgain;
+  _pushAgain = null;
+  return pending;
+}
+
 export async function pushNow(force = false): Promise<void> {
   if (!_enabled) return;
+  if (_pushing) {
+    // Keep `force` sticky: a queue publish that lands mid-push must not be
+    // downgraded to a dedupe-able tick by the trailing re-run.
+    _pushAgain = { force: force || _pushAgain?.force || false };
+    return;
+  }
+  _pushing = true;
+  try {
+    let next: boolean | null = force;
+    while (next !== null) {
+      const thisForce: boolean = next;
+      takePendingPush(); // anything queued before this run is carried BY it
+      await pushOnce(thisForce);
+      const pending = takePendingPush();
+      next = pending ? pending.force : null;
+    }
+  } finally {
+    _pushing = false;
+    _pushAgain = null;
+  }
+}
+
+async function pushOnce(force: boolean): Promise<void> {
   const data = snapshot();
   const dataJson = JSON.stringify(data);
   if (!force && dataJson === _lastSnapshotJson) return;
   const syncedAt = Date.now();
   const blob: Blob = { syncedAt, device: await deviceId(), data };
   try {
-    await invoke("vault_write_state", { json: JSON.stringify(blob) });
+    const written = await invoke<boolean>("vault_write_state", { json: JSON.stringify(blob) });
+    // An explicit `false` means the native side coalesced this tick into a sync
+    // that was already running, so NOTHING was written. Leave the dedupe marker
+    // alone so the next poll retries — advancing it here would record unsaved
+    // state as published. (Test harnesses stub this command as `null`, which is
+    // deliberately not `false` and still counts as written.)
+    if (written === false) return;
     _lastSnapshotJson = dataJson;
     setLast(syncedAt); // our own push isn't "newer" to us next launch
   } catch (e) {

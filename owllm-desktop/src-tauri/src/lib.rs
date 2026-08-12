@@ -829,6 +829,8 @@ pub fn run() {
             readiness::app_readiness,
             session_health::session_health_pending,
             session_health::session_health_dismiss,
+            session_health::session_health_expect_replacement,
+            session_health::session_health_rearm,
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,

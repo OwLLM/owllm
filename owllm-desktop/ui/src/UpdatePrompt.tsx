@@ -178,6 +178,12 @@ export default function UpdateController() {
         await invoke("server_stop").catch(() => {});
       } catch { /* best effort — proceed with the install regardless */ }
       if (installMode === "linux-appimage") {
+        // Same crash-safe marker handling as the Windows/macOS path: the
+        // AppImage helper waits for this process to exit and then swaps
+        // files. If RunEvent::Exit never fires (the event loop can be torn
+        // down before the helper finishes waiting), the marker survives and
+        // the next boot reports a crash that was actually an update.
+        await invoke("session_health_expect_replacement").catch(() => {});
         const { listen } = await import("@tauri-apps/api/event");
         const unlisten = await listen<{ downloaded: number; total?: number }>(
           "owllm:update-progress",

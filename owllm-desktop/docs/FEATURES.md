@@ -696,21 +696,27 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
 - **Crash / unclean-shutdown detection** (`session_health.rs`): every process
-  writes a marker on startup and deletes it on `RunEvent::Exit`. A marker whose
-  owner is gone means that session never reached its exit path — the only way to
-  detect a SIGKILL, an OOM kill, or a power cut, none of which leave anything
-  in-process. Markers are per-process (OwLLM is multi-instance) and matched on
-  pid **plus** process start time, so a recycled pid cannot make a dead session
-  look alive. The next launch shows one toast and the records ride along on
-  every support report (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`).
-  Showing the notice never deletes the records — only an explicit
-  `session_health_dismiss` does. The auto-updater is the one legitimate death
-  outside the exit path — `install()` never returns on Windows, it hands the
-  NSIS installer to the shell and calls `std::process::exit(0)` — so
-  `UpdatePrompt` declares it via `session_health_expect_replacement` between
-  `download()` and `install()`, and re-arms with `session_health_rearm` if the
-  install fails instead of replacing us. Without that, every auto-update made
-  the newly installed build open by accusing the previous one of crashing.
+  writes a marker on startup and deletes it on the way out. Cleanup runs on
+  `WindowEvent::CloseRequested` (the X), `RunEvent::ExitRequested`, and
+  `RunEvent::Exit` because Tauri does not guarantee the later events fire on
+  every path (Windows shutdown skips them, and some close paths have been seen
+  to skip `Exit`). A marker whose owner is gone means that session never reached
+  its exit path — the only way to detect a SIGKILL, an OOM kill, or a power cut,
+  none of which leave anything in-process. Markers are per-process (OwLLM is
+  multi-instance) and matched on pid **plus** process start time, so a recycled
+  pid cannot make a dead session look alive. The next launch shows one toast and
+  the records ride along on every support report
+  (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`). Showing the notice
+  never deletes the records — only an explicit `session_health_dismiss` does.
+  The auto-updater is a legitimate death outside the exit path — `install()`
+  never returns on Windows, it hands the NSIS installer to the shell and calls
+  `std::process::exit(0)` — so `UpdatePrompt` declares it via
+  `session_health_expect_replacement` between `download()` and `install()`, and
+  re-arms with `session_health_rearm` if the install fails instead of replacing
+  us. The Linux AppImage path does the same before launching its helper, whose
+  deferred swap also exits outside `RunEvent::Exit`. Without that, every
+  auto-update made the newly installed build open by accusing the previous one
+  of crashing.
 - **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
   window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
   naming whoever called `app.exit`) and `Exit` are all recorded to stderr and

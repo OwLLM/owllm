@@ -24,6 +24,7 @@ const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SCRIPTS = path.join(APP, "scripts");
 const LIB = path.join(SCRIPTS, "lib/release-body.sh");
 const PUBLISH = path.join(SCRIPTS, "publish-release.sh");
+const MULTIHOST = path.join(SCRIPTS, "finish-multihost.sh");
 
 let checks = 0;
 const check = (name, fn) => {
@@ -97,6 +98,46 @@ check("a placeholder passed as --notes is discarded, not published", () => {
 check("the coverage markdown is kept for the publish step", () => {
   assert.match(pubSrc, /COVERAGE_TEXT="\$\(cat "\$COVERAGE_MD"\)"/);
   assert.match(pubSrc, /^COVERAGE_TEXT=""$/m, "COVERAGE_TEXT must be initialised, or `set -u` aborts when the gate is skipped");
+});
+
+// -------------------------------------------------- multi-host refresh ---
+// REGRESSION (v1.0.20): the table is computed on the host that publishes FIRST,
+// before the other hosts have uploaded anything, so it necessarily records them
+// as carried forward. finish-multihost.sh then uploaded the real Linux/macOS
+// artifacts and merged latest.json but never recomputed the table, so v1.0.20's
+// page told users Linux was "1.0.19 — carried forward, 2 releases behind,
+// auto-update no" while latest.json served fresh 1.0.20 Linux AppImages.
+const mhSrc = fs.readFileSync(MULTIHOST, "utf8");
+
+check("finish-multihost.sh recomputes coverage from the live release history", () => {
+  assert.match(mhSrc, /\.\s+"\$_SCRIPT_DIR\/lib\/release-body\.sh"/, "the composer is no longer sourced");
+  assert.match(mhSrc, /gh api "repos\/\$REPO\/releases\?per_page=100"/, "release history is no longer fetched");
+  assert.match(mhSrc, /platform-coverage\.mjs/, "the coverage table is no longer recomputed after the foreign uploads");
+  // The recompute must come AFTER the artifacts land, or it reads the same
+  // incomplete history publish-release.sh already saw.
+  assert.ok(
+    mhSrc.indexOf("platform-coverage.mjs") > mhSrc.lastIndexOf('gh release upload "$TAG" "$W/latest.json"'),
+    "coverage is recomputed before the artifacts are uploaded, so it sees the same stale history",
+  );
+});
+
+check("finish-multihost.sh rewrites the body unconditionally", () => {
+  const lines = mhSrc.split(/\r?\n/);
+  let i = lines.findIndex((l) => l.includes("compose_release_body") && !l.trim().startsWith("#"));
+  assert.ok(i > 0, "finish-multihost.sh no longer composes a refreshed body");
+  while (i > 0 && /\\\s*$/.test(lines[i - 1])) i -= 1;
+  assert.match(lines[i].trim(), /^gh release edit\b/, `the refresh is gated — statement begins: ${lines[i].trim()}`);
+  assert.match(
+    mhSrc,
+    /compose_release_body "\$FALLBACK_NOTES" "\$\(cat "\$W\/platform-coverage\.md"\)" "\$EXISTING_BODY" "\$TAG" "\$VERSION"/,
+    "the live body / tag / version are no longer passed, so a hand-written changelog loses its protection",
+  );
+});
+
+check("a still-stale platform (rc 3) discloses itself instead of aborting", () => {
+  // rc 3 means "past the staleness budget" — here that is a legitimate outcome
+  // to publish loudly, not a reason to leave the page lying.
+  assert.match(mhSrc, /\[ "\$COVERAGE_RC" = 0 \] \|\| \[ "\$COVERAGE_RC" = 3 \]/, "rc 3 handling changed");
 });
 
 // ------------------------------------------------------------- execution ---
@@ -220,6 +261,48 @@ check("headings after the coverage section are preserved", () => {
 check("no coverage available → body is the prose alone, no dangling blanks", () => {
   const body = run("compose", { NOTES, COVERAGE: "", TAG, VERSION });
   assert.equal(body, `${NOTES}\n`);
+});
+
+// ------------------------------------------------ PowerShell transport ---
+// v1.0.20's body was assembled in Windows PowerShell 5.1, which decodes a native
+// command's stdout with the OEM codepage (437) and writes files with a BOM. The
+// published body starts EF BB BF and renders the em dash as "ΓÇö"; v1.0.18/.19,
+// published through these bash scripts, carry neither. Reproduced on the hub by
+// capturing the same commit subject through powershell.exe.
+const BOM = "﻿";
+const POISONED = `${BOM}- fix(startup): kill the double GUI start ΓÇö repaint\r\n- itΓÇÖs fine`;
+
+check("THE REPRO: a BOM + cp437 body is repaired, not republished", () => {
+  const body = compose({ EXISTING: POISONED });
+  assert.ok(!body.startsWith(BOM), "the UTF-8 BOM survived to the release page");
+  assert.ok(!body.includes("ΓÇ"), `mojibake survived: ${JSON.stringify(body)}`);
+  assert.ok(body.includes("double GUI start — repaint"), `the em dash was not restored: ${body}`);
+  assert.ok(body.includes("it’s fine"), `the apostrophe was not restored: ${body}`);
+  assert.ok(!body.includes("\r"), "CR from Out-File survived");
+  assert.ok(body.includes("## Platform builds"), "the disclosure did not reach the repaired body");
+});
+
+check("every cp437 punctuation shape is repaired", () => {
+  const pairs = [
+    ["ΓÇô", "–"], ["ΓÇö", "—"],
+    ["ΓÇÿ", "‘"], ["ΓÇÖ", "’"],
+    ["ΓÇ£", "“"], ["ΓÇ¥", "”"],
+    ["ΓÇó", "•"], ["ΓÇª", "…"],
+  ];
+  for (const [bad, good] of pairs) {
+    const body = compose({ EXISTING: `- a ${bad} b` });
+    assert.ok(body.includes(`- a ${good} b`), `${JSON.stringify(bad)} was not repaired: ${JSON.stringify(body)}`);
+  }
+});
+
+check("a BOM'd placeholder is still recognised as a placeholder", () => {
+  assert.equal(isPlaceholder(`${BOM}OwLLM Desktop 1.0.19`), "YES", "a BOM froze a placeholder body forever");
+});
+
+check("ordinary prose is left untouched", () => {
+  const human = "- Γ is a real letter\n- 100% — unchanged";
+  const body = compose({ EXISTING: human });
+  assert.ok(body.includes(human), `sanitisation damaged legitimate text: ${JSON.stringify(body)}`);
 });
 
 fs.rmSync(temp, { recursive: true, force: true });

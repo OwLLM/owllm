@@ -79,6 +79,20 @@ fs.writeFileSync(
   path.join(advancedDir, "deviceLiveness.js"),
   transpile(read(path.join(SRC, "pages", "advanced", "deviceLiveness.ts"))),
 );
+// The cache modules repaintAfterAdopt invalidates instead of reloading. All
+// dependency-free, so the REAL sources go in rather than stubs that could drift.
+const worldDir = path.join(temp, "pages", "world");
+fs.mkdirSync(worldDir, { recursive: true });
+for (const [dir, rel] of [
+  [githubDir, ["pages", "agentic", "modelProfiles.ts"]],
+  [githubDir, ["pages", "agentic", "cloudCatalogue.ts"]],
+  [worldDir, ["pages", "world", "worldState.ts"]],
+]) {
+  fs.writeFileSync(
+    path.join(dir, rel[rel.length - 1].replace(/\.ts$/, ".js")),
+    transpile(read(path.join(SRC, ...rel))),
+  );
+}
 const HOT_PREFIXES = [
   ...(read(path.join(SRC, "runtime", "stateMirror.ts"))
     .split("export const HOT_BLOB_PREFIXES")[1] ?? "").split("]")[0].matchAll(/"([^"]+)"/g),

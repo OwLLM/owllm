@@ -21,7 +21,6 @@ import { migratePageSettings } from "../state/pageSettings";
 applyCachedRemoteCatalogue();
 
 const ChatRuntimeContext = createContext<ChatRuntimeStore>(chatRuntime);
-const USER_INTERACTED_KEY = "owllm:session:user-interacted";
 
 export function useChatRuntime(): ChatRuntimeStore {
   return useContext(ChatRuntimeContext);
@@ -29,15 +28,6 @@ export function useChatRuntime(): ChatRuntimeStore {
 
 export function ChatRuntimeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
-    // Vault adoption may need a full repaint on a completely idle fresh boot,
-    // but it must never restart the WebView after the user has begun working.
-    // The sync engine reads this session-only flag before considering reload.
-    const markUserInteraction = () => {
-      try { sessionStorage.setItem(USER_INTERACTED_KEY, "1"); } catch { /* ignore */ }
-    };
-    window.addEventListener("pointerdown", markUserInteraction, { passive: true });
-    window.addEventListener("keydown", markUserInteraction);
-
     // Global "stop everything" — fired by the dock Stop / dispatch-abort.
     const onAbort = () => chatRuntime.stopAll();
     window.addEventListener("owllm:dispatch-abort", onAbort);
@@ -69,8 +59,6 @@ export function ChatRuntimeProvider({ children }: { children: React.ReactNode })
     startVaultSync().catch(() => {});
 
     return () => {
-      window.removeEventListener("pointerdown", markUserInteraction);
-      window.removeEventListener("keydown", markUserInteraction);
       window.removeEventListener("owllm:dispatch-abort", onAbort);
       unlistenReady?.();
     };

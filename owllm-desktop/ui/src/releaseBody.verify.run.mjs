@@ -155,21 +155,38 @@ if (!BASH) {
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-release-body-"));
 const driver = path.join(temp, "driver.sh");
-fs.writeFileSync(
-  driver,
-  `. "$LIB"\n` +
-    `case "$MODE" in\n` +
-    `  compose) compose_release_body "$NOTES" "$COVERAGE" "$EXISTING" "$TAG" "$VERSION" ;;\n` +
-    `  placeholder) if body_is_placeholder "$EXISTING" "$TAG" "$VERSION"; then echo YES; else echo NO; fi ;;\n` +
-    `  strip) strip_coverage_section "$EXISTING" ;;\n` +
-    `esac\n`,
-);
+
+// The bash we found may be Git Bash (understands "C:/x") or WSL's (needs
+// "/mnt/c/x"). On a release host the publish script runs this under Windows
+// node, so a WSL bash got "C:/…/driver.sh: No such file or directory" (exit
+// 127) and the whole ship gate went red on a path dialect, not a defect.
+const forBash = (p) => {
+  const direct = posix(p);
+  if (!/^[A-Za-z]:\//.test(direct)) return direct;
+  if (spawnSync(BASH, ["-c", `test -e "${direct}"`]).status === 0) return direct;
+  const mounted = `/mnt/${direct[0].toLowerCase()}${direct.slice(2)}`;
+  return spawnSync(BASH, ["-c", `test -e "${mounted}"`]).status === 0 ? mounted : direct;
+};
+
+// Inputs are baked into the driver rather than passed as env: when Windows node
+// spawns WSL's bash, Windows environment variables do NOT cross into the distro
+// unless they are listed in WSLENV, so every value arrived empty and compose
+// printed nothing. base64 also keeps newlines and ✅ intact across the boundary.
+const b64 = (value) => Buffer.from(String(value), "utf8").toString("base64");
 
 const run = (mode, vars) => {
-  const r = spawnSync(BASH, [posix(driver)], {
-    encoding: "utf8",
-    env: { ...process.env, LIB: posix(LIB), MODE: mode, NOTES: "", COVERAGE: "", EXISTING: "", TAG: "", VERSION: "", ...vars },
-  });
+  const values = { LIB: forBash(LIB), MODE: mode, NOTES: "", COVERAGE: "", EXISTING: "", TAG: "", VERSION: "", ...vars };
+  fs.writeFileSync(
+    driver,
+    Object.entries(values).map(([k, v]) => `${k}="$(printf %s ${b64(v)} | base64 -d)"\n`).join("") +
+      `. "$LIB"\n` +
+      `case "$MODE" in\n` +
+      `  compose) compose_release_body "$NOTES" "$COVERAGE" "$EXISTING" "$TAG" "$VERSION" ;;\n` +
+      `  placeholder) if body_is_placeholder "$EXISTING" "$TAG" "$VERSION"; then echo YES; else echo NO; fi ;;\n` +
+      `  strip) strip_coverage_section "$EXISTING" ;;\n` +
+      `esac\n`,
+  );
+  const r = spawnSync(BASH, [forBash(driver)], { encoding: "utf8" });
   assert.equal(r.status, 0, `bash driver failed (${mode}): ${r.stderr}`);
   return r.stdout.replace(/\r\n/g, "\n");
 };

@@ -155,6 +155,83 @@ check(rec.includes('data-ui="TutorialRecorderFps"') &&
   "the FPS selector and auto-stop checkbox are rendered in the panel");
 check(!rec.includes("recorder.start(250)"),
   "the broken 250ms fragmented-MP4 path is no longer the primary recorder");
+check(rec.includes("createFinalizedVideoRecorder(videoTrack, fps, bitrate, handleEncoderFailure)"),
+  "the recorder is told about encoder failures while it is still recording");
+
+// --- 8. Finalized recorder behavior, executed against a stub muxer ----------
+// A window/screen capture changes size whenever the user resizes, maximizes or
+// drags the window to a display with different scaling. `sizeChangeBehavior:
+// 'deny'` threw at finalize and DESTROYED the whole recording (reproduced in
+// Chromium with a real captured surface). These checks run the real factory.
+const stubDir = path.join(temp, "node_modules", "mediabunny");
+fs.mkdirSync(stubDir, { recursive: true });
+fs.writeFileSync(path.join(stubDir, "package.json"), JSON.stringify({ name: "mediabunny", main: "index.js" }));
+fs.writeFileSync(path.join(stubDir, "index.js"), `
+const calls = { encodings: [], probes: [], source: null };
+class BufferTarget { constructor() { this.buffer = new ArrayBuffer(8); } }
+class Mp4OutputFormat { constructor(options) { this.options = options; } }
+class WebMOutputFormat {}
+class MediaStreamVideoTrackSource {
+  constructor(track, encoding) {
+    calls.encodings.push(encoding);
+    this.errorPromise = new Promise((_resolve, reject) => { this.failNow = reject; });
+    this.errorPromise.catch(() => {});
+  }
+  pause() {} resume() {} close() {}
+}
+class Output {
+  constructor({ format, target }) { this.format = format; this.target = target; }
+  addVideoTrack(source) { calls.source = source; }
+  async start() {}
+  async finalize() {}
+  async cancel() {}
+}
+async function canEncodeVideo(codec, options) { calls.probes.push({ codec, options }); return codec === "avc"; }
+module.exports = {
+  BufferTarget, Mp4OutputFormat, WebMOutputFormat, MediaStreamVideoTrackSource, Output, canEncodeVideo,
+  __calls: calls,
+};
+`);
+const muxer = require(path.join(stubDir, "index.js"));
+const recorderModule = require(transpileInto("tutorial/finalizedVideoRecorder.ts", "finalizedVideoRecorder.js"));
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// A fresh display-capture track commonly reports no dimensions until its first
+// frame arrives; bailing out there silently downgraded capture to the
+// fragmented, unseekable MediaRecorder path this module exists to replace.
+let reported = null;
+const sizelessTrack = { kind: "video", getSettings: () => ({}) };
+const recorder = await recorderModule.createFinalizedVideoRecorder(
+  sizelessTrack, 30, 8_000_000, (error) => { reported = error; },
+);
+check(recorder !== null,
+  "a capture track that reports no dimensions still gets the finalized WebCodecs recorder");
+check(muxer.__calls.probes.length > 0 && muxer.__calls.probes[0].options.width === 1920,
+  "encoder support is probed at a standard size instead of refusing the track");
+check(muxer.__calls.encodings.length > 0
+  && muxer.__calls.encodings.every(e => e.sizeChangeBehavior === "contain"),
+  "resizing the captured window letterboxes into the original box instead of killing the recording");
+check(muxer.__calls.encodings.length > 0
+  && muxer.__calls.encodings.every(e => e.sizeChangeBehavior !== "deny"),
+  "the size-change behavior that destroyed finished recordings is gone");
+
+muxer.__calls.source.failNow(new Error("encoder died"));
+await tick();
+check(reported instanceof Error && /encoder died/.test(reported.message),
+  "an encoder failure is reported the moment it happens, not an hour later at save time");
+
+// Closing the source during a normal save must not be reported as a failure.
+let lateReport = null;
+muxer.__calls.encodings.length = 0;
+const saved = await recorderModule.createFinalizedVideoRecorder(
+  { kind: "video", getSettings: () => ({ width: 1280, height: 720 }) },
+  30, 8_000_000, (error) => { lateReport = error; },
+);
+await saved.finalize();
+muxer.__calls.source.failNow(new Error("closed during finalize"));
+await tick();
+check(lateReport === null,
+  "closing the encoder during a normal save is not reported as a recording failure");
 
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`OK tutorial recorder fps + auto-stop: ${passed}/${passed} checks passed`);

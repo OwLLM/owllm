@@ -3,21 +3,31 @@ import { useEffect, useRef, useState } from "react";
 /// Live generation-speed readout. Shows "⚡ N tok/s" while a LOCAL model
 /// streams — driven by the `owllm:gen-stats` events every local SSE loop
 /// broadcasts (agentic streamLocalChat AND the fine-tuning chat) — and clears
-/// ~1.5s after generation stops. tok/s reflects the user's own hardware, which
-/// is the meaningful number; cloud generation (network-bound) isn't metered.
+/// Retains llama-server's authoritative final timing until the local server
+/// stops; live estimates still fade if a stream stalls. tok/s reflects the
+/// user's own hardware, which is the meaningful number; cloud generation
+/// (network-bound) isn't metered.
 ///   • variant "header"   — compact inline span in the header's live server
 ///     status line.
 ///   • variant "floating" — fixed pill bottom-right (legacy global badge).
-export default function GenSpeedBadge({ variant = "floating" }: { variant?: "header" | "floating" }) {
+export default function GenSpeedBadge({
+  variant = "floating",
+  active = true,
+}: {
+  variant?: "header" | "floating";
+  active?: boolean;
+}) {
   const [tps, setTps] = useState<number | null>(null);
   const hideTimer = useRef<number | null>(null);
   useEffect(() => {
     const onStats = (e: Event) => {
-      const d = (e as CustomEvent<{ toksPerSec: number }>).detail;
+      const d = (e as CustomEvent<{ toksPerSec: number; complete?: boolean }>).detail;
       if (!d || typeof d.toksPerSec !== "number" || !isFinite(d.toksPerSec)) return;
       setTps(d.toksPerSec);
       if (hideTimer.current) window.clearTimeout(hideTimer.current);
-      hideTimer.current = window.setTimeout(() => setTps(null), 1500);
+      hideTimer.current = d.complete
+        ? null
+        : window.setTimeout(() => setTps(null), 1500);
     };
     window.addEventListener("owllm:gen-stats", onStats as EventListener);
     return () => {
@@ -25,6 +35,9 @@ export default function GenSpeedBadge({ variant = "floating" }: { variant?: "hea
       if (hideTimer.current) window.clearTimeout(hideTimer.current);
     };
   }, []);
+  useEffect(() => {
+    if (!active) setTps(null);
+  }, [active]);
   if (tps == null) return null;
   const label = `⚡ ${tps >= 100 ? Math.round(tps) : tps.toFixed(1)} tok/s`;
   if (variant === "header") {

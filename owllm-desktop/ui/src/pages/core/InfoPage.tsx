@@ -32,7 +32,7 @@ const ICONS = "/Page_icons";
 /// exactly once in the app.
 const DEVELOPER_EMAIL = "mc@far-island.com";
 
-type GpuInfo = { index: number; name: string; vram_gb: number };
+type GpuInfo = { index: number; name: string; vram_gb: number; unified?: boolean };
 type HardwareInfo = {
   cpu_name: string;
   cpu_cores: number;
@@ -41,7 +41,13 @@ type HardwareInfo = {
   ram_used_gb: number;
   gpus: GpuInfo[];
 };
-type VramGpu = { index: number; used_mib: number; total_mib: number };
+type VramGpu = {
+  index: number;
+  used_mib: number;
+  total_mib: number;
+  unified?: boolean;
+  model_scoped?: boolean;
+};
 type VramStatus = { gpus: VramGpu[] };
 type ModelInfo = {
   model_id: string;
@@ -313,7 +319,9 @@ export default function InfoPage() {
                       {g.name}
                       {live ? (
                         <span style={{ color: "#a0e88a" }}>
-                          {"  "}·  {(live.used_mib / 1024).toFixed(1)} / {(live.total_mib / 1024).toFixed(1)} GiB live
+                          {"  "}·  {(live.used_mib / 1024).toFixed(1)} / {(live.total_mib / 1024).toFixed(1)} GiB {live.unified
+                            ? (live.model_scoped ? "unified model memory" : "unified memory")
+                            : "live VRAM"}
                         </span>
                       ) : (
                         <span style={{ color: "var(--fg-subtle)" }}>{"  "}·  {g.vram_gb.toFixed(1)} GiB</span>

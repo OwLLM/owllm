@@ -34,8 +34,8 @@ check(!sysInfo.includes('data-ui="HeaderApiKeyLabel"') && !sysInfo.includes("API
   "hardcoded API-key line is absent from the header");
 check(sysInfo.includes('data-ui="HeaderServersLabel"') && sysInfo.includes('data-ui="HeaderVramLabel"'),
   "server and VRAM status remain visible");
-check(sysInfo.includes('<GenSpeedBadge variant="header" />'),
-  "live generation speed remains available without the API-key line");
+check(sysInfo.includes('<GenSpeedBadge variant="header" active={server.running} />'),
+  "live generation speed remains available and follows the local server lifecycle");
 check(header.includes('gridTemplateColumns: "auto 1fr auto auto"'),
   "header keeps its left controls, spacer, status block, and compact window controls");
 

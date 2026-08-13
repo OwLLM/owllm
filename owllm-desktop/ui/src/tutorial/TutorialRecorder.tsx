@@ -180,11 +180,14 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   // in flight doesn't stop itself before any work has run).
   const autoStopTimerRef = useRef<number | null>(null);
   const sawRunRef = useRef<boolean>(false);
-  // GNOME Shell recorder (Linux): the portal route getDisplayMedia depends on
-  // crashes, so where this is available it replaces it. Holds the file stem of
+  // Native recorder: Linux bypasses a crashing portal; macOS replaces the
+  // getDisplayMedia API that WKWebView does not expose. Holds the file stem of
   // the running native recording, or null when the WebView path is in use.
   const [nativeCapture, setNativeCapture] = useState(false);
   const nativeStemRef = useRef<string | null>(null);
+  const macNativeCapture = nativeCapture
+    && typeof navigator !== "undefined"
+    && /Macintosh|Mac OS X/.test(navigator.userAgent);
 
   useEffect(() => {
     const onToggle = () => {
@@ -306,7 +309,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     void nativeScreencastSupported().then((ok) => {
       if (cancelled || !ok) return;
       setNativeCapture(true);
-      setStatus("Records through GNOME Shell — no share dialog. Window-only records the OWLLM window's area; Ctrl+Shift+R to stop.");
+      setStatus("Uses the operating system's native recorder — no share dialog. Window-only records the OWLLM window's area; Ctrl+Shift+R to stop.");
     });
     return () => { cancelled = true; };
   }, []);
@@ -359,10 +362,11 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     setStatus(`Saved ${video.label} at ${describeCaptureSettings(settings, fps)}.`);
   };
 
-  // GNOME wrote the video itself, so only the click track still needs saving.
+  // The OS wrote the video itself, so only the click track still needs saving.
   const finishNativeRecording = (path: string, bytes: number) => {
     const stem = nativeStemRef.current ?? "owllm-tutorial";
-    downloadBlob(clickTrackBlob("video/mp4"), `${stem}-clicks.json`);
+    const mimeType = path.toLowerCase().endsWith(".mov") ? "video/quicktime" : "video/mp4";
+    downloadBlob(clickTrackBlob(mimeType), `${stem}-clicks.json`);
     nativeStemRef.current = null;
     setCaptureUiHidden(false);
     setState("idle");
@@ -377,6 +381,16 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     setCaptureUiHidden(false);
     setState("idle");
     setStatus(error instanceof Error ? error.message : "Could not save recording.");
+  };
+
+  // The encoder can die mid-recording (GPU reset, surface lost). Stop and say so
+  // right away instead of letting the user keep "recording" for another hour and
+  // only discover the loss when saving fails.
+  const handleEncoderFailure = (error: Error) => {
+    const recorder = finalizedRecorderRef.current;
+    if (!recorder) return;
+    void recorder.cancel().catch(() => {});
+    failRecording(new Error(`Recording stopped — the video encoder failed: ${error.message}`));
   };
 
   const start = async () => {
@@ -396,7 +410,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       }
       setElapsedMs(0);
       setStatus(nativeCapture
-        ? "Starting the GNOME Shell recorder..."
+        ? `Starting the ${macNativeCapture ? "macOS" : "GNOME Shell"} recorder...`
         : appOnly
           ? "Choose the OWLLM window. The recorder panel is hidden before capture starts."
           : "Choose the screen to record. Press Ctrl+Shift+R to stop.");
@@ -406,11 +420,12 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         const stem = `owllm-tutorial-${new Date().toISOString().replace(/[:.]/g, "-")}`;
         const path = await nativeScreencastStart(stem, fps, appOnly);
         nativeStemRef.current = stem;
-        // GNOME reports no track settings; the requested rate is what it got.
-        captureSettingsRef.current = { frameRate: fps };
+        // GNOME accepts the requested rate. macOS's native recorder chooses its
+        // own adaptive rate and does not expose it to the calling process.
+        captureSettingsRef.current = macNativeCapture ? {} : { frameRate: fps };
         startedAtRef.current = performance.now();
         setState("recording");
-        setStatus(`Recording ${appOnly ? "the OWLLM window" : "the screen"} at ${fps} FPS to ${path}. Ctrl+Shift+R to stop.`);
+        setStatus(`Recording ${appOnly ? "the OWLLM window" : "the screen"}${macNativeCapture ? "" : ` at ${fps} FPS`} to ${path}. Ctrl+Shift+R to stop.`);
         return;
       }
 
@@ -427,7 +442,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       captureSettingsRef.current = settings;
       const bitrate = bitrateForCapture(fps, settings.width, settings.height, "video/mp4");
       const { createFinalizedVideoRecorder } = await import("./finalizedVideoRecorder");
-      const finalized = await createFinalizedVideoRecorder(videoTrack, fps, bitrate);
+      const finalized = await createFinalizedVideoRecorder(videoTrack, fps, bitrate, handleEncoderFailure);
       if (finalized) {
         finalizedRecorderRef.current = finalized;
       } else {
@@ -595,7 +610,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         </label>
         <div style={{ fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 8, lineHeight: 1.35 }}>
           {nativeCapture
-            ? <>GNOME Shell records the <b>window's area</b> directly — no share dialog, and no pause.</>
+            ? <>{macNativeCapture ? "macOS" : "GNOME Shell"} records the <b>window's area</b> directly — no share dialog, and no pause.</>
             : <>Choose the <b>OWLLM window</b>. The recorder panel and desktop sharing popup stay outside the saved video.</>}
         </div>
         <div
@@ -607,7 +622,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             color: "var(--fg-muted)", fontSize: 10.5,
           }}
         >
-          <b style={{ color: "var(--fg-strong)" }}>{nativeCapture ? "GNOME Shell MP4" : "Finalized H.264 MP4"}</b>
+          <b style={{ color: "var(--fg-strong)" }}>{nativeCapture ? (macNativeCapture ? "macOS QuickTime MOV" : "GNOME Shell MP4") : "Finalized H.264 MP4"}</b>
           {nativeCapture
             ? " · written straight to disk · native resolution"
             : " · indexed · seekable · native resolution · VP9 fallback"}
@@ -626,7 +641,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
           <div style={{ flex: 1 }} />
           <select
             value={fps}
-            disabled={active}
+            disabled={active || macNativeCapture}
             onChange={(e) => {
               const next = Number(e.target.value) || DEFAULT_FPS;
               setFps(next);
@@ -638,8 +653,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
               border: "1px solid rgba(var(--accent-rgb),0.4)",
               background: "rgba(255,255,255,0.06)", color: "var(--fg)",
               fontSize: 12, fontWeight: 700,
-              cursor: active ? "not-allowed" : "pointer",
+              cursor: active || macNativeCapture ? "not-allowed" : "pointer",
             }}
+            title={macNativeCapture ? "macOS chooses an adaptive capture frame rate." : undefined}
           >
             {FPS_OPTIONS.map((opt) => (
               <option key={opt} value={opt}>{opt} fps</option>
@@ -681,9 +697,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
           </button>
           <button
             onClick={pause}
-            // GNOME's recorder has no pause — only the WebView path can.
+            // Native recorders have no pause — only the WebView path can.
             disabled={nativeCapture || (state !== "recording" && state !== "paused")}
-            title={nativeCapture ? "The GNOME Shell recorder cannot pause." : undefined}
+            title={nativeCapture ? "The native recorder cannot pause." : undefined}
             style={recBtn(!nativeCapture && (state === "recording" || state === "paused"), "#fbbf24")}
           >
             {state === "paused" ? "Resume" : "Pause"}

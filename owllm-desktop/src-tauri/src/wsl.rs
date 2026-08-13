@@ -25,11 +25,66 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[derive(Serialize, Clone, Debug)]
+/// Hard ceiling for a single `wsl.exe` probe. Generous enough for a cold WSL
+/// service to answer, short enough that a wedged one degrades quickly.
+const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Why a `wsl.exe` probe produced no output. The caller MUST distinguish
+/// these: "wsl.exe isn't there" is a permanent answer (no WSL on this PC —
+/// bail instantly, don't retry), while "timed out" is transient (WSL exists
+/// but is wedged/cold — a retry may succeed).
+enum ProbeFail {
+    /// wsl.exe could not be launched at all — no WSL installed.
+    Spawn,
+    /// The child ran past the timeout and was killed.
+    Timeout,
+}
+
+/// Run a command to completion with a HARD timeout, killing the child if it
+/// overruns.
+///
+/// WHY THIS EXISTS: `Command::output()` blocks until the child exits AND its
+/// stdout/stderr pipes close — with NO bound. When the WSL service/VM wedges,
+/// `wsl.exe` never exits, so the call blocks *forever*. That froze the entire
+/// app (diagnosed from a live gdb backtrace: the main thread parked in
+/// `WaitForMultipleObjects` inside `child_pipe::read_output`, reached from the
+/// `wsl_isolation_get` IPC command), leaving 16 orphaned `wsl.exe` probes
+/// behind. A timeout turns "hang forever" into "WSL unavailable".
+///
+/// The probes here emit a few bytes, so polling `try_wait` then draining with
+/// `wait_with_output` cannot deadlock on a full pipe buffer.
+fn output_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, ProbeFail> {
+    let mut child = cmd.spawn().map_err(|_| ProbeFail::Spawn)?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|_| ProbeFail::Timeout),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Kill the wedged child so its pipes close and we never
+                    // leak a growing pile of stuck wsl.exe processes.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProbeFail::Timeout);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return Err(ProbeFail::Timeout),
+        }
+    }
+}
+
+// Default: the async command wrappers below fall back to it if the
+// spawn_blocking task itself fails to join (all-false / empty = "no WSL").
+#[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WslStatus {
     /// At least one distro is installed and runnable.
@@ -366,9 +421,13 @@ fn list_distros_once() -> (Vec<String>, bool) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
-    let Ok(out) = cmd.output() else {
-        return (Vec::new(), true);
+    let out = match output_with_timeout(cmd, WSL_PROBE_TIMEOUT) {
+        Ok(out) => out,
+        // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
+        Err(ProbeFail::Spawn) => return (Vec::new(), true),
+        // Timeout = WSL exists but is wedged → NON-definitive, let the
+        // caller's backoff retry decide instead of caching "no WSL".
+        Err(ProbeFail::Timeout) => return (Vec::new(), false),
     };
     parse_distro_list_output(out.status.success(), &out.stdout, &out.stderr)
 }
@@ -411,7 +470,10 @@ fn default_distro_name() -> Option<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().ok()?;
+    // TIMEOUT-BOUNDED: this exact probe is what hung the app — a wedged WSL
+    // left `wsl.exe -- bash -lc 'printf %s "$WSL_DISTRO_NAME"'` running
+    // forever, and the unbounded `output()` blocked the UI thread with it.
+    let out = output_with_timeout(cmd, WSL_PROBE_TIMEOUT).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -461,7 +523,7 @@ pub(crate) fn is_system_distro(name: &str) -> bool {
 /// fine-tuning path should resolve through instead of the raw default,
 /// which can be `docker-desktop`.
 pub fn best_linux_distro() -> Option<String> {
-    wsl_status().best_distro
+    wsl_status_blocking().best_distro
 }
 
 /// Pure: pick the best real Linux distro from a (default, all) pair. Shared by
@@ -475,8 +537,21 @@ fn pick_best_distro(default_distro: &Option<String>, distros: &[String]) -> Opti
     distros.iter().find(|d| !is_system_distro(d)).cloned()
 }
 
+/// ASYNC + spawn_blocking — see `wsl_status_blocking`. A SYNC Tauri command
+/// runs on the WebView2 IPC/event-loop thread, so shelling out to `wsl.exe`
+/// there freezes the WHOLE UI for the duration — and forever if WSL wedges.
+/// Same fix already applied to `accounts_status`; these were missed.
 #[tauri::command]
-pub fn wsl_status() -> WslStatus {
+pub async fn wsl_status() -> WslStatus {
+    tokio::task::spawn_blocking(wsl_status_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// The real probe. Blocking + shells out to `wsl.exe` (bounded by
+/// `WSL_PROBE_TIMEOUT`), so it must NEVER be called on the UI thread —
+/// internal Rust callers already run off it.
+pub fn wsl_status_blocking() -> WslStatus {
     let distros = list_distros();
     let default_distro = default_distro_name().or_else(|| distros.first().cloned());
     let best_distro = pick_best_distro(&default_distro, &distros);
@@ -531,8 +606,18 @@ pub fn wsl_restart() -> Result<(), String> {
     Ok(())
 }
 
+/// ASYNC + spawn_blocking. THIS is the command whose sync version froze the
+/// app: normalize_isolation_distro → wsl_status → `wsl.exe`, all on the UI
+/// thread, blocking forever on a wedged WSL.
 #[tauri::command]
-pub fn wsl_isolation_get() -> WslIsolation {
+pub async fn wsl_isolation_get() -> WslIsolation {
+    tokio::task::spawn_blocking(wsl_isolation_get_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// Blocking variant for internal Rust callers (already off the UI thread).
+pub fn wsl_isolation_get_blocking() -> WslIsolation {
     let cfg = isolation_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -540,8 +625,22 @@ pub fn wsl_isolation_get() -> WslIsolation {
     normalize_isolation_distro(cfg)
 }
 
+/// ASYNC + spawn_blocking: normalize_isolation_distro shells out to `wsl.exe`
+/// (via wsl_status), which must not run on the UI thread.
 #[tauri::command]
-pub fn wsl_isolation_set(enabled: bool, distro: Option<String>) -> Result<WslIsolation, String> {
+pub async fn wsl_isolation_set(
+    enabled: bool,
+    distro: Option<String>,
+) -> Result<WslIsolation, String> {
+    tokio::task::spawn_blocking(move || wsl_isolation_set_blocking(enabled, distro))
+        .await
+        .map_err(|e| format!("wsl_isolation_set join: {e}"))?
+}
+
+fn wsl_isolation_set_blocking(
+    enabled: bool,
+    distro: Option<String>,
+) -> Result<WslIsolation, String> {
     let cfg = normalize_isolation_distro(WslIsolation { enabled, distro });
     let p = isolation_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
@@ -566,7 +665,7 @@ fn normalize_isolation_distro(mut cfg: WslIsolation) -> WslIsolation {
         cfg.distro = None;
         return cfg;
     };
-    let status = wsl_status();
+    let status = wsl_status_blocking();
     cfg.distro = status
         .distros
         .iter()
@@ -871,7 +970,7 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_status_detects_distros_when_cold() {
-        let s = wsl_status();
+        let s = wsl_status_blocking();
         assert!(s.available, "WSL should be detected even on a cold service");
         assert!(
             s.distros.iter().any(|d| !is_system_distro(d)),

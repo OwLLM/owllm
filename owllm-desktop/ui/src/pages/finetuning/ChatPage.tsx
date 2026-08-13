@@ -59,7 +59,7 @@ import { startupFailureReason } from "../agentic/localServerFailure";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { notify } from "../../components/Toast";
 import { useChatSession } from "../../runtime/useChatSession";
-import { makeGenMeter } from "../../utils/genStats";
+import { makeGenMeter, timingTokensPerSecond } from "../../utils/genStats";
 import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
 import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
@@ -1008,6 +1008,7 @@ export default function ChatPage() {
         // (This chat has its OWN SSE loop, separate from the agentic
         // streamLocalChat, so it has to drive the meter itself.)
         const genTick = makeGenMeter();
+        let exactToksPerSec: number | undefined;
         let turnReply = "";
         let turnThinking = "";
         let buffer = "";
@@ -1098,6 +1099,8 @@ export default function ChatPage() {
             if (!body || body === "[DONE]") continue;
             try {
               const j = JSON.parse(body);
+              const predictedPerSecond = timingTokensPerSecond(j);
+              if (predictedPerSecond !== undefined) exactToksPerSec = predictedPerSecond;
               if (j?.error) {
                 serverError = typeof j.error === "string"
                   ? j.error
@@ -1193,7 +1196,7 @@ export default function ChatPage() {
           if (loopAborted) break;
         }
         } finally {
-          genTick.stop();
+          genTick.stop(exactToksPerSec);
         }
         controls.onReader(null);
         if (serverError) {
@@ -1323,6 +1326,7 @@ export default function ChatPage() {
             const freader = fresp.body.getReader();
             controls.onReader(freader);
             const finalGenTick = makeGenMeter();
+            let exactToksPerSec: number | undefined;
             const fdec = new TextDecoder();
             let fbuf = "";
             let fInThink = false;
@@ -1341,6 +1345,8 @@ export default function ChatPage() {
                 if (!fbody || fbody === "[DONE]") continue;
                 try {
                   const fj = JSON.parse(fbody);
+                  const predictedPerSecond = timingTokensPerSecond(fj);
+                  if (predictedPerSecond !== undefined) exactToksPerSec = predictedPerSecond;
                   const fd = fj?.choices?.[0]?.delta;
                   const frc: string | undefined = fd?.reasoning_content ?? fd?.reasoning;
                   if (typeof frc === "string" && frc) {
@@ -1372,7 +1378,7 @@ export default function ChatPage() {
               }
             }
             } finally {
-              finalGenTick.stop();
+              finalGenTick.stop(exactToksPerSec);
             }
             controls.onReader(null);
           }

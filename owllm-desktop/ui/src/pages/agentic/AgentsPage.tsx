@@ -11321,6 +11321,10 @@ export function AgentsPage({
     // when it's wired directly as the onRun handler.
     let text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
+    // This run's effective cwd. Starts as the configured runCwd (which may be a
+    // WSL UNC path when isolation is on) but can be downgraded to the host folder
+    // if the WSL path is unreachable — see the pre-flight below.
+    let effectiveRunCwd = runCwd;
     if (!selectedProject || !projectCanRun({ ...selectedProject, location: runCwd })) {
       setRunError(selectedProject?.repo_url
         ? "This project is not installed on this computer. Clone its GitHub repository here before running agents."
@@ -11390,19 +11394,38 @@ export function AgentsPage({
     // a clear message instead of sending agents into an empty box. Files on disk are
     // never touched — this is only about reachability.
     if (runCwd && runCwd.trim()) {
-      let reachable = await invoke<boolean>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => true);
-      if (!reachable) {
+      type WarmCheckResult = { reachable: boolean; host_fallback: string | null; reason: string | null };
+      const warmOk = (r: WarmCheckResult | null) => !!r && r.reachable;
+      let check = await invoke<WarmCheckResult>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => null);
+      if (!warmOk(check)) {
         // The first call started the distro / mounted /mnt — try once more.
-        reachable = await invoke<boolean>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => true);
+        check = await invoke<WarmCheckResult>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => null);
       }
-      if (!reachable) {
-        setRunError(
-          `Project folder isn't reachable yet: ${rawLocation || runCwd}. ` +
-          `If you just rebooted, WSL is still starting up — wait a few seconds and run again. ` +
-          `Your files on disk are safe.`,
-        );
-        dispatchInFlightRef.current = false;
-        return;
+      if (!warmOk(check)) {
+        // WSL-isolated path is unreachable. If the original host folder exists,
+        // run there un-isolated with a clear notice instead of failing completely.
+        const fallback = check?.host_fallback;
+        if (fallback && fallback.trim() && fallback !== runCwd) {
+          const notice: GoalMsg = {
+            role: "system",
+            color: "#ffb74d",
+            text: `🛡 WSL isolation path not reachable — running on the host folder ${fallback} (no sandbox this run).`,
+          };
+          appendLog("system", notice);
+          setSupChat(prev => [...prev, { ...notice, ts: Date.now(), seq: nextSeq() }]);
+          effectiveRunCwd = fallback;
+        } else {
+          const detail = check?.reason
+            ? `${check.reason} `
+            : "If you just rebooted, WSL may still be starting up. ";
+          setRunError(
+            `Project folder isn't reachable: ${rawLocation || runCwd}. ` +
+            `${detail}` +
+            `Your files on disk are safe.`,
+          );
+          dispatchInFlightRef.current = false;
+          return;
+        }
       }
     }
     // The run's abort controller is created HERE, before the local-server
@@ -11522,9 +11545,9 @@ export function AgentsPage({
     // it, and we SURFACE the result — previously this was fire-and-forget with a
     // swallowed .catch(), so a failed/empty sync was invisible and there was no
     // way to tell whether skills were actually staged for this run.
-    if (runCwd) {
+    if (effectiveRunCwd) {
       try {
-        const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: runCwd });
+        const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: effectiveRunCwd });
         const syncMsg: GoalMsg = sync.count > 0
           ? { role: "system", color: "#8aa0b4",
               text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
@@ -11631,7 +11654,7 @@ export function AgentsPage({
     // Project location feeds the Claude CLI's --cwd so the bot runs
     // against the directory the user picked in the LocationRow, not
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
-    let projectCwd = runCwd;
+    let projectCwd = effectiveRunCwd;
     const runEnvironment = parseProjectEnvironment(selectedProject?.graph_json);
     // Host-path reachability fallback. ONLY for non-WSL paths: a WSL isolation
     // path (`\\wsl.localhost\...`) runs via wsl.exe, and Windows can't reliably

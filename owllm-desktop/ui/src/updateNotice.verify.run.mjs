@@ -217,6 +217,22 @@ if (!shell) {
   check("both surfaces route to the real installer",
     /onOpenUpdate=\{requestUpdateInstall\}/.test(shell.code));
 
+  // The balloon is the owl SPEAKING. The decorative frame the owl lives in
+  // idle-hides FRAME_IDLE_HIDE_MS after launch — long before the updater's
+  // first check lands at 2.5s — so the balloon used to float over the header
+  // with its tail aimed at nothing. Whichever notice is up, the owl comes back
+  // for as long as it talks, then the normal idle-hide takes over again.
+  check("the owl is on screen while a balloon is up",
+    /const noticeShowing = Boolean\(updateNotice \|\| chatNotice\);/.test(shell.code)
+    && /if \(!noticeShowing\) return;\s*\n\s*revealFrame\(\);/.test(shell.code)
+    && /return \(\) => hideFrameAfter\(FRAME_LEAVE_HIDE_MS\);\s*\n\s*\}, \[noticeShowing\]\);/.test(shell.code));
+
+  check("the reveal cannot outlive the balloon (it hands back to idle-hide)",
+    /\}, \[noticeShowing\]\);/.test(shell.code));
+
+  check("revealing the owl still honours 'keep frame visible'",
+    /const hideFrameAfter = \(delay: number\) => \{[\s\S]*?if \(keepFrameVisible\) return;/.test(shell.code));
+
   // ---- presence version (fix 1) --------------------------------------------
   check("presence reports the app version even when identity fails",
     /const appVersion = await getVersion\(\)\.catch\(\(\) => undefined\);/.test(shell.code)

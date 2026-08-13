@@ -222,7 +222,7 @@ mod imp {
         // best_linux_distro() here off a SINGLE wsl_status() call (fewer
         // wsl.exe spawns = less cold-start exposure) so we can also tell the
         // "no WSL at all" case apart from "WSL is here, but only Docker's".
-        let ws = crate::wsl::wsl_status();
+        let ws = crate::wsl::wsl_status_blocking();
         let default_distro: Option<String> = ws
             .default_distro
             .clone()

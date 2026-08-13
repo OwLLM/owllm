@@ -27,3 +27,6 @@ ui/src/**/*_PREPATCH_*.css
 
 # Tauri auto-update signing key. PRIVATE — never commit.
 .tauri-keys/
+
+# disk-reclaim scratch dirs (vendored node_modules; never product source)
+.owllm-reclaimed-*/

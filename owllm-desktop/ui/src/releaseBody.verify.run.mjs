@@ -77,6 +77,23 @@ check("the existing body is read verbatim, not whitespace-stripped", () => {
   assert.doesNotMatch(pubSrc, /EXISTING_BODY="\$\(gh release view[^\n]*tr -d/);
 });
 
+check("a placeholder passed as --notes is discarded, not published", () => {
+  // NOTES is also latest.json's "notes", which the in-app update popup renders.
+  // v1.0.16/.17 shipped "OwLLM Desktop 1.0.16" as the entire release note there.
+  const i = pubSrc.indexOf("OWLLM_RELEASE_NOTES:-");
+  const j = pubSrc.indexOf('if [ -z "$NOTES" ]; then');
+  assert.ok(i > 0 && j > i, "the notes-resolution block moved");
+  const seg = pubSrc.slice(i, j);
+  // Pin the whole condition, not just the call: `if false && body_is_placeholder`
+  // would satisfy a substring match while disabling the guard entirely.
+  assert.match(
+    seg,
+    /(^|\n)if \[ -n "\$NOTES" \] && body_is_placeholder "\$NOTES" "\$TAG" "\$VERSION"; then/,
+    "supplied notes are no longer placeholder-tested",
+  );
+  assert.match(seg, /(^|\n)\s*NOTES=""/, "a placeholder value is no longer cleared, so derivation is skipped");
+});
+
 check("the coverage markdown is kept for the publish step", () => {
   assert.match(pubSrc, /COVERAGE_TEXT="\$\(cat "\$COVERAGE_MD"\)"/);
   assert.match(pubSrc, /^COVERAGE_TEXT=""$/m, "COVERAGE_TEXT must be initialised, or `set -u` aborts when the gate is skipped");

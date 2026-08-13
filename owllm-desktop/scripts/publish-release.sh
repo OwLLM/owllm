@@ -268,6 +268,15 @@ preflight_host_disk "$APP"
 # because commit subjects can contain quotes that broke the inner bash -c.
 [ -n "${OWLLM_RELEASE_NOTES:-}" ] && [ -z "$NOTES" ] && NOTES="$OWLLM_RELEASE_NOTES"
 
+# Supplied notes that are just the title are worse than none: NOTES is also
+# latest.json's "notes", which the in-app update popup renders, so v1.0.16 and
+# v1.0.17 told every user their update was called "OwLLM Desktop 1.0.16" and
+# nothing else. Treat a title-shaped value as absent and derive the real thing.
+if [ -n "$NOTES" ] && body_is_placeholder "$NOTES" "$TAG" "$VERSION"; then
+  echo "⚠ supplied release notes are a placeholder ($(printf '%s' "$NOTES" | head -n1)) — deriving from git history instead"
+  NOTES=""
+fi
+
 # No --notes → derive them from git history. Version-bump commits (the ones
 # touching tauri.conf.json) mark release boundaries, and commit subjects in
 # this repo are written as release notes ("vX.Y.Z: what shipped"), so the

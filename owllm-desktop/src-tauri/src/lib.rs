@@ -994,6 +994,11 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-close");
                     }
+                    // The X is a deliberate user close. Drop the marker here as
+                    // well as on Exit/ExitRequested, because on some Windows
+                    // paths the event loop is gone before RunEvent::Exit fires
+                    // and the marker survives as a false "crash" report.
+                    session_health::end_clean();
                 }
                 // A window going away without a CloseRequested first is a
                 // window we did not close: a dead webview, or the WM
@@ -1044,6 +1049,9 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit-requested");
                     }
+                    // Redundant with CloseRequested and Exit: whatever path
+                    // actually gets us here, make sure the marker is gone.
+                    session_health::end_clean();
                 }
                 tauri::RunEvent::Exit => {
                     log_exit_path("Exit — process is leaving");

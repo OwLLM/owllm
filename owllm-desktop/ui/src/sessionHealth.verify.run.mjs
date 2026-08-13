@@ -86,6 +86,10 @@ check(
   "the marker is dropped BEFORE install(), which never returns on Windows",
 );
 check(
+  /session_health_expect_replacement[\s\S]*?linux_appimage_update_install/.test(updatePrompt),
+  "the marker is dropped BEFORE the AppImage helper, whose exit path is also outside RunEvent::Exit",
+);
+check(
   !/downloadAndInstall/.test(updatePrompt) && /update\.download\(/.test(updatePrompt),
   "download and install stay separate, so a crash mid-download is still reported",
 );
@@ -112,6 +116,20 @@ check(
 check(
   !/session_health_dismiss/.test(shell),
   "showing the notice never deletes the evidence the support report needs",
+);
+
+// --- Tauri lifecycle events are not reliable enough to be the only cleanup ----
+// On Windows a normal X-close has been observed to skip RunEvent::Exit, so the
+// marker survives and the next launch reports a crash that was a clean quit.
+// Clean it redundantly on the user action (CloseRequested) and on the event
+// loop's exit decision (ExitRequested), as well as the final Exit.
+check(
+  /WindowEvent::CloseRequested[\s\S]*?session_health::end_clean\(\)/.test(lib),
+  "CloseRequested drops the marker so a normal X-close does not look like a crash",
+);
+check(
+  /ExitRequested\s*\{[\s\S]*?session_health::end_clean\(\)/.test(lib),
+  "ExitRequested also drops the marker as a fallback",
 );
 
 // --- the data has to reach the developer ---------------------------------

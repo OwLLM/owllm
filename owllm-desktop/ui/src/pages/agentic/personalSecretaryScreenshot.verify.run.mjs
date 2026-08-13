@@ -11,6 +11,7 @@ const browser = read("src-tauri/src/browser.rs");
 const localTools = read("ui/src/pages/agentic/localTools.ts");
 const gateway = read("src-tauri/src/mcp_gateway.rs");
 const agents = read("ui/src/pages/agentic/AgentsPage.tsx");
+const skill = read("resources/agents/skills/web-messaging-artifact/SKILL.md");
 
 let passed = 0;
 let failed = 0;
@@ -33,22 +34,23 @@ check("app screenshot scope is documented for local/API agents",
   localTools.includes("scope=app"));
 check("subscription gateway exposes the app screenshot scope",
   gateway.includes('"app"') && gateway.includes("OWLLM app window only"));
-check("Secretary media requests have a narrow fast-operation classifier",
-  agents.includes("isPersonalSecretaryMediaRequest") &&
-  agents.includes("directExternalAction"));
-check("fast operation skips team fan-out only for the targeted request",
-  agents.includes("!directExternalAction") &&
-  agents.includes("FAST EXTERNAL OPERATION"));
-check("fast operation protects readable screenshots from WhatsApp photo recompression",
-  agents.includes("attach the PNG as a Document") &&
-  agents.includes("browser_screenshot with scope=app"));
+// The hardcoded isPersonalSecretaryMediaRequest fast path was replaced by auto
+// skill selection (see autoSkillSelection.verify.run.mjs). The guidance it used
+// to inline now lives in the web-messaging-artifact skill, loaded on demand.
+check("the hardcoded Secretary fast path stays retired",
+  !agents.includes("isPersonalSecretaryMediaRequest") &&
+  !agents.includes("FAST EXTERNAL OPERATION"));
+check("skill guidance replaces it on the solo and orchestrator paths",
+  (agents.match(/buildSoloSkillBlock\(/g) ?? []).length >= 2);
+check("the skill protects readable screenshots from WhatsApp photo recompression",
+  /as a \*\*Document\*\*/.test(skill) && /not recompressed/.test(skill));
 
 // Negative controls: the old implementation must not satisfy these guards.
 check("negative control catches the old browser-only screenshot scopes",
   !browser.replace('"app" => capture_app(&app, req)', '"viewport" => capture_browser_window(&app, None, req)')
     .includes('"app" => capture_app(&app, req)'));
-check("negative control catches removal of the fast-path guard",
-  !agents.replace("!directExternalAction", "true").includes("!directExternalAction"));
+check("negative control catches removal of the skill block",
+  !agents.replace(/buildSoloSkillBlock\(/g, "noSkillBlock(").includes("buildSoloSkillBlock("));
 
 console.log(`\npersonalSecretaryScreenshot.verify: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

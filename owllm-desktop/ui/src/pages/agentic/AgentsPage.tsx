@@ -1,4 +1,4 @@
-﻿// AgentsPage — agentic tab body. Frame + header + tabs come from
+// AgentsPage — agentic tab body. Frame + header + tabs come from
 // AppShell. Layout: location strip, goal row, then the workspace
 // (canvas + cards + orchestrator pane).
 //
@@ -5068,6 +5068,9 @@ type FleetMergeResult =
   | { status: "conflict"; files: string[] }
   | { status: "noChanges" }
   | { status: "error"; message: string };
+// fleet_worktree_remove reports what happened to the BRANCH: an unmerged
+// branch is preserved (never silently deleted), and the caller announces it.
+type FleetRemoveResult = { branchPreserved: boolean; branch: string };
 
 // File extensions the auto-doc trigger considers "code" — touching any
 // of these in a merged commit dispatches the documentation agent on
@@ -12016,7 +12019,10 @@ export function AgentsPage({
             agentName: coder.name,
             summary: text,
           });
-          if (soloFinalize.status === "committed") {
+          // noChanges still merges: a CLI coder that committed its own work
+          // leaves finalize nothing to stage while the branch is ahead of the
+          // project. The merge itself answers "nothing to integrate" when true.
+          if (soloFinalize.status === "committed" || soloFinalize.status === "noChanges") {
             const soloMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
               projectCwd,
               agentName: coder.name,
@@ -12116,7 +12122,7 @@ export function AgentsPage({
         return;
         } finally {
           try {
-            await invoke("fleet_worktree_remove", {
+            const removed = await invoke<FleetRemoveResult>("fleet_worktree_remove", {
               args: {
                 projectCwd,
                 worktreePath: soloWt.path,
@@ -12124,6 +12130,12 @@ export function AgentsPage({
                 keep: keepSoloWorktree,
               },
             });
+            if (!keepSoloWorktree && removed.branchPreserved) {
+              appendThought(coder.name, {
+                role: "fleet", color: "#ffb86c",
+                text: `🛟 branch ${removed.branch} still holds unmerged commits — kept in the repo (merge or inspect it with git).`,
+              });
+            }
           } catch { /* worktree remains recoverable on disk */ }
         }
       }
@@ -13249,7 +13261,19 @@ export function AgentsPage({
       const codeFilesChanged = new Set<string>();
       const keepOnDisk = new Set<string>();
       for (const o of outcomes) {
-        if (!o.worktree || !o.finalize || o.finalize.status !== "committed") continue;
+        if (!o.worktree) continue;
+        if (!o.finalize || o.finalize.status === "error") {
+          // Finalize failed (or never ran): the branch may still hold the
+          // agent's own commits — keep everything for inspection rather than
+          // letting cleanup drop unmerged work.
+          keepOnDisk.add(o.name);
+          continue;
+        }
+        // "committed" AND "noChanges" both attempt the merge. A capable CLI
+        // agent commits its own work in the worktree, so finalize correctly
+        // finds nothing left to stage — but the BRANCH is ahead of the project.
+        // Skipping the merge on noChanges is exactly how four whole site
+        // builds were orphaned in one team run (Website Red Hair, 2026-08-13).
         let merge: FleetMergeResult;
         try {
           merge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
@@ -13263,7 +13287,9 @@ export function AgentsPage({
             role: "fleet", color: "#7ff0c5",
             text: `🔀 merged ${o.name} → ${merge.commitSha.slice(0,7)} · ${merge.filesChanged} file${merge.filesChanged === 1 ? "" : "s"}`,
           });
-          for (const f of o.finalize.files) {
+          // A noChanges finalize (self-committed branch) has no file list.
+          const finalizedFiles = o.finalize.status === "committed" ? o.finalize.files : [];
+          for (const f of finalizedFiles) {
             // files entries are "STATUS\tpath" — take the path part.
             const tab = f.indexOf("\t");
             const p = tab >= 0 ? f.slice(tab + 1).trim() : f.trim();
@@ -13347,11 +13373,18 @@ export function AgentsPage({
             const docFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
               worktreePath: docWt.path, agentName: docSpec.name, summary: "auto-doc after merge",
             });
-            if (docFinalize.status === "committed") {
-              appendThought(docSpec.name, {
-                role: "fleet", color: "#7ff0c5",
-                text: `📦 committed ${docFinalize.commitSha.slice(0,7)} · ${docFinalize.filesChanged} file${docFinalize.filesChanged === 1 ? "" : "s"}`,
-              });
+            if (docFinalize.status === "error") {
+              // The branch may hold the doc agent's own commits — keep it.
+              keepOnDisk.add(docSpec.name);
+              appendThought(docSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${docFinalize.message} — worktree kept` });
+            }
+            if (docFinalize.status === "committed" || docFinalize.status === "noChanges") {
+              if (docFinalize.status === "committed") {
+                appendThought(docSpec.name, {
+                  role: "fleet", color: "#7ff0c5",
+                  text: `📦 committed ${docFinalize.commitSha.slice(0,7)} · ${docFinalize.filesChanged} file${docFinalize.filesChanged === 1 ? "" : "s"}`,
+                });
+              }
               const docMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
                 projectCwd, agentName: docSpec.name, branch: docWt.branch,
               });
@@ -13363,6 +13396,9 @@ export function AgentsPage({
               } else if (docMerge.status === "conflict") {
                 keepOnDisk.add(docSpec.name);
                 appendThought(orch.name, { role: "fleet", color: "#ffb86c", text: `⚠ docs merge conflict — branch ${docWt.branch} kept` });
+              } else if (docMerge.status === "error") {
+                keepOnDisk.add(docSpec.name);
+                appendThought(orch.name, { role: "fleet", color: "#ff8c8c", text: `⚠ docs merge failed: ${docMerge.message} — branch ${docWt.branch} kept` });
               }
             }
           }
@@ -13381,9 +13417,17 @@ export function AgentsPage({
         if (!o.worktree) continue;
         const keep = keepOnDisk.has(o.name);
         try {
-          await invoke("fleet_worktree_remove", {
+          const removed = await invoke<FleetRemoveResult>("fleet_worktree_remove", {
             args: { projectCwd, worktreePath: o.worktree.path, branch: o.worktree.branch, keep },
           });
+          // The backend refused to delete a branch with unmerged commits —
+          // say so, so preserved work is findable instead of silently parked.
+          if (!keep && removed.branchPreserved) {
+            appendThought(orch.name, {
+              role: "fleet", color: "#ffb86c",
+              text: `🛟 @${o.name}'s branch ${removed.branch} still holds unmerged commits — kept in the repo (merge or inspect it with git).`,
+            });
+          }
         } catch { /* best-effort — worktree is recoverable on disk */ }
       }
 

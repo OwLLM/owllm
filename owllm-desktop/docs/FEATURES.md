@@ -647,7 +647,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
   diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
   merging — real overlapping edits return a Conflict with both sides
-  preserved; only disposable app runtime files auto-resolve.
+  preserved; only disposable app runtime files auto-resolve. Cleanup never
+  deletes a branch whose work HEAD does not contain (ancestry or
+  squash-equivalent tree, `branch_work_contained`): the worktree directory is
+  reclaimed but the branch ref survives and the run announces it — an agent
+  that committed its own work can never be orphaned by teardown. Only the
+  Code page's explicitly confirmed close passes `discardUnmerged` to really
+  drop one. Gate: `fleetWorktreeWorkLoss.verify.run.mjs`.
 
 ## Support & UX
 

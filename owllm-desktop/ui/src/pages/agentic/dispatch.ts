@@ -60,7 +60,7 @@ import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoin
 import { DEVICE_PREFIX, parseDeviceModel, peerNameFor } from "./peerCatalogue";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
-import { makeGenMeter } from "../../utils/genStats";
+import { makeGenMeter, timingTokensPerSecond } from "../../utils/genStats";
 import { isProviderUsageLimit } from "../advanced/accountHealth";
 // Deterministic routing — shared with the desktop path so BOTH dispatch loops
 // route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
@@ -2816,18 +2816,23 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // meter before executing tools so tool latency and next-turn prompt prefill
   // never dilute the displayed generation rate.
   const meterStream = async (
-    run: (onDelta: StreamHandler, onThought: ThoughtHandler) => Promise<string>,
+    run: (
+      onDelta: StreamHandler,
+      onThought: ThoughtHandler,
+      onTiming: (toksPerSec: number) => void,
+    ) => Promise<string>,
   ): Promise<string> => {
     const genTick = makeGenMeter();
+    let exactToksPerSec: number | undefined;
     const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
     const countingThought: ThoughtHandler = (channel, role, delta) => {
       if (delta) genTick();
       emitThought?.(channel, role, delta);
     };
     try {
-      return await run(countingDelta, countingThought);
+      return await run(countingDelta, countingThought, (tps) => { exactToksPerSec = tps; });
     } finally {
-      genTick.stop();
+      genTick.stop(exactToksPerSec);
     }
   };
   const maybeYield = makeUiYield();
@@ -2930,8 +2935,8 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
     lastReply = await meterStream(
-      (countingDelta, countingThought) =>
-        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls),
+      (countingDelta, countingThought, onTiming) =>
+        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls, onTiming),
     );
     }
     // No tools available at all → single-shot, done.
@@ -3022,8 +3027,8 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         });
         if (fresp.ok) {
           const finalText = await meterStream(
-            (countingDelta, countingThought) =>
-              consumeOpenAISse(fresp, countingDelta, countingThought, []),
+            (countingDelta, countingThought, onTiming) =>
+              consumeOpenAISse(fresp, countingDelta, countingThought, [], onTiming),
           );
           if (finalText.trim()) lastReply = finalText;
         }
@@ -3857,6 +3862,9 @@ async function consumeOpenAISse(
   /// 3, Hermes) emit these instead of inline content; the caller routes
   /// them through canonicalizeNativeCalls → executeToolCall.
   toolCallsOut?: RawNativeCall[],
+  /// llama-server's final SSE chunk carries an authoritative measured speed.
+  /// Local callers retain it in the header; cloud callers omit this callback.
+  onTiming?: (toksPerSec: number) => void,
 ): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
@@ -3977,6 +3985,8 @@ async function consumeOpenAISse(
       if (!body || body === "[DONE]") continue;
       try {
         const j = JSON.parse(body);
+        const predictedPerSecond = timingTokensPerSecond(j);
+        if (predictedPerSecond !== undefined) onTiming?.(predictedPerSecond);
         // llama-server can emit an error mid-stream as
         // `data: {"error": {"message": "...", "type": "..."}}` (or
         // similar). The previous code only read `choices[0].delta`

@@ -27,7 +27,7 @@ for (const present of [
   'data-ui="SysInfoBlock"',
   'data-ui="HeaderServersLabel"',
   'data-ui="HeaderVramLabel"',
-  '<GenSpeedBadge variant="header" />',
+  '<GenSpeedBadge variant="header" active={server.running} />',
 ]) {
   check(shell.includes(present), `main header renders ${present}`);
 }
@@ -60,6 +60,8 @@ check(shell.includes('invoke<ServerStatusLite>("server_status")')
   && shell.includes('invoke<VramStatusLite>("vram_status")')
   && shell.includes("window.setInterval(tick, 2000)"),
   "server and VRAM values are polled live from the same commands ServerPage uses");
+check(shell.includes('<GenSpeedBadge variant="header" active={server.running} />'),
+  "the completed local speed clears when its model server stops");
 check(shell.includes("let dead = false") && shell.includes("window.clearInterval(id)"),
   "the poller is torn down on unmount");
 

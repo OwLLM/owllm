@@ -91,6 +91,6 @@ check(rust.includes("set_enable_media_stream(true)")
     && rust.includes("enable_linux_webview_media_capture(app)")
     && rust.includes("connect_permission_request")
     && rust.includes("UserMediaPermissionRequest"),
-  "Linux main WebView enables media-stream and grants capture so the screen recorder and mic dictation work");
+  "Linux main WebView enables media-stream and grants camera/microphone capture requests");
 
 console.log(`OK Linux WebKit stability: ${passed}/${passed} checks passed`);

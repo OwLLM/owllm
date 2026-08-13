@@ -704,7 +704,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   look alive. The next launch shows one toast and the records ride along on
   every support report (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`).
   Showing the notice never deletes the records — only an explicit
-  `session_health_dismiss` does.
+  `session_health_dismiss` does. The auto-updater is the one legitimate death
+  outside the exit path — `install()` never returns on Windows, it hands the
+  NSIS installer to the shell and calls `std::process::exit(0)` — so
+  `UpdatePrompt` declares it via `session_health_expect_replacement` between
+  `download()` and `install()`, and re-arms with `session_health_rearm` if the
+  install fails instead of replacing us. Without that, every auto-update made
+  the newly installed build open by accusing the previous one of crashing.
 - **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
   window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
   naming whoever called `app.exit`) and `Exit` are all recorded to stderr and

@@ -118,12 +118,21 @@ pub fn begin(version: &str) -> usize {
         version: version.to_string(),
         os: std::env::consts::OS.to_string(),
     };
-    if let (Some(path), Ok(json)) = (marker_path(marker.pid), serde_json::to_string(&marker)) {
-        let _ = std::fs::write(path, json);
-    }
+    write_marker(&marker);
+    let _ = OWN_MARKER.set(marker);
     NEW_THIS_LAUNCH.store(found.len(), std::sync::atomic::Ordering::SeqCst);
     found.len()
 }
+
+fn write_marker(marker: &SessionMarker) {
+    if let (Some(path), Ok(json)) = (marker_path(marker.pid), serde_json::to_string(marker)) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// This session's own marker, kept so an expected replacement that never
+/// happened can put it back — see [`expect_replacement`].
+static OWN_MARKER: std::sync::OnceLock<SessionMarker> = std::sync::OnceLock::new();
 
 /// Deaths discovered by *this* launch, as opposed to the stored history.
 ///
@@ -138,6 +147,31 @@ static NEW_THIS_LAUNCH: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 pub fn end_clean() {
     if let Some(path) = marker_path(std::process::id()) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+/// An installer is about to end this process from outside the exit path, so
+/// drop the marker now: this death is intentional, not a crash.
+///
+/// Needed because `RunEvent::Exit` — the only place [`end_clean`] otherwise
+/// runs — never fires here. On Windows the updater hands the NSIS installer to
+/// the shell and leaves through `std::process::exit(0)`
+/// (`tauri-plugin-updater`'s `install`), and the installer terminates
+/// `owllm-desktop.exe` besides. Either way the event loop is gone before it can
+/// emit anything, so without this every auto-update makes the freshly installed
+/// build greet the user by accusing the previous one of crashing.
+pub fn expect_replacement() {
+    end_clean();
+}
+
+/// The replacement did not happen — put the marker back.
+///
+/// A failed install leaves the app running, and an unmarked session is a
+/// session whose death nothing can report. Pairs with [`expect_replacement`] on
+/// every path that can return instead of exiting.
+pub fn rearm() {
+    if let Some(marker) = OWN_MARKER.get() {
+        write_marker(marker);
     }
 }
 
@@ -315,6 +349,18 @@ pub fn session_health_pending() -> SessionHealth {
         new_this_launch: NEW_THIS_LAUNCH.load(std::sync::atomic::Ordering::SeqCst),
         reports: pending(),
     }
+}
+
+/// The updater is about to hand this process to an installer.
+#[tauri::command]
+pub fn session_health_expect_replacement() {
+    expect_replacement();
+}
+
+/// The install returned instead of replacing us.
+#[tauri::command]
+pub fn session_health_rearm() {
+    rearm();
 }
 
 /// Forget the stored history. Only ever on an explicit user action — never as

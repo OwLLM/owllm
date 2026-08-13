@@ -79,6 +79,7 @@ mod recommendations;
 mod release;
 mod remote_devices;
 mod sandbox;
+mod screencast;
 mod server;
 mod session_health;
 mod signing;
@@ -233,14 +234,15 @@ fn install_linux_webview_recovery(app: &tauri::App) {
 #[cfg(not(target_os = "linux"))]
 fn install_linux_webview_recovery(_app: &tauri::App) {}
 
-/// WebKitGTK hides `navigator.mediaDevices` entirely — and with it
-/// `getDisplayMedia` / `getUserMedia` — unless `enable-media-stream` is set on
-/// the WebView. WRY leaves it off, so on Linux the in-app screen recorder and
-/// mic dictation see no `mediaDevices` and report "not available in this
-/// WebView"; WKWebView (macOS) and WebView2 (Windows) expose these by default,
-/// which is why the feature only breaks here. Turn the setting on for the main
-/// app view and grant the capture permission WebKitGTK would otherwise deny by
-/// default. Scoped to the "main" view, which only ever loads OWLLM's own
+/// WebKitGTK hides `navigator.mediaDevices` on an insecure origin unless
+/// `enable-media-stream` is set, and WRY leaves it off. The app's own scheme is
+/// registered as secure, so `getDisplayMedia` is present either way there — but
+/// camera and microphone capture still need the setting plus an answer to
+/// `permission-request`, which WebKitGTK denies by default. WKWebView (macOS)
+/// and WebView2 (Windows) do both for us, which is why only Linux needs this.
+/// (Screen recording does NOT come back from this: it fails further down, in
+/// xdg-desktop-portal — see screencast.rs.) Scoped to the "main" view, which
+/// only ever loads OWLLM's own
 /// bundled UI — this is the app authorising its own trusted origin, not any
 /// remote page (the agent-browser tabs are separate views and keep the setting
 /// off, so arbitrary sites still cannot reach the microphone or screen).
@@ -425,9 +427,9 @@ pub fn run() {
             // WebKit helpers are reaped instead of being orphaned onto an
             // AppImage mount that is about to disappear under them.
             webkit_children::install_shutdown_signals(app.handle());
-            // WebKitGTK hides navigator.mediaDevices unless enable-media-stream
-            // is set, which breaks the screen recorder on Linux only. Turn it on
-            // for the main view and allow capture. Order-independent.
+            // WebKitGTK denies camera/microphone capture until the app answers
+            // permission-request. Turn it on for the main view and allow
+            // capture. Order-independent.
             enable_linux_webview_media_capture(app);
             // Kill Windows' "ghost window" so a brief main-thread stall never
             // pops a stray "(Not Responding)" frame over the overlay chrome.
@@ -580,6 +582,9 @@ pub fn run() {
             audio::audio_transcribe_local,
             audio::whisper_runtime_status,
             audio::whisper_runtime_install,
+            screencast::screencast_supported,
+            screencast::screencast_start,
+            screencast::screencast_stop,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -824,6 +829,8 @@ pub fn run() {
             readiness::app_readiness,
             session_health::session_health_pending,
             session_health::session_health_dismiss,
+            session_health::session_health_expect_replacement,
+            session_health::session_health_rearm,
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,
@@ -1031,6 +1038,7 @@ pub fn run() {
                             MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
                         )),
                     }
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
@@ -1039,6 +1047,7 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     log_exit_path("Exit — process is leaving");
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {

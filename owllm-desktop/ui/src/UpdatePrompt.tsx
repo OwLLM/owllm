@@ -39,7 +39,8 @@ type Update = {
   // Tauri's update object — typed loosely so we don't have to import
   // the plugin's TS types at module top level (they're loaded via
   // dynamic import to keep the boot path small).
-  downloadAndInstall: (cb?: (event: any) => void) => Promise<void>;
+  download: (cb?: (event: any) => void) => Promise<void>;
+  install: () => Promise<void>;
 };
 
 /// Turn a release-notes body into a clean bullet list so the modal reads
@@ -194,7 +195,7 @@ export default function UpdateController() {
         return;
       }
 
-      await update.downloadAndInstall((evt: any) => {
+      await update.download((evt: any) => {
         // Tauri emits {event, data}: "Started" with contentLength,
         // "Progress" with chunkLength, "Finished".
         if (evt?.event === "Started" && typeof evt?.data?.contentLength === "number") {
@@ -205,11 +206,24 @@ export default function UpdateController() {
           setPhase("installing");
         }
       });
-      // Replace running process with the new one. Done as a separate
-      // dynamic import so we don't pay the cost on every boot.
+      // Download and install are separate calls purely so this can sit between
+      // them: `install()` does not return on Windows — it hands the NSIS
+      // installer to the shell and leaves through `std::process::exit(0)`, and
+      // the installer terminates owllm-desktop.exe besides. Either way
+      // RunEvent::Exit never fires, so the session marker survives and the
+      // freshly installed build opens by telling the user the previous one
+      // crashed. Say the death is expected instead. Doing it here rather than
+      // before the download keeps a real crash mid-download reportable.
+      await invoke("session_health_expect_replacement").catch(() => {});
+      await update.install();
+      // Reached only where install() returns rather than replacing us. Done as
+      // a separate dynamic import so we don't pay the cost on every boot.
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (e: any) {
+      // Still here, so nothing replaced us: put the marker back or this
+      // session's death would go unrecorded.
+      invoke("session_health_rearm").catch(() => {});
       setPhase("error");
       setError(String(e?.message ?? e));
     }

@@ -27,9 +27,9 @@ check(
   "the exact non-zero help-banner regression is covered by a Rust unit test",
 );
 check(
-  // The getter gained a `_blocking` suffix when it was moved off the UI thread;
-  // the invariant is the normalize call, not the name. Match either.
-  /pub fn wsl_isolation_get(_blocking)?\(\)[\s\S]{0,400}normalize_isolation_distro\(cfg\)/.test(wsl)
+  // The probe moved off the UI thread into spawn_blocking, so the read that
+  // normalizes is now wsl_isolation_get_blocking; the invariant is unchanged.
+  /pub fn wsl_isolation_get_blocking\(\)[\s\S]{0,400}normalize_isolation_distro\(cfg\)/.test(wsl)
     && /fn normalize_isolation_distro[\s\S]{0,900}eq_ignore_ascii_case/.test(wsl),
   "corrupt persisted distro preferences are normalized against the live list",
 );

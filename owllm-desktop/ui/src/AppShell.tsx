@@ -280,7 +280,13 @@ type ServerStatusLite = {
   port: number | null;
   message: string;
 };
-type VramGpu = { index: number; used_mib: number; total_mib: number };
+type VramGpu = {
+  index: number;
+  used_mib: number;
+  total_mib: number;
+  unified?: boolean;
+  model_scoped?: boolean;
+};
 type VramStatusLite = { gpus: VramGpu[] };
 
 // Model ids commonly include the organisation, fine-tune recipe and quant.
@@ -1592,7 +1598,12 @@ function SysInfoBlock() {
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
     : vram.gpus
-        .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
+        .map(g => {
+          const value = `${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`;
+          if (g.unified && g.model_scoped) return `Unified model: ${value}`;
+          if (g.unified) return `Unified: ${value}`;
+          return `GPU${g.index}: ${value}`;
+        })
         .join("   ");
   return (
     <div
@@ -1612,7 +1623,7 @@ function SysInfoBlock() {
     >
       <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
-        <GenSpeedBadge variant="header" />
+        <GenSpeedBadge variant="header" active={server.running} />
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}
@@ -2094,6 +2105,21 @@ export default function AppShell() {
     const t = window.setTimeout(() => setUpdateNotice(null), UPDATE_NOTICE_MS);
     return () => window.clearTimeout(t);
   }, [updateVersion]);
+
+  // A balloon is the OWL talking, so the owl has to be on screen while it does.
+  // The decorative frame — which is where the owl lives, inline in HybridFrame
+  // on macOS and in the click-through overlay window on Windows — idles away
+  // FRAME_IDLE_HIDE_MS after launch, long before the updater's first check
+  // lands (2.5s) or a World Chat message arrives. The balloon then floated over
+  // the header with its tail pointing at nothing. Reveal the frame for as long
+  // as either notice is up, then hand back to the normal idle-hide (which
+  // keepFrameVisible still overrides).
+  const noticeShowing = Boolean(updateNotice || chatNotice);
+  useEffect(() => {
+    if (!noticeShowing) return;
+    revealFrame();
+    return () => hideFrameAfter(FRAME_LEAVE_HIDE_MS);
+  }, [noticeShowing]);
 
   // Module offers (the local-inference engine above all). Separate from the app
   // update: the registry is republished on its own schedule, and an engine that

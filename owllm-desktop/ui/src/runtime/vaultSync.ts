@@ -12,7 +12,9 @@
 //       { syncedAt: <ms>, device: <id>, data: { <key>: <value>, … } }
 //   • On launch (vault cloned): read the REMOTE blob; if it's newer than what
 //     this device last adopted/pushed, write its keys into localStorage,
-//     fast-forward the clone (vault_align), and reload so every store repaints.
+//     fast-forward the clone (vault_align), and repaint in place — drop the few
+//     module caches that hold a synced key, and fire the refresh events
+//     (repaintAfterAdopt). This deliberately does NOT reload the WebView.
 //   • On change/idle/close: snapshot localStorage → vault_write_state (commit
 //     + push). We bump our adopted-marker so our own push doesn't look "new".
 //
@@ -26,12 +28,19 @@ import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMir
 import { mergeSteps, unionTombstones } from "./notebookMerge";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
 import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
+// The three module-level caches that hold a SYNCABLE localStorage key and would
+// otherwise keep serving their pre-sync copy after an adoption. Every other
+// consumer re-reads storage on render (pageSettings.get() hits localStorage on
+// every call) or re-probes the backend, so navigating to a page is already
+// enough. See repaintAfterAdopt.
+import { invalidateProfileCache } from "../pages/agentic/modelProfiles";
+import { invalidateCloudCatalogueCache } from "../pages/agentic/cloudCatalogue";
+import { invalidateProgress } from "../pages/world/worldState";
 
 // Device-local marker of the newest blob we've adopted OR pushed. Compared
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
 const LAST_KEY = "owllm:sync-last";
 const DEVICE_KEY = "owllm:sync-device";
-const USER_INTERACTED_KEY = "owllm:session:user-interacted";
 
 // Keys that must NOT sync (device-local / regenerable / machine-specific).
 const DENY_EXACT = new Set<string>([
@@ -290,7 +299,7 @@ function setLast(ts: number): void {
 }
 
 /// Pull the remote blob and adopt it if newer than what we last saw.
-/// Returns true when localStorage was changed (caller should reload).
+/// Returns true when localStorage was changed (caller should repaint).
 async function pullAndAdopt(): Promise<boolean> {
   let raw: string | null = null;
   try { raw = await invoke<string | null>("vault_read_remote_state"); } catch { return false; }
@@ -316,9 +325,8 @@ async function pullAndAdopt(): Promise<boolean> {
   }
   setLast(blob.syncedAt);
   try { await invoke("vault_align"); } catch { /* best effort */ }
-  // When we DON'T do a full reload (the user has already interacted), open
-  // notebook surfaces hold stale in-memory steps even though localStorage now
-  // has the adopted copy. Tell them to reload so the queue reflects work a
+  // Open notebook surfaces hold stale in-memory steps even though localStorage
+  // now has the adopted copy. Tell them to reload so the queue reflects work a
   // peer PC already completed instead of showing done steps as pending.
   for (const pid of adoptedNotebookPids) {
     try { window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT_NAME, { detail: { projectId: pid } })); } catch { /* non-browser */ }
@@ -593,25 +601,27 @@ export async function syncSigningNow(): Promise<boolean> {
   }
 }
 
-/// A vault adoption rewrites localStorage/SQLite under every store's feet, so
-/// a full reload is the blunt-but-reliable repaint. But each reload re-runs
-/// main.tsx — including the update prompt's fresh check() — and two devices
-/// converging can report "changed" for SEVERAL successive sync cycles, so the
-/// update dialog flashed in and out 3-4 times at launch. Allow ONE reload per
-/// launch (sessionStorage survives reloads); after that, repaint in place via
-/// the refresh event and let the next launch pick up any residual diff.
-function reloadOnce(): boolean {
-  try {
-    // Once the user has clicked or typed, a full reload would cancel their
-    // work just because a background sync finished. Components that own data
-    // receive their normal refresh events below instead; a complete repaint is
-    // only acceptable during an untouched initial boot.
-    if (sessionStorage.getItem(USER_INTERACTED_KEY) === "1") return false;
-    if (sessionStorage.getItem("owllm:vault:reloaded")) return false;
-    sessionStorage.setItem("owllm:vault:reloaded", "1");
-  } catch { return false; /* storage blocked → never risk a reload loop */ }
-  location.reload();
-  return true;
+/// Repaint in place after an adoption wrote synced keys under the running UI.
+///
+/// This used to be `location.reload()` — the "blunt-but-reliable" repaint. It
+/// was reliable and it was also the app's visible double start: the window is
+/// already on screen when the launch sync lands, so the user watched the whole
+/// UI reboot. Worse, each reload re-ran main.tsx including the update prompt's
+/// check(), so a converging pair of devices flashed the update dialog in and
+/// out several times.
+///
+/// A reload is not needed. Auditing every reader of a syncable key found only
+/// three module-level caches that hold one across a navigation; everything else
+/// either re-reads localStorage on each get (pageSettings, mcpSettings), lives
+/// in a page that unmounts on tab switch, or re-probes the backend for its real
+/// truth (accountsStore, readinessStore both boot with cacheIsStale = true).
+/// So: drop those three caches, and fire the refresh events that the
+/// already-mounted surfaces listen for.
+function repaintAfterAdopt(): void {
+  invalidateProfileCache();
+  invalidateCloudCatalogueCache();
+  invalidateProgress();
+  try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
 }
 
 /// Start the sync engine once at app launch. Safe to call when logged out /
@@ -642,12 +652,9 @@ export async function startVaultSync(): Promise<void> {
   }
   _enabled = true;
 
-  // 1) Adopt newer remote state, then reload (once) so every store repaints.
-  if (await pullAndAdopt()) {
-    if (reloadOnce()) return;
-    // Already reloaded this launch — repaint what we can in place and carry on.
-    try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
-  }
+  // 1) Adopt newer remote state, then repaint in place (no reload — see
+  //    repaintAfterAdopt for why the full reload was removed).
+  if (await pullAndAdopt()) repaintAfterAdopt();
   // 2) Seed/refresh the vault with our current state (covers a fresh device
   //    that has nothing remote yet).
   _lastSnapshotJson = JSON.stringify(snapshot());
@@ -664,11 +671,10 @@ export async function startVaultSync(): Promise<void> {
   void syncSigningNow();
 
   // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
-  //     If we pulled in newer projects/chats from another device, reload (once)
-  //     so the whole UI repaints from the freshly-synced database.
-  //     syncProjectsNow already fired owllm:projects:refresh as the in-place
-  //     fallback when the reload budget is spent.
-  if (await syncProjectsNow() && reloadOnce()) return;
+  //     syncProjectsNow fires owllm:projects:refresh itself when it changed
+  //     anything, and every other list_projects caller refetches on mount, so
+  //     the freshly-synced rows are on screen without a reload.
+  await syncProjectsNow();
 
   // 3) Keep pushing on the moments that matter.
   wireListeners();
@@ -686,7 +692,7 @@ export async function onVaultConnected(): Promise<void> {
   invoke("vault_sync_teams").catch(() => {});
   void syncDevicesNow();
   void syncSigningNow();
-  if (await syncProjectsNow()) reloadOnce();
+  await syncProjectsNow();
 }
 
 /// Push on tab-hidden, app-close, and a debounced diff poll (localStorage's

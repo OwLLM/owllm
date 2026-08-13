@@ -44,6 +44,7 @@ const js = ts.transpileModule(rawSrc, {
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./_tauri.js")')
   .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")')
   .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")')
+  .replace(/require\("\.\.\/pages\/(agentic\/modelProfiles|agentic\/cloudCatalogue|world\/worldState)"\)/g, 'require("./_caches.js")')
   .replace(/require\("\.\/stateMirror"\)/g, 'require("./_stateMirror.js")');
 
 // Hot-blob prefixes come from the REAL stateMirror source so this stub cannot
@@ -64,6 +65,10 @@ fs.writeFileSync(path.join(TMP, "notebookMerge.js"), ts.transpileModule(
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
 fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
+// repaintAfterAdopt drops the module caches that hold a synced key. This suite
+// exercises notebook merging, where those caches play no part — the dedicated
+// cover for the invalidators is runtime/vaultSyncNoReload.verify.run.mjs.
+fs.writeFileSync(path.join(TMP, "_caches.js"), "module.exports = { invalidateProfileCache: () => {}, invalidateCloudCatalogueCache: () => {}, invalidateProgress: () => {} };");
 fs.writeFileSync(path.join(TMP, "_stateMirror.js"),
   `const P = ${JSON.stringify(HOT_PREFIXES)};\n` +
   "const m = new Map();\n" +

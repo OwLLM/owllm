@@ -28,6 +28,11 @@ else
   have_gh() { command -v gh >/dev/null 2>&1; }
 fi
 
+# Release-body composition: protects a hand-written changelog while always
+# rewriting the platform-coverage disclosure. Defines compose_release_body().
+# shellcheck source=lib/release-body.sh
+. "$_SCRIPT_DIR/lib/release-body.sh"
+
 # Target GitHub repo for `gh release` — resolution order:
 #   1. $OWLLM_RELEASE_REPO (exported by finish-and-publish.sh from the Project
 #      Card's release.repo, or set by the caller)
@@ -308,6 +313,7 @@ command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
 # dated. BODY is the GitHub release body; NOTES stays clean for latest.json,
 # whose text renders in the in-app update popup.
 BODY="$NOTES"
+COVERAGE_TEXT=""
 COVERAGE_MD="dist/platform-coverage.md"
 COVERAGE_JSON="dist/platform-coverage.json"
 RELEASES_JSON="dist/releases.json"
@@ -344,9 +350,10 @@ else
       fail "platform coverage check errored (rc=$COVERAGE_RC)"
     fi
     # Disclosure rides in the release body for every publish, acknowledged or not.
-    [ -s "$COVERAGE_MD" ] && BODY="$NOTES
-
-$(cat "$COVERAGE_MD")"
+    if [ -s "$COVERAGE_MD" ]; then
+      COVERAGE_TEXT="$(cat "$COVERAGE_MD")"
+      BODY="$(compose_release_body "$NOTES" "$COVERAGE_TEXT")"
+    fi
   fi
 fi
 
@@ -646,12 +653,14 @@ for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop_${V
 done
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "${UPLOADS[@]}" --repo "$REPO" --clobber
-  # Refresh the body too — but never clobber notes a human wrote by hand:
-  # only overwrite when the existing body is empty or just the tag/version.
-  EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null | tr -d ' \r\n')"
-  if [ -z "$EXISTING_BODY" ] || [ "$EXISTING_BODY" = "$TAG" ] || [ "$EXISTING_BODY" = "$VERSION" ] || [ "$EXISTING_BODY" = "Release$VERSION" ]; then
-    gh release edit "$TAG" --repo "$REPO" --notes "$BODY"
-  fi
+  # Refresh the body. The changelog half is still protected — a hand-written one
+  # survives — but the platform-coverage table is a disclosure of what this
+  # release actually ships, so it is rewritten unconditionally. It used to ride
+  # inside the protected half, so publishing into a pre-created release object
+  # (v1.0.19, body "OwLLM Desktop 1.0.19") silently dropped it.
+  EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null || true)"
+  gh release edit "$TAG" --repo "$REPO" \
+    --notes "$(compose_release_body "$NOTES" "$COVERAGE_TEXT" "$EXISTING_BODY" "$TAG" "$VERSION")"
   if [ "$DRAFT" = 1 ]; then :
   elif [ "$PRERELEASE" = 1 ]; then gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
   else gh release edit "$TAG" --repo "$REPO" --draft=false --latest

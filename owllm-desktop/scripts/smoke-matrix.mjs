@@ -286,6 +286,9 @@ function runHarnesses() {
     // Source-text assertions over wsl.rs/sandbox.rs — no transpile needed, so
     // it must not be parked behind the TypeScript-dependent SKIP.
     "sandboxNetPreflight.verify.run.mjs",
+    // Executes scripts/lib/release-body.sh through bash — no transpile needed,
+    // and it must run on a release host whether or not the UI deps are installed.
+    "releaseBody.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

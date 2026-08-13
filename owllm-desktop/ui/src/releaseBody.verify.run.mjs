@@ -124,10 +124,22 @@ fs.writeFileSync(
     `esac\n`,
 );
 
+// The bash we found may be Git Bash (understands "C:/x") or WSL's (needs
+// "/mnt/c/x"). On a release host the publish script runs this under Windows
+// node, so a WSL bash got "C:/…/driver.sh: No such file or directory" (exit
+// 127) and the whole ship gate went red on a path dialect, not a defect.
+const forBash = (p) => {
+  const direct = posix(p);
+  if (!/^[A-Za-z]:\//.test(direct)) return direct;
+  if (spawnSync(BASH, ["-c", `test -e "${direct}"`]).status === 0) return direct;
+  const mounted = `/mnt/${direct[0].toLowerCase()}${direct.slice(2)}`;
+  return spawnSync(BASH, ["-c", `test -e "${mounted}"`]).status === 0 ? mounted : direct;
+};
+
 const run = (mode, vars) => {
-  const r = spawnSync(BASH, [posix(driver)], {
+  const r = spawnSync(BASH, [forBash(driver)], {
     encoding: "utf8",
-    env: { ...process.env, LIB: posix(LIB), MODE: mode, NOTES: "", COVERAGE: "", EXISTING: "", TAG: "", VERSION: "", ...vars },
+    env: { ...process.env, LIB: forBash(LIB), MODE: mode, NOTES: "", COVERAGE: "", EXISTING: "", TAG: "", VERSION: "", ...vars },
   });
   assert.equal(r.status, 0, `bash driver failed (${mode}): ${r.stderr}`);
   return r.stdout.replace(/\r\n/g, "\n");

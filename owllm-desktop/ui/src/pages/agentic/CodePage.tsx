@@ -4723,7 +4723,8 @@ type TreeEntry = { name: string; kind: string };
 // Lazy file-tree node. Reuses the existing tool_list_dir command (the same
 // one the coding agent uses), so no new backend. Folders expand on click and
 // load their children once; files insert an @-reference into the composer.
-function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
+// Exported: the Agents page's left project column renders the SAME tree.
+export function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
   path: string; name: string; depth: number; defaultOpen?: boolean;
   onOpenFile: (absPath: string) => void;
 }) {

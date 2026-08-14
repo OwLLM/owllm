@@ -30,9 +30,16 @@ import {
   parseProjectEnvironment,
   restoreProjectBrowser,
   reopenPersonalBrowserSession,
+  openWelcomeBrowserSplit,
   type ProjectEnvironment,
 } from "./projectEnvironment";
 import RulesEditor from "./RulesEditor";
+// The Code page's column building blocks — the Agents page reuses them so the
+// two pages converge on ONE layout (user spec 2026-08-14): the resizable
+// right utility column, the collapsed icon rails, and the lazy file tree.
+import { SideColumnShell, sideTabStyle, UsagePanel, BrowserToggleButton } from "./CodeSidePanel";
+import { CodeProjectRailIcons, CodeUtilityRailIcons, RAIL_W } from "./CodeColumnRails";
+import { TreeDir } from "./CodePage";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
@@ -5532,9 +5539,8 @@ function OrchestratorPane({
   team, isSuperUser,
   projectId, directives, onDirectivesChanged,
   projectCwd,
-  supChat, onSupSend, supSendBusy,
-  autoApprove, onToggleAutoApprove,
-  needsLoad, loadingModel, onLoadModel,
+  supChat, supSendBusy,
+  switchTabRef,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -5552,25 +5558,26 @@ function OrchestratorPane({
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   /// Super-User chat — feeds the User Input sub-tab's HISTORY view
-  /// (filtered to role="you"). The bottom input dock writes to this
-  /// stream via onSupSend.
+  /// (filtered to role="you"). New sends come from the canvas-column
+  /// composer (ChatInputDock, Code-page position) via onSupSend up in
+  /// AgentsPage.
   supChat: GoalMsg[];
-  onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
-  /// VS Code-style dock's "Auto mode" toggle — wires to the project's
-  /// autoApprove flag (drives the dispatch's auto-accept of tool calls).
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
-  /// Send-button → Load-button state. True when the team uses a
-  /// local model that isn't currently served by llama-server.
-  needsLoad: boolean;
-  loadingModel: boolean;
-  onLoadModel: () => void;
+  /// The composer lives in the canvas column now; its slash commands still
+  /// switch this pane's sub-tabs through this ref bridge.
+  switchTabRef: React.MutableRefObject<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>;
 }) {
   // Sub-tab strip. "Clear Chat" (reply) was removed in favour of "Full Chat"
   // as the single chat view (per user request), which is now the default so the
   // whole run is visible at startup. Rules shows ONLY on the Super User page.
   const [activeTab, setActiveTab] = useState<"rules"|"userinput"|"reply"|"thought"|"tools"|"full">("full");
+  // The canvas-column composer's slash commands (/rules, /thought, …) switch
+  // this pane's sub-tabs through the ref bridge — instance-scoped, so a
+  // background Agents page never flips a foreground pane's tab.
+  useEffect(() => {
+    switchTabRef.current = setActiveTab;
+    return () => { if (switchTabRef.current === setActiveTab) switchTabRef.current = null; };
+  }, [switchTabRef]);
   // Effective (displayed) tab: gracefully fold away tabs that no longer exist
   // or aren't allowed here — the removed "reply" tab, and "rules" when we're not
   // on the Super User page — both fall back to Full Chat. Keeps slash commands
@@ -5699,46 +5706,9 @@ function OrchestratorPane({
     return () => { el.removeEventListener("scroll", onScroll); mo.disconnect(); cancelAnimationFrame(r1); };
   }, [effTab, focus, tailSig]);
 
-  // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
-  // Persistent draft per project (localStorage); auto-resize textarea
-  // grows with content up to a max height; Enter sends, Shift+Enter
-  // inserts a newline.
-  const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
-  const draftKeyRef = useRef(draftKey);
-  draftKeyRef.current = draftKey;
-  const [draft, setDraftState] = useState<string>(() => {
-    if (!draftKey) return "";
-    try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
-  });
-  useEffect(() => {
-    if (!draftKey) { setDraftState(""); return; }
-    try { setDraftState(localStorage.getItem(draftKey) ?? ""); } catch { setDraftState(""); }
-  }, [draftKey]);
-  const setDraft = (v: string) => {
-    setDraftState(v);
-    const k = draftKeyRef.current;
-    if (k) { try { localStorage.setItem(k, v); } catch {} }
-  };
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  // Auto-resize: reset to "auto" so the textarea can shrink, then set
-  // height to its content's scrollHeight up to a cap. Runs on every
-  // draft change so the box grows as the user types.
-  useLayoutEffect(() => {
-    const ta = inputRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    const next = Math.min(ta.scrollHeight, 240);
-    ta.style.height = `${Math.max(36, next)}px`;
-  }, [draft]);
-  const submitInput = (images: Attachment[] = []) => {
-    const t = draft.trim();
-    if (!t && images.length === 0) return;
-    // NOTE: no busy-guard — when a run is active, onSupSend queues this as a
-    // mid-run steer instead of starting a second run. That's what lets the user
-    // type + send while the team works (the ■ button still stops the run).
-    onSupSend(t, images);
-    setDraft("");
-  };
+  // (The user-input dock and its draft state moved up to AgentsPage — the
+  // composer now sits at the bottom of the canvas column, the same position
+  // as the Code page's composer. This pane is purely the log/chat viewer.)
 
   // ---- Rules sub-tab state (inline CRUD, mirrors the SuperUserCard
   // rules tab; the rules surface lives here now per user spec) ----
@@ -6043,23 +6013,8 @@ function OrchestratorPane({
           </>)}
         </div>
       </div>
-      {/* Super User is settings-only — no chat composer there (user spec #4).
-          The dock stays on the Orchestrator/Team pages where chatting happens. */}
-      {!isSuperUser && (
-        <ChatInputDock
-          draft={draft}
-          setDraft={setDraft}
-          inputRef={inputRef}
-          onSend={submitInput}
-          busy={supSendBusy}
-          autoApprove={autoApprove}
-          onToggleAutoApprove={onToggleAutoApprove}
-          onSwitchTab={setActiveTab}
-          needsLoad={needsLoad}
-          loadingModel={loadingModel}
-          onLoadModel={onLoadModel}
-        />
-      )}
+      {/* The composer (ChatInputDock) is no longer docked here — it sits at
+          the bottom of the canvas column, the Code page's composer position. */}
     </div>
   );
 }
@@ -6082,21 +6037,31 @@ function OrchestratorPane({
 // Three top-level pages remain: Super User (Y), Orchestrator (B),
 // Team (G).
 type RightTabId = "super" | "orch" | "team";
-const RIGHT_TAB_COLOR: Record<RightTabId, string> = {
-  super: "#ffd97a",
-  orch:  "#74a4ff",
-  team:  "#6cd28e",
-};
-const RIGHT_TAB_BG_ON: Record<RightTabId, string> = {
-  super: "rgba(255,217,122,0.18)",
-  orch:  "rgba(116,164,255,0.18)",
-  team:  "rgba(108,210,142,0.18)",
-};
 const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
   super: "👤 Super User",
   orch:  "📜 Orchestrator",
   team:  "🏷 Team",
 };
+
+// The right column's width + open tab persist like the Code page's
+// (owllm:code:sidew / owllm:code:sidetab) so the two columns behave the same.
+const AGENTS_SIDE_WIDTH_KEY = "owllm:agents:sidew";
+const AGENTS_SIDE_TAB_KEY = "owllm:agents:sidetab";
+// The old flex column bottomed out at 360px; the resizable one keeps that floor.
+const AGENTS_SIDE_MIN_W = 360;
+
+/// Choose which page the right column shows the next time it mounts. The
+/// collapsed rail uses this so its ⚡ icon lands on Super User — the panel
+/// unmounts while shrunk, so the stored preference IS the handover.
+function selectAgentsSideTab(tab: RightTabId): void {
+  try { localStorage.setItem(AGENTS_SIDE_TAB_KEY, tab); } catch { /* keeps the last choice */ }
+}
+function loadAgentsSideTab(): RightTabId {
+  try {
+    const t = localStorage.getItem(AGENTS_SIDE_TAB_KEY);
+    return t === "super" || t === "team" ? t : "orch";
+  } catch { return "orch"; }
+}
 
 function RightColumnTabs(props: {
   team: Team | null;
@@ -6131,15 +6096,25 @@ function RightColumnTabs(props: {
   voiceFor: (agentName: string) => VoiceConfig;
   onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
   ttsVoices: SpeechSynthesisVoice[];
-  needsLoad: boolean;
-  loadingModel: boolean;
-  onLoadModel: () => void;
+  /// providerFor(effective team model) — drives the bottom Usage panel,
+  /// exactly like the Code page's side panel.
+  usageProvider: string;
+  /// Agent Browser popup (owned by AgentsPage; the 🌐 button here toggles it
+  /// AND arranges the app + browser side by side, like the Code page).
+  browserOpen: boolean;
+  onToggleBrowser: () => void;
+  /// Collapse this outer column to its icon rail. AgentsPage owns the state.
+  onCollapse: () => void;
+  /// The composer moved to the canvas column (Code-page position); its slash
+  /// commands still switch this pane's sub-tabs through this ref bridge.
+  switchTabRef: React.MutableRefObject<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
   // container — which stays put. So the chat is ALWAYS visible no
   // matter which top tab is active.
-  const [tab, setTab] = useState<RightTabId>("orch");
+  const [tab, setTabState] = useState<RightTabId>(loadAgentsSideTab);
+  const setTab = (t: RightTabId) => { setTabState(t); selectAgentsSideTab(t); };
 
   // Dynamic label for the middle (Orchestrator) tab. The pane *is*
   // the generic agent page: when the user clicks the orchestrator
@@ -6158,37 +6133,27 @@ function RightColumnTabs(props: {
       : "📜 Orchestrator";
 
   return (
-    <div data-ui="RightColumnTabs" className="selectable-chat" style={{
-      display:"flex", flexDirection:"column", height:"100%",
-      background:"var(--bg-elevated)",
-    }}>
-      {/* Tab strip — 3 small coloured "page selectors". */}
-      <div data-ui="RightTabs" style={{
-        display:"flex", gap:0,
-        borderBottom: `1px solid ${RIGHT_TAB_COLOR[tab]}55`,
-        background: `linear-gradient(180deg, ${RIGHT_TAB_COLOR[tab]}10 0%, transparent 100%)`,
-        flexShrink:0,
-      }}>
+    <SideColumnShell widthKey={AGENTS_SIDE_WIDTH_KEY} minW={AGENTS_SIDE_MIN_W} dataUi="RightColumnTabs" className="selectable-chat">
+      {/* Tab strip — the Code side panel's strip (same tab style), carrying
+          the agentic pages: 👤 Super User | 📜 Orchestrator | 🏷 Team. */}
+      <div data-ui="RightTabs" style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2, flexShrink: 0 }}>
+        <button
+          data-ui="AgentsUtilityPanelCollapse"
+          onClick={props.onCollapse}
+          aria-label="Shrink right utility column"
+          title="Shrink right column"
+          style={{ height: 28, width: 28, padding: 0, flexShrink: 0, cursor: "pointer", fontSize: 18, lineHeight: 1, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-surface)", color: "var(--fg-muted)" }}
+        >›</button>
         {(["super","orch","team"] as const).map(id => {
-          const on = tab === id;
-          const c  = RIGHT_TAB_COLOR[id];
-          const bg = RIGHT_TAB_BG_ON[id];
           const label = id === "orch" ? orchTabLabel : RIGHT_TAB_LABEL[id];
           return (
             <button
               key={id}
               data-ui={`RightTab-${id}`}
               onClick={() => setTab(id)}
-              style={{
-                flex:1, height:34, padding:"0 10px",
-                background: on ? bg : "transparent",
-                color: on ? c : "var(--fg-muted)",
-                border:"none",
-                borderBottom: on ? `2.5px solid ${c}` : "2.5px solid transparent",
-                fontSize:12, fontWeight:700, cursor:"pointer",
-                letterSpacing:0.3,
-                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-              }} title={label}>{label}</button>
+              style={{ ...sideTabStyle(tab === id), overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}
+              title={label}
+            >{label}</button>
           );
         })}
       </div>
@@ -6280,16 +6245,21 @@ function RightColumnTabs(props: {
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
           supChat={props.supChat}
-          onSupSend={props.onSupSend}
           supSendBusy={props.supSendBusy}
-          autoApprove={props.autoApprove}
-          onToggleAutoApprove={props.onToggleAutoApprove}
-          needsLoad={props.needsLoad}
-          loadingModel={props.loadingModel}
-          onLoadModel={props.onLoadModel}
+          switchTabRef={props.switchTabRef}
         />
       </div>
-    </div>
+      {/* ---- Bottom utility container — same as the Code page's side panel:
+          USAGE for the team's effective model, then the 🌐 Browser toggle
+          (opens the popup AND splits the app + browser side by side). ---- */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)", flexShrink: 0 }}>
+        <UsagePanel provider={props.usageProvider} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          <span style={{ flex: 1 }} />
+          <BrowserToggleButton open={props.browserOpen} onToggle={props.onToggleBrowser} />
+        </div>
+      </div>
+    </SideColumnShell>
   );
 }
 
@@ -9436,16 +9406,96 @@ export function AgentsPage({
     return () => window.removeEventListener("owllm:open-workbench", onOpen as EventListener);
   }, []);
 
-  // 🌐 header button opens the shared Agent Browser panel (daemon is app-global).
+  // 🌐 header button opens the shared Agent Browser panel (daemon is app-global)
+  // AND arranges the app + browser side by side — the same coordinated split
+  // the Code page's browser control performs (user spec 2026-08-14).
   const [browserPanelOpen, setBrowserPanelOpen] = useState(false);
+  const openBrowserSplit = async (): Promise<void> => {
+    try {
+      await openWelcomeBrowserSplit((command, args) => invoke(command, args as Record<string, unknown>));
+    } catch (e) {
+      notify(`Could not open the browser: ${String(e)}`, "error");
+    }
+  };
   useEffect(() => {
     const onOpen = () => {
       if (!isActiveRef.current) return; // only the visible tab opens it
       setBrowserPanelOpen(true);
+      void openBrowserSplit();
     };
     window.addEventListener("owllm:open-browser-panel", onOpen as EventListener);
     return () => window.removeEventListener("owllm:open-browser-panel", onOpen as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ---- Code-page column states (user spec 2026-08-14: the Agents page reuses
+  // the Code page's outer columns). Left = project rail (memory + file tree +
+  // Publisher card); right = the resizable utility column. Both collapse to
+  // the same icon rails as the Code page.
+  const [agentsProjectRailOpen, setAgentsProjectRailOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("owllm:agents:projectrail") !== "closed"; } catch { return true; }
+  });
+  const setProjectRailOpen = (open: boolean) => {
+    setAgentsProjectRailOpen(open);
+    try { localStorage.setItem("owllm:agents:projectrail", open ? "open" : "closed"); } catch { /* keeps default */ }
+  };
+  const [agentsSideOpen, setAgentsSideOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("owllm:agents:sideopen") !== "closed"; } catch { return true; }
+  });
+  const setSideOpen = (open: boolean) => {
+    setAgentsSideOpen(open);
+    try { localStorage.setItem("owllm:agents:sideopen", open ? "open" : "closed"); } catch { /* keeps default */ }
+  };
+  // The composer's slash commands switch the right column's sub-tabs via this
+  // instance-scoped bridge (OrchestratorPane assigns its setter here).
+  const rightTabSwitchRef = useRef<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>(null);
+
+  // ---- User-input composer (canvas column, Code-page position) ----
+  // Persistent draft per project (localStorage); moved up from
+  // OrchestratorPane so the dock renders under the canvas, exactly where the
+  // Code page's composer sits. Same storage key — no draft is lost.
+  const dockDraftKey = selectedProjectId ? `owllm:supdraft:${selectedProjectId}` : "";
+  const dockDraftKeyRef = useRef(dockDraftKey);
+  dockDraftKeyRef.current = dockDraftKey;
+  const [dockDraft, setDockDraftState] = useState<string>(() => {
+    if (!dockDraftKey) return "";
+    try { return localStorage.getItem(dockDraftKey) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    if (!dockDraftKey) { setDockDraftState(""); return; }
+    try { setDockDraftState(localStorage.getItem(dockDraftKey) ?? ""); } catch { setDockDraftState(""); }
+  }, [dockDraftKey]);
+  const setDockDraft = (v: string) => {
+    setDockDraftState(v);
+    const k = dockDraftKeyRef.current;
+    if (k) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  const dockInputRef = useRef<HTMLTextAreaElement>(null);
+  // Auto-resize: reset to "auto" so the textarea can shrink, then set
+  // height to its content's scrollHeight up to a cap.
+  useLayoutEffect(() => {
+    const ta = dockInputRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const next = Math.min(ta.scrollHeight, 240);
+    ta.style.height = `${Math.max(36, next)}px`;
+  }, [dockDraft]);
+  const submitDockInput = (images: Attachment[] = []) => {
+    const t = dockDraft.trim();
+    if (!t && images.length === 0) return;
+    // NOTE: no busy-guard — when a run is active, onSupSend queues this as a
+    // mid-run steer instead of starting a second run. That's what lets the user
+    // type + send while the team works (the ■ button still stops the run).
+    onSupSend(t, images);
+    setDockDraft("");
+  };
+  // A file clicked in the left column's tree lands as an @-reference in the
+  // composer (TreeDir's documented contract), so the team can be pointed at it.
+  const addFileRefToDraft = (abs: string) => {
+    const root = (publisherCwd ?? "").replace(/[\\/]+$/, "");
+    const rel = root && abs.startsWith(root) ? abs.slice(root.length).replace(/^[\\/]/, "") : abs;
+    setDockDraft((dockDraft ? dockDraft.replace(/\s+$/, "") + " " : "") + `@${rel} `);
+  };
 
   // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude,
   // Codex, Gemini, or Kimi) surfaces a visible "team paused / retrying" notice
@@ -14411,6 +14461,54 @@ export function AgentsPage({
         flex:1, minHeight:0, margin:"0 23px",
         display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0,
       }}>
+        {/* Left project column — the Code page's rail (user spec 2026-08-14):
+            🧠 Project Memory + the file tree, with the release Publisher card
+            (the Publisher agent's exact tile panel) where the Code page
+            carries its GitHub cards. Collapses to the same pink icon rail. */}
+        {publisherCwd && (
+          <div
+            data-ui="AgentsProjectRail"
+            data-state={agentsProjectRailOpen ? "expanded" : "collapsed"}
+            style={{ width: agentsProjectRailOpen ? 220 : RAIL_W, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: agentsProjectRailOpen ? "stretch" : "center", overflowY: agentsProjectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: agentsProjectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: agentsProjectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: agentsProjectRailOpen ? 4 : 3, marginRight: 8 }}
+          >
+            {agentsProjectRailOpen ? (
+              <>
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  <button
+                    data-ui="AgentsProjectMemory"
+                    onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
+                    title="Project Memory — the shared facts and worklog this team reads and writes, synced through the vault."
+                    style={{ flex: 1, minWidth: 0, height: 30, display: "flex", alignItems: "center", justifyContent: "flex-start", padding: "0 10px", borderRadius: 6, border: "1px solid rgba(var(--accent-rgb),0.42)", background: "var(--bg-surface)", color: "var(--accent-ink)", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}
+                  >
+                    🧠 Project Memory
+                  </button>
+                  <button
+                    data-ui="AgentsProjectRailCollapse"
+                    onClick={() => setProjectRailOpen(false)}
+                    aria-label="Shrink left project column"
+                    title="Shrink left column"
+                    style={{ width: 28, height: 30, padding: 0, flexShrink: 0, fontSize: 18, lineHeight: 1, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", cursor: "pointer" }}
+                  >‹</button>
+                </div>
+                <TreeDir path={publisherCwd} name={publisherCwd.replace(/[\\/]+$/, "").replace(/^.*[\\/]/, "")} depth={0} defaultOpen onOpenFile={addFileRefToDraft} />
+                {/* Publisher card — the SAME PublisherTilePanel the ▦ chat
+                    grid's Publisher tile renders: Commit / Merge / Publish +
+                    ⚙ Set up repo, in the left column like the Code page. */}
+                <div data-ui="AgentsProjectRailPublisher" style={{ display: "flex", flexDirection: "column", flexShrink: 0, marginTop: 6, border: "1px solid rgba(255, 105, 180, 0.4)", borderRadius: 8, background: "rgba(255, 82, 160, 0.06)" }}>
+                  <PublisherTilePanel cwd={publisherCwd} rgb="255,120,183" />
+                </div>
+              </>
+            ) : (
+              /* Shrunk: one icon per feature this column holds — memory, the
+                 file tree and the Publisher card. */
+              <CodeProjectRailIcons
+                publisher
+                onMemory={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
+                onExpand={() => setProjectRailOpen(true)}
+              />
+            )}
+          </div>
+        )}
         {/* Canvas column — TeamCanvas / GraphCanvas / AgentChatGrid
             depending on viewMode. The chat-grid is now a CANVAS MODE
             (third option in the FlowHeader segmented switch), not a
@@ -14523,9 +14621,27 @@ export function AgentsPage({
               </button>
             )}
           </div>
+          {/* Composer — the Code page's position (user spec 2026-08-14):
+              bottom of the center column, exactly as wide as the canvas. Same
+              dock features as before (slash commands, ⚡ Auto mode, cold-load
+              button, attachments, mid-run steering); it just no longer lives
+              in the right column. */}
+          <ChatInputDock
+            draft={dockDraft}
+            setDraft={setDockDraft}
+            inputRef={dockInputRef}
+            onSend={submitDockInput}
+            busy={supSendBusy}
+            autoApprove={autoApprove}
+            onToggleAutoApprove={() => setAutoApprove(v => !v)}
+            onSwitchTab={(t) => rightTabSwitchRef.current?.(t)}
+            needsLoad={dockNeedsLoad}
+            loadingModel={dockLoadingModel}
+            onLoadModel={dockLoadModel}
+          />
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
-        <div style={{ flex:"1 1 0", minWidth:360 }}>
+        {agentsSideOpen ? (
           <RightColumnTabs
             team={renderTeam}
             roleByName={roleByName}
@@ -14555,14 +14671,32 @@ export function AgentsPage({
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
-            needsLoad={dockNeedsLoad}
-            loadingModel={dockLoadingModel}
-            onLoadModel={dockLoadModel}
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}
+            usageProvider={providerForShared(effectiveTeamModel || serverState.model_id || "", models)}
+            browserOpen={browserPanelOpen}
+            onToggleBrowser={() => { if (!browserPanelOpen) void openBrowserSplit(); setBrowserPanelOpen(v => !v); }}
+            onCollapse={() => setSideOpen(false)}
+            switchTabRef={rightTabSwitchRef}
           />
-        </div>
+        ) : (
+          /* Shrunk: the Code page's orange utility rail — usage, rules and
+             the browser stay reachable (no Notebook page here; the Notebook
+             lives on the FlowHeader's 📓 button). */
+          <div
+            data-ui="AgentsUtilityPanelRail"
+            data-state="collapsed"
+            style={{ width: RAIL_W, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
+          >
+            <CodeUtilityRailIcons
+              onUsage={() => setSideOpen(true)}
+              onRules={() => { selectAgentsSideTab("super"); setSideOpen(true); }}
+              onBrowser={() => { void openBrowserSplit(); }}
+              onExpand={() => setSideOpen(true)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -139,6 +139,24 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   sending, publishing, deleting and other consequential browser actions.
 - **Multi-page**: tab strip opens several Agents pages at once, each with its
   own project + run; tabs stay alive (runs keep going), green ● = running.
+- **Code-page layout** (2026-08-14, first step toward merging the two pages):
+  the Agents page reuses the Code page's column building blocks
+  (`CodeSidePanel.tsx` `SideColumnShell`/`UsagePanel`/`BrowserToggleButton`/
+  `sideTabStyle`, `CodeColumnRails.tsx`, `TreeDir` from `CodePage.tsx`).
+  **Left column** = 🧠 Project Memory + the lazy file tree (a clicked file
+  lands as an `@path` reference in the composer) + the **Publisher card**
+  (the exact `PublisherTilePanel` from the ▦ grid — Commit / Merge / Publish)
+  where the Code page carries its GitHub cards; collapses to the pink rail
+  (🧠 📁 🚀). **Right column** = the Code panel's resizable shell + tab style
+  carrying 👤 Super User / 📜 Orchestrator / 🏷 Team + the always-visible chat
+  host, with the Code panel's bottom **Usage** + 🌐 Browser container — no
+  Notebook tab (Notebook stays on the FlowHeader 📓 button); collapses to the
+  orange rail (📊 ⚡ 🌐). **Composer** = the same `ChatInputDock` now at the
+  bottom of the canvas column (the Code page's composer position), out of the
+  right column; slash commands still switch the pane's sub-tabs via a ref
+  bridge. Every 🌐 browser control opens the popup **and** splits app +
+  browser side by side (`openWelcomeBrowserSplit`). Gated by
+  `agentsCodeLayoutMerge.verify.run.mjs`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.

@@ -68,7 +68,9 @@ function ExpandButton({ id, tone, onClick, label, glyph }: { id: string; tone: T
 
 const stack: CSSProperties = { display: "flex", flexDirection: "column", alignItems: "center", gap: 6 };
 
-export function CodeProjectRailIcons({ onMemory, onExpand }: { onMemory: () => void; onExpand: () => void }) {
+/// `publisher` swaps the third icon: the Agents page's left column carries the
+/// release Publisher card where the Code page carries the GitHub cards.
+export function CodeProjectRailIcons({ onMemory, onExpand, publisher }: { onMemory: () => void; onExpand: () => void; publisher?: boolean }) {
   return (
     <div data-ui="CodeProjectRailIcons" style={stack}>
       <RailButton
@@ -83,31 +85,42 @@ export function CodeProjectRailIcons({ onMemory, onExpand }: { onMemory: () => v
         label="Project files"
         title="Project files — expands this column onto the file tree."
       >📁</RailButton>
-      <RailButton
-        id="CodeProjectRailCollapsedGithub" tone={PINK}
-        onClick={onExpand}
-        label="GitHub"
-        title="GitHub — expands this column onto the repository and publish cards."
-      >🐙</RailButton>
+      {publisher ? (
+        <RailButton
+          id="CodeProjectRailCollapsedPublisher" tone={PINK}
+          onClick={onExpand}
+          label="Publisher"
+          title="Publisher — expands this column onto the release Commit / Merge / Publish card."
+        >🚀</RailButton>
+      ) : (
+        <RailButton
+          id="CodeProjectRailCollapsedGithub" tone={PINK}
+          onClick={onExpand}
+          label="GitHub"
+          title="GitHub — expands this column onto the repository and publish cards."
+        >🐙</RailButton>
+      )}
       <ExpandButton id="CodeProjectRailExpand" tone={PINK} onClick={onExpand} label="Expand left project column" glyph="›" />
     </div>
   );
 }
 
 /// The browser icon ACTS instead of expanding: shrinking the column must not
-/// cost the user the control it holds.
+/// cost the user the control it holds. `onNotebook` is optional — the Agents
+/// page's right column has no notebook page (its Notebook lives in the
+/// FlowHeader), so its rail omits the 📓 icon.
 export function CodeUtilityRailIcons(
   { onNotebook, onUsage, onRules, onBrowser, onExpand }:
-  { onNotebook: () => void; onUsage: () => void; onRules: () => void; onBrowser: () => void; onExpand: () => void },
+  { onNotebook?: () => void; onUsage: () => void; onRules: () => void; onBrowser: () => void; onExpand: () => void },
 ) {
   return (
     <div data-ui="CodeUtilityPanelIcons" style={stack}>
-      <RailButton
+      {onNotebook && <RailButton
         id="CodeUtilityPanelCollapsedNotebook" iconId="CodeUtilityPanelCollapsedIcon" tone={ORANGE}
         onClick={onNotebook}
         label="Notebook"
         title="Notebook — expands this column onto the run notebook."
-      >📓</RailButton>
+      >📓</RailButton>}
       <RailButton
         id="CodeUtilityPanelCollapsedUsage" tone={ORANGE}
         onClick={onUsage}

@@ -72,6 +72,15 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
+- **One line per model, effort chosen inline.** A model that exposes reasoning
+  -effort tiers (Claude / GPT) is **one row** whose right edge carries a
+  `Low · Med · High · Max` strip — clicking a segment selects
+  `<variant>/<id>:<tier>`, the same id the dispatch has always parsed. Tiers are
+  normalised to cheapest→deepest whatever order the catalogue lists them in, a
+  disconnected account disables the whole strip, and the section header counts
+  **rows**, not tier entries. Grouping lives in `groupRows()` in
+  `ModelPicker.tsx`, so every surface gets it from the one shared picker.
+  Guarded by `modelPickerEffortRow.verify.run.mjs`.
 - **No surface ever auto-picks a model.** With nothing saved the picker reads
   **“Select model”** (`SELECT_MODEL_LABEL`) and Send/Generate/Run is blocked by
   the rule-based `components/ModelRequiredDialog` — so a run can't use (or bill)

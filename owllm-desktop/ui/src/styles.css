@@ -322,7 +322,8 @@
 }
 
 .ow-model-picker--solid-psychedelic .ow-model-picker__trigger:focus-visible,
-.ow-model-picker--solid-psychedelic .ow-model-picker__option:focus-visible {
+.ow-model-picker--solid-psychedelic .ow-model-picker__option:focus-visible,
+.ow-model-picker--solid-psychedelic .ow-model-picker__effort:focus-visible {
   outline: 2px solid #ffd93c;
   outline-offset: 2px;
   box-shadow: none;
@@ -348,6 +349,26 @@
 .ow-model-picker--solid-psychedelic .ow-model-picker__option[data-state="selected"]:hover:not(:disabled) {
   background: #ff5c8a;
   color: #260812;
+  box-shadow: none;
+}
+
+/* Inline reasoning-effort strip on a tiered model row. Same solid palette as
+   the option rows, one step brighter so the active tier reads at 9.5px. */
+.ow-model-picker--solid-psychedelic .ow-model-picker__effort {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__effort[data-state="selected"] {
+  background: #ffd93c;
+  color: #241c00;
+  box-shadow: none;
+}
+
+.ow-model-picker--solid-psychedelic .ow-model-picker__effort:hover:not(:disabled) {
+  background: #7fd4ff;
+  color: #041722;
   box-shadow: none;
 }
 

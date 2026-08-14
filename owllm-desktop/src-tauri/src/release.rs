@@ -111,30 +111,116 @@ pub struct ReadyCheck {
     pub detail: String,
 }
 
+/// Hard ceiling for one readiness git. `ls-remote` reaches the network and can
+/// stall on a dead link, a captive portal, or a credential helper that ignores
+/// every non-interactive switch. The card re-probes every 30s, so a probe that
+/// outlives this one is never worth waiting for — and a probe that waits
+/// forever holds a blocking thread forever and the next tick starts another.
+const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Kill a stuck git AND the helpers it spawned. `git.exe` is only the parent —
+/// `git-remote-https` and the credential helper are separate processes that
+/// survive it and keep holding the inherited stdout/stderr pipes open.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Run one git command against the repo on the HOST (native path, native git,
 /// native credentials — the exact environment the sandboxed agents lack).
 /// GIT_TERMINAL_PROMPT=0 makes a missing credential FAIL FAST instead of
 /// hanging the UI waiting for a username prompt that can never be answered.
+/// GUI credential prompts are blocked process-wide (git::forbid_gui_credential_prompts);
+/// GIT_PROBE_TIMEOUT is the backstop for every other way a git can hang.
 fn run_git(host_dir: &str, args: &[&str]) -> (bool, String) {
+    use std::io::Read;
+    use std::process::Stdio;
+
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(host_dir).args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    match cmd.output() {
-        Ok(out) => {
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            (out.status.success(), combined.trim().to_string())
-        }
-        Err(e) => (false, format!("spawn git: {e}")),
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (false, format!("spawn git: {e}")),
+    };
+
+    // Drain both pipes on their own threads: a full pipe buffer would deadlock
+    // a child we are otherwise willing to wait for. The threads are never
+    // joined on the timeout path — an orphan helper can still hold the write
+    // end, and waiting on that is the very hang this function exists to bound.
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
+    let stdout = child
+        .stdout
+        .take()
+        .map(|r| Box::new(r) as Box<dyn Read + Send>);
+    let stderr = child
+        .stderr
+        .take()
+        .map(|r| Box::new(r) as Box<dyn Read + Send>);
+    for (is_err, pipe) in [(false, stdout), (true, stderr)] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(mut r) = pipe {
+                let _ = r.read_to_string(&mut s);
+            }
+            let _ = tx.send((is_err, s));
+        });
     }
+    drop(tx);
+
+    let deadline = std::time::Instant::now() + GIT_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    kill_process_tree(&mut child);
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return (false, format!("wait git: {e}")),
+        }
+    };
+
+    let Some(st) = status else {
+        return (
+            false,
+            format!(
+                "git {} did not answer within {}s and was stopped \
+                 (network unreachable, or a credential helper waiting on input)",
+                args.join(" "),
+                GIT_PROBE_TIMEOUT.as_secs()
+            ),
+        );
+    };
+    // The child is gone, so both readers are guaranteed to finish.
+    let (mut out, mut err) = (String::new(), String::new());
+    while let Ok((is_err, s)) = rx.recv() {
+        if is_err {
+            err = s;
+        } else {
+            out = s;
+        }
+    }
+    (st.success(), format!("{out}{err}").trim().to_string())
 }
 
 /// Convert any project-path shape the agent might pass — Windows `C:\…`, WSL

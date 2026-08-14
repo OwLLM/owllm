@@ -10,6 +10,29 @@ use std::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Every git this app spawns runs unattended: a 30s readiness probe, a vault
+/// sync, an agent's commit. None of them has a console to answer a prompt, and
+/// none has anyone watching the instant it asks.
+///
+/// `GIT_TERMINAL_PROMPT=0` only silences git's OWN terminal prompt. A GUI
+/// credential helper — Git Credential Manager, which ships with git on every
+/// desktop OS and is the default `credential.helper` on Windows — ignores it
+/// and opens a modal dialog instead, then blocks the child until a human
+/// answers. A polling probe then stacks one blocked git plus one orphan dialog
+/// per tick, without bound, until the machine is unusable.
+///
+/// Set process-wide before anything can spawn git, so every child inherits it
+/// (including the ones CLI agents spawn — they cannot answer a dialog either).
+/// Terminal prompts are deliberately left alone: a PTY the user is looking at
+/// CAN be answered, and a missing credential there should still be askable.
+pub fn forbid_gui_credential_prompts() {
+    // GCM's own switch, and the git-config form every GCM-derived helper reads.
+    std::env::set_var("GCM_INTERACTIVE", "never");
+    std::env::set_var("GIT_CONFIG_COUNT", "1");
+    std::env::set_var("GIT_CONFIG_KEY_0", "credential.interactive");
+    std::env::set_var("GIT_CONFIG_VALUE_0", "false");
+}
+
 fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(Path::new(dir));

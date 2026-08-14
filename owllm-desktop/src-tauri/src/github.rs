@@ -252,18 +252,54 @@ fn configure_host(login: &str, email: &str, token: &str) -> Result<(), String> {
         .ok_or_else(|| "no home directory".to_string())?;
     let p = std::path::PathBuf::from(home).join(".git-credentials");
     let line = format!("https://{login}:{token}@github.com");
-    // Keep any non-github lines, replace/add the github one.
+    // Keep any non-github lines, replace/add the github one. A line that is not
+    // a credential URL is DROPPED, not carried: `git credential-store` writes
+    // unparseable lines back verbatim forever, so one corrupt line (a NUL run
+    // from an interrupted write — `trim()` does not strip NUL, so it survives
+    // an is-empty test) otherwise outlives every reconnect.
     let existing = std::fs::read_to_string(&p).unwrap_or_default();
     let mut kept: Vec<String> = existing
         .lines()
-        .filter(|l| !l.contains("@github.com") && !l.trim().is_empty())
+        .filter(|l| !l.contains("@github.com") && is_credential_line(l))
         .map(|s| s.to_string())
         .collect();
     kept.push(line);
     let mut body = kept.join("\n");
     body.push('\n');
-    std::fs::write(&p, body).map_err(|e| format!("write {}: {e}", p.display()))?;
+    write_atomically(&p, &body)?;
     Ok(())
+}
+
+/// A usable `~/.git-credentials` entry: `scheme://…host`, no control bytes.
+/// Anything else is debris git will preserve but can never authenticate with.
+fn is_credential_line(l: &str) -> bool {
+    let t = l.trim();
+    !t.is_empty() && t.contains("://") && !t.chars().any(|c| c.is_control())
+}
+
+/// Write via temp + rename so an interrupted write can never leave a file whose
+/// length was committed but whose bytes were not — the shape that turns a
+/// credential store into a run of NULs and sends every later git to a prompt.
+fn write_atomically(p: &std::path::Path, body: &str) -> Result<(), String> {
+    let tmp = p.with_extension("owllm-tmp");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        f.write_all(body.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, p).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replace {}: {e}", p.display())
+    })
 }
 
 #[tauri::command]
@@ -793,12 +829,12 @@ pub async fn github_disconnect(distro: Option<String>) -> Result<(), String> {
             if let Ok(existing) = std::fs::read_to_string(&p) {
                 let kept: Vec<&str> = existing
                     .lines()
-                    .filter(|l| !l.contains("@github.com") && !l.trim().is_empty())
+                    .filter(|l| !l.contains("@github.com") && is_credential_line(l))
                     .collect();
                 if kept.is_empty() {
                     let _ = std::fs::remove_file(&p);
                 } else {
-                    let _ = std::fs::write(&p, format!("{}\n", kept.join("\n")));
+                    let _ = write_atomically(&p, &format!("{}\n", kept.join("\n")));
                 }
             }
         }

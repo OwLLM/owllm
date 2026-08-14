@@ -382,6 +382,10 @@ pub fn run() {
         return;
     }
     install_crash_log_hook();
+    // Before ANY subsystem can spawn git (vault ownership check, readiness
+    // probes, sync): a background git must never be able to open a modal
+    // credential dialog nobody is there to answer.
+    git::forbid_gui_credential_prompts();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and

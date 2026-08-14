@@ -293,6 +293,11 @@ function runHarnesses() {
     // guards the step that decides which exe the user actually clicks, so it
     // must run on any build host, deps installed or not.
     "buildArtifactCopy.verify.run.mjs",
+    // Source assertions over git.rs/lib.rs/release.rs/github.rs plus two proofs
+    // executed through the installed git. It guards against a background probe
+    // opening a modal credential dialog nobody can answer, so it must run on
+    // every host regardless of whether the UI deps are installed.
+    "backgroundGitNoPrompt.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

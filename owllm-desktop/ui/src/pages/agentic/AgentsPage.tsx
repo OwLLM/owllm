@@ -2722,17 +2722,21 @@ function AgentChatTile({
           : "No skills equipped — click to add"}
         style={{
           position: "absolute", bottom: 6, right: 6, zIndex: 4, cursor: "pointer",
-          display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 1,
+          display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 0,
         }}
       >
         {(skills ?? []).slice(0, 5).map((id, i) => (
           <span
             key={id}
             style={{
-              fontSize: 11, width: 18, height: 18,
+              fontSize: 17, width: 27, height: 27,
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
-              borderRadius: 4,
+              borderRadius: 6,
+              // Bigger badges would run a flat row across a narrow card, so they
+              // overlap into a fanned stack (negative margin — `gap` cannot go
+              // negative and would silently no-op).
+              marginLeft: -4,
               transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
               boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
             }}
@@ -2740,16 +2744,16 @@ function AgentChatTile({
         ))}
         {(skills ?? []).length > 5 && (
           <span style={{
-            fontSize: 9, fontWeight: 800, color: "var(--fg-muted)",
+            fontSize: 11, fontWeight: 800, color: "var(--fg-muted)",
             alignSelf: "center", padding: "0 2px",
           }}>+{(skills ?? []).length - 5}</span>
         )}
         {(!skills || skills.length === 0) && (
           <span style={{
-            fontSize: 10, width: 18, height: 18, opacity: 0.75,
+            fontSize: 16, width: 27, height: 27, opacity: 0.75,
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             background: "rgba(8,11,17,0.78)", border: `1px dashed rgba(${rgb},0.5)`,
-            borderRadius: 4,
+            borderRadius: 6,
           }}>🧩</span>
         )}
       </div>
@@ -2890,7 +2894,7 @@ function AgentSkillsModal({
                       title={`${skillPackLabel(p)} — ${p.description || "no description"}\n~${est} tokens of instructions · ${on ? "equipped, click to remove" : "click to equip"}`}
                       style={{
                         display: "flex", flexDirection: "column", alignItems: "stretch", gap: 5,
-                        textAlign: "left", padding: "9px 10px", minHeight: 92, minWidth: 0,
+                        textAlign: "left", padding: "9px 10px", minHeight: 104, minWidth: 0,
                         cursor: "pointer", borderRadius: 9, color: "var(--fg)",
                         border: on ? `1px solid ${accent}` : hot ? "1px solid var(--border-strong)" : "1px solid var(--border)",
                         background: on
@@ -2903,7 +2907,7 @@ function AgentSkillsModal({
                     >
                       <span style={{ display: "flex", alignItems: "center", gap: 7, width: "100%" }}>
                         <span style={{
-                          width: 24, height: 24, flexShrink: 0, fontSize: 14, borderRadius: 6,
+                          width: 36, height: 36, flexShrink: 0, fontSize: 21, borderRadius: 9,
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
                           background: on ? `${accent}33` : "var(--bg-deep)",
                           border: `1px solid ${on ? accent : "var(--border)"}`,

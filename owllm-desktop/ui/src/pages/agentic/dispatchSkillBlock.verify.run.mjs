@@ -241,6 +241,27 @@ check("whitespace-only block is not injected", !specBlank.includes("--- YOUR SKI
     agentsPage.includes("organizeSkillPacks(packs, equipped, query)")
       && agentsPage.includes("Search skills by name or description"));
 
+  // Skill icons carry the whole at-a-glance read of what an agent is equipped
+  // with, so they are pinned as MINIMUMS: the card badges were 18px and the
+  // picker icons 24px, both too small to identify. A later style tidy-up must
+  // not shrink them back.
+  const iconBox = (marker) => {
+    const at = agentsPage.indexOf(marker);
+    if (at < 0) return null;
+    const before = agentsPage.slice(Math.max(0, at - 700), at);
+    const m = [...before.matchAll(/width:\s*(\d+),\s*height:\s*(\d+)/g)].pop();
+    return m ? Math.min(Number(m[1]), Number(m[2])) : null;
+  };
+  check("card skill badges are legible (>= 24px)", (iconBox("{skillIcon(id)}") ?? 0) >= 24);
+  check("picker skill icons are legible (>= 32px)", (iconBox("{skillIcon(p.id)}") ?? 0) >= 32);
+  // The fanned badge stack must overlap via margin: CSS `gap` rejects negative
+  // values outright, so a negative gap silently collapses to 0 and the row
+  // runs off a narrow card instead.
+  const ribbonAt = agentsPage.indexOf("Skill ribbon —");
+  check("ribbon stack overlaps by margin, never an invalid negative gap",
+    ribbonAt > 0 && !/gap:\s*-/.test(agentsPage.slice(ribbonAt, agentsPage.indexOf("{skillIcon(id)}")))
+      && /marginLeft:\s*-\d/.test(agentsPage.slice(ribbonAt, agentsPage.indexOf("{skillIcon(id)}"))));
+
   // Rust side of the duplicate fix: list_skill_packs dedups by id, and the
   // homes are enumerated user → legacy → bundled so a user-installed/edited
   // pack shadows the read-only bundled copy (writes always target the user

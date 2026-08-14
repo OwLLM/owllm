@@ -270,6 +270,28 @@ fn configure_host(login: &str, email: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The credential store the app's own unattended git uses, materialised from
+/// the connected account. Kept beside the app's other user data — never in
+/// `$HOME`, which git shares with `gh`, VS Code and the user's terminal.
+///
+/// Rewritten whenever it does not already match the connected account, so a
+/// `credential reject` that empties it (see `git::app_owned_credential_args`)
+/// heals on the next call instead of degrading every later sync.
+///
+/// `None` when no account is connected, or when there is nowhere to put it.
+pub fn background_credentials_file() -> Option<std::path::PathBuf> {
+    let login = crate::accounts::accounts_get_secret("GITHUB_LOGIN".to_string())?;
+    let token = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string())?;
+    let root = crate::paths::user_data_root()?;
+    let p = root.join("git-credentials");
+    let body = format!("https://{login}:{token}@github.com\n");
+    if std::fs::read_to_string(&p).as_deref().ok() != Some(body.as_str()) {
+        std::fs::create_dir_all(&root).ok()?;
+        write_atomically(&p, &body).ok()?;
+    }
+    Some(p)
+}
+
 /// A usable `~/.git-credentials` entry: `scheme://…host`, no control bytes.
 /// Anything else is debris git will preserve but can never authenticate with.
 fn is_credential_line(l: &str) -> bool {

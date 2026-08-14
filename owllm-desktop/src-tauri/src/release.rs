@@ -145,6 +145,7 @@ fn run_git(host_dir: &str, args: &[&str]) -> (bool, String) {
     use std::process::Stdio;
 
     let mut cmd = Command::new("git");
+    cmd.args(crate::git::app_owned_credential_args());
     cmd.arg("-C").arg(host_dir).args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.stdin(Stdio::null())

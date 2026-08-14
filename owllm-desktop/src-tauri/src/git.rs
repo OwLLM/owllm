@@ -33,6 +33,44 @@ pub fn forbid_gui_credential_prompts() {
     std::env::set_var("GIT_CONFIG_VALUE_0", "false");
 }
 
+/// `-c` arguments that keep an unattended git's credential I/O inside a store
+/// this app owns.
+///
+/// Not prompting is only half of it. When a server rejects a credential that
+/// came from a helper, git runs `credential reject`, which broadcasts **erase**
+/// to EVERY configured helper — the OS vault (Windows Credential Manager, the
+/// macOS keychain) and `~/.git-credentials` alike. Those are shared surfaces:
+/// `gh`, VS Code and the user's own terminal read them. So one 401 from a
+/// cosmetic 30s readiness poll can silently delete the user's GitHub login for
+/// every tool on the machine — with the prompt suppressed, without even a
+/// dialog to notice. Observed: an emptied store on Linux, where there is no GUI
+/// helper at all and nothing ever appeared on screen.
+///
+/// Git has no switch to accept `get` but refuse `erase`, so instead the helper
+/// list is reset and replaced with an app-owned file. An erase then costs a
+/// file `github::background_credentials_file` rewrites on the next call, and
+/// nothing outside the app is reachable.
+///
+/// Empty when no GitHub account is connected — there is nothing to substitute,
+/// and reducing an unattended git to no credentials at all would only turn a
+/// working probe into a failing one.
+pub fn app_owned_credential_args() -> Vec<String> {
+    let Some(store) = crate::github::background_credentials_file() else {
+        return Vec::new();
+    };
+    // git hands a multi-word helper value to the shell, so the path is quoted
+    // and slash-separated — a Windows `C:\Users\…` would otherwise arrive with
+    // its separators eaten as escapes.
+    let path = store.to_string_lossy().replace('\\', "/");
+    vec![
+        "-c".into(),
+        // An empty value resets the inherited helper list (system + global).
+        "credential.helper=".into(),
+        "-c".into(),
+        format!("credential.helper=store --file=\"{path}\""),
+    ]
+}
+
 fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(Path::new(dir));

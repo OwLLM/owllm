@@ -151,16 +151,23 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   Commit / Merge / Publish + ⚙ Set up repo), a fixed agent for every way of
   working (team, solo-loop, single coder) — so it is no longer also tiled on
   the ▦ canvas grid. **Right column** = the Code panel's resizable shell + tab
-  style carrying 👤 Super User / 📜 Orchestrator / 🏷 Team + the always-visible
-  chat host, **plus the Code panel's 📓 Notebook page** (the shared
-  `RunNotebook` mounted `inline`, kept mounted across tab flips), with the
-  bottom **Usage** + 🌐 Browser container; collapses to the orange rail
-  (📓 📊 ⚡ 🌐). The FlowHeader's duplicate 📓 Notebook and 🧠 Memory buttons
-  are gone — both features live in the columns.
+  style carrying 📋 Rules / 🏷 Team + the always-visible chat host, **plus the
+  Code panel's 📓 Notebook page** (the shared `RunNotebook` mounted `inline`,
+  kept mounted across tab flips), with the bottom **Usage** + 🌐 Browser
+  container; collapses to the orange rail (📓 📊 ⚡ 🌐). The focused agent's
+  page has **no tab of its own** — the chat/log host below *is* that page and
+  never hides, so the old 📜 Orchestrator tab was redundant; the per-agent
+  Model + Voice it carried moved into the agent editor popup (click the agent's
+  name). The FlowHeader's duplicate 📓 Notebook and 🧠 Memory buttons are gone —
+  both features live in the columns.
   **Composer** = the same `ChatInputDock` now at the
   bottom of the canvas column (the Code page's composer position), out of the
   right column; slash commands still switch the pane's sub-tabs via a ref
-  bridge. Every 🌐 browser control opens the popup **and** splits app +
+  bridge. Directly above its textarea, `RunToggleRow` puts the three run
+  switches on **one line** — ⚡ auto-approve · critic decides for me ·
+  parallel dispatch — the controls that used to sit in the right column's
+  Super User container (which is gone; auto-approve is no longer *also* a
+  Composer toolbar toggle). Every 🌐 browser control opens the popup **and** splits app +
   browser side by side (`openWelcomeBrowserSplit`). Gated by
   `agentsCodeLayoutMerge.verify.run.mjs`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
@@ -252,8 +259,8 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
-  prompt (and every Code-page coder turn). Editable from the Super User card
-  (Agents) and the Code page's right column.
+  prompt (and every Code-page coder turn). Editable from the right column's
+  📋 Rules page (Agents) and the Code page's right column.
 - **Skills**: skill packs auto-equipped by role, badges on agent cards,
   cross-provider self-load (any model reads `.owllm/skills/<id>` from disk).
 - **Personal agents + rule cards**: Studio provides an editor for reusable,

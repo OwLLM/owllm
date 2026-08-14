@@ -2788,6 +2788,7 @@ function AgentEditorModal({
   agentName, displayName, icon,
   initialModel, initialColor, initialPrompt, initialProfileRef, projectId, projectCwd,
   models, accountsStatus, serverState, effectiveTeamModel, providerFor,
+  voiceFor, onPickAgentVoice, ttsVoices,
   templateId, onPickModel, onPreviewColor, onClose, onSaved,
 }: {
   agentName: string;
@@ -2806,6 +2807,11 @@ function AgentEditorModal({
   /// Model → provider resolver (same one the run loop uses) so the ✨ Organize
   /// button can call the agent's own model to split the freeform prompt.
   providerFor: (modelId: string) => string;
+  /// Per-agent TTS wiring for the Voice row (same handlers the right column's
+  /// agent tab used before it was removed).
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  ttsVoices: SpeechSynthesisVoice[];
   /// Template id (= save_team_template fileStem) backing the active team, or
   /// null when the roster is a custom project with no saved template.
   templateId: string | null;
@@ -3014,6 +3020,20 @@ function AgentEditorModal({
                   ? `(use team / server model · ${serverState.model_id})`
                   : "(use team / server model — none running)"
             }
+          />
+        </div>
+
+        {/* Voice — the per-agent TTS row. It used to sit on the right column's
+            agent tab; that tab is gone (user spec 2026-08-14), so it lives with
+            the agent's other per-agent setting, its model, in this editor. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Voice</span>
+          <AgentVoiceRow
+            agent={agentName}
+            cfg={voiceFor(agentName)}
+            voices={ttsVoices}
+            onChange={(partial) => onPickAgentVoice(agentName, partial)}
+            disabled={false}
           />
         </div>
 
@@ -5315,9 +5335,69 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
 //     square (orange) while the dispatch is in flight. Tomorrow we
 //     wire the stop button to an AbortController; for now it just
 //     reflects state.
+// RunToggleRow — the three run-scope switches that used to live in the right
+// column's Super User container (user spec 2026-08-14: "put those 3 check
+// boxes above the input text box in 1 line"). They are run settings, so they
+// belong with the composer that starts the run. Each keeps its old accent
+// colour and its explanation, now as the tooltip so the row stays one line.
+function RunToggleRow({
+  autoApprove, onToggleAutoApprove,
+  directorMode, onToggleDirectorMode,
+  parallelMode, onToggleParallel,
+}: {
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
+}) {
+  const row: React.CSSProperties = { display:"flex", alignItems:"center", gap:5, fontSize:11, cursor:"pointer", whiteSpace:"nowrap" };
+  return (
+    <div data-ui="RunToggleRow" style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap", padding:"0 2px 8px" }}>
+      <label
+        style={{ ...row, color: autoApprove ? "#ff8c8c" : "#7888a8" }}
+        title={autoApprove ? "Agents auto-accept tool calls" : "Agents wait for your approval on every tool call"}
+      >
+        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+        <span>⚡ auto-approve tool requests</span>
+      </label>
+      {/* The ONE critic-authority control (formerly two: "director mode" +
+          "critic = super user" — merged per user, they meant the same thing).
+          OFF (default): the Critical Thinker is advisory — it reviews in bounded
+          loops but can NEVER block the team (so a guarded critic can't stall a
+          Red-Team run). ON: it is the Super User and decides in your place. */}
+      <label
+        style={{ ...row, color: directorMode ? "#ffb3e6" : "#7888a8" }}
+        title={directorMode
+          ? "ON: the critic answers my decisions + approves/rejects the plan and the answer"
+          : "OFF: the critic is advisory only — it never blocks the team"}
+      >
+        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#ff79d2" }} />
+        <span>critic decides for me</span>
+      </label>
+      {/* Parallel dispatch — lets the orchestrator fan out INDEPENDENT tasks in
+          one turn; the team already runs them concurrently in isolated worktrees. */}
+      <label
+        style={{ ...row, color: parallelMode ? "#7fd4ff" : "#7888a8" }}
+        title={parallelMode
+          ? "ON: the orchestrator batches independent tasks into one wave"
+          : "OFF: one task at a time (sequential)"}
+      >
+        <input type="checkbox" checked={parallelMode} onChange={onToggleParallel} style={{ width:12, height:12, accentColor:"#3aa0ff" }} />
+        <span>parallel dispatch</span>
+      </label>
+      {/* Solo-loop lives on the canvas header toggle (⚡ Solo / 👥 Team) — it was
+          duplicated as a redundant checkbox and removed (v0.7.14). */}
+    </div>
+  );
+}
+
 function ChatInputDock({
   draft, setDraft, inputRef, onSend, busy,
   autoApprove, onToggleAutoApprove,
+  directorMode, onToggleDirectorMode,
+  parallelMode, onToggleParallel,
   onSwitchTab,
   needsLoad, loadingModel, onLoadModel,
 }: {
@@ -5326,8 +5406,14 @@ function ChatInputDock({
   inputRef: React.RefObject<HTMLTextAreaElement>;
   onSend: (attachments: Attachment[]) => void;
   busy: boolean;
+  /// The three run switches rendered on one line above the textarea — they
+  /// moved here from the right column's Super User container.
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
   onSwitchTab: (tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void;
   /// True when the team's currently-resolved model is local AND
   /// llama-server isn't already serving it. The send button label
@@ -5476,6 +5562,16 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
+      <RunToggleRow
+        autoApprove={autoApprove}
+        onToggleAutoApprove={onToggleAutoApprove}
+        directorMode={directorMode}
+        onToggleDirectorMode={onToggleDirectorMode}
+        parallelMode={parallelMode}
+        onToggleParallel={onToggleParallel}
+      />
+      {/* Auto mode is NOT a Composer toolbar toggle any more — it is the first
+          of the three switches on RunToggleRow above. One control per setting. */}
       <Composer
         dataUi="UserInput"
         textareaRef={inputRef}
@@ -5505,13 +5601,6 @@ function ChatInputDock({
         mic
         showCounter
         slashCommands={slashCommands.map(c => ({ name: c.name, hint: c.description, run: () => runCommand(c) }))}
-        toggles={[{
-          key: "auto",
-          label: "⚡ Auto mode",
-          title: autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval",
-          on: autoApprove,
-          onToggle: onToggleAutoApprove,
-        }]}
         canSend={loadingModel || !!draft.trim() || attachments.length > 0}
         sendLabel={loadingModel ? "⏳ Loading" : needsLoad ? "⚡ Load" : "▶"}
         sendTitle={loadingModel
@@ -5533,7 +5622,7 @@ function ChatInputDock({
 function OrchestratorPane({
   agentLogs, agentThoughts, runError, serverState,
   selectedAgent, activeAgent,
-  team, isSuperUser,
+  team, rulesPage,
   projectId, directives, onDirectivesChanged,
   projectCwd,
   supChat, supSendBusy,
@@ -5546,9 +5635,9 @@ function OrchestratorPane({
   selectedAgent: string | null;
   activeAgent: string | null;
   team: Team | null;
-  /// True only on the Super User top page — gates the Rules sub-tab so rules
+  /// True only on the 📋 Rules top page — gates the Rules sub-tab so rules
   /// are visible ONLY there (per user request).
-  isSuperUser: boolean;
+  rulesPage: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
   projectCwd?: string;
@@ -5577,12 +5666,12 @@ function OrchestratorPane({
   }, [switchTabRef]);
   // Effective (displayed) tab: gracefully fold away tabs that no longer exist
   // or aren't allowed here — the removed "reply" tab, and "rules" when we're not
-  // on the Super User page — both fall back to Full Chat. Keeps slash commands
+  // on the 📋 Rules page — both fall back to Full Chat. Keeps slash commands
   // and stale state from showing a blank/forbidden pane.
-  // Super User is the human operator — its card shows ONLY the operator's info +
-  // settings (Rules), never the agent chat log (user spec #4). So on the Super
-  // User page the pane is pinned to Rules and the chat tabs/dock are hidden.
-  const effTab = isSuperUser
+  // The Rules page shows ONLY the rules editor, never the agent chat log
+  // (user spec #4), so there the pane is pinned to Rules and the chat tabs
+  // are hidden.
+  const effTab = rulesPage
     ? "rules"
     : (activeTab === "reply" || activeTab === "rules") ? "full" : activeTab;
   // Pick which buffer to show: explicit selection > currently-active
@@ -5760,9 +5849,9 @@ function OrchestratorPane({
             smaller than full-screen). flexShrink:0 + whiteSpace:nowrap
             on each button keeps the labels on one line. */}
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)", flexShrink:0, overflowX:"auto", overflowY:"hidden" }}>
-          {(isSuperUser
-            // Super User page = operator info + settings only. Show JUST the
-            // Rules (settings) tab; no agent chat tabs (user spec #4).
+          {(rulesPage
+            // Rules page = the project rules only. Show JUST the Rules
+            // (settings) tab; no agent chat tabs (user spec #4).
             ? [{ id:"rules" as const, label:"📋 Rules", accent:"#ff6b6b", count: directives.length }]
             : [
                 { id:"userinput" as const, label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
@@ -6029,17 +6118,16 @@ function OrchestratorPane({
 // now driven by which top-level tab is open. The SuperUserCard canvas
 // overlay is gone too — the card lives entirely inside this column.
 
-// Rules is no longer a top-level tab — the user spec 2026-05-28
-// places it as a sub-tab inside the Orchestrator (chat container).
-// Three top-level pages remain: Super User (Y), Orchestrator (B),
-// Team (G).
-// 2026-08-14: the Code page's 📓 Notebook page joins them as a fourth page —
-// the right column now carries EVERY feature both pages had, so the Notebook
-// no longer needs its own header button.
-type RightTabId = "super" | "orch" | "team" | "notebook";
+// 2026-08-14: the Code page's 📓 Notebook page joins them as a page of this
+// column — the right column now carries EVERY feature both pages had, so the
+// Notebook no longer needs its own header button.
+// 2026-08-14 (later, user spec): the agent's page has NO button of its own —
+// the chat/log host below is ALWAYS the focused agent's page, so a tab that
+// only collapsed the settings strip was redundant. And the old "Super User"
+// page is now just what it shows: Rules.
+type RightTabId = "rules" | "team" | "notebook";
 const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
-  super: "👤 Super User",
-  orch:  "📜 Orchestrator",
+  rules: "📋 Rules",
   team:  "🏷 Team",
   notebook: "📓 Notebook",
 };
@@ -6052,7 +6140,7 @@ const AGENTS_SIDE_TAB_KEY = "owllm:agents:sidetab";
 const AGENTS_SIDE_MIN_W = 360;
 
 /// Choose which page the right column shows the next time it mounts. The
-/// collapsed rail uses this so its ⚡ icon lands on Super User — the panel
+/// collapsed rail uses this so its ⚡ icon lands on Rules — the panel
 /// unmounts while shrunk, so the stored preference IS the handover.
 function selectAgentsSideTab(tab: RightTabId): void {
   try { localStorage.setItem(AGENTS_SIDE_TAB_KEY, tab); } catch { /* keeps the last choice */ }
@@ -6060,26 +6148,23 @@ function selectAgentsSideTab(tab: RightTabId): void {
 function loadAgentsSideTab(): RightTabId {
   try {
     const t = localStorage.getItem(AGENTS_SIDE_TAB_KEY);
-    return t === "super" || t === "team" || t === "notebook" ? t : "orch";
-  } catch { return "orch"; }
+    // "super" is the pre-rename id for the Rules page — migrate it so a user
+    // who left the column on that page doesn't get bounced elsewhere.
+    if (t === "rules" || t === "super") return "rules";
+    if (t === "notebook") return "notebook";
+    return "team";
+  } catch { return "team"; }
 }
 
 function RightColumnTabs(props: {
   team: Team | null;
-  roleByName: Map<string, RoleData>;
   supChat: GoalMsg[];
   onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
   projectId: string;
   projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
-  directorMode: boolean;
-  onToggleDirectorMode: () => void;
-  parallelMode: boolean;
-  onToggleParallel: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -6088,9 +6173,6 @@ function RightColumnTabs(props: {
   activeAgent: string | null;
   phase: DispatchPhase;
   models: ModelInfo[];
-  modelFor: (agentName: string) => string;
-  agentModelOverrideFor: (agentName: string) => string;
-  onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
   onPickTeamModel: (id: string) => void;
@@ -6128,26 +6210,12 @@ function RightColumnTabs(props: {
     return () => window.removeEventListener("owllm:open-run-notebook", open);
   }, []);
 
-  // Dynamic label for the middle (Orchestrator) tab. The pane *is*
-  // the generic agent page: when the user clicks the orchestrator
-  // node, it reads "Orchestrator"; when they click another agent, it
-  // reads that agent's display name. No more second-line title strip
-  // below the tabs — the title lives on the tab itself.
-  const orchName = props.team ? (findOrchestratorSpec(props.team)?.name ?? null) : null;
-  const focusAgent =
-    props.selectedAgent ??
-    props.activeAgent ??
-    orchName ??
-    null;
-  const orchTabLabel =
-    focusAgent && focusAgent !== orchName && focusAgent !== "you" && props.team
-      ? `📜 ${displayLabel(focusAgent)}`
-      : "📜 Orchestrator";
-
   return (
     <SideColumnShell widthKey={AGENTS_SIDE_WIDTH_KEY} minW={AGENTS_SIDE_MIN_W} dataUi="RightColumnTabs" className="selectable-chat">
       {/* Tab strip — the Code side panel's strip (same tab style), carrying
-          the agentic pages: 👤 Super User | 📜 Orchestrator | 🏷 Team. */}
+          the agentic pages: 📋 Rules | 🏷 Team | 📓 Notebook. The focused
+          agent's page needs no button: the chat/log host below IS it, and it
+          is always on screen. */}
       <div data-ui="RightTabs" style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2, flexShrink: 0 }}>
         <button
           data-ui="AgentsUtilityPanelCollapse"
@@ -6156,8 +6224,8 @@ function RightColumnTabs(props: {
           title="Shrink right column"
           style={{ height: 28, width: 28, padding: 0, flexShrink: 0, cursor: "pointer", fontSize: 18, lineHeight: 1, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-surface)", color: "var(--fg-muted)" }}
         >›</button>
-        {(["super","orch","team","notebook"] as const).map(id => {
-          const label = id === "orch" ? orchTabLabel : RIGHT_TAB_LABEL[id];
+        {(["rules","team","notebook"] as const).map(id => {
+          const label = RIGHT_TAB_LABEL[id];
           return (
             <button
               key={id}
@@ -6169,43 +6237,25 @@ function RightColumnTabs(props: {
           );
         })}
       </div>
-      {/* Top settings panel — only the Orchestrator face is gone now
-          (its per-agent info — Model / Voice / Info — lives on each
-          graph card). Super User and Team are project / team scope
-          and still belong here. The panel is sized to ~22 % of the
-          right column when active; collapses to 0 px when the
-          Orchestrator tab is open. */}
+      {/* Top settings panel — Team scope only. The Super User container that
+          used to sit here is gone: its three run switches moved onto one line
+          above the composer (user spec 2026-08-14), so the Rules page is the
+          rules editor and nothing else. */}
       <div data-ui="RightSettingsPanel" style={{
-        // The Notebook is a full page (like the Code page's) — no team/agent
-        // settings strip above it.
-        display: tab === "notebook" ? "none" : "block",
+        // Rules and Notebook are full pages (like the Code page's) — no
+        // team/agent settings strip above them.
+        display: tab === "team" ? "block" : "none",
         flex:"0 0 auto",
         maxHeight:"22%",
-        // Natural height (no forced minHeight) so Team + Orch panels
-        // hug their 2-row content. The old 120 px minimum on Team
-        // produced a visible empty gap below the voice row that the
-        // Orch panel didn't have, breaking the symmetric look.
+        // Natural height (no forced minHeight) so the panel hugs its 2-row
+        // content. The old 120 px minimum produced a visible empty gap below
+        // the voice row.
         minHeight: 0,
         overflow:"auto",
-        // Orch + Team get matching padding so the model/voice rows sit
-        // identically on both tabs (used to be 0 on Orch because the
-        // pane rendered nothing; now it has content too).
-        padding: tab === "super" ? "8px 12px" : "8px 12px",
+        padding: "8px 12px",
         borderBottom: "1px solid var(--border)",
         background:"var(--bg-elevated)",
       }}>
-        {tab === "super" && (
-          <SuperUserSettings
-            autoApprove={props.autoApprove}
-            onToggleAutoApprove={props.onToggleAutoApprove}
-            directorMode={props.directorMode}
-            onToggleDirectorMode={props.onToggleDirectorMode}
-            parallelMode={props.parallelMode}
-            onToggleParallel={props.onToggleParallel}
-            team={props.team}
-            roleByName={props.roleByName}
-          />
-        )}
         {tab === "team" && (
           <TeamSettings
             team={props.team}
@@ -6219,32 +6269,10 @@ function RightColumnTabs(props: {
             voices={props.ttsVoices}
           />
         )}
-        {tab === "orch" && (
-          // Per user spec 2026-05-29: the Orchestrator/agent tab mirrors
-          // the Team tab — two rows: model picker + voice picker. The
-          // focus agent is whatever the user has selected (or the
-          // orchestrator by default), and the model + voice apply to
-          // that agent specifically.
-          <OrchAgentSettings
-            team={props.team}
-            selectedAgent={props.selectedAgent}
-            activeAgent={props.activeAgent}
-            models={props.models}
-            modelFor={props.modelFor}
-            agentModelOverrideFor={props.agentModelOverrideFor}
-            onPickAgentModel={props.onPickAgentModel}
-            accountsStatus={props.accountsStatus}
-            effectiveTeamModel={props.effectiveTeamModel}
-            serverState={props.serverState}
-            voiceFor={props.voiceFor}
-            onPickAgentVoice={props.onPickAgentVoice}
-            voices={props.ttsVoices}
-          />
-        )}
       </div>
-      {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
-          Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
-          when the top tab changes. */}
+      {/* Chat container — the focused agent's page. ALWAYS visible (that is
+          why it needs no tab of its own); the Rules page pins it to the rules
+          editor, the Notebook page swaps it out. */}
       {/* ---- Page: Notebook — the SAME inline RunNotebook the Code page's
           right column renders (kept mounted so notes/digest survive tab
           flips, exactly like CodeSidePanel). ---- */}
@@ -6260,7 +6288,7 @@ function RightColumnTabs(props: {
           selectedAgent={props.selectedAgent}
           activeAgent={props.activeAgent}
           team={props.team}
-          isSuperUser={tab === "super"}
+          rulesPage={tab === "rules"}
           projectId={props.projectId}
           projectCwd={props.projectCwd}
           directives={props.directives}
@@ -6281,81 +6309,6 @@ function RightColumnTabs(props: {
         </div>
       </div>
     </SideColumnShell>
-  );
-}
-
-// ---------- SuperUserSettings ----------
-// Compact yellow info container for the Super User top tab. Shows the
-// avatar + auto-approve + director-mode controls. Sized to ~18% of
-// the right column's available height.
-function SuperUserSettings({
-  autoApprove, onToggleAutoApprove,
-  directorMode, onToggleDirectorMode,
-  parallelMode, onToggleParallel,
-  team, roleByName,
-}: {
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
-  directorMode: boolean;
-  onToggleDirectorMode: () => void;
-  parallelMode: boolean;
-  onToggleParallel: () => void;
-  team: Team | null;
-  roleByName: Map<string, RoleData>;
-}) {
-  const peekAgents = (team?.agents ?? []).slice(0, 6);
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:"#ffd97a", lineHeight:"18px" }}>Super User</div>
-          <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase" }}>
-            {team?.agents.length ?? 0} agents on team
-          </div>
-        </div>
-        {peekAgents.length > 0 && (
-          <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-            {peekAgents.map((a, i) => (
-              <img key={i} src={owlSrc(agentIconRef(a, roleByName))} title={displayLabel(a.name)} style={{ width:18, height:18, opacity:0.85 }} />
-            ))}
-          </div>
-        )}
-      </div>
-      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-        <span>auto-approve tool requests</span>
-      </label>
-      {/* The ONE critic-authority control (formerly two: "director mode" +
-          "critic = super user" — merged per user, they meant the same thing).
-          OFF (default): the Critical Thinker is advisory — it reviews in bounded
-          loops but can NEVER block the team (so a guarded critic can't stall a
-          Red-Team run). ON: it is the Super User and decides in your place —
-          answers the orchestrator's mid-run decisions AND approves/rejects the
-          plan + final answer, with higher (still capped) round limits. Backed by
-          the director_mode flag, which already drives the "answer my decisions"
-          prompt block. */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: directorMode ? "#ffb3e6" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, marginTop:2, accentColor:"#ff79d2" }} />
-        <span>critic = super user (decides for me)
-          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {directorMode ? "answers my decisions + approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
-          </span>
-        </span>
-      </label>
-      {/* Parallel dispatch — lets the orchestrator fan out INDEPENDENT tasks in
-          one turn; the team already runs them concurrently in isolated worktrees. */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: parallelMode ? "#7fd4ff" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={parallelMode} onChange={onToggleParallel} style={{ width:12, height:12, marginTop:2, accentColor:"#3aa0ff" }} />
-        <span>parallel dispatch (run independent agents at once)
-          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {parallelMode ? "orchestrator batches independent tasks into one wave" : "off: one task at a time (sequential)"}
-          </span>
-        </span>
-      </label>
-      {/* Solo-loop lives on the canvas header toggle (⚡ Solo / 👥 Team) — it was
-          duplicated here as a redundant checkbox and removed (v0.7.14). */}
-    </div>
   );
 }
 
@@ -6536,74 +6489,6 @@ function OrchestratorSettings({
 // ---------- TeamSettings ----------
 // Compact green info container for the Team top tab. Team identity +
 // team-wide model picker.
-// OrchAgentSettings — minimal two-row settings panel for the
-// Orchestrator tab. Same shape as TeamSettings (model + voice), but
-// scoped to whichever agent the user has focused on the canvas.
-// Tab label is handled in RightColumnTabs (it flips to the focus
-// agent's display name when an agent other than the orchestrator
-// is selected).
-function OrchAgentSettings({
-  team, selectedAgent, activeAgent,
-  models, modelFor, agentModelOverrideFor, onPickAgentModel, accountsStatus,
-  effectiveTeamModel, serverState,
-  voiceFor, onPickAgentVoice, voices,
-}: {
-  team: Team | null;
-  selectedAgent: string | null;
-  activeAgent: string | null;
-  models: ModelInfo[];
-  modelFor: (agentName: string) => string;
-  agentModelOverrideFor: (agentName: string) => string;
-  onPickAgentModel: (agentName: string, modelId: string) => void;
-  accountsStatus: AccountsStatusLite | null;
-  effectiveTeamModel: string;
-  serverState: ServerStatus;
-  voiceFor: (agentName: string) => VoiceConfig;
-  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
-  voices: SpeechSynthesisVoice[];
-}) {
-  const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
-  const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
-  const explicitModel = agentModelOverrideFor(focus);
-  const inheritedModel = modelFor(focus);
-  const disabled = focus === "you" || focus === "system";
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
-        <ModelPicker
-          value={explicitModel}
-          onChange={(id) => onPickAgentModel(focus, id)}
-          models={models}
-          status={accountsStatus}
-          disabled={disabled}
-          fallbackLabel={
-            inheritedModel && inheritedModel !== "local"
-              ? `(use inherited · ${inheritedModel})`
-              : effectiveTeamModel
-              ? `(use team model · ${effectiveTeamModel})`
-              : serverState.model_id
-                ? `(use team / server model · ${serverState.model_id})`
-                : "(use team / server model — none running)"
-          }
-        />
-      </div>
-      <AgentVoiceRow
-        agent={focus}
-        cfg={voiceFor(focus)}
-        voices={voices}
-        onChange={(partial) => onPickAgentVoice(focus, partial)}
-        disabled={disabled}
-      />
-      {/* Skills are NOT selected here. They are associated with the AGENT
-          itself (Studio → Agents → the agent's 📚 Skills checklist, or a
-          team's Workbench). At dispatch the runtime gives each agent its
-          associated skills and loads only the ones a task needs (progressive
-          disclosure) — the user doesn't hand-pick skills per chat. */}
-    </div>
-  );
-}
-
 function TeamSettings({
   team, models, effectiveTeamModel, onPickTeamModel,
   serverModelId, accountsStatus,
@@ -14241,7 +14126,7 @@ export function AgentsPage({
               onClick={onNewProject}
               title="Create a new project"
               style={{ height:38, padding:"0 12px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:13, fontWeight:700, cursor:"pointer" }}
-            >+ New</button>
+            >+ New Project</button>
             <div style={{ width:1, height:24, background:"var(--border-strong)", margin:"0 2px" }} />
           </div>
         }
@@ -14442,6 +14327,9 @@ export function AgentsPage({
             serverState={serverState}
             effectiveTeamModel={effectiveTeamModel}
             providerFor={providerFor}
+            voiceFor={voiceFor}
+            onPickAgentVoice={onPickAgentVoice}
+            ttsVoices={ttsVoices}
             templateId={activeTeamTemplate?.id ?? null}
             onPickModel={(id) => onPickAgentModel(name, id)}
             onPreviewColor={(hex) => setPerAgentColor(prev => {
@@ -14692,6 +14580,10 @@ export function AgentsPage({
             busy={supSendBusy}
             autoApprove={autoApprove}
             onToggleAutoApprove={() => setAutoApprove(v => !v)}
+            directorMode={directorMode}
+            onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+            parallelMode={parallelMode}
+            onToggleParallel={() => setParallelMode(!parallelMode)}
             onSwitchTab={(t) => rightTabSwitchRef.current?.(t)}
             needsLoad={dockNeedsLoad}
             loadingModel={dockLoadingModel}
@@ -14702,19 +14594,12 @@ export function AgentsPage({
         {agentsSideOpen ? (
           <RightColumnTabs
             team={renderTeam}
-            roleByName={roleByName}
             supChat={supChat}
             onSupSend={onSupSend}
             supSendBusy={supSendBusy}
-            autoApprove={autoApprove}
-            onToggleAutoApprove={() => setAutoApprove(v => !v)}
             projectId={selectedProjectId}
             directives={directives}
             onDirectivesChanged={reloadDirectives}
-            directorMode={directorMode}
-            onToggleDirectorMode={() => setDirectorMode(!directorMode)}
-            parallelMode={parallelMode}
-            onToggleParallel={() => setParallelMode(!parallelMode)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}
@@ -14723,9 +14608,6 @@ export function AgentsPage({
             activeAgent={activeAgent}
             phase={phase}
             models={models}
-            modelFor={modelFor}
-            agentModelOverrideFor={agentModelOverrideFor}
-            onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
@@ -14765,7 +14647,7 @@ export function AgentsPage({
             <CodeUtilityRailIcons
               onNotebook={() => { selectAgentsSideTab("notebook"); setSideOpen(true); }}
               onUsage={() => setSideOpen(true)}
-              onRules={() => { selectAgentsSideTab("super"); setSideOpen(true); }}
+              onRules={() => { selectAgentsSideTab("rules"); setSideOpen(true); }}
               onBrowser={() => { void openBrowserSplit(); }}
               onExpand={() => setSideOpen(true)}
             />

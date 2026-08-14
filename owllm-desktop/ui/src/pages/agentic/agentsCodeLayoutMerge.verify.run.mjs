@@ -5,7 +5,9 @@
 //                     agentic Publisher card where Code carries GitHub cards
 //   • right column  = the Code side panel's resizable shell + tab style +
 //                     bottom Usage/Browser container, carrying the agentic
-//                     Super User / Orchestrator / Team pages (NO notebook tab)
+//                     Rules / Team pages AND the Code page's Notebook page.
+//                     The focused agent's page has no tab of its own — the
+//                     chat/log host below IS it and is always on screen.
 //   • composer      = bottom of the canvas column (Code-page position), no
 //                     longer docked inside the right column's pane
 //   • 🌐 browser    = opens the popup AND splits app + browser side by side
@@ -52,9 +54,12 @@ check(agentsPage.includes('<SideColumnShell widthKey={AGENTS_SIDE_WIDTH_KEY} min
   "the agentic right column lives in the SAME resizable shell as the Code side panel");
 check(agentsPage.includes("sideTabStyle(tab === id)"),
   "its tab strip renders with the Code panel's tab style");
+const rightColumnEnd = agentsPage.indexOf("// ---------- AgentVoiceRow ----------");
+check(rightColumnEnd > agentsPage.indexOf("function RightColumnTabs"),
+  "the right-column slice used by the checks below is real (a -1 marker would slice the WHOLE file and pass everything)");
 const rightColumn = agentsPage.slice(
   agentsPage.indexOf("function RightColumnTabs"),
-  agentsPage.indexOf("// ---------- SuperUserSettings ----------"),
+  rightColumnEnd,
 );
 check(rightColumn.includes("<UsagePanel provider={props.usageProvider} />")
   && rightColumn.includes("<BrowserToggleButton open={props.browserOpen}"),
@@ -85,8 +90,59 @@ check(agentsPage.includes('data-ui="AgentsUtilityPanelCollapse"')
 check(!agentsPage.includes('data-ui="FlowMemoryBtn"')
   && agentsPage.includes('data-ui="AgentsProjectMemory"'),
   "the canvas header's 🧠 Memory button is gone — memory lives in the left column");
-check(agentsPage.includes('selectAgentsSideTab("super"); setSideOpen(true)'),
-  "the shrunk ⚡ rules icon lands on the Super User page through the stored tab handover");
+check(agentsPage.includes('selectAgentsSideTab("rules"); setSideOpen(true)'),
+  "the shrunk ⚡ rules icon lands on the Rules page through the stored tab handover");
+
+// ---- 2c. Pages are Rules | Team | Notebook — the agent's page has no button
+//          (user spec 2026-08-14). The chat/log host below IS that page and is
+//          always on screen, so a tab that only collapsed the settings strip
+//          was redundant. "Super User" is renamed to what it shows: Rules. ----
+check(agentsPage.includes('type RightTabId = "rules" | "team" | "notebook"')
+  && agentsPage.includes('rules: "📋 Rules"')
+  && !agentsPage.includes('"📜 Orchestrator"'),
+  "the right column's page ids/labels are Rules | Team | Notebook — no agent tab, no Super User");
+check(rightColumn.includes('{(["rules","team","notebook"] as const).map(id => {')
+  && !rightColumn.includes('tab === "orch"')
+  && !rightColumn.includes("<OrchAgentSettings"),
+  "the tab strip renders exactly those three and the per-agent settings face is gone with the tab");
+check(!agentsPage.includes("function OrchAgentSettings"),
+  "the now-unreachable per-agent settings component is deleted, not left as dead code");
+check(agentsPage.includes("<AgentVoiceRow\n            agent={agentName}")
+  && agentsPage.includes("onPickAgentVoice={onPickAgentVoice}\n            ttsVoices={ttsVoices}"),
+  "the per-agent Voice row survives the tab removal — it moved into the agent editor, next to its model");
+check(rightColumn.includes('rulesPage={tab === "rules"}')
+  && agentsPage.includes("const effTab = rulesPage"),
+  "the renamed Rules page still pins the pane to the rules editor (chat tabs hidden there)");
+check(agentsPage.includes('if (t === "rules" || t === "super") return "rules";'),
+  'a column left on the pre-rename "super" page migrates to Rules instead of being bounced elsewhere');
+check(rightColumn.includes('display: tab === "team" ? "block" : "none"'),
+  "the settings strip is Team-scope only — Rules and Notebook are full pages");
+
+// ---- 2d. The three run switches sit on ONE line above the composer ----
+check(!agentsPage.includes("function SuperUserSettings")
+  && !rightColumn.includes("<SuperUserSettings"),
+  "the Super User container is gone from the right column, component and all");
+check(agentsPage.includes("function RunToggleRow")
+  && agentsPage.includes('data-ui="RunToggleRow"')
+  && agentsPage.includes("checked={autoApprove}")
+  && agentsPage.includes("checked={directorMode}")
+  && agentsPage.includes("checked={parallelMode}"),
+  "all THREE switches (auto-approve · critic authority · parallel dispatch) live in one row component");
+const dock = agentsPage.slice(
+  agentsPage.indexOf("function ChatInputDock"),
+  agentsPage.indexOf("// OrchestratorPane — RIGHT pane"),
+);
+check(dock.includes("<RunToggleRow")
+  && dock.indexOf("<RunToggleRow") < dock.indexOf("<Composer"),
+  "the row renders ABOVE the input text box, inside the composer dock");
+check(!dock.includes('key: "auto"') && !dock.includes("⚡ Auto mode"),
+  "auto-approve is no longer ALSO a Composer toolbar toggle — one control per setting");
+
+// ---- 2e. The project strip's create button says what it creates ----
+check(agentsPage.includes('data-ui="NewProjectBtn"')
+  && agentsPage.slice(agentsPage.indexOf('data-ui="NewProjectBtn"')).startsWith('data-ui="NewProjectBtn"')
+  && /data-ui="NewProjectBtn"[\s\S]{0,400}?>\+ New Project<\/button>/.test(agentsPage),
+  'the project strip\'s create button reads "+ New Project", not a bare "+ New"');
 
 // ---- 3. Left column = Code project rail with the Publisher card ----
 check(agentsPage.includes('data-ui="AgentsProjectRail"')

@@ -94,10 +94,16 @@ try {
     page.includes("defaultModelId?: string")
       && page.includes("a.default_model_id")
       && page.includes("agentTemplateModelFor(agentName)"));
+  // The right column's per-agent settings face was removed with its tab (user
+  // spec 2026-08-14); the agent editor is now the ONLY per-agent model picker.
+  // Same invariant, pinned on the surviving surface: the picker's VALUE is the
+  // explicit override (or the template default), never a resolved inherited
+  // model — inheritance is disclosed in the fallback label instead.
   check("Agent settings picker shows only explicit overrides, not resolved inherited models",
-    page.includes("agentModelOverrideFor: (agentName: string) => string")
-      && page.includes("value={explicitModel}")
-      && page.includes("(use inherited · ${inheritedModel})"));
+    page.includes("const agentModelOverrideFor = (agentName: string): string =>")
+      && page.includes("value={model}")
+      && page.includes("`(use team model · ${effectiveTeamModel})`")
+      && !page.includes("value={explicitModel}"));
   check("Agent editor does not materialize inherited team/server models as overrides",
     page.includes("initialModel={agentModelOverrideFor(name) || spec.defaultModelId || \"\"}"));
   check("Team picker bulk-assigns all agents in local and DB persistence",

@@ -18,6 +18,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "./utils/openWebUrl";
 import { OPEN_UPDATE_EVENT, setUpdateAvailable } from "./runtime/updateAvailability";
+import { RECHECK_MS, nextCheckDelayMs, shouldSurfaceCheckError } from "./runtime/updateSchedule";
 
 const ICONS = "/Page_icons";
 
@@ -25,11 +26,6 @@ const ICONS = "/Page_icons";
 // version by hand — the public dist repo's latest release, same target as
 // the download page cards.
 const RELEASES_URL = "https://github.com/OwLLM/owllm/releases/latest";
-
-// How often the running app looks for a new release. Long enough to be
-// invisible, short enough that a machine left running for days still finds
-// out the same day.
-const RECHECK_MS = 6 * 60 * 60 * 1000;
 
 type Phase = "hidden" | "prompt" | "downloading" | "installing" | "error";
 
@@ -98,11 +94,13 @@ export default function UpdateController() {
   // AppImage. deb/rpm remain manual because the package manager owns them.
   const [installMode, setInstallMode] = useState<"auto" | "linux-appimage" | "manual">("auto");
 
-  // First check 2.5s after mount, then REPEATED every RECHECK_MS. A one-shot
-  // per-launch check is why long-running installs sat on old versions: the
-  // check fired once, found nothing newer at that instant, and never looked
-  // again — a release published an hour later was invisible until the user
-  // happened to quit and relaunch.
+  // First check 2.5s after mount, then REPEATEDLY — the next one is scheduled
+  // by the check that just finished, never by a fixed setInterval. A one-shot
+  // per-launch check is why long-running installs sat on old versions, and a
+  // fixed interval is why they still did: a check landing inside a multi-OS
+  // publish window throws TargetNotFound for the platforms not merged yet
+  // (see runtime/updateSchedule), and the app then waited a whole period
+  // before asking again. It now backs off in minutes, not hours.
   //
   // Finding an update no longer opens this modal. It publishes the fact to
   // runtime/updateAvailability, and the chrome greets the user with the owl
@@ -110,11 +108,33 @@ export default function UpdateController() {
   useEffect(() => {
     if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
     let disposed = false;
+    let timer = 0;
+    let failures = 0;
+    let lastRunAt = 0;
+    // Only a check error may clear itself; an install error must survive.
+    let checkErrorShown = false;
+
+    const schedule = (ms: number) => {
+      if (disposed) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(runCheck, ms);
+    };
+
     const runCheck = async () => {
+      if (disposed) return;
+      lastRunAt = Date.now();
       try {
         const { check } = await import("@tauri-apps/plugin-updater");
         const u = await check();
         if (disposed) return;
+        failures = 0;
+        // The release answered, so any "unavailable for this platform" we put
+        // up during a publish window was transient. Take it back down.
+        if (checkErrorShown) {
+          checkErrorShown = false;
+          setError(null);
+          setPhase((p) => (p === "error" ? "hidden" : p));
+        }
         if (u && (u as any).available !== false) {
           try {
             const mode = await invoke<string>("update_install_mode");
@@ -124,21 +144,35 @@ export default function UpdateController() {
           setUpdate(u as unknown as Update);
           setUpdateAvailable(String((u as any).version ?? ""));
         }
+        schedule(RECHECK_MS);
       } catch (e) {
-        console.warn("[updater] check failed:", e);
+        if (disposed) return;
+        failures += 1;
+        console.warn(`[updater] check failed (${failures} in a row):`, e);
         const actionable = actionableCheckError(e);
-        if (actionable && !disposed) {
+        if (actionable && shouldSurfaceCheckError(failures)) {
+          checkErrorShown = true;
           setError(actionable);
           setPhase("error");
         }
+        schedule(nextCheckDelayMs(failures));
       }
     };
-    const first = window.setTimeout(runCheck, 2500);
-    const iv = window.setInterval(runCheck, RECHECK_MS);
+
+    // A laptop that slept through its timer, or a machine that was offline
+    // when the release landed, must not wait out the rest of the period.
+    const onOnline = () => {
+      if (disposed) return;
+      if (Date.now() - lastRunAt < nextCheckDelayMs(1)) return;
+      schedule(0);
+    };
+    window.addEventListener("online", onOnline);
+
+    schedule(2500);
     return () => {
       disposed = true;
-      window.clearTimeout(first);
-      window.clearInterval(iv);
+      window.clearTimeout(timer);
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 

@@ -647,7 +647,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
   diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
   merging — real overlapping edits return a Conflict with both sides
-  preserved; only disposable app runtime files auto-resolve.
+  preserved; only disposable app runtime files auto-resolve. Cleanup never
+  deletes a branch whose work HEAD does not contain (ancestry or
+  squash-equivalent tree, `branch_work_contained`): the worktree directory is
+  reclaimed but the branch ref survives and the run announces it — an agent
+  that committed its own work can never be orphaned by teardown. Only the
+  Code page's explicitly confirmed close passes `discardUnmerged` to really
+  drop one. Gate: `fleetWorktreeWorkLoss.verify.run.mjs`.
 
 ## Support & UX
 
@@ -729,10 +735,18 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
 - **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
-  `ui/src/runtime/updateAvailability.ts`): the updater checks 2.5 s after launch
-  **and every 6 h after that** — a one-shot per-launch check meant an install
-  left running never learned about a release published an hour later, which is
-  why live presence nodes sat on old versions. Finding one no longer opens a
+  `ui/src/runtime/updateAvailability.ts` + `ui/src/runtime/updateSchedule.ts`):
+  the updater checks 2.5 s after launch, **then every 30 min**, and again as
+  soon as the machine comes back **online**. The next check is scheduled by the
+  one that just finished, never by a fixed `setInterval`, because a check that
+  lands inside a multi-OS publish window does not get "no update" — it gets
+  `TargetNotFound` for whichever platforms `finish-multihost.sh` has not merged
+  into `latest.json` yet (tauri-plugin-updater resolves the platform URL before
+  it compares versions). Those failures back off 1 → 2 → 4 → 8 → 15 min instead
+  of waiting out the period, so a Linux/macOS install picks the release up
+  within ~15 min of the manifest completing rather than hours later; the
+  "unavailable for this platform" notice is withheld until 4 failures in a row
+  and clears itself on the next answered check. Finding one no longer opens a
   modal. It publishes to the `updateAvailability` store, and the owl at the
   top-centre of the frame says so in a **manga speech balloon** on its LEFT (so
   it can never collide with the World Chat bubble on its right) — *"Please,

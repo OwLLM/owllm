@@ -4,7 +4,8 @@
 # publish-release.sh runs on ONE host and publishes that host's platform. The
 # other hosts build and upload their own artifacts, but they hold neither the
 # minisign updater key nor a gh login (see LINUX-AUTOUPDATE-RUNBOOK.md), so the
-# hub has to sign their artifacts and merge the platform keys into latest.json.
+# hub has to sign their artifacts and merge the platform keys into latest.json,
+# then restate on the release page what the tag now really ships (step 6).
 # That tail used to be hand-typed into the hub every release; this is it.
 #
 #   VERSION=1.0.14 scripts/finish-multihost.sh
@@ -12,6 +13,12 @@
 # Assumes: gh authenticated, ~/.tauri-keys/owllm-updater.key present, and the
 # local WSL Ubuntu distro holds the linux-x86_64 build at ~/owllm-build.
 set -euo pipefail
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Same composer publish-release.sh uses: protects a hand-written changelog while
+# always rewriting the platform-coverage disclosure. Defines compose_release_body().
+# shellcheck source=lib/release-body.sh
+. "$_SCRIPT_DIR/lib/release-body.sh"
 
 VERSION="${VERSION:?set VERSION, e.g. VERSION=1.0.14}"
 TAG="v$VERSION"
@@ -106,4 +113,40 @@ VERSION="$VERSION" BASE_URL="$BASE_URL" W="$W" EXISTING_LATEST="$EXISTING_LATEST
   console.log("  platforms in manifest:",Object.keys(platforms).sort().join(", "));'
 
 gh release upload "$TAG" "$W/latest.json" --repo "$REPO" --clobber
+
+# 6. Refresh the "## Platform builds" disclosure now that the foreign artifacts
+#    actually exist on the tag.
+#    WHY: publish-release.sh computes that table on the host that publishes
+#    FIRST — before the other hosts have uploaded anything — so it necessarily
+#    records those platforms as carried forward. Nothing recomputed it
+#    afterwards, so the table froze at that moment and kept saying so. v1.0.20
+#    shipped genuinely fresh 1.0.20 Linux builds (uploaded 14:13 and 14:31, and
+#    named in latest.json) while its release page still told users Linux x86_64
+#    and aarch64 were "1.0.19 — carried forward, 2 releases behind, auto-update
+#    no". The table is a FACT about the tag, so it is recomputed from the live
+#    release history here, at the only point where that history is complete.
+say "refreshing the platform-coverage table"
+COVERAGE_PLATFORM="${COVERAGE_PLATFORM:-windows-x86_64}"   # the hub builds Windows
+gh api "repos/$REPO/releases?per_page=100" --paginate --slurp > "$W/releases.json" 2>/dev/null \
+  || gh api "repos/$REPO/releases?per_page=100" > "$W/releases.json" 2>/dev/null \
+  || { echo "could not read release history from $REPO — coverage table NOT refreshed" >&2; exit 1; }
+
+# rc 3 = a platform is still past the staleness budget. That is a legitimate
+# outcome here (the table then says so out loud); only a real error aborts.
+COVERAGE_RC=0
+node "$APP/scripts/platform-coverage.mjs" \
+  --releases "$W/releases.json" --version "$VERSION" --tag "$TAG" \
+  --platform "$COVERAGE_PLATFORM" --allow-stale "${ALLOW_STALE:-}" \
+  --out-md "$W/platform-coverage.md" || COVERAGE_RC=$?
+[ "$COVERAGE_RC" = 0 ] || [ "$COVERAGE_RC" = 3 ] \
+  || { echo "platform-coverage failed (rc=$COVERAGE_RC) — table NOT refreshed" >&2; exit 1; }
+
+# The changelog half stays protected; only the disclosure is rewritten. When the
+# body holds no changelog worth keeping, fall back to latest.json's notes — the
+# same text the in-app update popup renders for this version.
+EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null || true)"
+FALLBACK_NOTES="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).notes||""))' "$W/latest.json")"
+gh release edit "$TAG" --repo "$REPO" \
+  --notes "$(compose_release_body "$FALLBACK_NOTES" "$(cat "$W/platform-coverage.md")" "$EXISTING_BODY" "$TAG" "$VERSION")"
+
 echo "FINISH_MULTIHOST_OK $VERSION"

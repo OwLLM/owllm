@@ -1384,11 +1384,48 @@ fn fleet_worktree_merge_blocking(
 /// Keeping the lock outside this helper lets the isolated Sync coordinator
 /// retain exclusive ownership across local integration and remote
 /// reconciliation. The public merge command still takes the same lock above.
+/// True when HEAD already contains the branch's WORK — by ancestry, or by an
+/// earlier squash-merge (which leaves no ancestry, so the merge is simulated
+/// in memory and its tree compared to HEAD's). Unreadable state or a merge
+/// that would conflict answers false: the callers use `true` as a license to
+/// delete the branch or report "nothing to merge", so uncertainty must always
+/// land on the side that keeps the work reachable.
+fn branch_work_contained(cwd: &Path, branch: &str) -> bool {
+    if git(cwd, &["merge-base", "--is-ancestor", branch, "HEAD"])
+        .map(|(ok, _, _)| ok)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // `merge-tree --write-tree` needs git >= 2.38; any failure (conflicts,
+    // older git) stays conservative.
+    let Ok((ok, tree, _)) = git(
+        cwd,
+        &["merge-tree", "--write-tree", "--no-messages", "HEAD", branch],
+    ) else {
+        return false;
+    };
+    if !ok {
+        return false;
+    }
+    let Ok((head_ok, head_tree, _)) = git(cwd, &["rev-parse", "HEAD^{tree}"]) else {
+        return false;
+    };
+    head_ok && !tree.trim().is_empty() && tree.trim() == head_tree.trim()
+}
+
 fn fleet_worktree_merge_locked(
     cwd: &Path,
     agent_name: &str,
     branch: &str,
 ) -> Result<MergeOutcome, String> {
+    // Establish up front whether HEAD already contains the branch's work.
+    // NoChanges may only be reported when it does — a "nothing to merge"
+    // answer for a branch that carries work tells the caller it is safe to
+    // delete that branch, and that is how committed agent work got orphaned.
+    if branch_work_contained(cwd, branch) {
+        return Ok(MergeOutcome::NoChanges);
+    }
     // Integrate into the user's CURRENT local branch. Cross-PC reconciliation
     // belongs to the single repo_sync coordinator after local integration.
     // Fetching here with a fast-forward-only policy made a valid isolated run
@@ -1440,14 +1477,29 @@ fn fleet_worktree_merge_locked(
             });
         }
     }
+    // Captured BEFORE the scratch drop: a branch whose only commits touch
+    // app-owned runtime scratch legitimately merges down to nothing.
+    let (_, staged_before_scratch_drop, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     drop_staged_app_scratch(cwd)?;
     if let Some(backup) = untracked_backup.as_mut() {
         backup.restore_preserved()?;
     }
-    // If `merge --squash` succeeded but staged nothing, the agent's
-    // branch is a fast-forward of HEAD (no new commits to apply).
     let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     if staged.trim().is_empty() {
+        if staged_before_scratch_drop.trim().is_empty() {
+            // The ancestor pre-check said this branch HAS commits beyond HEAD,
+            // yet the squash staged nothing at all. Whatever produced that
+            // state, calling it "no changes" licenses the caller to delete the
+            // branch — refuse loudly instead so the work stays reachable.
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Error {
+                message: format!(
+                    "branch {branch} has commits beyond HEAD but the squash staged nothing — \
+                     refusing to report it as a no-op; the branch is kept for inspection"
+                ),
+            });
+        }
+        // Scratch-only branch: genuinely nothing of the user's to integrate.
         return Ok(MergeOutcome::NoChanges);
     }
     let msg = format!("[merge:{}] integrate parallel dispatch", agent_name);
@@ -1696,18 +1748,55 @@ pub struct RemoveArgs {
     /// When true, leave the worktree + branch on disk (set after a
     /// merge conflict or finalize failure so the user can inspect).
     pub keep: bool,
+    /// When true, delete the branch even if it holds commits the project HEAD
+    /// does not contain. ONLY for flows where the user explicitly confirmed the
+    /// discard (Code-page close). Autonomous run cleanup leaves this unset.
+    #[serde(default)]
+    pub discard_unmerged: Option<bool>,
+}
+
+/// What remove actually did with the BRANCH. Callers that ignore it keep
+/// working (it serializes to a plain object), but the run cleanup surfaces
+/// `branchPreserved` so preserved work is announced, never silent.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveOutcome {
+    /// True when the branch had commits not contained in the project HEAD and
+    /// was therefore kept (the worktree directory is still reclaimed).
+    pub branch_preserved: bool,
+    pub branch: String,
 }
 
 #[tauri::command]
-pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
+pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<RemoveOutcome, String> {
     let cwd = PathBuf::from(&args.project_cwd);
     if args.keep {
         // Keep the worktree (unmerged edits to inspect) but reclaim its
         // regenerable build caches — otherwise every kept worktree hoards an
         // 8-17 GB `target/` forever. Source + git state are left intact.
         reclaim_build_caches(&PathBuf::from(&args.worktree_path), BUILD_CACHE_LIVE_SECS);
-        return Ok(());
+        return Ok(RemoveOutcome {
+            branch_preserved: true,
+            branch: args.branch,
+        });
     }
+    // NEVER delete a branch whose work the project HEAD does not contain —
+    // `branch -D` makes its commits dangling, which is how four whole site
+    // builds vanished from one team run (agents commit their own work,
+    // finalize then reports noChanges, and cleanup used to drop the branch
+    // regardless). The worktree DIRECTORY is still reclaimed; the branch ref
+    // is what keeps the work reachable and costs nothing. Explicit
+    // user-confirmed discards (Code-page close) pass `discard_unmerged` to
+    // really drop it. Containment covers squash-merged work too — a probe
+    // that can't tell answers "not contained" → preserve.
+    let unmerged = !branch_work_contained(&cwd, &args.branch);
+    let branch_exists = git(
+        &cwd,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", args.branch)],
+    )
+    .map(|(ok, _, _)| ok)
+    .unwrap_or(false);
+    let preserve_branch = branch_exists && unmerged && !args.discard_unmerged.unwrap_or(false);
     // Best-effort: remove worktree, then delete the branch. Don't
     // fail the dispatch on cleanup failure — the worktree on disk is
     // recoverable, the run completed.
@@ -1715,7 +1804,9 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
         &cwd,
         &["worktree", "remove", "--force", &args.worktree_path],
     );
-    let _ = git(&cwd, &["branch", "-D", &args.branch]);
+    if !preserve_branch {
+        let _ = git(&cwd, &["branch", "-D", &args.branch]);
+    }
     let _ = remove_dir_all_native(&PathBuf::from(&args.worktree_path));
     // Remove the now-empty parent RUN dir (…/<repo>/<run_id>/) so finished runs
     // don't leave a litter of empty folders (remove_dir only succeeds if empty,
@@ -1723,7 +1814,10 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
     if let Some(run_dir) = PathBuf::from(&args.worktree_path).parent() {
         let _ = remove_empty_dir_native(run_dir);
     }
-    Ok(())
+    Ok(RemoveOutcome {
+        branch_preserved: preserve_branch,
+        branch: args.branch,
+    })
 }
 
 /// Sweep leftover fleet worktrees for this repo. Per-run cleanup
@@ -1876,9 +1970,9 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 mod tests {
     use super::{
         fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
-        git_failure_message, git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc,
-        path_is_dir_native, porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome,
-        FinalizeOutcome, MergeOutcome,
+        fleet_worktree_remove, git_failure_message, git_reported_path_for_host, is_app_scratch,
+        linux_path_to_wsl_unc, path_is_dir_native, porcelain_path, unstage_app_scratch,
+        user_conflict_files, CreateOutcome, FinalizeOutcome, MergeOutcome, RemoveArgs,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -2075,6 +2169,196 @@ mod tests {
         git_ok(root, &["branch", "-D", &branch]);
     }
 
+    /// THE Website-Red-Hair loss (2026-08-13): a CLI agent committed its own
+    /// work in its worktree, finalize correctly reported noChanges (nothing
+    /// left to stage), the merge was skipped on that answer, and cleanup ran
+    /// `branch -D` — four site builds went dangling across four runs. Remove
+    /// must preserve a branch whose commits HEAD does not contain.
+    #[tokio::test]
+    async fn remove_preserves_a_self_committed_unmerged_branch() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "worker_a".to_string(),
+            "loss-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        // The agent builds AND commits its own work — exactly what a capable
+        // CLI agent does.
+        let wt = Path::new(&wt_path);
+        fs::write(wt.join("site.html"), "<h1>the red hair</h1>\n").unwrap();
+        git_ok(wt, &["add", "-A"]);
+        git_ok(wt, &["commit", "-m", "Scaffold the site"]);
+        let work_sha = head_sha(wt);
+        // Finalize finds nothing left to stage — correct, and NOT license to
+        // drop the branch.
+        let finalized = fleet_worktree_finalize(
+            wt_path.clone(),
+            "worker_a".to_string(),
+            "build the site".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(finalized, FinalizeOutcome::NoChanges));
+
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path.clone(),
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            outcome.branch_preserved,
+            "an unmerged branch must be preserved, not deleted"
+        );
+        assert!(
+            !path_is_dir_native(Path::new(&wt_path)).unwrap(),
+            "the worktree directory is still reclaimed"
+        );
+        // The work is still REACHABLE: the branch exists and holds the commit.
+        let tip = Command::new("git")
+            .args(["rev-parse", &branch])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(tip.status.success(), "branch must still exist");
+        assert_eq!(String::from_utf8_lossy(&tip.stdout).trim(), work_sha);
+        // And the preserved branch can be merged later — nothing was lost.
+        let merged = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            branch.clone(),
+        )
+        .unwrap();
+        assert!(matches!(merged, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("site.html")).unwrap(),
+            "<h1>the red hair</h1>\n"
+        );
+    }
+
+    /// A branch with nothing beyond HEAD is a true no-op: remove deletes it,
+    /// leaving no litter — the guard only bites when there is work to lose.
+    #[tokio::test]
+    async fn remove_deletes_a_branch_head_already_contains() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "worker_a".to_string(),
+            "noop-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path,
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: None,
+        })
+        .await
+        .unwrap();
+        assert!(!outcome.branch_preserved);
+        let tip = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(!tip.success(), "a fully-contained branch is deleted");
+    }
+
+    /// The Code page's close-page flow warns the user and then really discards:
+    /// the explicit flag still deletes an unmerged branch.
+    #[tokio::test]
+    async fn explicit_discard_still_deletes_an_unmerged_branch() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "code".to_string(),
+            "discard-run".to_string(),
+            Some("owllm-page".to_string()),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        let wt = Path::new(&wt_path);
+        fs::write(wt.join("draft.txt"), "unmerged draft\n").unwrap();
+        git_ok(wt, &["add", "-A"]);
+        git_ok(wt, &["commit", "-m", "draft"]);
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path,
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: Some(true),
+        })
+        .await
+        .unwrap();
+        assert!(!outcome.branch_preserved);
+        let tip = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(!tip.success(), "a user-confirmed discard really discards");
+    }
+
+    /// NoChanges may only mean "HEAD already contains this branch". A branch
+    /// that carries commits must merge (or error) — never read as a no-op,
+    /// because callers treat no-op as safe-to-delete.
+    #[test]
+    fn merge_never_calls_a_branch_with_commits_a_noop() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-work"]);
+        fs::write(root.join("feature.txt"), "agent work\n").unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "agent work"]);
+        git_ok(root, &["checkout", "main"]);
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            "agent-work".into(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, MergeOutcome::Merged { .. }),
+            "a branch with commits must integrate, got {outcome:?}"
+        );
+        // AFTER the merge the branch is contained → the ancestor pre-check
+        // reports the true no-op.
+        let again = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            "agent-work".into(),
+        )
+        .unwrap();
+        assert!(matches!(again, MergeOutcome::NoChanges));
+    }
+
     /// Opening a Code page also cuts a worktree. That is not a user-started run,
     /// so it must keep the dirty-tree stop rather than commit on their behalf.
     #[tokio::test]
@@ -2223,6 +2507,7 @@ mod tests {
             worktree_path: worktree_path.clone(),
             branch,
             keep: false,
+            discard_unmerged: None,
         })
         .await
         .unwrap();

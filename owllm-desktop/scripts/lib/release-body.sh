@@ -26,13 +26,55 @@ _trim_trailing_blank() {
        END { for (i = 1; i <= last; i++) print lines[i] }'
 }
 
+# cp437 renderings of the U+20xx punctuation that turns up in commit subjects,
+# each paired with the character it must become. Written as octal escapes so
+# this file stays pure ASCII and cannot itself be re-corrupted.
+#
+# WHY: a release body assembled in Windows PowerShell 5.1 arrives double-encoded.
+# PS 5.1 decodes a native command's stdout with [Console]::OutputEncoding, which
+# defaults to the OEM codepage (437), so git's UTF-8 "—" (\342\200\224) is read
+# as three cp437 characters and re-emitted as "ΓÇö". Reproduced on the hub:
+# capturing the subject of 2c797160 through PowerShell yields U+0393 U+00C7
+# U+00F6 exactly where the em dash was. v1.0.20's published body carries that,
+# plus the UTF-8 BOM and CRLF that Out-File adds; v1.0.18/.19, published through
+# these bash scripts, carry none of it. Every mojibake sequence begins \316\223
+# \303\207 (Γ Ç), which no real changelog line contains.
+_MOJIBAKE_MAP='\316\223\303\207\303\264|\342\200\223
+\316\223\303\207\303\266|\342\200\224
+\316\223\303\207\303\277|\342\200\230
+\316\223\303\207\303\226|\342\200\231
+\316\223\303\207\302\243|\342\200\234
+\316\223\303\207\302\245|\342\200\235
+\316\223\303\207\303\263|\342\200\242
+\316\223\303\207\302\252|\342\200\246'
+
+# _sanitize_prose <text>
+# Undo the transport damage above: strip a leading UTF-8 BOM, drop CR, and put
+# the mangled punctuation back. Applied to whatever prose is about to be
+# published, so the next release through this pipeline repairs a body that an
+# ad-hoc PowerShell step poisoned instead of inheriting it forever.
+_sanitize_prose() {
+  local bom script from to
+  bom="$(printf '\357\273\277')"
+  script="1s/^$bom//"
+  while IFS='|' read -r from to; do
+    [ -n "$from" ] || continue
+    script="$script;s/$(printf '%b' "$from")/$(printf '%b' "$to")/g"
+  done <<MOJIBAKE
+$_MOJIBAKE_MAP
+MOJIBAKE
+  printf '%s' "${1-}" | tr -d '\r' | sed "$script"
+}
+
 # body_is_placeholder <body> <tag> <version>
 # 0 when the body holds no hand-written changelog and may be overwritten.
 # Covers the title-shaped bodies an ad-hoc `gh release create --notes` produces —
 # that is what v1.0.16/.17/.19 were published with.
 body_is_placeholder() {
   local norm tag="${2-}" version="${3-}"
-  norm="$(printf '%s' "${1-}" | tr -d ' \t\r\n')"
+  # Sanitize first: a BOM in front of "OwLLM Desktop 1.0.20" would otherwise
+  # make a placeholder body look hand-written and freeze it forever.
+  norm="$(_sanitize_prose "${1-}" | tr -d ' \t\r\n')"
   [ -z "$norm" ] && return 0
   case "$norm" in
     "$tag"|"$version"|"v$version") return 0 ;;
@@ -61,9 +103,9 @@ strip_coverage_section() {
 compose_release_body() {
   local notes="${1-}" coverage="${2-}" existing="${3-}" tag="${4-}" version="${5-}" prose
   if [ -n "$existing" ] && ! body_is_placeholder "$existing" "$tag" "$version"; then
-    prose="$(strip_coverage_section "$existing")"
+    prose="$(strip_coverage_section "$(_sanitize_prose "$existing")")"
   else
-    prose="$(printf '%s\n' "$notes" | _trim_trailing_blank)"
+    prose="$(_sanitize_prose "$notes" | _trim_trailing_blank)"
   fi
   if [ -n "$coverage" ]; then
     printf '%s\n\n%s\n' "$prose" "$(printf '%s\n' "$coverage" | _trim_trailing_blank)"

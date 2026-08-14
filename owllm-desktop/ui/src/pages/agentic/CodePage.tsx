@@ -1493,13 +1493,13 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (st.secondaryWorkspace) {
       try {
         await invoke("fleet_worktree_remove", {
-          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false },
+          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false, discardUnmerged: true },
         });
       } catch { /* best-effort cleanup */ }
     }
     try {
       await invoke("fleet_worktree_remove", {
-        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
+        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false, discardUnmerged: true },
       });
     } catch { /* best-effort cleanup */ }
   };
@@ -4551,13 +4551,13 @@ export default function CodePage() {
       // and (like opening) the user shouldn't wait for cleanup. Fire-and-forget so
       // the tab vanishes instantly.
       void invoke("fleet_worktree_remove", {
-        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
+        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false, discardUnmerged: true },
       }).catch(() => { /* best-effort */ });
       // The second agent has its own checkout on this page — leaving it behind
       // would leak a worktree (and its build caches) that nothing ever sweeps.
       if (st.secondaryWorkspace) {
         void invoke("fleet_worktree_remove", {
-          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false },
+          args: { projectCwd: st.projectRoot, worktreePath: st.secondaryWorkspace, branch: st.secondaryBranch ?? "", keep: false, discardUnmerged: true },
         }).catch(() => { /* best-effort */ });
       }
     }

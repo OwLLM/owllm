@@ -127,6 +127,7 @@ import { TEAM_FIXTURES } from "./teamEvalFixtures";
 import {
   resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock,
   listSkillPacks, resolveEquippedSkillIds, toggleSkillGrant, type SkillPack,
+  organizeSkillPacks, skillPackLabel, skillPackSource, prettySkillName,
 } from "./skillRuntime";
 import {
   applyDelegationPolicy,
@@ -1696,10 +1697,11 @@ export function skillIcon(id: string): string {
   if (/docs|documentation/.test(s)) return "📚";
   return "📦";
 }
-// "anthropics__pdf" → "Pdf"; "code-review" → "Code Review". Tooltip label.
+// "anthropics__pdf" → "PDF"; "code-review" → "Code Review". Tooltip label —
+// delegates to the shared prettifier so ribbon tooltips and the picker's card
+// titles can never disagree on a skill's name.
 function skillShortName(id: string): string {
-  const base = id.includes("__") ? id.split("__").pop()! : id;
-  return base.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return prettySkillName(id);
 }
 // An agent's BASE skill ids — role yaml allowlist ∪ team-template extras.
 // The per-project grant is applied on top by resolveEquippedSkillIds, whose
@@ -2780,6 +2782,8 @@ function AgentSkillsModal({
 }) {
   const [packs, setPacks] = useState<SkillPack[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [hoverId, setHoverId] = useState<string | null>(null);
   useEffect(() => {
     listSkillPacks()
       .then(setPacks)
@@ -2791,6 +2795,10 @@ function AgentSkillsModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   const equipped = new Set(resolveEquippedSkillIds(baseIds, grant ?? []));
+  // Dedup + search + equipped-first sections, sorted by display label — one
+  // pure helper so the gate can execute the exact shaping the popup renders.
+  const sections = organizeSkillPacks(packs, equipped, query);
+  const installedCount = new Set(packs.map(p => p.id)).size;
   return (
     <div
       data-ui="AgentSkillsOverlay"
@@ -2805,7 +2813,10 @@ function AgentSkillsModal({
         data-ui="AgentSkillsModal"
         onClick={e => e.stopPropagation()}
         style={{
-          width: 880, maxWidth: "94vw", maxHeight: "84vh", overflow: "auto",
+          // Header + search stay pinned; only the card sections scroll. The
+          // grid uses minmax(0,1fr) columns so nowrap titles can never force
+          // a horizontal overflow that clips the 4th column.
+          width: 940, maxWidth: "94vw", maxHeight: "84vh", overflow: "hidden",
           background: "var(--bg-elevated)", border: "1px solid var(--border)",
           borderRadius: 12, padding: "16px 18px",
           display: "flex", flexDirection: "column", gap: 12,
@@ -2819,7 +2830,7 @@ function AgentSkillsModal({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg)" }}>{displayName} — Skills</div>
             <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 2 }}>
-              {equipped.size} equipped · click a skill to equip or unequip it for this agent (saved with the project)
+              {equipped.size} equipped of {installedCount} installed · click a skill to equip or unequip it for this agent (saved with the project)
             </div>
           </div>
           <button
@@ -2828,45 +2839,105 @@ function AgentSkillsModal({
             style={{ width: 28, height: 28, padding: 0, borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: "pointer", fontSize: 14, flexShrink: 0 }}
           >✕</button>
         </div>
+        {/* Search — with ~45 packs across three homes a flat wall is unusable */}
+        <input
+          type="text"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="🔍 Search skills by name or description…"
+          autoFocus
+          style={{
+            width: "100%", boxSizing: "border-box", padding: "7px 11px",
+            fontSize: 12, borderRadius: 8, outline: "none",
+            border: "1px solid var(--border-strong)", background: "var(--bg-deep)",
+            color: "var(--fg)",
+          }}
+        />
         {err && (
           <div style={{ fontSize: 12, color: "#ffb4a8" }}>⚠ {err}</div>
         )}
         {!err && packs.length === 0 && (
           <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>Loading skill packs…</div>
         )}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-          {packs.map(p => {
-            const on = equipped.has(p.id);
-            return (
-              <button
-                key={p.id}
-                onClick={() => onToggle(p.id)}
-                title={`${p.name}${on ? " — equipped, click to remove" : " — click to equip"}`}
-                style={{
-                  display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4,
-                  textAlign: "left", padding: "8px 9px", minHeight: 74, cursor: "pointer",
-                  borderRadius: 8,
-                  border: on ? `1px solid ${accent}` : "1px solid var(--border)",
-                  background: on ? "rgba(122,211,255,0.10)" : "var(--bg-surface)",
-                  color: "var(--fg)",
-                }}
-              >
-                <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
-                  <span style={{ fontSize: 14 }}>{skillIcon(p.id)}</span>
-                  <span style={{
-                    fontSize: 11.5, fontWeight: 700, flex: 1, minWidth: 0,
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>{skillShortName(p.id)}</span>
-                  {on && <span style={{ fontSize: 10, color: accent, flexShrink: 0 }}>✓</span>}
-                </span>
-                <span style={{
-                  fontSize: 10, lineHeight: 1.35, color: "var(--fg-muted)",
-                  display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
-                  overflow: "hidden",
-                }}>{p.description || "(no description)"}</span>
-              </button>
-            );
-          })}
+        {packs.length > 0 && sections.equipped.length === 0 && sections.available.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--fg-muted)", padding: "8px 2px" }}>
+            No skills match “{query.trim()}”.
+          </div>
+        )}
+        <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, paddingRight: 2 }}>
+          {([
+            ["Equipped", sections.equipped],
+            ["Available", sections.available],
+          ] as const).map(([label, list]) => list.length === 0 ? null : (
+            <div key={label}>
+              <div style={{
+                fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase",
+                color: label === "Equipped" ? accent : "var(--fg-subtle)",
+                margin: "0 0 6px 2px",
+              }}>{label} · {list.length}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
+                {list.map(p => {
+                  const on = equipped.has(p.id);
+                  const hot = hoverId === p.id;
+                  const source = skillPackSource(p.id);
+                  const est = p.ctx_estimate >= 1000 ? `${Math.round(p.ctx_estimate / 1000)}k` : "<1k";
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => onToggle(p.id)}
+                      onMouseEnter={() => setHoverId(p.id)}
+                      onMouseLeave={() => setHoverId(cur => (cur === p.id ? null : cur))}
+                      title={`${skillPackLabel(p)} — ${p.description || "no description"}\n~${est} tokens of instructions · ${on ? "equipped, click to remove" : "click to equip"}`}
+                      style={{
+                        display: "flex", flexDirection: "column", alignItems: "stretch", gap: 5,
+                        textAlign: "left", padding: "9px 10px", minHeight: 92, minWidth: 0,
+                        cursor: "pointer", borderRadius: 9, color: "var(--fg)",
+                        border: on ? `1px solid ${accent}` : hot ? "1px solid var(--border-strong)" : "1px solid var(--border)",
+                        background: on
+                          ? `linear-gradient(180deg, ${accent}26, ${accent}0d)`
+                          : hot ? "var(--bg-elevated)" : "var(--bg-surface)",
+                        boxShadow: hot ? "0 3px 10px rgba(0,0,0,0.35)" : "none",
+                        transform: hot ? "translateY(-1px)" : "none",
+                        transition: "border-color 80ms, background 80ms, box-shadow 80ms, transform 80ms",
+                      }}
+                    >
+                      <span style={{ display: "flex", alignItems: "center", gap: 7, width: "100%" }}>
+                        <span style={{
+                          width: 24, height: 24, flexShrink: 0, fontSize: 14, borderRadius: 6,
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          background: on ? `${accent}33` : "var(--bg-deep)",
+                          border: `1px solid ${on ? accent : "var(--border)"}`,
+                        }}>{skillIcon(p.id)}</span>
+                        <span style={{
+                          fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        }}>{skillPackLabel(p)}</span>
+                        {on && <span style={{ fontSize: 11, fontWeight: 800, color: accent, flexShrink: 0 }}>✓</span>}
+                      </span>
+                      <span style={{
+                        fontSize: 10, lineHeight: 1.35, color: "var(--fg-muted)",
+                        display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                      }}>{p.description || "(no description)"}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 5, marginTop: "auto", minWidth: 0 }}>
+                        {source && (
+                          <span style={{
+                            fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                            padding: "1px 5px", borderRadius: 4, color: "var(--fg-subtle)",
+                            border: "1px solid var(--border)", background: "var(--bg-deep)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>{source}</span>
+                        )}
+                        <span style={{ fontSize: 8.5, color: "var(--fg-subtle)", marginLeft: "auto", flexShrink: 0 }}>
+                          ~{est} ctx
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>

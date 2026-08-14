@@ -111,13 +111,19 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
   through the same graph machinery.
 - **Per-agent skills picker**: the skill ribbon on every agent card (bottom
-  right, rendered even when empty) opens a 4-column popup of ALL installed
-  skill packs — icon, name, short description, `~Xk` size, "role" origin tag —
-  and clicking a cell equips/unequips it live for this project. Unequips of
-  role/template skills persist as `-id` DENY entries in the graph_json
-  `agentSkills` grant; ONE resolver (`resolveEquippedSkillIds` in
-  `skillRuntime.ts`) backs the badge, the picker, and every dispatch injection
-  site (gate: `dispatchSkillBlock.verify.run.mjs`).
+  right, rendered even when empty) opens a searchable 4-column popup of ALL
+  installed skill packs, deduped across skills homes and split into
+  Equipped/Available sections sorted by display name — icon tile, real name
+  (frontmatter name or acronym-aware prettified slug: PDF, MCP Builder…),
+  short description, namespace chip, `~Xk ctx` size — and clicking a card
+  equips/unequips it live for this project. Unequips of role/template skills
+  persist as `-id` DENY entries in the graph_json `agentSkills` grant; ONE
+  resolver (`resolveEquippedSkillIds` in `skillRuntime.ts`) backs the badge,
+  the picker, and every dispatch injection site, and ONE pure organizer
+  (`organizeSkillPacks`) shapes the popup. Same-id packs in multiple homes
+  resolve user > legacy > bundled (`skills_dirs_read` precedence +
+  `list_skill_packs` dedup), so a user-edited pack shadows the bundled copy
+  everywhere (gate: `dispatchSkillBlock.verify.run.mjs`).
 - **Auto-skill selection**: before the first model token, the goal text is
   matched against installed skills' `triggers:`/keywords and the best 1–2 are
   injected automatically (Solo, team orchestrator, and bridge paths;

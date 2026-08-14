@@ -98,6 +98,11 @@ pub async fn list_team_templates() -> Result<Vec<TeamTemplate>, String> {
 #[tauri::command]
 pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
     let mut out = Vec::new();
+    // Dedup by id across homes — same rule as list_team_templates: the first
+    // home in skills_dirs_read() precedence (user > legacy > bundled) wins, so
+    // a user-installed/edited pack shadows the bundled read-only copy instead
+    // of the picker showing the same skill twice.
+    let mut seen = std::collections::HashSet::new();
     // Walk EVERY skills home — Phase 2 puts new installs in
     // %APPDATA%\OwLLM Desktop\skills/, but the legacy LLM/data/skills/
     // location is also enumerated during the migration window.
@@ -130,6 +135,9 @@ pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
+            if !seen.insert(id.clone()) {
+                continue; // same pack in a lower-precedence home — shadowed
+            }
             out.push(SkillPack {
                 id,
                 path: md.to_string_lossy().into_owned(),

@@ -98,6 +98,68 @@ export function toggleSkillGrant(grant: string[] | null | undefined, baseIds: st
   return base.has(id) ? next : [...next, id];
 }
 
+// ── Picker presentation (pure, gate-executed) ─────────────────────────────
+// The skills popup shows ~45 packs from three homes with slug ids — these
+// helpers turn that into readable, deduped, searchable sections. Pure so the
+// regression gate executes them directly.
+
+/// Word-level acronyms that title-casing would mangle ("Pdf", "Mcp Builder").
+const SKILL_ACRONYMS = new Set([
+  "pdf", "pptx", "docx", "xlsx", "csv", "mcp", "api", "gif", "html", "css", "url", "ai", "qa",
+]);
+
+/// "anthropics__pdf" → "PDF"; "code-review" → "Code Review"; "mcp-builder" →
+/// "MCP Builder". Namespace prefix is dropped, words title-cased, known
+/// acronyms uppercased.
+export function prettySkillName(idOrSlug: string): string {
+  const base = idOrSlug.includes("__") ? idOrSlug.split("__").pop()! : idOrSlug;
+  return base
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map(w => (SKILL_ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
+}
+
+/// A pack's display title: the frontmatter name when it's a real name, else
+/// the prettified id. Curated packs often set name to the slug again
+/// ("algorithmic-art"), so slug-like names ride the same prettifier.
+export function skillPackLabel(p: { id: string; name: string }): string {
+  const n = (p.name ?? "").trim();
+  if (n && n !== p.id && !/^[a-z0-9]+([-_][a-z0-9]+)*$/.test(n)) return n;
+  return prettySkillName(n || p.id);
+}
+
+/// Namespace chip: "anthropics__pdf" → "anthropics"; unprefixed ids → null.
+export function skillPackSource(id: string): string | null {
+  const i = id.indexOf("__");
+  return i > 0 ? id.slice(0, i) : null;
+}
+
+/// Shape the picker's list: dedup by id (belt over the Rust-side home dedup),
+/// filter by a search query (label + description + id, case-insensitive),
+/// split into equipped/available sections, each sorted by display label.
+export function organizeSkillPacks(
+  packs: SkillPack[],
+  equippedIds: Iterable<string>,
+  query = "",
+): { equipped: SkillPack[]; available: SkillPack[] } {
+  const eq = new Set(equippedIds);
+  const q = query.trim().toLowerCase();
+  const seen = new Set<string>();
+  const equipped: SkillPack[] = [];
+  const available: SkillPack[] = [];
+  for (const p of packs) {
+    if (!p?.id || seen.has(p.id)) continue;
+    seen.add(p.id);
+    if (q && !`${skillPackLabel(p)} ${p.description} ${p.id}`.toLowerCase().includes(q)) continue;
+    (eq.has(p.id) ? equipped : available).push(p);
+  }
+  const byLabel = (a: SkillPack, b: SkillPack) => skillPackLabel(a).localeCompare(skillPackLabel(b));
+  equipped.sort(byLabel);
+  available.sort(byLabel);
+  return { equipped, available };
+}
+
 /// Resolve equipped skill ids → metadata + full bodies, ready to inject.
 /// Skips ids that aren't installed. Bodies come from the same cached list call,
 /// so this is a pure in-memory lookup (no extra round-trip).

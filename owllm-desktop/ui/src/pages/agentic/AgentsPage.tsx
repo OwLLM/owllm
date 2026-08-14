@@ -1241,13 +1241,9 @@ function FlowHeader({
       )}
       <div style={{ flex:1 }} />
       {/* (old FlowSoloBtn removed — the header title-switch above now controls the mode) */}
-      <button
-        data-ui="FlowNotebookBtn"
-        className="ghost-btn"
-        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook"))}
-        title="Notebook — write working notes while agents run, digest them into a Kanban plan board and larger feedable steps, then feed steps to the team or auto-feed them run after run."
-        style={{ height:28, padding:"0 8px", fontSize:11 }}
-      >📓 Notebook</button>
+      {/* (📓 Notebook + 🧠 Memory buttons removed 2026-08-14 — the Notebook is
+          a page of the right column and Project Memory a button on the left
+          column, exactly like the Code page. Nothing to duplicate here.) */}
       <button
         data-ui="FlowBrowserBtn"
         className="ghost-btn"
@@ -1255,13 +1251,6 @@ function FlowHeader({
         title="Agent Browser — view and drive the shared web browser your agents control with the browser_* tools (live page view, open URLs, persistent logins)."
         style={{ height:28, padding:"0 8px", fontSize:11 }}
       >🌐 Browser</button>
-      <button
-        data-ui="FlowMemoryBtn"
-        className="ghost-btn"
-        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
-        title="Team Memory — the shared knowledge base your agents read and write (build commands, decisions, file maps). Syncs across your PCs via the vault."
-        style={{ height:28, padding:"0 8px", fontSize:11 }}
-      >🧠 Memory</button>
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
       {/* Segmented view switch. Graph = editable top-down hierarchy,
           Chat = per-agent grid replacing the canvas entirely.
@@ -1515,6 +1504,14 @@ function AgentInfoCard({
 // matches the green Design Critic card on the canvas. Orchestrator
 // and critic get distinct dedicated colours since they sit OUTSIDE
 // the design/build split.
+/// Is this the release agent (the "Producer")? Either the publisher base role
+/// or any role granted `publish_release`. One predicate so the solo roster, the
+/// chat grid and the left column's fixed Producer card all agree.
+function isPublisherAgent(a: AgentSpec, roleByName: Map<string, RoleData>): boolean {
+  return a.base === "publisher"
+    || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release");
+}
+
 function tileAccentFor(spec: AgentSpec): string {
   if (spec.color && spec.color.trim()) return spec.color;
   const shortName = spec.name.includes(".") ? spec.name.split(".").pop()! : spec.name;
@@ -1748,14 +1745,11 @@ function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
   selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, onPickAgentModel,
   models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
-  perAgentSkills, projectCwd, labelOverrides,
+  perAgentSkills, labelOverrides,
 }: {
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
   /// "Coder"). Never touches the underlying agent name — that's identity.
   labelOverrides?: Record<string, string>;
-  /// Project working directory — threaded to the publisher tile's
-  /// Commit / Merge / Publish host controls.
-  projectCwd?: string | null;
   team: Team | null;
   roleByName: Map<string, RoleData>;
   /// Per-agent skill grants (project overrides) — combined with each agent's
@@ -1796,8 +1790,14 @@ function AgentChatGrid({
   // uneven — we render those as empty grid cells so the placement
   // doesn't drift. Tiny teams (<6 agents) fall back to the original
   // densely-packed square grid.
-  const filledArr = useMemo(() => team?.agents ?? [], [team]);
-  const fourCol = useMemo(() => arrangeTilesFourCol(team), [team]);
+  // The Producer (publisher) card is FIXED to the bottom of the left project
+  // column now (user spec 2026-08-14) — it belongs to every mode (team,
+  // solo-loop, single coder), so it is not also tiled here.
+  const gridTeam = useMemo<Team | null>(() => (
+    team ? { ...team, agents: team.agents.filter(a => !isPublisherAgent(a, roleByName)) } : null
+  ), [team, roleByName]);
+  const filledArr = useMemo(() => gridTeam?.agents ?? [], [gridTeam]);
+  const fourCol = useMemo(() => arrangeTilesFourCol(gridTeam), [gridTeam]);
   // Only use the 4-column build/design SPLIT when the team actually HAS a design
   // sub-team. A single team with no design agents (e.g. an ops team like RED)
   // was still forced into 4 columns, leaving the right two columns as empty
@@ -1911,10 +1911,7 @@ function AgentChatGrid({
             alphaB={alphaB}
             timing={agentTiming?.get(a.name)}
             skills={resolveAgentSkillIds(a, roleByName, perAgentSkills)}
-            isPublisher={a.base === "publisher"
-              || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release")}
             isBrowser={a.base === "browser"}
-            projectCwd={projectCwd}
           />
         );
       })}
@@ -6036,11 +6033,15 @@ function OrchestratorPane({
 // places it as a sub-tab inside the Orchestrator (chat container).
 // Three top-level pages remain: Super User (Y), Orchestrator (B),
 // Team (G).
-type RightTabId = "super" | "orch" | "team";
+// 2026-08-14: the Code page's 📓 Notebook page joins them as a fourth page —
+// the right column now carries EVERY feature both pages had, so the Notebook
+// no longer needs its own header button.
+type RightTabId = "super" | "orch" | "team" | "notebook";
 const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
   super: "👤 Super User",
   orch:  "📜 Orchestrator",
   team:  "🏷 Team",
+  notebook: "📓 Notebook",
 };
 
 // The right column's width + open tab persist like the Code page's
@@ -6059,7 +6060,7 @@ function selectAgentsSideTab(tab: RightTabId): void {
 function loadAgentsSideTab(): RightTabId {
   try {
     const t = localStorage.getItem(AGENTS_SIDE_TAB_KEY);
-    return t === "super" || t === "team" ? t : "orch";
+    return t === "super" || t === "team" || t === "notebook" ? t : "orch";
   } catch { return "orch"; }
 }
 
@@ -6108,6 +6109,9 @@ function RightColumnTabs(props: {
   /// The composer moved to the canvas column (Code-page position); its slash
   /// commands still switch this pane's sub-tabs through this ref bridge.
   switchTabRef: React.MutableRefObject<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>;
+  /// The inline RunNotebook — the Code page's 📓 page, rendered as a page of
+  /// this column too (AgentsPage owns its wiring, exactly like CodePage).
+  notebook: React.ReactNode;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -6115,6 +6119,14 @@ function RightColumnTabs(props: {
   // matter which top tab is active.
   const [tab, setTabState] = useState<RightTabId>(loadAgentsSideTab);
   const setTab = (t: RightTabId) => { setTabState(t); selectAgentsSideTab(t); };
+  // The Notebook used to be a popup opened by this event (Brainstorm's "open
+  // the notebook" hand-off still fires it). It is a PAGE of this column now, so
+  // the event selects that page instead of popping a window.
+  useEffect(() => {
+    const open = () => setTab("notebook");
+    window.addEventListener("owllm:open-run-notebook", open);
+    return () => window.removeEventListener("owllm:open-run-notebook", open);
+  }, []);
 
   // Dynamic label for the middle (Orchestrator) tab. The pane *is*
   // the generic agent page: when the user clicks the orchestrator
@@ -6144,7 +6156,7 @@ function RightColumnTabs(props: {
           title="Shrink right column"
           style={{ height: 28, width: 28, padding: 0, flexShrink: 0, cursor: "pointer", fontSize: 18, lineHeight: 1, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-surface)", color: "var(--fg-muted)" }}
         >›</button>
-        {(["super","orch","team"] as const).map(id => {
+        {(["super","orch","team","notebook"] as const).map(id => {
           const label = id === "orch" ? orchTabLabel : RIGHT_TAB_LABEL[id];
           return (
             <button
@@ -6164,6 +6176,9 @@ function RightColumnTabs(props: {
           right column when active; collapses to 0 px when the
           Orchestrator tab is open. */}
       <div data-ui="RightSettingsPanel" style={{
+        // The Notebook is a full page (like the Code page's) — no team/agent
+        // settings strip above it.
+        display: tab === "notebook" ? "none" : "block",
         flex:"0 0 auto",
         maxHeight:"22%",
         // Natural height (no forced minHeight) so Team + Orch panels
@@ -6230,7 +6245,13 @@ function RightColumnTabs(props: {
       {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
           Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
           when the top tab changes. */}
-      <div data-ui="RightChatHost" className="selectable-chat" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+      {/* ---- Page: Notebook — the SAME inline RunNotebook the Code page's
+          right column renders (kept mounted so notes/digest survive tab
+          flips, exactly like CodeSidePanel). ---- */}
+      <div data-ui="RightNotebookHost" style={{ flex: 1, minHeight: 0, display: tab === "notebook" ? "flex" : "none", flexDirection: "column" }}>
+        {props.notebook}
+      </div>
+      <div data-ui="RightChatHost" className="selectable-chat" style={{ flex:1, minHeight:0, display: tab === "notebook" ? "none" : "flex", overflow:"hidden" }}>
         <OrchestratorPane
           agentLogs={props.agentLogs}
           agentThoughts={props.agentThoughts}
@@ -10296,7 +10317,7 @@ export function AgentsPage({
     const coder = soloGeneralistForTeam(renderTeam);
     const critic = agents.find(a => a.name === CRITIC_AGENT_NAME)
       ?? ({ name: CRITIC_AGENT_NAME, base: "critic", icon: null } as AgentSpec);
-    const publisher = agents.find(a => a.base === "publisher" || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release"))
+    const publisher = agents.find(a => isPublisherAgent(a, roleByName))
       ?? ({ name: "Publisher", base: "publisher", icon: null } as AgentSpec);
     const seen = new Set<string>();
     const soloAgents = [coder, critic, publisher].filter(a => a && !seen.has(a.name) && seen.add(a.name));
@@ -10310,6 +10331,18 @@ export function AgentsPage({
   // Solo card label reflects the actual runtime role. It is deliberately not a
   // team lane ("Frontend") or the old generic "Coder": this agent owns every
   // domain and receives every connected tool in Solo mode.
+  // The Producer — the release agent, FIXED for every way of working (team,
+  // solo-loop, single coder). Its card left the canvas grid and is docked at
+  // the bottom of the left project column instead (user spec 2026-08-14), so
+  // Commit / Merge / Publish, its model picker and its identity are always one
+  // place. Falls back to a synthetic spec when the roster has no publisher, so
+  // the card is present even on a team that never defined one.
+  const producerSpec = useMemo<AgentSpec>(() => {
+    const roster = (soloMode ? soloRenderTeam : renderTeam)?.agents ?? [];
+    return roster.find(a => isPublisherAgent(a, roleByName))
+      ?? ({ name: "Publisher", base: "publisher", icon: null } as AgentSpec);
+  }, [soloMode, soloRenderTeam, renderTeam, roleByName]);
+
   const soloLabels = useMemo<Record<string, string>>(() => {
     const coder = soloRenderTeam?.agents[0];
     return coder ? { [coder.name]: "Solo Generalist" } : {};
@@ -14430,18 +14463,6 @@ export function AgentsPage({
         detail={modelRequired?.detail}
         onClose={() => setModelRequired(null)}
       />
-      <RunNotebook
-        projectId={selectedProjectId}
-        projectName={activeTeam?.display}
-        surfaceId={notebookSurfaceId}
-        active={isActive}
-        running={busy || supSendBusy}
-        onFeed={feedFromNotebook}
-        modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
-        port={serverState.port ?? 0}
-        models={models}
-        accountsStatus={accountsStatus}
-      />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",
@@ -14469,7 +14490,7 @@ export function AgentsPage({
           <div
             data-ui="AgentsProjectRail"
             data-state={agentsProjectRailOpen ? "expanded" : "collapsed"}
-            style={{ width: agentsProjectRailOpen ? 220 : RAIL_W, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: agentsProjectRailOpen ? "stretch" : "center", overflowY: agentsProjectRailOpen ? "auto" : "hidden", overflowX: "hidden", background: agentsProjectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: agentsProjectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: agentsProjectRailOpen ? 4 : 3, marginRight: 8 }}
+            style={{ width: agentsProjectRailOpen ? 220 : RAIL_W, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: agentsProjectRailOpen ? "stretch" : "center", minHeight: 0, overflow: "hidden", background: agentsProjectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: agentsProjectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: agentsProjectRailOpen ? 4 : 3, marginRight: 8 }}
           >
             {agentsProjectRailOpen ? (
               <>
@@ -14490,12 +14511,50 @@ export function AgentsPage({
                     style={{ width: 28, height: 30, padding: 0, flexShrink: 0, fontSize: 18, lineHeight: 1, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", cursor: "pointer" }}
                   >‹</button>
                 </div>
-                <TreeDir path={publisherCwd} name={publisherCwd.replace(/[\\/]+$/, "").replace(/^.*[\\/]/, "")} depth={0} defaultOpen onOpenFile={addFileRefToDraft} />
-                {/* Publisher card — the SAME PublisherTilePanel the ▦ chat
-                    grid's Publisher tile renders: Commit / Merge / Publish +
-                    ⚙ Set up repo, in the left column like the Code page. */}
-                <div data-ui="AgentsProjectRailPublisher" style={{ display: "flex", flexDirection: "column", flexShrink: 0, marginTop: 6, border: "1px solid rgba(255, 105, 180, 0.4)", borderRadius: 8, background: "rgba(255, 82, 160, 0.06)" }}>
-                  <PublisherTilePanel cwd={publisherCwd} rgb="255,120,183" />
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  <TreeDir path={publisherCwd} name={publisherCwd.replace(/[\\/]+$/, "").replace(/^.*[\\/]/, "")} depth={0} defaultOpen onOpenFile={addFileRefToDraft} />
+                </div>
+                {/* Producer card — the WHOLE agent card the ▦ chat grid used to
+                    tile (header: icon + name + model picker; body: the release
+                    controls), docked here so this fixed agent is present for
+                    every way of working. Same AgentChatTile component, so the
+                    card can never drift from the grid's look. */}
+                <div data-ui="AgentsProjectRailPublisher" style={{ flexShrink: 0, height: 292, marginTop: 6, display: "flex", flexDirection: "column" }}>
+                  {(() => {
+                    const resolved = modelFor(producerSpec.name);
+                    const chip = modelChipFor(resolved, providerFor(resolved));
+                    return (
+                      <AgentChatTile
+                        name={producerSpec.name}
+                        label={soloMode ? soloLabels[producerSpec.name] : undefined}
+                        icon={agentIconRef(producerSpec, roleByName, agentIconOverrides)}
+                        messages={agentLogs.get(producerSpec.name) ?? []}
+                        isActive={activeAgents.has(producerSpec.name)}
+                        isSelected={selectedNode === producerSpec.name}
+                        accent={tileAccentFor(producerSpec)}
+                        onClick={() => setSelectedNode(producerSpec.name)}
+                        onOpenEditor={() => setEditingAgent(producerSpec.name)}
+                        onPickModel={(id) => onPickAgentModel(producerSpec.name, id)}
+                        models={models}
+                        accountsStatus={accountsStatus}
+                        isCritic={false}
+                        criticEnabled={criticEnabled}
+                        onToggleCritic={() => setCriticEnabled(v => !v)}
+                        modelId={resolved}
+                        modelLabel={chip.lab}
+                        modelTint={chip.tint}
+                        modelTitle={shortModelLabel(resolved)}
+                        ringPx={0}
+                        outerPx={0}
+                        alphaA={0.65}
+                        alphaB={0.4}
+                        timing={agentTiming.get(producerSpec.name)}
+                        skills={resolveAgentSkillIds(producerSpec, roleByName, perAgentSkills)}
+                        isPublisher
+                        projectCwd={publisherCwd}
+                      />
+                    );
+                  })()}
                 </div>
               </>
             ) : (
@@ -14582,7 +14641,6 @@ export function AgentsPage({
                 onToggleCritic={() => setCriticEnabled(v => !v)}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
-                projectCwd={publisherCwd}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the
@@ -14679,17 +14737,33 @@ export function AgentsPage({
             onToggleBrowser={() => { if (!browserPanelOpen) void openBrowserSplit(); setBrowserPanelOpen(v => !v); }}
             onCollapse={() => setSideOpen(false)}
             switchTabRef={rightTabSwitchRef}
+            notebook={
+              <RunNotebook
+                inline
+                projectId={selectedProjectId}
+                projectName={activeTeam?.display}
+                surfaceId={notebookSurfaceId}
+                active={isActive}
+                running={busy || supSendBusy}
+                onFeed={feedFromNotebook}
+                modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
+                port={serverState.port ?? 0}
+                models={models}
+                accountsStatus={accountsStatus}
+              />
+            }
           />
         ) : (
-          /* Shrunk: the Code page's orange utility rail — usage, rules and
-             the browser stay reachable (no Notebook page here; the Notebook
-             lives on the FlowHeader's 📓 button). */
+          /* Shrunk: the Code page's orange utility rail — the same four
+             features the expanded column holds: notebook, usage, rules and
+             the browser. */
           <div
             data-ui="AgentsUtilityPanelRail"
             data-state="collapsed"
             style={{ width: RAIL_W, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
           >
             <CodeUtilityRailIcons
+              onNotebook={() => { selectAgentsSideTab("notebook"); setSideOpen(true); }}
               onUsage={() => setSideOpen(true)}
               onRules={() => { selectAgentsSideTab("super"); setSideOpen(true); }}
               onBrowser={() => { void openBrowserSplit(); }}

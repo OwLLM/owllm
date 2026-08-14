@@ -59,12 +59,32 @@ const rightColumn = agentsPage.slice(
 check(rightColumn.includes("<UsagePanel provider={props.usageProvider} />")
   && rightColumn.includes("<BrowserToggleButton open={props.browserOpen}"),
   "the bottom utility container carries Usage + the 🌐 Browser toggle, like the Code panel");
-check(!rightColumn.toLowerCase().includes("notebook"),
-  "the agentic right column has NO notebook page (Notebook stays on the FlowHeader)");
+// Step 2 (user spec 2026-08-14): ADD the agentic pages to the Code page's
+// column — don't REPLACE its features. So the 📓 Notebook page the Code panel
+// carries must be here too, and the FlowHeader's duplicate button is gone.
+check(agentsPage.includes('notebook: "📓 Notebook"')
+  && rightColumn.includes('data-ui="RightNotebookHost"')
+  && rightColumn.includes("{props.notebook}"),
+  "the agentic right column carries the Code panel's 📓 Notebook page");
+check(rightColumn.includes('display: tab === "notebook" ? "flex" : "none"')
+  && rightColumn.includes('display: tab === "notebook" ? "none" : "flex"'),
+  "the Notebook page swaps with the chat host and BOTH stay mounted (state survives tab flips)");
+check(agentsPage.includes("<RunNotebook\n                inline")
+  && !/<RunNotebook(?![\s\S]{0,40}inline)/.test(agentsPage),
+  "AgentsPage mounts the shared RunNotebook INLINE in that page — the popup copy is gone");
+check(rightColumn.includes('window.addEventListener("owllm:open-run-notebook"'),
+  "the open-notebook event (Brainstorm hand-off) selects the page instead of popping a window");
+check(!agentsPage.includes('data-ui="FlowNotebookBtn"'),
+  "the FlowHeader's duplicate 📓 Notebook button is gone — the page IS the notebook");
 check(agentsPage.includes('data-ui="AgentsUtilityPanelCollapse"')
   && agentsPage.includes('data-ui="AgentsUtilityPanelRail"')
-  && /CodeUtilityRailIcons\s*\n(?:(?!onNotebook)[\s\S])*?onUsage=/.test(agentsPage.slice(agentsPage.indexOf('data-ui="AgentsUtilityPanelRail"'))),
-  "the right column collapses to the Code rail — without a notebook icon");
+  && agentsPage.slice(agentsPage.indexOf('data-ui="AgentsUtilityPanelRail"')).includes('selectAgentsSideTab("notebook"); setSideOpen(true)'),
+  "the collapsed rail carries the notebook icon and it lands on the Notebook page");
+
+// ---- 2b. Memory is the LEFT column's button only (user spec 2026-08-14) ----
+check(!agentsPage.includes('data-ui="FlowMemoryBtn"')
+  && agentsPage.includes('data-ui="AgentsProjectMemory"'),
+  "the canvas header's 🧠 Memory button is gone — memory lives in the left column");
 check(agentsPage.includes('selectAgentsSideTab("super"); setSideOpen(true)'),
   "the shrunk ⚡ rules icon lands on the Super User page through the stored tab handover");
 
@@ -77,9 +97,34 @@ const leftRail = agentsPage.slice(
   agentsPage.indexOf('data-ui="AgentsProjectRail"'),
   agentsPage.indexOf("{/* Canvas column"),
 );
+// Step 4 (user spec 2026-08-14): the Publish card IS the Producer card — the
+// WHOLE agent card (identity + model picker + release controls), docked at the
+// bottom of this column, and NOT also tiled on the canvas.
 check(leftRail.includes("<TreeDir path={publisherCwd}")
-  && leftRail.includes("<PublisherTilePanel cwd={publisherCwd}"),
-  "expanded left column = 🧠 memory + the shared file tree + the agentic Publisher card");
+  && leftRail.includes('data-ui="AgentsProjectRailPublisher"')
+  && leftRail.includes("<AgentChatTile")
+  && leftRail.includes("isPublisher")
+  && leftRail.includes("projectCwd={publisherCwd}"),
+  "expanded left column = 🧠 memory + the shared file tree + the whole Producer CARD");
+check(leftRail.includes("onPickModel={(id) => onPickAgentModel(producerSpec.name, id)}")
+  && leftRail.includes("modelId={resolved}")
+  && leftRail.includes("onOpenEditor={() => setEditingAgent(producerSpec.name)}")
+  // and NOT the buttons-only panel it replaced — the whole card, or nothing.
+  && !leftRail.includes("<PublisherTilePanel"),
+  "the docked Producer card keeps its model selection and its agent identity, not just the buttons");
+check(leftRail.indexOf('data-ui="AgentsProjectRailPublisher"') > leftRail.indexOf("<TreeDir path={publisherCwd}"),
+  "the Producer card sits at the BOTTOM of the column, under the file tree");
+const chatGrid = agentsPage.slice(
+  agentsPage.indexOf("function AgentChatGrid"),
+  agentsPage.indexOf("// ── Publisher card body"),
+);
+check(chatGrid.includes("agents: team.agents.filter(a => !isPublisherAgent(a, roleByName))")
+  && !chatGrid.includes("isPublisher={"),
+  "the canvas chat grid no longer tiles a Producer card — the docked one is the only copy");
+check(agentsPage.includes("function isPublisherAgent(")
+  && agentsPage.includes("roster.find(a => isPublisherAgent(a, roleByName))")
+  && agentsPage.includes("agents.find(a => isPublisherAgent(a, roleByName))"),
+  "ONE publisher predicate drives the solo roster, the grid filter and the docked card");
 check(!leftRail.includes("PublishCards"),
   "the left column carries the Publisher card, NOT the Code page's GitHub container");
 check(leftRail.includes("<CodeProjectRailIcons")

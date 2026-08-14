@@ -897,15 +897,23 @@ fn usage_tally_stats(provider: &str) -> Vec<UsageStat> {
 /// Pretty label for the OAuth usage endpoint's window keys. Unknown keys
 /// (new windows Anthropic adds) fall back to the key with underscores
 /// spaced — never dropped.
-fn usage_window_label(key: &str) -> String {
+/// Friendly name for a quota window we KNOW, or None for a key the provider
+/// has not documented to us.
+fn usage_window_known_label(key: &str) -> Option<&'static str> {
     match key {
-        "five_hour" => "Session (5hr)".to_string(),
-        "seven_day" => "Weekly (7 day)".to_string(),
-        "seven_day_opus" => "Weekly Opus".to_string(),
-        "seven_day_sonnet" => "Weekly Sonnet".to_string(),
-        "seven_day_oauth_apps" => "Weekly (apps)".to_string(),
-        other => other.replace('_', " "),
+        "five_hour" => Some("Session (5hr)"),
+        "seven_day" => Some("Weekly (7 day)"),
+        "seven_day_opus" => Some("Weekly Opus"),
+        "seven_day_sonnet" => Some("Weekly Sonnet"),
+        "seven_day_oauth_apps" => Some("Weekly (apps)"),
+        _ => None,
     }
+}
+
+fn usage_window_label(key: &str) -> String {
+    usage_window_known_label(key)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| key.replace('_', " "))
 }
 
 /// Usage for the account behind `provider` (a `providerFor()` string from
@@ -1078,13 +1086,23 @@ async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUs
             let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else {
                 continue;
             };
+            let resets_at = val
+                .get("resets_at")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+            // The payload also carries the provider's INTERNAL buckets under
+            // codenames ("nimbus_quill", "cinder_cove", "tangelo"…). They are
+            // not user-facing quotas and rendering one as a bar is noise the
+            // user can't act on. A real quota window always says when it
+            // resets — so an undocumented key with no `resets_at` is skipped,
+            // while a genuinely NEW documented window still shows up.
+            if resets_at.is_none() && usage_window_known_label(key).is_none() {
+                continue;
+            }
             windows.push(UsageWindow {
                 label: usage_window_label(key),
                 used_pct: util,
-                resets_at: val
-                    .get("resets_at")
-                    .and_then(|r| r.as_str())
-                    .map(|s| s.to_string()),
+                resets_at,
             });
         }
     }

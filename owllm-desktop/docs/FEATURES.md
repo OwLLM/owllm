@@ -144,14 +144,20 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   (`CodeSidePanel.tsx` `SideColumnShell`/`UsagePanel`/`BrowserToggleButton`/
   `sideTabStyle`, `CodeColumnRails.tsx`, `TreeDir` from `CodePage.tsx`).
   **Left column** = 🧠 Project Memory + the lazy file tree (a clicked file
-  lands as an `@path` reference in the composer) + the **Publisher card**
-  (the exact `PublisherTilePanel` from the ▦ grid — Commit / Merge / Publish)
-  where the Code page carries its GitHub cards; collapses to the pink rail
-  (🧠 📁 🚀). **Right column** = the Code panel's resizable shell + tab style
-  carrying 👤 Super User / 📜 Orchestrator / 🏷 Team + the always-visible chat
-  host, with the Code panel's bottom **Usage** + 🌐 Browser container — no
-  Notebook tab (Notebook stays on the FlowHeader 📓 button); collapses to the
-  orange rail (📊 ⚡ 🌐). **Composer** = the same `ChatInputDock` now at the
+  lands as an `@path` reference in the composer) + the **Producer card** docked
+  at the bottom, where the Code page carries its GitHub cards; collapses to the
+  pink rail (🧠 📁 🚀). The Producer *is* the publish card: the WHOLE
+  `AgentChatTile` (identity + per-agent model picker + `PublisherTilePanel`'s
+  Commit / Merge / Publish + ⚙ Set up repo), a fixed agent for every way of
+  working (team, solo-loop, single coder) — so it is no longer also tiled on
+  the ▦ canvas grid. **Right column** = the Code panel's resizable shell + tab
+  style carrying 👤 Super User / 📜 Orchestrator / 🏷 Team + the always-visible
+  chat host, **plus the Code panel's 📓 Notebook page** (the shared
+  `RunNotebook` mounted `inline`, kept mounted across tab flips), with the
+  bottom **Usage** + 🌐 Browser container; collapses to the orange rail
+  (📓 📊 ⚡ 🌐). The FlowHeader's duplicate 📓 Notebook and 🧠 Memory buttons
+  are gone — both features live in the columns.
+  **Composer** = the same `ChatInputDock` now at the
   bottom of the canvas column (the Code page's composer position), out of the
   right column; slash commands still switch the pane's sub-tabs via a ref
   bridge. Every 🌐 browser control opens the popup **and** splits app +

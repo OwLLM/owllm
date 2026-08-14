@@ -97,7 +97,7 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "OpenAI-compatible API providers use the host tool loop, not plain chat (v0.8.20)"],
-  ["ui/src/pages/agentic/AgentsPage.tsx", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "Agentic teams give OpenAI-compatible API providers browser/local tools (v0.8.20)"],
+  ["ui/src/pages/agentic/AgentsPage.tsx", /streamChatCompletion,[\s\S]{0,3000}\} from "\.\/dispatch"/, "Agentic teams reach the OpenAI-compatible tool loop via the ONE shared dispatch (v0.8.20; stacks unified 2026-08-14)"],
   ["ui/src/pages/agentic/RunNotebook.tsx", /^(?![\s\S]*digestInput)(?=[\s\S]*Working notes)(?=[\s\S]*Plan board)(?=[\s\S]*Save plan \+ clear notes)(?=[\s\S]*Do NOT create tiny painful micro-steps)[\s\S]*$/s, "Notebook has one notes input, Kanban plan, clears consumed notes, avoids micro-steps (v0.8.23)"],
   ["ui/src/pages/agentic/localTools.ts", /MEMORY_INVOKE_TIMEOUT_MS/, "memory context is bounded and cannot stall agent startup for minutes (v0.8.20)"],
   ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],

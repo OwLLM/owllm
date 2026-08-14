@@ -51,14 +51,22 @@ check(
   "missing text gives the install command",
 );
 
-// --- both call sites route through the helper ------------------------
+// --- every call site routes through the helper ------------------------
 // Source-level: a future edit that reinstates a hardcoded string fails here.
-for (const file of ["dispatch.ts", "AgentsPage.tsx"]) {
-  const text = fs.readFileSync(path.join(HERE, file), "utf8");
-  check(/claudeCliUnavailableMessage\(/.test(text), `${file} uses the shared helper`);
-  check(!/"Claude Code CLI not detected/.test(text), `${file} has no hardcoded conflated message`);
-  check(/claude_cli_installed/.test(text), `${file} reads claude_cli_installed`);
-}
+// AgentsPage's duplicated cloud stack collapsed onto dispatch.ts (2026-08-14),
+// so the ONE Claude branch lives in dispatch.ts; AgentsPage's pin is that it
+// delegates there and never regrows a branch of its own.
+const dispatchText = fs.readFileSync(path.join(HERE, "dispatch.ts"), "utf8");
+check(/claudeCliUnavailableMessage\(/.test(dispatchText), "dispatch.ts uses the shared helper");
+check(!/"Claude Code CLI not detected/.test(dispatchText), "dispatch.ts has no hardcoded conflated message");
+check(/claude_cli_installed/.test(dispatchText), "dispatch.ts reads claude_cli_installed");
+const agentsText = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+check(!/"Claude Code CLI not detected/.test(agentsText), "AgentsPage has no hardcoded conflated message");
+check(
+  /streamChatCompletion,[\s\S]{0,3000}\} from "\.\/dispatch"/.test(agentsText)
+    && !/function streamAnthropic/.test(agentsText),
+  "AgentsPage delegates to the ONE shared Claude path (no duplicate branch)",
+);
 
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`\ncliAuthMessage: ${passed} checks passed`);

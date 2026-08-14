@@ -110,6 +110,14 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   studio (product_owner design sub-team → whitepaper.json → parallel FE/BE
   lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
   through the same graph machinery.
+- **Per-agent skills picker**: the skill ribbon on every agent card (bottom
+  right, rendered even when empty) opens a 4-column popup of ALL installed
+  skill packs — icon, name, short description, `~Xk` size, "role" origin tag —
+  and clicking a cell equips/unequips it live for this project. Unequips of
+  role/template skills persist as `-id` DENY entries in the graph_json
+  `agentSkills` grant; ONE resolver (`resolveEquippedSkillIds` in
+  `skillRuntime.ts`) backs the badge, the picker, and every dispatch injection
+  site (gate: `dispatchSkillBlock.verify.run.mjs`).
 - **Auto-skill selection**: before the first model token, the goal text is
   matched against installed skills' `triggers:`/keywords and the best 1–2 are
   injected automatically (Solo, team orchestrator, and bridge paths;

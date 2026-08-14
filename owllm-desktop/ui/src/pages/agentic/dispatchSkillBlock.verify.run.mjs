@@ -120,5 +120,78 @@ check("whitespace-only block is not injected", !specBlank.includes("--- YOUR SKI
       && (agentsPage.match(/announced\.get\(effectiveRunCwd\) !== outcome/g) || []).length >= 2);
 }
 
+// ── Card skills picker (2026-08-14): deny-aware per-agent grant ─────────────
+// The tile's skill ribbon opens a 4-column picker; toggles ride the project
+// grant, where "-id" entries DENY a role/template skill. One resolver
+// (resolveEquippedSkillIds) backs the badge, the picker AND every dispatch
+// injection site — executed here, not just grepped.
+{
+  const { readFileSync } = await import("node:fs");
+  const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  const agentsPage = readFileSync(path.join(here, "AgentsPage.tsx"), "utf8");
+
+  const srOut = path.join(outDir, "skillRuntime.bundle.mjs");
+  await build({
+    entryPoints: [new URL("./skillRuntime.ts", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")],
+    bundle: true, format: "esm", platform: "node", outfile: srOut,
+    plugins: [stubPlugin], logLevel: "silent",
+  });
+  const sr = await import(pathToFileURL(srOut).href);
+  const { resolveEquippedSkillIds, toggleSkillGrant } = sr;
+
+  // Guard so a missing export FAILS the executed checks instead of crashing
+  // the whole gate (a crash on old sources is a weak instrument).
+  const helpersExist = typeof resolveEquippedSkillIds === "function" && typeof toggleSkillGrant === "function";
+  check("skillRuntime exports the deny-aware grant helpers", helpersExist);
+  if (helpersExist) {
+    check("legacy additive grants keep their exact meaning",
+      JSON.stringify(resolveEquippedSkillIds(["a"], ["x"])) === '["a","x"]');
+    let g = toggleSkillGrant([], ["a", "b"], "a");
+    check("unequipping a role skill writes a deny entry", JSON.stringify(g) === '["-a"]');
+    check("denied role skill is no longer equipped",
+      !resolveEquippedSkillIds(["a", "b"], g).includes("a")
+        && resolveEquippedSkillIds(["a", "b"], g).includes("b"));
+    g = toggleSkillGrant(g, ["a", "b"], "a");
+    check("re-equipping a role skill just clears the deny (no debris)", g.length === 0);
+    g = toggleSkillGrant(g, ["a", "b"], "c");
+    check("equipping an extra skill appends a grant", JSON.stringify(g) === '["c"]');
+    g = toggleSkillGrant(g, ["a", "b"], "c");
+    check("unequipping a granted extra removes it (no deny debris)", g.length === 0);
+  } else {
+    for (const name of [
+      "legacy additive grants keep their exact meaning",
+      "unequipping a role skill writes a deny entry",
+      "denied role skill is no longer equipped",
+      "re-equipping a role skill just clears the deny (no debris)",
+      "equipping an extra skill appends a grant",
+      "unequipping a granted extra removes it (no deny debris)",
+    ]) check(name, false);
+  }
+
+  check("card badge shares the ONE resolver with dispatch",
+    agentsPage.includes("resolveEquippedSkillIds(baseAgentSkillIds(a, roleByName)"));
+  check("specialist injection uses the deny-aware resolver",
+    agentsPage.includes("const skillIds = resolveAgentSkillIds(spec, roleByName, perAgentSkills)"));
+  check("orchestrator injection uses the deny-aware resolver",
+    agentsPage.includes("const orchSkillIds = resolveAgentSkillIds(orch, roleByName, perAgentSkills)"));
+  check("solo + doc lanes use the deny-aware resolver",
+    agentsPage.includes("const sIds = resolveAgentSkillIds(coder, roleByName, perAgentSkills)")
+      && agentsPage.includes("const docSkillIds = resolveAgentSkillIds(docSpec, roleByName, perAgentSkills)"));
+  check("skill ribbon click opens the picker popup",
+    agentsPage.includes("onClick={(e) => { e.stopPropagation(); onOpenSkills(); }}")
+      && agentsPage.includes('data-ui="AgentSkillsModal"'));
+  check("picker lays the skills out in 4 columns",
+    agentsPage.includes('gridTemplateColumns: "repeat(4, 1fr)"'));
+  check("each picker cell carries the skill icon + short description",
+    /skillIcon\(p\.id\)/.test(agentsPage)
+      && agentsPage.includes('{p.description || "(no description)"}'));
+  check("a picker toggle rides the per-project grant (toggleSkillGrant)",
+    agentsPage.includes("toggleSkillGrant(prev.get(agentName), baseIds, skillId)"));
+  check("old hover-only skill list is gone (one control per setting)",
+    !agentsPage.includes("showSkills"));
+  check("ribbon renders even with zero skills so the picker stays reachable",
+    agentsPage.includes("No skills equipped — click to add"));
+}
+
 console.log(fail === 0 ? `\nall ${pass} checks passed` : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

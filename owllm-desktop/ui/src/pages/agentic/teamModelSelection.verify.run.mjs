@@ -120,9 +120,11 @@ try {
       && page.includes('new CustomEvent("owllm:agent-model-changed"')
       && page.includes('window.addEventListener("owllm:agent-model-changed"')
       && page.includes("agentModels: Array.from(assignedModels.entries())"));
+  // The kimi branch moved into the shared dispatch.ts when AgentsPage's
+  // duplicated cloud stack collapsed (2026-08-14) — same invariant, one copy.
   check("Agentic Kimi path runs the execution-environment preflight",
-    /if \(route\.forceSub\) \{\s+[\s\S]*?await ensureCliWarm\("kimi_cli", projectCwd\);/.test(page)
-      && /\}\), projectCwd\);/.test(page));
+    /if \(route\.forceSub === true\) \{\s+await ensureCliWarm\("kimi_cli", projectCwd\);/.test(dispatch)
+      && !/ensureCliWarm\("kimi_cli"/.test(page));
   check("Shared CLI warm-up prepares the actual project environment",
     dispatch.includes('"accounts_prepare_cli_for_cwd"')
       && dispatch.includes('{ kind: "prepare", backend }')

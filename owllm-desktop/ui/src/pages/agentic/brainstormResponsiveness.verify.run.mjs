@@ -58,26 +58,18 @@ must(
   "Anthropic SSE parser must yield while streaming",
 );
 
+// AgentsPage's private cloud stack (its own streamChatCompletion + SSE
+// parsers) collapsed onto dispatch.ts on 2026-08-14. The responsiveness
+// invariants are pinned on the shared implementations above; the page's pin
+// is that no private copy creeps back in and bypasses them.
 must(
   agents,
-  /makeResponsiveHandlers,\s*[\r\n\s]*makeUiYield,/,
-  "AgentsPage legacy routing must import the shared responsiveness helpers",
+  /streamChatCompletion,[\s\S]{0,3000}\} from "\.\/dispatch"/,
+  "AgentsPage must route streaming through the ONE shared dispatch",
 );
-must(
-  agents,
-  /streamChatCompletion[\s\S]*makeResponsiveHandlers\(onDelta, onThought\)[\s\S]*try \{[\s\S]*finally \{[\s\S]*await responsive\.flush\(\)/,
-  "AgentsPage local streamChatCompletion copy must buffer and flush callbacks",
-);
-must(
-  agents,
-  /consumeOpenAISse[\s\S]*const maybeYield = makeUiYield\(\)[\s\S]*await maybeYield\(\)/,
-  "AgentsPage legacy OpenAI SSE parser must yield",
-);
-must(
-  agents,
-  /consumeAnthropicSse[\s\S]*const maybeYield = makeUiYield\(\)[\s\S]*await maybeYield\(\)/,
-  "AgentsPage legacy Anthropic SSE parser must yield",
-);
+if (/function streamChatCompletion|consumeOpenAISse|consumeAnthropicSse/.test(agents)) {
+  fail("AgentsPage has grown a private streaming copy again — the responsiveness pins above no longer cover it");
+}
 
 must(
   brainstorm,

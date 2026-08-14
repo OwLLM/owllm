@@ -79,8 +79,14 @@ try {
   // on 3 of 11 paths. These assert the remaining eight are wired too.
   const dispatch = read("pages/agentic/dispatch.ts");
   const page = read("pages/agentic/AgentsPage.tsx");
+  // AgentsPage's own provider paths collapsed onto dispatch.ts (2026-08-14);
+  // the budget is applied inside the shared stack, so the page's pin is that
+  // it routes through it rather than budgeting (or not budgeting) on its own.
   check("dispatch.ts imports the budget rather than re-deriving one",
-    dispatch.includes('from "./contextBudget"') && page.includes('from "./contextBudget"'));
+    dispatch.includes('from "./contextBudget"'));
+  check("AgentsPage has no provider path of its own to budget (routes through dispatch)",
+    /streamChatCompletion,[\s\S]{0,3000}\} from "\.\/dispatch"/.test(page)
+      && !page.includes("function streamChatCompletion"));
   check("No provider path spreads raw history into a request any more",
     !/\.\.\.\(history \?\? \[\]\)/.test(dispatch)
       && !/\.\.\.\(history \?\? \[\]\)/.test(page)
@@ -89,20 +95,19 @@ try {
   check("No provider path joins the whole transcript by hand any more",
     !/const convo = \(history \?\? \[\]\)/.test(dispatch)
       && !/const folded = \(history \?\? \[\]\)/.test(page));
-  check("The Gemini contents[] builders are bounded on both copies",
+  check("The Gemini contents[] builder is bounded (one shared copy since 2026-08-14)",
     /recentTextHistory\(history, geminiBudget\.turns, geminiBudget\.chars\)/.test(dispatch)
-      && /recentTextHistory\(history, geminiBudget\.turns, geminiBudget\.chars\)/.test(page));
-  check("The Anthropic messages[] builders are bounded on both copies",
-    /recentTextHistory\(history, anthropicBudget\.turns, anthropicBudget\.chars\)/.test(page)
-      && /recentTextHistory\(history, budgetForModel\.turns, budgetForModel\.chars\)/.test(dispatch));
+      && !/geminiBudget/.test(page));
+  check("The Anthropic messages[] builder is bounded (one shared copy since 2026-08-14)",
+    /recentTextHistory\(history, budgetForModel\.turns, budgetForModel\.chars\)/.test(dispatch)
+      && !/anthropicBudget/.test(page));
   check("The local llama-server path asks for the window it was actually granted",
     dispatch.includes("grantedLocalContextWindow")
       && /server_status/.test(dispatch));
   check("The CLI folds name the model they are budgeting for",
     /foldHistoryIntoPrompt\(cliUserMessage, history, cliModel\)/.test(dispatch)
       && /foldHistoryIntoPrompt\(userMessage, history, modelId\)/.test(dispatch)
-      && /foldHistoryIntoPrompt\(cliUserMessage, history, cliModel\)/.test(page)
-      && /foldHistoryIntoPrompt\(userMessage, history, modelId\)/.test(page));
+      && !/foldHistoryIntoPrompt\(/.test(page));
 
   for (const c of checks) console.log(`  ok  ${c.name}`);
   console.log(`\ncontextBudget.verify: ${checks.length} checks passed`);

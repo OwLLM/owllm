@@ -124,7 +124,10 @@ import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomai
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
-import { resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
+import {
+  resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock,
+  listSkillPacks, resolveEquippedSkillIds, toggleSkillGrant, type SkillPack,
+} from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -1698,19 +1701,24 @@ function skillShortName(id: string): string {
   const base = id.includes("__") ? id.split("__").pop()! : id;
   return base.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
-// An agent's equipped skill ids — role allowlist + team extras + per-project
-// grant, deduped. The SAME sources buildSpecialistPrompt injects, so the badge
-// reflects exactly what the agent actually has equipped.
+// An agent's BASE skill ids — role yaml allowlist ∪ team-template extras.
+// The per-project grant is applied on top by resolveEquippedSkillIds, whose
+// "-id" entries can also DENY one of these base skills (card-picker unequip).
+function baseAgentSkillIds(a: AgentSpec, roleByName: Map<string, RoleData>): string[] {
+  return [...new Set([
+    ...(roleByName.get(a.base)?.skillAllowlist ?? []),
+    ...(a.extraSkills ?? []),
+  ])].filter(Boolean);
+}
+// An agent's equipped skill ids — THE resolver behind the card badge, the
+// skills picker AND every dispatch injection site. One implementation, so a
+// picker toggle can never lie about what the agent actually gets injected.
 function resolveAgentSkillIds(
   a: AgentSpec,
   roleByName: Map<string, RoleData>,
   perAgentSkills?: Map<string, string[]>,
 ): string[] {
-  return [...new Set([
-    ...(roleByName.get(a.base)?.skillAllowlist ?? []),
-    ...(a.extraSkills ?? []),
-    ...(perAgentSkills?.get(a.name) ?? []),
-  ])].filter(Boolean);
+  return resolveEquippedSkillIds(baseAgentSkillIds(a, roleByName), perAgentSkills?.get(a.name));
 }
 
 // AgentChatGrid — per-agent chat windows tiled into a square grid in
@@ -1722,7 +1730,7 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, onPickAgentModel,
+  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, providerFor, onPickAgentModel,
   models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
   perAgentSkills, labelOverrides,
 }: {
@@ -1742,6 +1750,8 @@ function AgentChatGrid({
   /// Open the per-agent editor popup (model / colour / prompt) for this agent.
   /// Fired in addition to onSelectAgent when a tile is clicked.
   onOpenEditor: (name: string) => void;
+  /// Open the skills picker popup for this agent (tile skill-ribbon click).
+  onOpenSkills: (name: string) => void;
   /// Resolve the model id shown on a tile's header chip (per-agent override >
   /// team default > server model). Same resolver the dispatch path uses.
   modelFor: (agentName: string) => string;
@@ -1874,6 +1884,7 @@ function AgentChatGrid({
             accent={accent}
             onClick={() => onSelectAgent(a.name)}
             onOpenEditor={() => onOpenEditor(a.name)}
+            onOpenSkills={() => onOpenSkills(a.name)}
             onPickModel={(id) => onPickAgentModel(a.name, id)}
             models={models}
             accountsStatus={accountsStatus}
@@ -2382,7 +2393,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
 // for every other tile otherwise.
 function AgentChatTile({
   name, icon, messages,
-  isActive, isSelected, accent, onClick, onOpenEditor,
+  isActive, isSelected, accent, onClick, onOpenEditor, onOpenSkills,
   onPickModel, models, accountsStatus, isCritic, criticEnabled, onToggleCritic,
   modelId, modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
@@ -2423,6 +2434,9 @@ function AgentChatTile({
   /// Click the tile also opens the per-agent editor popup (model / colour /
   /// prompt). Suppressed while the user is mid text-selection in the tile.
   onOpenEditor: () => void;
+  /// Click the bottom-right skill ribbon → the skills picker popup for this
+  /// agent (like the model chip, the ribbon is the selection control).
+  onOpenSkills: () => void;
   /// Short model name shown as a logo-chip on the right of the header.
   modelId: string;
   modelLabel: string;
@@ -2442,7 +2456,6 @@ function AgentChatTile({
   alphaB: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [showSkills, setShowSkills] = useState(false); // skill-badge hover → named list
   useTick(timing?.activeSince != null); // tick this card's clock while it's working
   const elapsedMs = agentElapsedMs(timing);
   const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
@@ -2697,62 +2710,165 @@ function AgentChatTile({
       </>
       )}
       {/* Skill ribbon — a corner stack of skill icons (like a soldier's
-          badges). Hover the corner → the full named list. Shows what this
-          agent has equipped; lit whether it's mid-run or idle. */}
-      {skills && skills.length > 0 && (
-        <div
-          onMouseEnter={() => setShowSkills(true)}
-          onMouseLeave={() => setShowSkills(false)}
-          onClick={(e) => e.stopPropagation()}
-          title={`Skills: ${skills.map(skillShortName).join(", ")}`}
-          style={{
-            position: "absolute", bottom: 6, right: 6, zIndex: 4,
-            display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 1,
-          }}
-        >
-          {skills.slice(0, 5).map((id, i) => (
-            <span
-              key={id}
-              style={{
-                fontSize: 11, width: 18, height: 18,
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-                background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
-                borderRadius: 4,
-                transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
-                boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
-              }}
-            >{skillIcon(id)}</span>
-          ))}
-          {skills.length > 5 && (
-            <span style={{
-              fontSize: 9, fontWeight: 800, color: "var(--fg-muted)",
-              alignSelf: "center", padding: "0 2px",
-            }}>+{skills.length - 5}</span>
-          )}
-          {showSkills && (
-            <div style={{
-              position: "absolute", bottom: 24, right: 0, zIndex: 6,
-              minWidth: 150, maxWidth: 210,
-              background: "rgba(10,13,20,0.98)", border: `1px solid rgba(${rgb},0.6)`,
-              borderRadius: 8, padding: "7px 9px", boxShadow: "0 6px 20px rgba(0,0,0,0.6)",
-            }}>
-              <div style={{
-                fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase",
-                color: "var(--fg-muted)", marginBottom: 5,
-              }}>Skills ({skills.length})</div>
-              {skills.map((id) => (
-                <div key={id} style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  fontSize: 11.5, color: "var(--fg-strong)", padding: "2px 0",
-                }}>
-                  <span style={{ width: 15, textAlign: "center", flexShrink: 0 }}>{skillIcon(id)}</span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{skillShortName(id)}</span>
-                </div>
-              ))}
+          badges). Click → the skills picker popup for this agent, the same
+          way the model chip opens the model picker. Rendered even with zero
+          skills so the picker stays reachable from every card. */}
+      <div
+        onClick={(e) => { e.stopPropagation(); onOpenSkills(); }}
+        title={skills && skills.length > 0
+          ? `Skills: ${skills.map(skillShortName).join(", ")} — click to change`
+          : "No skills equipped — click to add"}
+        style={{
+          position: "absolute", bottom: 6, right: 6, zIndex: 4, cursor: "pointer",
+          display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 1,
+        }}
+      >
+        {(skills ?? []).slice(0, 5).map((id, i) => (
+          <span
+            key={id}
+            style={{
+              fontSize: 11, width: 18, height: 18,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
+              borderRadius: 4,
+              transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
+              boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+            }}
+          >{skillIcon(id)}</span>
+        ))}
+        {(skills ?? []).length > 5 && (
+          <span style={{
+            fontSize: 9, fontWeight: 800, color: "var(--fg-muted)",
+            alignSelf: "center", padding: "0 2px",
+          }}>+{(skills ?? []).length - 5}</span>
+        )}
+        {(!skills || skills.length === 0) && (
+          <span style={{
+            fontSize: 10, width: 18, height: 18, opacity: 0.75,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(8,11,17,0.78)", border: `1px dashed rgba(${rgb},0.5)`,
+            borderRadius: 4,
+          }}>🧩</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// AgentSkillsModal — the skills picker opened by clicking a card's skill
+// ribbon. Shows every installed skill pack in a 4-column grid (icon + name +
+// short description); equipped ones are lit. A toggle rewrites the agent's
+// per-project grant via toggleSkillGrant, whose "-id" entries DENY a role/
+// template-provided skill — the same deny-aware grant resolveAgentSkillIds
+// reads, so this picker, the card badge and every dispatch injection agree.
+// Mirrors AgentEditorModal's overlay chrome (backdrop click-to-close, ✕, Esc).
+function AgentSkillsModal({
+  displayName, icon, accent, baseIds, grant, onToggle, onClose,
+}: {
+  displayName: string;
+  icon: string;
+  /// The tile's accent colour — carried into the header + lit cells so the
+  /// popup visibly belongs to the card that opened it.
+  accent: string;
+  /// Role yaml allowlist ∪ team-template extras — what the agent has before
+  /// the per-project grant is applied (deny targets resolve against these).
+  baseIds: string[];
+  /// The agent's per-project grant list (additions + "-id" denies).
+  grant: string[] | undefined;
+  onToggle: (skillId: string) => void;
+  onClose: () => void;
+}) {
+  const [packs, setPacks] = useState<SkillPack[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    listSkillPacks()
+      .then(setPacks)
+      .catch(e => setErr(`Skill packs unavailable: ${String((e as { message?: string })?.message ?? e)}`));
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const equipped = new Set(resolveEquippedSkillIds(baseIds, grant ?? []));
+  return (
+    <div
+      data-ui="AgentSkillsOverlay"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(8,12,20,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        data-ui="AgentSkillsModal"
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 880, maxWidth: "94vw", maxHeight: "84vh", overflow: "auto",
+          background: "var(--bg-elevated)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "16px 18px",
+          display: "flex", flexDirection: "column", gap: 12,
+          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        {/* Header — same shape as the agent editor's */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: accent, flexShrink: 0 }} />
+          <img src={owlSrc(icon)} style={{ width: 26, height: 26, objectFit: "contain" }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg)" }}>{displayName} — Skills</div>
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 2 }}>
+              {equipped.size} equipped · click a skill to equip or unequip it for this agent (saved with the project)
             </div>
-          )}
+          </div>
+          <button
+            onClick={onClose}
+            title="Close (Esc)"
+            style={{ width: 28, height: 28, padding: 0, borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: "pointer", fontSize: 14, flexShrink: 0 }}
+          >✕</button>
         </div>
-      )}
+        {err && (
+          <div style={{ fontSize: 12, color: "#ffb4a8" }}>⚠ {err}</div>
+        )}
+        {!err && packs.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>Loading skill packs…</div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+          {packs.map(p => {
+            const on = equipped.has(p.id);
+            return (
+              <button
+                key={p.id}
+                onClick={() => onToggle(p.id)}
+                title={`${p.name}${on ? " — equipped, click to remove" : " — click to equip"}`}
+                style={{
+                  display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4,
+                  textAlign: "left", padding: "8px 9px", minHeight: 74, cursor: "pointer",
+                  borderRadius: 8,
+                  border: on ? `1px solid ${accent}` : "1px solid var(--border)",
+                  background: on ? "rgba(122,211,255,0.10)" : "var(--bg-surface)",
+                  color: "var(--fg)",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+                  <span style={{ fontSize: 14 }}>{skillIcon(p.id)}</span>
+                  <span style={{
+                    fontSize: 11.5, fontWeight: 700, flex: 1, minWidth: 0,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{skillShortName(p.id)}</span>
+                  {on && <span style={{ fontSize: 10, color: accent, flexShrink: 0 }}>✓</span>}
+                </span>
+                <span style={{
+                  fontSize: 10, lineHeight: 1.35, color: "var(--fg-muted)",
+                  display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }}>{p.description || "(no description)"}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -6910,14 +7026,9 @@ function buildOrchestratorPrompt(
   const roster = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     const tools = agentToolCapability(roleByName.get(a.base)?.toolAllowlist);
-    // Full equipped-skill set: role allowlist + team template extras + per-project
-    // grant — the SAME sources the dispatch injects into the specialist, so the
-    // roster reflects exactly what each agent actually knows.
-    const skillIds = [...new Set([
-      ...(roleByName.get(a.base)?.skillAllowlist ?? []),
-      ...(a.extraSkills ?? []),
-      ...(perAgentSkills?.get(a.name) ?? []),
-    ])];
+    // Full equipped-skill set — the SAME deny-aware resolver the dispatch
+    // injects with, so the roster reflects exactly what each agent knows.
+    const skillIds = resolveAgentSkillIds(a, roleByName, perAgentSkills);
     const skills = skillIds.length ? ` [skills: ${skillIds.map(prettySkill).join(", ")}]` : "";
     return `  - ${a.name} (${a.base}): ${desc}${tools}${skills}`;
   }).join("\n");
@@ -7946,6 +8057,8 @@ export function AgentsPage({
   const consentSeenRef = useRef<Set<string>>(new Set());
   /// Which agent's editor popup (model / colour / prompt) is open, by name.
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
+  // Which agent's skills-picker popup is open (card skill-ribbon click).
+  const [skillsAgent, setSkillsAgent] = useState<string | null>(null);
   /// Live card-colour preview per agent (name → hex), applied to renderTeam so
   /// the tile / canvas / graph repaint before the user hits Save. Ephemeral —
   /// the persisted colour rides on the team template (spec.color via toTeam);
@@ -10731,11 +10844,7 @@ export function AgentsPage({
         appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
         appendLog(coder.name, { role: coder.name, color: colorForAgent(coder), text: "" });
         runTraceRef.current?.agents.set(coder.name, { domain: agentDomain(coder), runs: 1 });
-        const sIds = [
-          ...(roleByName.get(coder.base)?.skillAllowlist ?? []),
-          ...(coder.extraSkills ?? []),
-          ...(perAgentSkills.get(coder.name) ?? []),
-        ];
+        const sIds = resolveAgentSkillIds(coder, roleByName, perAgentSkills);
         const { block: sBlock, autoLoaded: sAutoLoaded } = await buildSoloSkillBlock(
           runtimeSkillIds(coder, sIds),
           text,
@@ -11066,13 +11175,9 @@ export function AgentsPage({
       }
       // The orchestrator consumes its OWN equipped skills exactly like specialists
       // do — so any skill (incl. downloaded community/Anthropic packs) equipped on
-      // the orchestrator is injected, not silently dropped. Same id sources as the
-      // specialist path: role allowlist + team extras + per-project grant.
-      const orchSkillIds = [
-        ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
-        ...(orch.extraSkills ?? []),
-        ...(perAgentSkills.get(orch.name) ?? []),
-      ];
+      // the orchestrator is injected, not silently dropped. Same deny-aware
+      // resolver as the card badge and the specialist path.
+      const orchSkillIds = resolveAgentSkillIds(orch, roleByName, perAgentSkills);
       // Auto-skill selection (same engine as the Solo path): merge the
       // orchestrator's equipped skills with skills matched from the goal text,
       // so a relevant procedure loads without the model having to discover it.
@@ -11648,14 +11753,10 @@ export function AgentsPage({
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
           const specModel = effectiveModelFor(spec);
           const allowed = effectiveToolsFor(spec);
-          // Resolve this agent's equipped skills (template extra_skills + the
-          // per-project graph_json grant) and inject them (budgeted progressive
-          // disclosure). Skills not installed are skipped.
-          const skillIds = [
-            ...(roleByName.get(spec.base)?.skillAllowlist ?? []),  // Studio agent-card skills
-            ...(spec.extraSkills ?? []),                           // team template extra_skills
-            ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
-          ];
+          // Resolve this agent's equipped skills (role allowlist + template
+          // extra_skills + the deny-aware per-project grant) and inject them
+          // (budgeted progressive disclosure). Skills not installed are skipped.
+          const skillIds = resolveAgentSkillIds(spec, roleByName, perAgentSkills);
           const skillBlock = await buildAgentSkillBlock(
             runtimeSkillIds(spec, skillIds),
             !!spec.runtimePersonal,
@@ -12266,7 +12367,7 @@ export function AgentsPage({
         if (!docWt) throw new Error(`Required worktree for @${docSpec.name} was not created.`);
         const docCwd = docWt.path;
         const docAllowed = effectiveToolsFor(docSpec);
-        const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
+        const docSkillIds = resolveAgentSkillIds(docSpec, roleByName, perAgentSkills);
         const docSkillBlock = await buildAgentSkillBlock(
           runtimeSkillIds(docSpec, docSkillIds),
           !!docSpec.runtimePersonal,
@@ -13290,6 +13391,32 @@ export function AgentsPage({
           />
         );
       })()}
+      {skillsAgent && (() => {
+        // Same lookup rule as the editor modal: renderTeam resolves every
+        // visible tile (incl. the synthetic critic and the docked Producer).
+        const spec = (soloMode ? soloRenderTeam : renderTeam)?.agents.find(a => a.name === skillsAgent)
+          ?? renderTeam?.agents.find(a => a.name === skillsAgent) ?? null;
+        if (!spec) return null;
+        const agentName = skillsAgent;
+        const baseIds = baseAgentSkillIds(spec, roleByName);
+        return (
+          <AgentSkillsModal
+            displayName={displayLabel(agentName)}
+            icon={agentIconRef(spec, roleByName, agentIconOverrides)}
+            accent={tileAccentFor(spec)}
+            baseIds={baseIds}
+            grant={perAgentSkills.get(agentName)}
+            onToggle={(skillId) => setPerAgentSkills(prev => {
+              // One picker click → the next deny-aware grant list. The existing
+              // persistence effect saves it into the project's graph_json.
+              const next = new Map(prev);
+              next.set(agentName, toggleSkillGrant(prev.get(agentName), baseIds, skillId));
+              return next;
+            })}
+            onClose={() => setSkillsAgent(null)}
+          />
+        );
+      })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
       <BrowserPanel open={browserPanelOpen} onClose={() => setBrowserPanelOpen(false)} />
       <ModelRequiredDialog
@@ -13369,6 +13496,7 @@ export function AgentsPage({
                         accent={tileAccentFor(producerSpec)}
                         onClick={() => setSelectedNode(producerSpec.name)}
                         onOpenEditor={() => setEditingAgent(producerSpec.name)}
+                        onOpenSkills={() => setSkillsAgent(producerSpec.name)}
                         onPickModel={(id) => onPickAgentModel(producerSpec.name, id)}
                         models={models}
                         accountsStatus={accountsStatus}
@@ -13467,6 +13595,7 @@ export function AgentsPage({
                 selectedAgent={selectedNode}
                 onSelectAgent={(name) => setSelectedNode(name)}
                 onOpenEditor={(name) => setEditingAgent(name)}
+                onOpenSkills={(name) => setSkillsAgent(name)}
                 modelFor={modelFor}
                 providerFor={providerFor}
                 onPickAgentModel={onPickAgentModel}

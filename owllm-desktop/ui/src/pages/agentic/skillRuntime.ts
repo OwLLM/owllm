@@ -211,9 +211,16 @@ export async function buildSoloSkillBlock(
   equippedIds: string[],
   goalText: string,
   strict = false,
+  /// Ids already injected into the SAME prompt through a dedicated section
+  /// (e.g. `owllm__parallel-dispatch` rides the PARALLEL DISPATCH block when
+  /// parallel mode is on). Excluded here so one skill's body can never sit in
+  /// the prompt twice — equipped, granted, or auto-selected.
+  excludeIds: string[] = [],
 ): Promise<{ block: string; autoLoaded: string[] }> {
-  const autoLoaded = strict ? [] : await selectRelevantSkillIds(goalText, { max: 2 });
-  const merged = [...new Set([...equippedIds, ...autoLoaded])];
+  const excluded = new Set(excludeIds);
+  const autoLoaded = (strict ? [] : await selectRelevantSkillIds(goalText, { max: 2 }))
+    .filter(id => !excluded.has(id));
+  const merged = [...new Set([...equippedIds, ...autoLoaded])].filter(id => !excluded.has(id));
   const block = await buildAgentSkillBlock(merged, strict);
   return { block, autoLoaded };
 }

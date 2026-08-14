@@ -68,36 +68,16 @@ import {
   buildCriticPrompt,
   buildAskUserBubble,
   extractUserInputRequest,
-  transcribeAudioAttachments,
   imageAttachments,
-  appendImageAttachmentNotes,
-  appendCliImageFiles,
-  saveCliImages,
-  resolveImageCwd,
-  fileToImageAttachment,
   fileToChatAttachment,
   appendDocumentAttachmentText,
   CHAT_ATTACHMENT_ACCEPT,
-  openaiUserContent,
-  anthropicUserContent,
-  parseClaudeModelId,
-  mapClaudeEffort,
   getClaudeSession,
-  resetClaudeSession,
-  clearAllClaudeSessions,
   loadAgentMemory,
   appendAgentMemory,
-  streamLocalChat,
-  streamOpenAiApiWithTools,
-  foldHistoryIntoPrompt,
-  recentTextHistory,
-  runCodexCliStream,
-  runKimiCliStream,
-  makeResponsiveHandlers,
-  makeUiYield,
-  ensureCliWarm,
+  streamChatCompletion,
+  setGrantHomeThisRun,
   CliPreflightError,
-  clearCliWarm,
   withCliAuthRetry,
   setCliAuthWaitHandler,
   type AuthWaitInfo,
@@ -113,7 +93,6 @@ import {
   routingHint,
   nextHandoffs,
   loopExhaustedNotice,
-  fetchNetRetry,
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
   TEAM_MEMORY_HINT_LEAN,
@@ -124,14 +103,15 @@ import {
   sleepAbortable,
 } from "./dispatch";
 import { requiresManagedLocalServer } from "./peerCatalogue";
-// The local-model tool-use loop now lives in ONE shared place
-// (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
-// keeps only the cloud/sub/API routing and delegates the GGUF path to
-// streamLocalChat. stripFabricatedToolOutput is still used to clean the
-// SuperUser orchestrator's streamed reply.
+// The FULL model dispatch (cloud/sub/API routing AND the local tool-use loop)
+// lives in ONE shared place: streamChatCompletion in dispatch.ts. AgentsPage
+// used to carry its own ~1000-line copy of the router + provider streams; the
+// two drifted apart 19 documented ways (Claude 401 retry, Stop scoping, kimi
+// images, gemini warm-up, grok sub, usage metering, …), so the copy is gone.
+// stripFabricatedToolOutput is still used to clean the SuperUser
+// orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
-import { claudeCliUnavailableMessage, type ClaudeCliStatus } from "./cliAuthMessage";
 import { runMemoryCurator } from "./memoryCurator";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -188,13 +168,12 @@ import {
   worktreePreflightError,
   type WorktreeCreateState,
 } from "./worktreeIsolation";
-import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
-import { historyBudgetFor } from "./contextBudget";
+import { READONLY_LOCAL_TOOLS } from "./agentSandbox";
 import { startupFailureReason, localStartFailureText } from "./localServerFailure";
 import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
-// Native tool_call shape harvested by consumeOpenAISse from
-// delta.tool_calls (used by the cloud streaming display path).
+// Native tool_call shape harvested from delta.tool_calls by the shared
+// SSE consumers in dispatch.ts (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
 type QueuedSteer = { text: string; attachments: Attachment[] };
 
@@ -7172,32 +7151,6 @@ function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
   return out;
 }
 
-/// Route the SSE chat-completion to whichever backend serves the
-/// model. The signature stays the same so the dispatch loop doesn't
-/// care which provider it's talking to — only the resolver layer
-/// (modelFor + provider lookup) does.
-// Channel-keyed thinking/tool stream. Mirrors dispatch.ts ThoughtHandler.
-// `channel` is a stable per-block id ("thinking", "tool:Write:abc"),
-// `role` is the human label ("🧠 thinking", "🛠 Write"), `delta` the chunk.
-type ThoughtHandler = (channel: string, role: string, delta: string) => void;
-
-// Mirror of accounts.rs ClaudeStreamEvent (Tauri ipc::Channel payload).
-type ClaudeStreamEvent =
-  | { kind: "text"; delta: string }
-  | { kind: "thinking"; delta: string }
-  | { kind: "toolUse"; toolUseId: string; name: string; input: string }
-  | { kind: "toolResult"; toolUseId: string; content: string }
-  | { kind: "error"; message: string };
-
-// Per-run consent to widen the CLI's filesystem scope to the user's home
-// profile (--add-dir). DEFAULT FALSE — the agent stays jailed to the project.
-// Flipped true only when the user approves the "grant home for this run"
-// consent prompt (see FileAccessConsentModal), and RESET to false at the start
-// of every dispatch (dispatchGoal) so a grant never silently leaks into a later
-// run. Module-scoped so runClaudeCliStream (also module-scoped) can read it
-// without threading a param through every stream* signature.
-let grantHomeThisRun = false;
-function setGrantHomeThisRun(v: boolean) { grantHomeThisRun = v; }
 
 // Detect the CLI/local sandbox "file is outside the working directory" block
 // from a streamed error string, and best-effort pull out the path the agent
@@ -7220,1033 +7173,6 @@ function detectOutsideWorkspaceBlock(text: string): { path: string | null } | nu
   return { path };
 }
 
-// Streaming variant of claude_cli_complete — uses claude --print
-// --output-format stream-json --verbose so the Thought tab gets live
-// thinking blocks + tool_use commands as the CLI emits them. Returns
-// the assembled assistant text.
-async function runClaudeCliStream(args: {
-  systemPrompt: string;
-  userMessage: string;
-  cwd?: string | null;
-  autoApprove?: boolean;
-  /// Per-role tool allowlist (OWLLM-style names — read_file, shell,
-  /// edit_file, …). Forwarded to the CLI as --allowedTools after the
-  /// Rust side translates to Claude tool names. Omit / pass empty to
-  /// run unrestricted (operator behaviour).
-  allowedTools?: string[];
-  /// Bare Claude model id (no ":effort" suffix). Forwards as --model.
-  model?: string | null;
-  /// Effort tier: "low"|"medium"|"high"|"xhigh"|"max". Forwards as --effort.
-  effort?: string | null;
-  /// Persistent session UUID for multi-turn memory.
-  sessionId?: string | null;
-  briefMode?: boolean;
-  /// Called when the agent emits a SendUserMessage tool call. Caller
-  /// shows the question to the user (modal, inline prompt, chat
-  /// entry). Phase C v1: not yet wired to bidirectional reply.
-  onAskUser?: (question: string) => void;
-  onDelta: (delta: string) => void;
-  onThought: ThoughtHandler;
-}): Promise<string> {
-  const ch = new Channel<ClaudeStreamEvent>();
-  ch.onmessage = (msg) => {
-    switch (msg.kind) {
-      case "text":
-        args.onDelta(msg.delta);
-        break;
-      case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
-        break;
-      case "toolUse": {
-        if (msg.name === "SendUserMessage") {
-          let q = msg.input || "";
-          try {
-            const parsed = JSON.parse(msg.input);
-            if (parsed && typeof parsed.message === "string") q = parsed.message;
-            else if (parsed && typeof parsed.text === "string") q = parsed.text;
-          } catch { /* raw input */ }
-          if (args.onAskUser) args.onAskUser(q);
-          args.onThought("ask-user", "❓ agent asks", q);
-          break;
-        }
-        const channel = `tool:${msg.name}:${msg.toolUseId}`;
-        args.onThought(channel, `🛠 ${msg.name}`, msg.input || "");
-        break;
-      }
-      case "toolResult": {
-        const channel = `tool-result:${msg.toolUseId}`;
-        const snippet = msg.content.length > 800
-          ? msg.content.slice(0, 800) + "\n…(truncated)"
-          : msg.content;
-        args.onThought(channel, "↩ result", snippet);
-        break;
-      }
-      case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
-        break;
-    }
-  };
-  return await invoke<string>("claude_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    autoApprove: args.autoApprove ?? false,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    sessionId: args.sessionId ?? null,
-    // Default --brief on — matches VS Code Claude Code. The agent can
-    // always ask via SendUserMessage; question lands in the chat as a
-    // prominent "❓ agent asks" entry.
-    briefMode: args.briefMode ?? true,
-    // Per-run, user-consented home-profile access (--add-dir). False unless the
-    // user approved the consent prompt this run. See grantHomeThisRun.
-    grantHome: grantHomeThisRun,
-    readOnly: isAgentReadOnly(args),
-    onEvent: ch,
-  });
-}
-
-// Per-role tool allowlist (OWLLM-style names) forwarded into the
-// Claude CLI subscription path as --allowedTools. See accounts.rs::
-// map_owllm_tool_to_cli for the name translation. Optional on every
-// layer so non-CLI providers (OpenAI / local) ignore it.
-type AllowedTools = string[] | undefined;
-
-async function streamChatCompletion(
-  port: number,
-  modelId: string,
-  provider: string,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  /// Project location, threaded into the Claude Code CLI when the
-  /// dispatch resolves to the subscription path. Without it the CLI
-  /// inherits the desktop app's install dir and ends up reasoning
-  /// about the wrong tree.
-  projectCwd?: string,
-  /// Prior conversation turns. For API paths this becomes the
-  /// `messages` array preceding the current user turn; for the
-  /// Claude CLI subscription path it's folded into the user prompt
-  /// (the CLI's --print mode is one-shot and has no inherent memory).
-  history?: HistoryItem[],
-  /// When true and the dispatch resolves to the Claude CLI sub path,
-  /// the CLI is invoked with --dangerously-skip-permissions so file
-  /// writes / bash runs don't stall on permission prompts. Honoured
-  /// only when the user has opted in via the SuperUserCard checkbox
-  /// or the Telegram bridge's auto_approve flag.
-  autoApprove?: boolean,
-  /// Streaming reasoning + tool-call channel. Fires for Anthropic
-  /// thinking / tool_use blocks, OpenAI reasoning_content + tool_calls,
-  /// and local <think>/<thinking> tag content. Skipped for the Claude
-  /// CLI subscription path (--print mode emits one final blob — see TODO).
-  onThought?: ThoughtHandler,
-  /// Per-role tool allowlist. Only meaningful on the Claude CLI sub
-  /// path; ignored elsewhere.
-  allowedTools?: AllowedTools,
-  /// Multimodal attachments. Audio is transcribed up-front (Whisper);
-  /// images ride to the provider's native image part shape.
-  attachments?: Attachment[],
-  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
-  /// used by CLI subscription branches; OpenAI/local/API paths ignore.
-  sessionId?: string | null,
-  /// Optional callback invoked when this call can't deliver a feature
-  /// the user expected — currently fires when the CLI subscription
-  /// path is selected AND images are attached (those CLIs are
-  /// text-only stdin). The caller wires this to appendLog so the
-  /// user sees a yellow system note in the chat instead of the silent
-  /// thought-tab annotation we used to ship.
-  onSystemWarning?: (text: string) => void,
-  /// Fires once per successfully transcribed audio attachment so the
-  /// caller can surface the transcribed text in the chat as soon as it
-  /// lands (green "🎤 <text>" bubble) instead of waiting for the model
-  /// to echo it back. Mirrors dispatch.ts streamChatCompletion.
-  onTranscript?: (filename: string, text: string) => void,
-  /// Mid-run steering tap — see dispatch.ts streamChatCompletion. Polled at
-  /// each tool-loop boundary on the LOCAL path so a message typed while the
-  /// agent works is injected between tool calls; CLI/API paths ignore it.
-  getSteer?: () => string,
-): Promise<string> {
-  // Strip the optional route prefix encoded by the ModelPicker before
-  // handing the bare model id to the provider-specific call.
-  const forceSub = modelId.startsWith("sub/");
-  const forceApi = modelId.startsWith("api/");
-  const bareId = forceSub || forceApi || modelId.startsWith("auto/")
-    ? modelId.slice(modelId.indexOf("/") + 1)
-    : modelId;
-  assertProviderHonorsPersonalPolicy(provider, modelId, allowedTools);
-
-  // Audio attachments collapse into the user message via Whisper.
-  // Images stay on the side and get a provider-specific encoding.
-  const images = imageAttachments(attachments);
-  // CLI subscription paths take text-only stdin. The Claude (anthropic) CLI now
-  // gets images via the file-reference path (appendCliImageFiles saves them and
-  // the agent reads them), so no warning there. The other CLIs (Kimi, Gemini,
-  // OpenAI) don't yet, so still warn for those.
-  if (forceSub && images.length > 0 && onSystemWarning &&
-      (provider === "moonshot" || provider === "gemini" || provider === "openai")) {
-    const providerName = provider === "moonshot"  ? "Kimi"
-                       : provider === "gemini"    ? "Gemini"
-                       :                            "OpenAI";
-    const apiKey = provider === "moonshot"  ? "MOONSHOT_API_KEY"
-                 : provider === "gemini"    ? "GEMINI_API_KEY"
-                 :                            "OPENAI_API_KEY";
-    onSystemWarning(
-      `⚠ ${images.length} image attachment${images.length === 1 ? "" : "s"} can't be sent via the ${providerName} CLI subscription path (stdin is text-only). ` +
-      `To send images, switch to the API row (set ${apiKey} on the Accounts page) or pick a local vision model.`
-    );
-  }
-  const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
-    images,
-  );
-
-  if (provider === "auto") {
-    // P0-4: resolve "Auto · …" at dispatch time with the shared resolver
-    // (dispatch.ts — same catalogue the picker shows). The pick is ALWAYS
-    // surfaced; a cloud pick is never silent (§0.4: this duplicate stays
-    // in lockstep with dispatch.ts's auto branch).
-    const res = await resolveAutoModel(bareId, effectiveText);
-    onSystemWarning?.(
-      `⚡ Auto → ${res.label} (${res.cloud ? "cloud — uses your account/credits" : "local — free, private"}) · ${res.reason}`,
-    );
-    return streamChatCompletion(
-      port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
-      onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
-      sessionId, onSystemWarning, onTranscript, getSteer,
-    );
-  }
-  const responsive = makeResponsiveHandlers(onDelta, onThought);
-  onDelta = responsive.onDelta;
-  onThought = responsive.onThought;
-  try {
-  if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
-  }
-  if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
-  }
-  if (provider === "moonshot") {
-    return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  }
-  if (provider === "deepseek") {
-    return streamOpenAICompatible({
-      url: "https://api.deepseek.com/v1/chat/completions",
-      keyName: "DEEPSEEK_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "DeepSeek", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "xai") {
-    return streamOpenAICompatible({
-      url: "https://api.x.ai/v1/chat/completions",
-      keyName: "XAI_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "xAI Grok", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "groq") {
-    return streamOpenAICompatible({
-      url: "https://api.groq.com/openai/v1/chat/completions",
-      keyName: "GROQ_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Groq", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "perplexity") {
-    return streamOpenAICompatible({
-      url: "https://api.perplexity.ai/chat/completions",
-      keyName: "PERPLEXITY_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Perplexity", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "mistral") {
-    return streamOpenAICompatible({
-      url: "https://api.mistral.ai/v1/chat/completions",
-      keyName: "MISTRAL_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Mistral", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "together") {
-    return streamOpenAICompatible({
-      url: "https://api.together.xyz/v1/chat/completions",
-      keyName: "TOGETHER_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Together AI", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "gemini") {
-    return streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
-  }
-  // ---- Local llama-server path (GGUF) ----
-  // Native tool-calling only, via the shared streamLocalChat (dispatch.ts).
-  // Tool activity is surfaced on the Thought tab through onThought (which
-  // consumeOpenAISse already drives for delta.tool_calls). The cloud /
-  // sub / API branches above are untouched.
-    return streamLocalChat({
-      port,
-      modelId,
-      systemPrompt,
-      userContent: openaiUserContent(effectiveText, images),
-      temperature,
-      signal,
-      onDelta,
-      onThought,
-      projectCwd,
-      history,
-      allowedTools,
-      getSteer,
-    });
-  } finally {
-    await responsive.flush();
-  }
-}
-
-/// Anthropic Messages API streaming. Format:
-///   event: content_block_delta
-///   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}
-/// We only care about text_delta entries; everything else (ping, stop
-/// events) is ignored for plain-text streaming.
-///
-/// Fallback: when no ANTHROPIC_API_KEY is saved but the user's Claude
-/// Code CLI subscription is connected, we shell out to `claude --print`
-/// instead of hitting api.anthropic.com directly. This works without
-/// the user paying for API credits — they use the same subscription
-/// that powers their normal Claude Code sessions. Trade-off: --print
-/// mode emits the full reply at the end (no token streaming).
-type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
-
-// The Claude CLI subscription path folds prior turns into one prompt because
-// `claude --print` is one-shot with no native history input. It used the same
-// unbounded copy dispatch.ts had, so the shared budgeted version is imported
-// instead — one fold, one budget, every CLI path.
-
-// ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
-// The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
-async function streamAnthropic(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  autoApprove?: boolean,
-  onThought?: ThoughtHandler,
-  allowedTools?: AllowedTools,
-  /// Image attachments only — audio was transcribed in streamChatCompletion.
-  /// API path embeds images natively. CLI subscription path is text-only;
-  /// we surface a note so silently-dropped attachments don't confuse the user.
-  images?: Attachment[],
-  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
-  /// used by CLI subscription branches.
-  sessionId?: string | null,
-): Promise<string> {
-  const wantSub = route.forceSub === true;
-  const wantApi = route.forceApi === true;
-  const imgList = images ?? [];
-  // Split ":effort" off the model id so both the CLI (--model + --effort)
-  // and the API (thinking budget in buildAnthropicBody) get clean inputs.
-  const { wireModel: cliModel, effort: cliEffortRaw } = parseClaudeModelId(modelId);
-  const claudeEffort = mapClaudeEffort(cliEffortRaw);
-  // Save pasted images into the working directory and reference their paths so
-  // the Claude CLI reads them with its own tool (subscription images, no API
-  // key). See appendCliImageFiles. The API path embeds images natively instead.
-  // A no-folder team chat has no projectCwd; fall back to the shared chat-scratch
-  // dir so the CLI has a real place to save+read the image (#24). claudeCwd is
-  // used for BOTH the image save and every claude_cli cwd below.
-  const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
-  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
-  // Claude CLI's --print mode is one-shot — no inherent memory across
-  // calls — so fold the prior conversation into the user prompt the
-  // CLI sees. The CLI then has everything it needs to continue.
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
-  // forceSub: skip the API path entirely and go straight to the CLI.
-  if (wantSub) {
-    const status = await invoke<ClaudeCliStatus>("accounts_status");
-    if (!status?.claude_cli) {
-      throw new Error(claudeCliUnavailableMessage({
-        loggedIn: false,
-        installed: status?.claude_cli_installed === true,
-      }));
-    }
-    // Refresh the CLI token once per session (cold-start 401 fix). Pass the cwd so
-    // a sandboxed project ALSO re-mirrors the refreshed creds into its WSL sandbox
-    // (the agentic-team 401 fix) — the in-distro CLI reads a copy, not the host token.
-    await ensureCliWarm("claude_cli", claudeCwd);
-    // Stream via claude_cli_stream when the consumer wants live
-    // thought traffic (AgentsPage Thought tab); fall back to one-shot
-    // --print blob otherwise. Session-id conflicts get swallowed +
-    // retried with a fresh uuid: Claude CLI rejects a session_id
-    // that's currently locked by another in-flight (or stale-crashed)
-    // process, so we drop the persistent id, regenerate, and try
-    // once more before bubbling up.
-    const runWithSessionRetry = async <T,>(
-      attempt: (sid: string | null | undefined) => Promise<T>,
-    ): Promise<T> => {
-      try {
-        return await attempt(sessionId);
-      } catch (e: unknown) {
-        const msg = (e as { message?: string })?.message ?? String(e);
-        const isSessionConflict = /Session ID .* (is already in use|already in use)/i.test(msg)
-          || (/already in use/i.test(msg) && /session/i.test(msg));
-        if (!isSessionConflict) throw e;
-        // Stale lock from a prior crashed claude process — the
-        // persistent session ID is wedged. Wipe every cached
-        // Claude session across the app so this dispatch AND every
-        // future one gets a fresh UUID, then retry the current call
-        // in one-shot mode (sid=null) so it succeeds now.
-        try { clearAllClaudeSessions(); } catch { /* best-effort */ }
-        return await attempt(null);
-      }
-    };
-    if (onThought) {
-      return await withCliAuthRetry("claude_cli", signal, () =>
-        runWithSessionRetry((sid) => runClaudeCliStream({
-          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false, allowedTools,
-          model: cliModel, effort: claudeEffort, sessionId: sid,
-          onDelta, onThought,
-        })), claudeCwd);
-    }
-    const reply = await withCliAuthRetry("claude_cli", signal, () =>
-      runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
-        autoApprove: autoApprove ?? false,
-        readOnly: isReadOnlyToolAllowlist(allowedTools),
-        model: cliModel, effort: claudeEffort, sessionId: sid,
-        grantHome: grantHomeThisRun,
-      })), claudeCwd);
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
-  if (!key) {
-    if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
-    // Default (unforced) path: try CLI subscription as a fallback.
-    let cliInstalled = false;
-    try {
-      const status = await invoke<ClaudeCliStatus>("accounts_status");
-      cliInstalled = status?.claude_cli_installed === true;
-      if (status?.claude_cli) {
-        await ensureCliWarm("claude_cli", claudeCwd);
-        if (onThought) {
-          return await withCliAuthRetry("claude_cli", signal, () => runClaudeCliStream({
-            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-            autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort, sessionId,
-            onDelta, onThought,
-          }), claudeCwd);
-        }
-        const reply = await withCliAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
-          systemPrompt,
-          userMessage: cliPrompt,
-          cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false,
-          readOnly: isReadOnlyToolAllowlist(allowedTools),
-          model: cliModel, effort: claudeEffort, sessionId,
-          grantHome: grantHomeThisRun,
-        }), claudeCwd);
-        if (reply) onDelta(reply);
-        return reply;
-      }
-    } catch (e) {
-      console.error("claude_cli_complete failed", e);
-    }
-    throw new Error(
-      "No ANTHROPIC_API_KEY saved. " +
-      claudeCliUnavailableMessage({ loggedIn: false, installed: cliInstalled }) +
-      " Or save a key on the Accounts page instead."
-    );
-  }
-  const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify(buildAnthropicBody(modelId, systemPrompt, history, userMessage, imgList, temperature)),
-    signal,
-  }), signal);
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  return consumeAnthropicSse(resp, onDelta, onThought);
-}
-
-/// Parse the optional ":<effort>" suffix off the Anthropic model id
-/// (set by ModelPicker for Opus 4.7 / Sonnet 4.6) and translate the
-/// tier into extended-thinking parameters. Mirrors the same helper in
-/// dispatch.ts — kept in lockstep until the two streams collapse to
-/// one in a future refactor.
-///
-/// Tier → (budget_tokens, max_tokens, forced temperature):
-///   low (or none) → 0    / 4096  / caller's temp
-///   medium        → 4000 / 8192  / 1 (Anthropic mandates temp=1 with thinking)
-///   high          → 8000 / 16384 / 1
-///   extra_high    → 16000/ 24576 / 1
-function buildAnthropicBody(
-  modelId: string,
-  systemPrompt: string,
-  history: HistoryItem[] | undefined,
-  userMessage: string,
-  imgList: Attachment[],
-  temperature: number,
-): unknown {
-  const sep = modelId.indexOf(":");
-  const wireModel = sep === -1 ? modelId : modelId.slice(0, sep);
-  const effort = sep === -1 ? null : modelId.slice(sep + 1);
-  const budget = effort === "extra_high" ? 16000
-              : effort === "high" ? 8000
-              : effort === "medium" ? 4000
-              : 0;
-  const thinkingOn = budget > 0;
-  const maxTokens = thinkingOn ? budget + 4096 : 4096;
-  const reqTemp = thinkingOn ? 1 : temperature;
-  const anthropicBudget = historyBudgetFor(wireModel);
-  return {
-    model: wireModel,
-    max_tokens: maxTokens,
-    ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
-    system: systemPrompt,
-    messages: [
-      // Bounded to the model's window — the API path used to spread the whole
-      // history in raw while only the CLI paths were capped.
-      ...recentTextHistory(history, anthropicBudget.turns, anthropicBudget.chars)
-        .map(h => ({ role: h.role, content: h.content })),
-      { role: "user", content: anthropicUserContent(userMessage, imgList) },
-    ],
-    stream: true,
-    temperature: reqTemp,
-  };
-}
-
-// Anthropic Messages SSE consumer — splits the stream into three
-// channels: text deltas → onDelta, thinking deltas → onThought
-// ("thinking:<idx>"), tool_use blocks → onThought("tool:<name>:<id>").
-async function consumeAnthropicSse(
-  resp: Response,
-  onDelta: StreamHandler,
-  onThought?: ThoughtHandler,
-): Promise<string> {
-  const reader = resp.body!.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body) continue;
-      try {
-        const j = JSON.parse(body);
-        if (j?.type === "content_block_start") {
-          const idx: number = j.index;
-          const block = j.content_block;
-          if (block?.type === "thinking") {
-            blocks.set(idx, { kind: "thinking", channel: `thinking:${idx}`, role: "🧠 thinking" });
-          } else if (block?.type === "tool_use") {
-            const name = String(block?.name ?? "tool");
-            const id = String(block?.id ?? idx);
-            const channel = `tool:${name}:${id}`;
-            blocks.set(idx, { kind: "tool", channel, role: `🛠 ${name}` });
-            onThought?.(channel, `🛠 ${name}`, "");
-          } else {
-            blocks.set(idx, { kind: "text", channel: "", role: "" });
-          }
-        } else if (j?.type === "content_block_delta") {
-          const idx: number = j.index;
-          const meta = blocks.get(idx);
-          const delta = j.delta;
-          if (meta?.kind === "thinking" && typeof delta?.thinking === "string") {
-            onThought?.(meta.channel, meta.role, delta.thinking);
-          } else if (meta?.kind === "tool" && typeof delta?.partial_json === "string") {
-            onThought?.(meta.channel, meta.role, delta.partial_json);
-          } else if (typeof delta?.text === "string" && delta.text) {
-            acc += delta.text;
-            onDelta(delta.text);
-          }
-        }
-      } catch { /* skip malformed chunk */ }
-    }
-  }
-  return acc;
-}
-
-/// OpenAI chat-completions streaming. Same SSE shape as llama-server.
-async function streamOpenAI(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  history?: HistoryItem[],
-  onThought?: ThoughtHandler,
-  /// Image attachments only — audio was transcribed in streamChatCompletion.
-  images?: Attachment[],
-  /// Project working dir — threaded to the Codex CLI so it runs IN the project.
-  projectCwd?: string,
-  /// Per-role tool allowlist — forwarded to the Codex CLI stream so the Rust
-  /// side can detect the Browser role and wire the MCP browser gateway.
-  allowedTools?: AllowedTools,
-): Promise<string> {
-  // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
-  // the Claude / Kimi subscriptions route through their CLIs. Without this,
-  // a `sub/` codex model on the Agents page demanded OPENAI_API_KEY and
-  // failed with "No OPENAI_API_KEY saved" even when a Codex subscription was
-  // logged in — codex was the one provider left stubbed to the API path.
-  if (route.forceSub === true) {
-    // Refresh the Codex CLI token once per session (cold-start 401 fix). Pass cwd
-    // so an isolated project also re-mirrors creds into its WSL sandbox.
-    await ensureCliWarm("codex_cli", projectCwd);
-    // Budgeted fold — an unbounded transcript here is what put 778k characters
-    // (81% of the model's context) into a single orchestrator dispatch.
-    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Pasted images → saved to the cwd inbox + attached via codex's native -i
-    // flag (verified). Same path the Code page uses — consistent everywhere.
-    // A no-folder team chat has no projectCwd; fall back to the shared
-    // chat-scratch dir so codex has a real place to save+read the image (#24).
-    const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
-    let imageSaveNote = "";
-    const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
-    const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
-    const [pickedModel, pickedEffort] = modelId.split(":", 2);
-    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
-    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
-    // Stream live activity (reasoning/commands/tools/web-search) into the
-    // Thought tab when present; fall back to the one-shot blob otherwise.
-    if (onThought) {
-      return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools,
-        readOnly: isReadOnlyToolAllowlist(allowedTools), onDelta, onThought,
-      }), codexCwd);
-    }
-    const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort,
-    }), codexCwd);
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  return streamOpenAiApiWithTools({
-    modelId,
-    systemPrompt,
-    userMessage,
-    temperature,
-    signal,
-    onDelta,
-    history,
-    onThought,
-    images,
-    projectCwd,
-    allowedTools,
-  });
-}
-
-/// Moonshot AI / Kimi streaming. Two routes:
-///   * subscription — shell out to Moonshot's `kimi --print` CLI.
-///     Used when the picker resolved to a `sub/<id>` row AND the
-///     user is logged into the Kimi CLI. Non-streaming: the CLI emits
-///     one final reply, which we flush via a single onDelta call.
-///   * API — OpenAI-compatible REST at api.moonshot.ai/v1, same SSE
-///     shape so we reuse consumeOpenAISse.
-async function streamMoonshot(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  onThought?: ThoughtHandler,
-  images?: Attachment[],
-  allowedTools?: AllowedTools,
-): Promise<string> {
-  // Subscription path — shell to `kimi --print`. Fold history into the
-  // user prompt because the CLI's --print mode is single-turn.
-  if (route.forceSub) {
-    // Agentic has its own provider loop (separate from dispatch.ts). Keep the
-    // same preflight as Code/Chat so an isolated project gets the Kimi binary
-    // and refreshed credentials before the first agent tries to execute it.
-    await ensureCliWarm("kimi_cli", projectCwd);
-    // Bounded fold, same helper as every other CLI path. This joined the WHOLE
-    // transcript before, so a long team run re-sent every prior turn each time.
-    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Retry transient network blips (and surface a clear auth error) like the
-    // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
-    // real auth/network text, so withCliAuthRetry can recognize and retry it.
-    // allowedTools gates the browser gateway to the Browser role only (a normal
-    // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
-    const reply = await withCliAuthRetry("kimi_cli", signal, () => runKimiCliStream({
-      systemPrompt,
-      userMessage: composed,
-      cwd: projectCwd ?? null,
-      model: modelId,
-      allowedTools,
-      onDelta,
-      onThought: onThought ?? (() => {}),
-    }), projectCwd);
-    return reply;
-  }
-  // API path — OpenAI-compatible streaming.
-  return streamOpenAiApiWithTools({
-    modelId,
-    systemPrompt,
-    userMessage,
-    temperature,
-    signal,
-    onDelta,
-    history,
-    onThought,
-    images,
-    projectCwd,
-    allowedTools,
-    apiUrl: "https://api.moonshot.ai/v1/chat/completions",
-    keyName: "MOONSHOT_API_KEY",
-    providerLabel: "Moonshot",
-  });
-}
-
-/// Generic OpenAI-compatible streamer. DeepSeek, xAI Grok, Groq,
-/// Perplexity, Mistral, and Together AI all speak the same JSON
-/// chat-completions shape with /v1/chat/completions endpoints; this
-/// keeps each provider's dispatch entry to a 1-line config.
-async function streamOpenAICompatible(args: {
-  url: string;
-  keyName: string;
-  modelId: string;
-  systemPrompt: string;
-  userMessage: string;
-  temperature: number;
-  signal: AbortSignal;
-  onDelta: StreamHandler;
-  history?: HistoryItem[];
-  onThought?: ThoughtHandler;
-  images?: Attachment[];
-  providerLabel: string;
-  projectCwd?: string;
-  allowedTools?: AllowedTools;
-}): Promise<string> {
-  return streamOpenAiApiWithTools({
-    modelId: args.modelId,
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    temperature: args.temperature,
-    signal: args.signal,
-    onDelta: args.onDelta,
-    history: args.history,
-    onThought: args.onThought,
-    images: args.images,
-    projectCwd: args.projectCwd,
-    allowedTools: args.allowedTools,
-    apiUrl: args.url,
-    keyName: args.keyName,
-    providerLabel: args.providerLabel,
-  });
-}
-
-/// Google Gemini streaming via generativelanguage.googleapis.com.
-/// NOT OpenAI-compatible — different request body and event shape.
-/// Request: POST .../v1beta/models/<id>:streamGenerateContent?alt=sse&key=<K>
-/// Body: { contents: [{ role, parts: [{ text }] }], systemInstruction:
-///         { parts: [{ text }] }, generationConfig: { temperature } }
-/// SSE events: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
-async function streamGemini(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  _onThought?: ThoughtHandler,
-  _images?: Attachment[],
-): Promise<string> {
-  // Subscription path — gemini-cli's --print mode (per its docs,
-  // similar to claude/kimi). Folds history into the prompt since
-  // --print is single-turn.
-  if (route.forceSub) {
-    // Bounded fold — see the Kimi path above.
-    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Retry transient network blips / surface real auth errors, as for the other
-    // subscription CLIs (the Rust non-zero-exit path now carries the auth text).
-    const reply = await withCliAuthRetry("gemini_cli", signal, () => invoke<string>("gemini_cli_complete", {
-      systemPrompt,
-      userMessage: composed,
-      cwd: projectCwd ?? null,
-      model: modelId,
-    }), projectCwd ?? null).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  // API path — REST + SSE.
-  const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
-  const fallbackKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
-  if (!fallbackKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
-  // Translate alternating user/assistant history to Gemini's contents
-  // shape. Gemini uses "model" instead of "assistant".
-  const geminiBudget = historyBudgetFor(modelId);
-  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
-    role: h.role === "assistant" ? "model" : (h.role === "user" ? "user" : "model"),
-    parts: [{ text: typeof h.content === "string" ? h.content : "" }],
-  }));
-  contents.push({ role: "user", parts: [{ text: userMessage }] });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(fallbackKey)}`;
-  const resp = await fetchNetRetry(() => fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents,
-      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-      generationConfig: { temperature },
-    }),
-    signal,
-  }), signal);
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body) continue;
-      try {
-        const j = JSON.parse(body);
-        const parts = j?.candidates?.[0]?.content?.parts;
-        if (Array.isArray(parts)) {
-          for (const p of parts) {
-            if (typeof p?.text === "string" && p.text) {
-              acc += p.text;
-              onDelta(p.text);
-            }
-          }
-        }
-      } catch { /* malformed event line, skip */ }
-    }
-  }
-  return acc;
-}
-
-/// Shared SSE consumer for OpenAI-compatible endpoints (llama-server,
-/// api.openai.com). Routes:
-///   - delta.content (with <think>/<thinking> stripped) → onDelta
-///   - text inside <think> tags → onThought("thinking", …)
-///   - delta.reasoning_content (DeepSeek-R1, o-series) → onThought("thinking", …)
-///   - delta.tool_calls[] → onThought("tool:<name>:<i>", "🛠 <name>", …)
-async function consumeOpenAISse(
-  resp: Response,
-  onDelta: StreamHandler,
-  onThought?: ThoughtHandler,
-  toolCallsOut?: NativeToolCall[],
-): Promise<string> {
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  let inThink = false;
-  const toolNames = new Map<number, string>();
-  const toolArgsBuf = new Map<number, string>();
-  // Client-side degeneration detectors — backstop for the server-side
-  // DRY/min_p sampling. Mirrors dispatch.ts:
-  //   - checkLineLoop / checkInlineLoop: literal repetition.
-  //   - checkRunawayLine: NON-repeating runaway (a wall of novel tokens
-  //     with no sentence breaks) which the repeat detectors miss.
-  let loopAborted = false;
-  let genTail = "";
-  const checkLineLoop = (full: string): boolean => {
-    const tail = full.length > 600 ? full.slice(-600) : full;
-    const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
-    if (lines.length < 3) return false;
-    const [a, b, c] = lines.slice(-3);
-    return a === b && b === c;
-  };
-  const checkInlineLoop = (full: string): boolean => {
-    if (full.length < 90) return false;
-    const tail = full.slice(-90);
-    for (let chunkLen = 25; chunkLen <= 30; chunkLen++) {
-      const a = tail.slice(0, chunkLen);
-      const b = tail.slice(chunkLen, chunkLen * 2);
-      const c = tail.slice(chunkLen * 2, chunkLen * 3);
-      if (a === b && b === c && a.trim().length >= 15) return true;
-    }
-    return false;
-  };
-  const checkRunawayLine = (full: string): boolean => {
-    const nlIdx = full.lastIndexOf("\n");
-    const lineText = nlIdx >= 0 ? full.slice(nlIdx + 1) : full;
-    if (lineText.length < 2500) return false;
-    return !/[.!?](\s|$)/.test(lineText.slice(-400));
-  };
-  const noteGen = (s: string): boolean => {
-    genTail = (genTail + s).slice(-3600);
-    return checkRunawayLine(genTail);
-  };
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body || body === "[DONE]") continue;
-      try {
-        const j = JSON.parse(body);
-        const delta = j?.choices?.[0]?.delta;
-        if (!delta) continue;
-        const abortRunaway = async () => {
-          console.warn("[AgentsPage.sse] runaway degeneration — aborting");
-          onDelta("\n\n⚠ Runaway generation detected — stream aborted.");
-          loopAborted = true;
-          try { await reader.cancel("runaway"); } catch { /* ignore */ }
-        };
-        const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
-        if (typeof reasoning === "string" && reasoning) {
-          onThought?.("thinking", "🧠 thinking", reasoning);
-          if (noteGen(reasoning)) { await abortRunaway(); break; }
-        }
-        const toolCalls: any[] | undefined = delta?.tool_calls;
-        if (Array.isArray(toolCalls)) {
-          for (const tc of toolCalls) {
-            const idx: number = typeof tc?.index === "number" ? tc.index : 0;
-            const fn = tc?.function ?? {};
-            if (typeof fn?.name === "string" && fn.name) {
-              toolNames.set(idx, fn.name);
-              const channel = `tool:${fn.name}:${idx}`;
-              onThought?.(channel, `🛠 ${fn.name}`, "");
-            }
-            if (typeof fn?.arguments === "string" && fn.arguments) {
-              const name = toolNames.get(idx) ?? "tool";
-              const channel = `tool:${name}:${idx}`;
-              onThought?.(channel, `🛠 ${name}`, fn.arguments);
-              toolArgsBuf.set(idx, (toolArgsBuf.get(idx) ?? "") + fn.arguments);
-            }
-          }
-        }
-        const content: string | undefined = delta?.content;
-        if (typeof content === "string" && content) {
-          const split = splitThinkTags(content, inThink);
-          inThink = split.inThink;
-          if (split.thought) {
-            onThought?.("thinking", "🧠 thinking", split.thought);
-            if (noteGen(split.thought)) { await abortRunaway(); break; }
-          }
-          if (split.reply)   { acc += split.reply; onDelta(split.reply); }
-          if (split.reply && (split.reply.includes("\n") || acc.length > 90)) {
-            if (checkLineLoop(acc) || checkInlineLoop(acc)) {
-              console.warn("[AgentsPage.sse] repetition loop detected — aborting");
-              onDelta("\n\n⚠ Repetition loop detected — stream aborted.");
-              loopAborted = true;
-              try { await reader.cancel("loop"); } catch { /* ignore */ }
-              break;
-            }
-          }
-          if (split.reply && noteGen(split.reply)) { await abortRunaway(); break; }
-        }
-      } catch { /* skip malformed chunk */ }
-    }
-    if (loopAborted) break;
-  }
-  // Finalise any native tool_calls: name + accumulated args JSON
-  // → NativeToolCall shape the caller can pass straight to
-  // executeToolCall, same as XML-parsed calls.
-  if (toolCallsOut) {
-    for (const [idx, rawName] of toolNames.entries()) {
-      const argsJson = toolArgsBuf.get(idx) ?? "{}";
-      const args: Record<string, string> = {};
-      try {
-        const parsed = JSON.parse(argsJson);
-        if (parsed && typeof parsed === "object") {
-          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-            args[k] = typeof v === "string" ? v : JSON.stringify(v);
-          }
-        }
-      } catch {
-        args.raw = argsJson;
-      }
-      toolCallsOut.push({ name: rawName, args });
-    }
-  }
-  return acc;
-}
-
-// Streaming-safe <think> / <thinking> tag splitter — see dispatch.ts
-// for the full notes. Tags split across chunks fall through as literal
-// text; full-tag-in-one-chunk (the common case) routes correctly.
-function splitThinkTags(chunk: string, inThink: boolean): { reply: string; thought: string; inThink: boolean } {
-  let reply = "";
-  let thought = "";
-  let i = 0;
-  const open = /<think(?:ing)?>/i;
-  const close = /<\/think(?:ing)?>/i;
-  while (i < chunk.length) {
-    const rest = chunk.slice(i);
-    if (inThink) {
-      const m = rest.match(close);
-      if (!m) { thought += rest; break; }
-      thought += rest.slice(0, m.index!);
-      i += m.index! + m[0].length;
-      inThink = false;
-    } else {
-      const m = rest.match(open);
-      if (!m) { reply += rest; break; }
-      reply += rest.slice(0, m.index!);
-      i += m.index! + m[0].length;
-      inThink = true;
-    }
-  }
-  return { reply, thought, inThink };
-}
 
 // Strip any `@agent: …` directive lines from the orchestrator's reply
 // so the final user-facing rendering doesn't double-show them.
@@ -8762,6 +7688,11 @@ export function AgentsPage({
   // in. The run-end integration gate reuses it when it already verified projectCwd
   // (a solo coder) instead of re-running the full build. Reset at run start.
   const lastGateRef = useRef<GateResult | null>(null);
+  // Last skill-staging outcome announced per cwd ("<count>" or "err:<msg>").
+  // The mirror itself refreshes EVERY dispatch (cheap, keeps skills current),
+  // but the chat line only appears when the outcome CHANGES — it used to print
+  // "🧩 45 skills staged…" on every single send (81× in one project chat).
+  const skillSyncAnnouncedRef = useRef<Map<string, string>>(new Map());
   // Run-trace draft (Layer 2 eval): the objective signals of THIS run, collected
   // as it executes and finalized into a RunTrace at run end (rendered as the Run
   // Report + persisted for team.eval.run.mjs). Pure bookkeeping — never affects
@@ -11517,20 +10448,32 @@ export function AgentsPage({
     // swallowed .catch(), so a failed/empty sync was invisible and there was no
     // way to tell whether skills were actually staged for this run.
     if (effectiveRunCwd) {
+      // Announce only when the outcome CHANGES for this cwd (first sync,
+      // count moved, or a new failure). The sync itself still runs every
+      // dispatch so the mirror stays fresh; the chat just stops repeating it.
+      const announced = skillSyncAnnouncedRef.current;
       try {
         const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: effectiveRunCwd });
-        const syncMsg: GoalMsg = sync.count > 0
-          ? { role: "system", color: "#8aa0b4",
-              text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
-          : { role: "system", color: "#ffb74d",
-              text: "🧩 Skill sync ran but staged 0 skills — none are installed, so agents have none to self-load." };
-        setSupChat(prev => [...prev, syncMsg]);
-        appendLog("system", syncMsg);
+        const outcome = String(sync.count);
+        if (announced.get(effectiveRunCwd) !== outcome) {
+          announced.set(effectiveRunCwd, outcome);
+          const syncMsg: GoalMsg = sync.count > 0
+            ? { role: "system", color: "#8aa0b4",
+                text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
+            : { role: "system", color: "#ffb74d",
+                text: "🧩 Skill sync ran but staged 0 skills — none are installed, so agents have none to self-load." };
+          setSupChat(prev => [...prev, syncMsg]);
+          appendLog("system", syncMsg);
+        }
       } catch (e: any) {
-        const errMsg: GoalMsg = { role: "system", color: "#ff8c8c",
-          text: `⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}` };
-        setSupChat(prev => [...prev, errMsg]);
-        appendLog("system", errMsg);
+        const outcome = `err:${String(e?.message ?? e)}`;
+        if (announced.get(effectiveRunCwd) !== outcome) {
+          announced.set(effectiveRunCwd, outcome);
+          const errMsg: GoalMsg = { role: "system", color: "#ff8c8c",
+            text: `⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}` };
+          setSupChat(prev => [...prev, errMsg]);
+          appendLog("system", errMsg);
+        }
       }
     }
     runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
@@ -12137,6 +11080,10 @@ export function AgentsPage({
         runtimeSkillIds(orch, orchSkillIds),
         text,
         !!orch.runtimePersonal,
+        // Parallel mode injects the parallel-dispatch pack as its own PARALLEL
+        // DISPATCH section — keep it out of the skill block so its body can't
+        // appear in the same prompt twice.
+        parallelMode ? ["owllm__parallel-dispatch"] : [],
       );
       if (orchAutoLoaded.length > 0) {
         appendThought(orch.name, {

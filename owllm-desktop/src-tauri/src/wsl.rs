@@ -34,6 +34,15 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// service to answer, short enough that a wedged one degrades quickly.
 const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Default liveness ceiling for an in-distro SCRIPT (CLI prepare, sandbox
+/// probes, login sync, cache trims). Generous: first-run CLI provisioning
+/// waits on a `flock -w 600` plus an apt+npm install. Before 2026-08-14 these
+/// had NO bound at all — a wedged wsl.exe (cold-start hang, dead 9P server)
+/// stalled the dispatch warm-up forever with zero diagnostics; that was the
+/// invisible half of the historical "wsl exited 1" run-killer family. Long
+/// legitimate work (guided WSL setup) passes its own ceiling explicitly.
+const WSL_SCRIPT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// Why a `wsl.exe` probe produced no output. The caller MUST distinguish
 /// these: "wsl.exe isn't there" is a permanent answer (no WSL on this PC —
 /// bail instantly, don't retry), while "timed out" is transient (WSL exists
@@ -270,7 +279,19 @@ pub fn run_in_distro_script_user(
     user: Option<&str>,
     script: &str,
 ) -> Result<String, String> {
-    use std::io::Write;
+    run_in_distro_script_user_with_timeout(distro, user, script, WSL_SCRIPT_TIMEOUT)
+}
+
+/// Bounded variant — the ONE place in-distro scripts actually execute. The
+/// child is killed at the ceiling and the error names the remedy, so a wedged
+/// WSL degrades into an actionable failure instead of an eternal hang.
+pub fn run_in_distro_script_user_with_timeout(
+    distro: &str,
+    user: Option<&str>,
+    script: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-d").arg(distro);
     if let Some(u) = user {
@@ -293,15 +314,44 @@ pub fn run_in_distro_script_user(
             .map_err(|e| format!("write script to wsl stdin: {e}"))?;
         // stdin dropped here → EOF so bash runs the script and exits.
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("wait wsl: {e}"))?;
-    let stdout = decode_wsl(&out.stdout);
-    let stderr = decode_wsl(&out.stderr);
-    if !out.status.success() {
+    // Drain both pipes on threads so a chatty script can't dead-lock on a
+    // full pipe buffer while we poll for exit below.
+    let mut stdout_pipe = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let mut stderr_pipe = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    let out_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut b);
+        b
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "wsl script timed out after {}s and was killed — WSL may be wedged; run `wsl --shutdown` (or Home → Set up WSL) and retry",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("wait wsl: {e}")),
+        }
+    };
+    let stdout = decode_wsl(&out_h.join().unwrap_or_default());
+    let stderr = decode_wsl(&err_h.join().unwrap_or_default());
+    if !status.success() {
         return Err(format!(
             "wsl exited {}: {}",
-            out.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             if stderr.trim().is_empty() {
                 stdout.trim()
             } else {

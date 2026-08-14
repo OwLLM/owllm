@@ -442,7 +442,15 @@ echo USER_OK
     /// to the shared runner so wsl.exe's UTF-16LE error messages are decoded
     /// (`decode_wsl`) instead of rendering as mojibake.
     fn run_root_capture(distro: &str, script: &str) -> Result<String, String> {
-        crate::wsl::run_in_distro_script_user(distro, Some("root"), script)
+        // Guided-setup installs (apt update + Python toolchain) can
+        // legitimately run far past the shared runner's default ceiling on a
+        // slow network — give them an explicit hour instead of no bound.
+        crate::wsl::run_in_distro_script_user_with_timeout(
+            distro,
+            Some("root"),
+            script,
+            std::time::Duration::from_secs(60 * 60),
+        )
     }
 
     /// apt-install python3 + pip + venv and uv inside the distro, AS ROOT

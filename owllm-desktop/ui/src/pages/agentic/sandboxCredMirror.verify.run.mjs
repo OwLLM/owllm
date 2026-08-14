@@ -127,7 +127,24 @@ const sites = [
   ...callSites(agentsPage, "AgentsPage.tsx"),
   ...callSites(dispatch, "dispatch.ts"),
 ];
-check("withCliAuthRetry call sites were found", sites.length >= 10);
+// The retry funnel lives in dispatch.ts — the ONE dispatch stack (AgentsPage's
+// ~1000-line copy was collapsed onto it 2026-08-14; any AgentsPage site that
+// remains must still pass cwd, but none are REQUIRED there anymore).
+check("withCliAuthRetry call sites were found", callSites(dispatch, "dispatch.ts").length >= 9);
+// Claude was the one backend with NO retry funnel in dispatch.ts (drift item
+// #1 of the census): Code page / bridge Claude-sub calls got no mid-run 401
+// backoff, no refusal detection, no OOM diagnosis. All four Claude CLI call
+// sites (stream + one-shot, forced-sub + no-key fallback) must ride it now.
+check(
+  "the dispatch.ts Claude branch rides withCliAuthRetry (all four call sites)",
+  (dispatch.match(/withCliAuthRetry\("claude_cli"/g) || []).length >= 4,
+);
+// …and its warm-ups pass the cwd so a sandboxed project re-mirrors creds.
+check(
+  "the dispatch.ts Claude warm-ups pass the cwd (sandbox re-mirror)",
+  !/ensureCliWarm\("claude_cli"\)/.test(dispatch)
+    && (dispatch.match(/ensureCliWarm\("claude_cli", claudeCwd\)/g) || []).length >= 2,
+);
 const missingCwd = sites.filter((s) => s.args < 4);
 check(
   `every withCliAuthRetry passes cwd${missingCwd.length ? ` (offenders: ${missingCwd.map((s) => `${s.file}:${s.line}`).join(", ")})` : ""}`,

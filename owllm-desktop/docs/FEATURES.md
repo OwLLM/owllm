@@ -814,7 +814,7 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 |---|---|
 | local chat + tool loop | `ui/src/pages/agentic/dispatch.ts` (`streamLocalChat`) |
 | tool specs + MCP | `ui/src/pages/agentic/localTools.ts` |
-| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (own copy of cloud dispatch!) |
+| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (run loop; model calls via shared `dispatch.ts`) |
 | team dispatch (bridges) | `ui/src/pages/agentic/dispatch.ts` |
 | solo coder page | `ui/src/pages/agentic/CodePage.tsx` + `CodeSidePanel.tsx` |
 | notebook | `ui/src/pages/agentic/RunNotebook.tsx` |
@@ -826,6 +826,12 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 | user-facing page docs | `ui/src/support/WatcherDrawer.tsx` (`PAGE_DOCS`) |
 | "why did the app close?" | `src-tauri/src/session_health.rs`, `log_exit_path` in `lib.rs` |
 
-**Known trap for agents**: `AgentsPage.tsx` duplicates parts of `dispatch.ts`
-(prompt builders + cloud dispatch). A fix in one usually needs the other —
-grep BOTH before declaring a dispatch bug fixed.
+**Known trap for agents (updated 2026-08-14)**: `AgentsPage.tsx` used to carry
+its own ~1000-line copy of the cloud dispatch stack (router + provider
+streams); it drifted from `dispatch.ts` 19 documented ways and was collapsed
+onto the shared stack — `streamChatCompletion` and every provider stream now
+live ONLY in `dispatch.ts`, and `teamRunContinuity.verify.run.mjs` fails if a
+page-local CLI invoke ever comes back. The PROMPT BUILDERS
+(`buildOrchestratorPrompt`/`buildSpecialistPrompt`) are still duplicated
+(AgentsPage's richer copy vs dispatch.ts's bridge copy) — a prompt fix still
+needs BOTH until that half is unified.

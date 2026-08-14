@@ -98,5 +98,27 @@ check("specialist role prompt still present", specWithout.includes("You are the 
 const specBlank = buildSpecialistPrompt(team, spec, roleByName, undefined, "   ", null, true);
 check("whitespace-only block is not injected", !specBlank.includes("--- YOUR SKILLS"));
 
+// ── Skill redundancy + staging spam (2026-08-14 audit) ──────────────────────
+// The parallel-dispatch pack used to be injected TWICE into one orchestrator
+// prompt (its own PARALLEL DISPATCH section AND again via the skill block when
+// equipped or auto-selected by goal keywords); and the "🧩 N skills staged"
+// notice printed on EVERY send (81× in one project chat).
+{
+  const { readFileSync } = await import("node:fs");
+  const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  const skillRuntime = readFileSync(path.join(here, "skillRuntime.ts"), "utf8");
+  const agentsPage = readFileSync(path.join(here, "AgentsPage.tsx"), "utf8");
+  check("buildSoloSkillBlock supports a dedicated-section exclude list",
+    /excludeIds: string\[\] = \[\]/.test(skillRuntime)
+      && skillRuntime.includes(".filter(id => !excluded.has(id))"));
+  check("the exclusion covers auto-selected ids too, not just equipped ones",
+    (skillRuntime.match(/\.filter\(id => !excluded\.has\(id\)\)/g) || []).length >= 2);
+  check("parallel mode keeps the parallel-dispatch pack out of the skill block",
+    agentsPage.includes('parallelMode ? ["owllm__parallel-dispatch"] : []'));
+  check("skill staging announces only when the outcome CHANGES",
+    agentsPage.includes("skillSyncAnnouncedRef")
+      && (agentsPage.match(/announced\.get\(effectiveRunCwd\) !== outcome/g) || []).length >= 2);
+}
+
 console.log(fail === 0 ? `\nall ${pass} checks passed` : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

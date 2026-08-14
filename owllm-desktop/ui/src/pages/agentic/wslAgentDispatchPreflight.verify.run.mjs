@@ -67,4 +67,33 @@ check(
   "fallback is announced to the user and skill sync uses the host cwd",
 );
 
+// ── In-distro scripts are BOUNDED (2026-08-14 audit) ────────────────────────
+// run_in_distro_script_user used wait_with_output() with no ceiling, so a
+// wedged wsl.exe (cold-start hang, dead 9P server) stalled CLI prepare /
+// sandbox probes / login sync forever — the invisible half of the historical
+// "wsl exited 1" run-killer family. Every caller now inherits a ceiling, the
+// child is KILLED at the deadline, and the error names the remedy.
+check(
+  wsl.includes("const WSL_SCRIPT_TIMEOUT: Duration")
+    && /pub fn run_in_distro_script_user\([\s\S]{0,300}run_in_distro_script_user_with_timeout\(distro, user, script, WSL_SCRIPT_TIMEOUT\)/.test(wsl),
+  "every in-distro script inherits the shared liveness ceiling",
+);
+check(
+  /Instant::now\(\) >= deadline[\s\S]{0,300}child\.kill\(\)/.test(wsl)
+    && wsl.includes("wsl script timed out after"),
+  "a wedged wsl.exe is killed at the deadline with an actionable error",
+);
+check(
+  /read_to_end/.test(wsl.slice(wsl.indexOf("pub fn run_in_distro_script_user_with_timeout"))),
+  "both pipes are drained on threads so a chatty script can't dead-lock the poll",
+);
+{
+  const setup = read("src-tauri/src/wsl_setup.rs");
+  check(
+    setup.includes("run_in_distro_script_user_with_timeout")
+      && setup.includes("60 * 60"),
+    "guided-setup installs opt into an explicit longer ceiling, not no bound",
+  );
+}
+
 console.log(`wsl agent-dispatch preflight verification: ${passed}/${passed} passed`);

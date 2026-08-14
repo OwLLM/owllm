@@ -289,6 +289,10 @@ function runHarnesses() {
     // Executes scripts/lib/release-body.sh through bash — no transpile needed,
     // and it must run on a release host whether or not the UI deps are installed.
     "releaseBody.verify.run.mjs",
+    // Executes build-release.bat's artifact-install block through cmd.exe. It
+    // guards the step that decides which exe the user actually clicks, so it
+    // must run on any build host, deps installed or not.
+    "buildArtifactCopy.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

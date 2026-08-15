@@ -106,8 +106,12 @@ check("both Code agents keep their own model picker and Terminal",
   && codePage.includes('headerExtra={renderTerminalButton("secondary")}'));
 check("Code agent 1 keeps its Plan / Auto / Chat modes",
   codePage.includes('mode={agentMode}') && codePage.includes('{ key: "plan"') && codePage.includes('{ key: "chat"'));
+// Auto mode moved OFF the Composer toolbar (user spec 2026-08-14) onto the
+// one-line RunToggleRow above the textarea, together with the other two run
+// switches. The capability must still be there — exactly once.
 check("the Agents dock keeps slash commands, Auto mode and the cold-load button",
-  agentsPage.includes("slashCommands={slashCommands.map") && agentsPage.includes('key: "auto"')
+  agentsPage.includes("slashCommands={slashCommands.map")
+  && agentsPage.includes("<RunToggleRow") && agentsPage.includes("onChange={onToggleAutoApprove}")
   && agentsPage.includes('"⚡ Load"'));
 check("the Agents dock still queues mid-run steers on Enter",
   agentsPage.includes("onSend(attachments)") && agentsPage.includes("busy && (draft.trim() || attachments.length)"));

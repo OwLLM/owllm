@@ -132,9 +132,14 @@ const vaultJs = toCjs(vaultSyncSrc, false)
   .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")')
   .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")')
   .replace(/require\("\.\/notebookMerge"\)/g, 'require("./notebookMerge.js")')
+  .replace(/require\("\.\.\/pages\/(agentic\/modelProfiles|agentic\/cloudCatalogue|world\/worldState)"\)/g, 'require("./_caches.js")')
   .replace(/require\("\.\/stateMirror"\)/g, 'require("./_stateMirror.js")');
 w("_github.js", 'module.exports = { vaultEnsure: async () => ({ connected: true, cloned: true }), vaultStatus: async () => ({ connected: true, cloned: true }) };');
 w("_deviceLiveness.js", "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
+// repaintAfterAdopt drops the module caches that hold a synced key. This suite
+// exercises notebook merging, where those caches play no part — the dedicated
+// cover for the invalidators is runtime/vaultSyncNoReload.verify.run.mjs.
+w("_caches.js", "module.exports = { invalidateProfileCache: () => {}, invalidateCloudCatalogueCache: () => {}, invalidateProgress: () => {} };");
 w("_stateMirror.js", `
   const HOT = ${JSON.stringify(
   [...(readLF(path.join(SRC, "runtime", "stateMirror.ts")).split("export const HOT_BLOB_PREFIXES")[1] ?? "")

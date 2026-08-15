@@ -38,6 +38,129 @@ type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
 type UsageStat = { label: string; turns: number; tokensEst: number };
 type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[]; balance?: string | null };
 
+const sectionTitle: CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" };
+
+/// The tab-strip button style this panel uses — exported so the Agents page's
+/// right column renders the SAME strip (one look, never forked).
+export const sideTabStyle = (on: boolean): CSSProperties => ({
+  height: 28, padding: "0 12px", cursor: "pointer", fontSize: 12, fontWeight: 600,
+  border: "1px solid " + (on ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
+  borderBottom: "none", borderRadius: "8px 8px 0 0",
+  background: on ? "rgba(var(--accent-rgb),0.12)" : "transparent",
+  color: on ? "var(--accent-ink)" : "var(--fg-muted)",
+});
+
+/// The resizable outer column this panel lives in (drag its left edge; width
+/// persisted under `widthKey`). Extracted so the Agents page's right column
+/// shares the exact container instead of re-implementing the resize.
+export function SideColumnShell({ widthKey, minW = MIN_W, dataUi, className, children }: {
+  widthKey: string; minW?: number; dataUi: string; className?: string; children: ReactNode;
+}) {
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const saved = parseInt(localStorage.getItem(widthKey) || "", 10);
+      if (Number.isFinite(saved) && saved >= minW) return saved;
+    } catch { /* default below */ }
+    return Math.max(minW, Math.round(window.innerWidth * 0.28));
+  });
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const onDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startW: width };
+    const move = (ev: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const w = Math.min(Math.round(window.innerWidth * 0.6), Math.max(minW, d.startW + (d.startX - ev.clientX)));
+      setWidth(w);
+    };
+    const up = () => {
+      dragRef.current = null;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setWidth((w) => { try { localStorage.setItem(widthKey, String(w)); } catch { } return w; });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  return (
+    <div data-ui={dataUi} className={className} style={{ position: "relative", width, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 6, background: "linear-gradient(135deg, rgba(38,30,10,0.55) 0%, rgba(18,14,4,0.55) 100%)", border: "1px solid rgba(255,200,80,0.3)", borderRadius: 8, padding: "8px 10px 8px 12px" }}>
+      {/* Drag handle — resize by dragging the column's left edge. */}
+      <div
+        onMouseDown={onDragStart}
+        title="Drag to resize"
+        style={{ position: "absolute", left: -2, top: 0, bottom: 0, width: 7, cursor: "col-resize", zIndex: 2 }}
+      />
+      {children}
+    </div>
+  );
+}
+
+/// VS Code-style account usage — provider quota bars where a quota API exists
+/// plus the app's own recorded traffic for EVERY model. Shared by the Code
+/// page's side panel and the Agents page's right column.
+export function UsagePanel({ provider }: { provider: string }) {
+  // Refreshed on provider change + every 5 min.
+  const [usage, setUsage] = useState<AccountUsage | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      invoke<AccountUsage>("account_usage", { provider: provider || "" })
+        .then((u) => { if (alive) setUsage(u); })
+        .catch(() => { if (alive) setUsage(null); });
+    };
+    load();
+    const t = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, [provider]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <span style={{ ...sectionTitle, fontSize: 10 }}>Usage</span>
+      {usage?.available && usage.windows.map((w, i) => (
+        <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ display: "flex", alignItems: "baseline", fontSize: 11.5, color: "var(--fg)" }}>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
+            <span style={{ fontWeight: 700 }}>{Math.round(w.usedPct)}%</span>
+          </div>
+          {/* Track: theme-agnostic translucent grey — var(--bg-surface) vanishes on black themes. */}
+          <div style={{ height: 4, borderRadius: 2, background: "rgba(148,158,178,0.30)", overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, w.usedPct))}%`, borderRadius: 2, background: w.usedPct >= 90 ? "#ff8c8c" : w.usedPct >= 70 ? "#ffd27a" : "var(--accent)" }} />
+          </div>
+          {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
+        </div>
+      ))}
+      {/* Prepaid providers (Moonshot, DeepSeek…) report a balance, not quota windows. */}
+      {usage?.balance && (
+        <div style={{ fontSize: 11, color: "var(--fg)" }}>{usage.balance}</div>
+      )}
+      {(usage?.stats?.length ?? 0) > 0 && usage!.stats.map((s, i) => (
+        <div key={`s${i}`} style={{ display: "flex", alignItems: "baseline", fontSize: 11, color: "var(--fg)" }} title="This app's recorded traffic for this provider — token count is an estimate (~4 chars/token).">
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-muted)" }}>{s.label}</span>
+          <span>{s.turns} turns · ~{compactNum(s.tokensEst)} tok</span>
+        </div>
+      ))}
+      {usage && !usage.available && !usage.balance && (usage.stats?.length ?? 0) === 0 && (
+        <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage.note || ""}>
+          no traffic recorded yet for this account
+        </span>
+      )}
+      {!usage && <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>…</span>}
+    </div>
+  );
+}
+
+/// The 🌐 Browser toggle at the bottom of the utility column — shared so both
+/// pages' buttons look and behave identically.
+export function BrowserToggleButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      className="btn"
+      onClick={onToggle}
+      title="View + drive the agents' shared web browser (browser_* tools) — see the live page, open URLs, stop the daemon."
+      style={{ fontSize: 11, padding: "3px 10px", ...(open ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+    >🌐 Browser</button>
+  );
+}
+
 /// "34k" / "1.2M" for the tokens-estimate stat.
 function compactNum(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -80,55 +203,11 @@ type Props = {
 };
 
 export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, browserOpen, onToggleBrowser, usageProvider, notebook, onCollapse }: Props) {
-  // ---- Resizable width: make the Notebook comfortably writable by default. ----
-  const [width, setWidth] = useState<number>(() => {
-    try {
-      const saved = parseInt(localStorage.getItem(WIDTH_KEY) || "", 10);
-      if (Number.isFinite(saved) && saved >= MIN_W) return saved;
-    } catch { /* default below */ }
-    return Math.max(MIN_W, Math.round(window.innerWidth * 0.28));
-  });
-  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
-  const onDragStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    dragRef.current = { startX: e.clientX, startW: width };
-    const move = (ev: MouseEvent) => {
-      const d = dragRef.current;
-      if (!d) return;
-      const w = Math.min(Math.round(window.innerWidth * 0.6), Math.max(MIN_W, d.startW + (d.startX - ev.clientX)));
-      setWidth(w);
-    };
-    const up = () => {
-      dragRef.current = null;
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      setWidth((w) => { try { localStorage.setItem(WIDTH_KEY, String(w)); } catch { } return w; });
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
   // ---- Tabs (same strip pattern as TeamMemoryModal Facts/Worklog) ----
   const [tab, setTab] = useState<CodeSidePanelTab>(() => {
     try { return localStorage.getItem(TAB_KEY) === "notebook" ? "notebook" : "super"; } catch { return "super"; }
   });
   const pickTab = (t: CodeSidePanelTab) => { setTab(t); selectCodeSidePanelTab(t); };
-
-  // ---- Account usage (VS Code-style) — refreshed on provider change + every 5 min ----
-  const [usage, setUsage] = useState<AccountUsage | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const load = () => {
-      invoke<AccountUsage>("account_usage", { provider: usageProvider || "" })
-        .then((u) => { if (alive) setUsage(u); })
-        .catch(() => { if (alive) setUsage(null); });
-    };
-    load();
-    const t = setInterval(load, 5 * 60 * 1000);
-    return () => { alive = false; clearInterval(t); };
-  }, [usageProvider]);
-
-  const sectionTitle: CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" };
 
   const MODES: Array<{ id: CodeAgentMode; label: string; hint: string }> = [
     { id: "plan", label: "📋 Plan", hint: "Break the goal into ordered Kanban steps, then build them one by one." },
@@ -140,25 +219,12 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
     <button
       key={t}
       onClick={() => pickTab(t)}
-      style={{
-        height: 28, padding: "0 12px", cursor: "pointer", fontSize: 12, fontWeight: 600,
-        border: "1px solid " + (tab === t ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
-        borderBottom: "none", borderRadius: "8px 8px 0 0",
-        background: tab === t ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === t ? "var(--accent-ink)" : "var(--fg-muted)",
-      }}
+      style={sideTabStyle(tab === t)}
     >{label}</button>
   );
 
   return (
-    <div data-ui="CodeSidePanel" style={{ position: "relative", width, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 6, background: "linear-gradient(135deg, rgba(38,30,10,0.55) 0%, rgba(18,14,4,0.55) 100%)", border: "1px solid rgba(255,200,80,0.3)", borderRadius: 8, padding: "8px 10px 8px 12px" }}>
-      {/* Drag handle — resize by dragging the column's left edge. */}
-      <div
-        onMouseDown={onDragStart}
-        title="Drag to resize"
-        style={{ position: "absolute", left: -2, top: 0, bottom: 0, width: 7, cursor: "col-resize", zIndex: 2 }}
-      />
-
+    <SideColumnShell widthKey={WIDTH_KEY} dataUi="CodeSidePanel">
       {/* ---- Tab strip: ⚡ Super User | 📓 Notebook (two PAGES) ---- */}
       <div style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2 }}>
         <button
@@ -199,38 +265,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
         {/* USAGE — like VS Code: provider quota bars when the account
             reports them, plus the app's own recorded traffic for EVERY
             model (local, API keys, CLIs — model-agnostic by design). */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <span style={{ ...sectionTitle, fontSize: 10 }}>Usage</span>
-          {usage?.available && usage.windows.map((w, i) => (
-            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <div style={{ display: "flex", alignItems: "baseline", fontSize: 11.5, color: "var(--fg)" }}>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
-                <span style={{ fontWeight: 700 }}>{Math.round(w.usedPct)}%</span>
-              </div>
-              {/* Track: theme-agnostic translucent grey — var(--bg-surface) vanishes on black themes. */}
-              <div style={{ height: 4, borderRadius: 2, background: "rgba(148,158,178,0.30)", overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, w.usedPct))}%`, borderRadius: 2, background: w.usedPct >= 90 ? "#ff8c8c" : w.usedPct >= 70 ? "#ffd27a" : "var(--accent)" }} />
-              </div>
-              {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
-            </div>
-          ))}
-          {/* Prepaid providers (Moonshot, DeepSeek…) report a balance, not quota windows. */}
-          {usage?.balance && (
-            <div style={{ fontSize: 11, color: "var(--fg)" }}>{usage.balance}</div>
-          )}
-          {(usage?.stats?.length ?? 0) > 0 && usage!.stats.map((s, i) => (
-            <div key={`s${i}`} style={{ display: "flex", alignItems: "baseline", fontSize: 11, color: "var(--fg)" }} title="This app's recorded traffic for this provider — token count is an estimate (~4 chars/token).">
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-muted)" }}>{s.label}</span>
-              <span>{s.turns} turns · ~{compactNum(s.tokensEst)} tok</span>
-            </div>
-          ))}
-          {usage && !usage.available && !usage.balance && (usage.stats?.length ?? 0) === 0 && (
-            <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage.note || ""}>
-              no traffic recorded yet for this account
-            </span>
-          )}
-          {!usage && <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>…</span>}
-        </div>
+        <UsagePanel provider={usageProvider} />
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
           <div style={{ display: "flex", border: "1px solid var(--border-strong)", borderRadius: 7, overflow: "hidden" }}>
             {MODES.map((m) => (
@@ -247,14 +282,9 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
             ))}
           </div>
           <span style={{ flex: 1 }} />
-          <button
-            className="btn"
-            onClick={onToggleBrowser}
-            title="View + drive the agents' shared web browser (browser_* tools) — see the live page, open URLs, stop the daemon."
-            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
-          >🌐 Browser</button>
+          <BrowserToggleButton open={browserOpen} onToggle={onToggleBrowser} />
         </div>
       </div>
-    </div>
+    </SideColumnShell>
   );
 }

@@ -382,6 +382,10 @@ pub fn run() {
         return;
     }
     install_crash_log_hook();
+    // Before ANY subsystem can spawn git (vault ownership check, readiness
+    // probes, sync): a background git must never be able to open a modal
+    // credential dialog nobody is there to answer.
+    git::forbid_gui_credential_prompts();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
@@ -829,6 +833,8 @@ pub fn run() {
             readiness::app_readiness,
             session_health::session_health_pending,
             session_health::session_health_dismiss,
+            session_health::session_health_expect_replacement,
+            session_health::session_health_rearm,
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,
@@ -992,6 +998,11 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-close");
                     }
+                    // The X is a deliberate user close. Drop the marker here as
+                    // well as on Exit/ExitRequested, because on some Windows
+                    // paths the event loop is gone before RunEvent::Exit fires
+                    // and the marker survives as a false "crash" report.
+                    session_health::end_clean();
                 }
                 // A window going away without a CloseRequested first is a
                 // window we did not close: a dead webview, or the WM
@@ -1036,14 +1047,19 @@ pub fn run() {
                             MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
                         )),
                     }
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit-requested");
                     }
+                    // Redundant with CloseRequested and Exit: whatever path
+                    // actually gets us here, make sure the marker is gone.
+                    session_health::end_clean();
                 }
                 tauri::RunEvent::Exit => {
                     log_exit_path("Exit — process is leaving");
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {

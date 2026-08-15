@@ -39,7 +39,7 @@ check(sync.includes("if (!st?.connected) return") &&
       sync.includes("if (!st.cloned) st = await vaultEnsure()"),
   "a connected device ensures its vault clone before project sync");
 check(sync.indexOf("if (!st.cloned) st = await vaultEnsure()") <
-      sync.indexOf("if (await syncProjectsNow() && reloadOnce()) return"),
+      sync.indexOf("await syncProjectsNow()"),
   "vault recovery happens before projects are pulled");
 check(sync.includes("_started = false") &&
       sync.includes("[vaultSync] vault startup failed"),
@@ -83,6 +83,22 @@ fs.writeFileSync(
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText,
 );
+// The cache modules repaintAfterAdopt invalidates instead of reloading. All
+// dependency-free, so the REAL sources go in rather than stubs that could drift.
+const worldDir = path.join(temp, "pages", "world");
+fs.mkdirSync(worldDir, { recursive: true });
+for (const [dir, rel] of [
+  [githubDir, ["pages", "agentic", "modelProfiles.ts"]],
+  [githubDir, ["pages", "agentic", "cloudCatalogue.ts"]],
+  [worldDir, ["pages", "world", "worldState.ts"]],
+]) {
+  fs.writeFileSync(
+    path.join(dir, rel[rel.length - 1].replace(/\.ts$/, ".js")),
+    ts.transpileModule(read(path.join(SRC, ...rel)), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText,
+  );
+}
 // vaultSync reads/writes hot blobs (keys that deliberately never touch
 // localStorage). Back the stub with a real map and take the prefix list from
 // the REAL stateMirror source, so this stub cannot drift from the app.

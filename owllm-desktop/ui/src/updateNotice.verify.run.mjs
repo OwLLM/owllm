@@ -139,19 +139,38 @@ const ctl = codeOf(CONTROLLER);
 if (!ctl) {
   check("UpdatePrompt.tsx exists", false);
 } else {
+  // Equivalent cover for the old setInterval pin: the repeat is now scheduled
+  // by the check that just finished (so a failed check can come back sooner),
+  // and the first one still lands 2.5s after mount. The interval VALUE is
+  // asserted by executing runtime/updateSchedule in section 4.
   check("the check REPEATS instead of firing once per launch",
-    /const RECHECK_MS = /.test(ctl.code)
-    && /setInterval\(runCheck, RECHECK_MS\)/.test(ctl.code)
-    && /setTimeout\(runCheck, 2500\)/.test(ctl.code));
+    /schedule\(2500\)/.test(ctl.code)
+    && /timer = window\.setTimeout\(runCheck, ms\)/.test(ctl.code)
+    && /schedule\(RECHECK_MS\)/.test(ctl.code)
+    && !/setInterval/.test(ctl.code));
 
-  check("the re-check interval is at most a day",
-    (() => {
-      const m = ctl.code.match(/const RECHECK_MS = ([^;]+);/);
-      if (!m) return false;
-      // eslint-disable-next-line no-new-func
-      const ms = Function(`"use strict"; return (${m[1]});`)();
-      return Number.isFinite(ms) && ms > 0 && ms <= 24 * 60 * 60 * 1000;
-    })());
+  // Scoped to the SUCCESS path, between the awaited check and the catch —
+  // otherwise `let failures = 0` / `let checkErrorShown = false` at the top of
+  // the effect satisfy these on their own, and deleting the actual resets goes
+  // unnoticed (both mutations survived a whole-file match).
+  const okFrom = ctl.code.indexOf("const u = await check();");
+  const okTo = ctl.code.indexOf("} catch (e) {", okFrom);
+  const okPath = okFrom >= 0 && okTo > okFrom ? ctl.code.slice(okFrom, okTo) : "";
+
+  check("a check that could not answer retries on the backoff, not the period",
+    /schedule\(nextCheckDelayMs\(failures\)\)/.test(ctl.code)
+    && /failures \+= 1/.test(ctl.code)
+    && /(^|\n)\s*failures = 0;/.test(okPath));
+
+  check("a transient publish-window error is not shown, and clears itself",
+    /shouldSurfaceCheckError\(failures\)/.test(ctl.code)
+    && /if \(checkErrorShown\) \{/.test(okPath)
+    && /(^|\n)\s*checkErrorShown = false;/.test(okPath)
+    && /setPhase\(\(p\) => \(p === "error" \? "hidden" : p\)\)/.test(okPath));
+
+  check("coming back online re-checks instead of waiting out the period",
+    /addEventListener\("online", onOnline\)/.test(ctl.code)
+    && /removeEventListener\("online", onOnline\)/.test(ctl.code));
 
   check("a found update is published to the store, not thrown at the user",
     /setUpdateAvailable\(String\(\(u as any\)\.version \?\? ""\)\)/.test(ctl.code));
@@ -160,7 +179,7 @@ if (!ctl) {
   // modal. Requiring both markers keeps the slice from collapsing to "" and
   // passing vacuously against a source that has no runCheck at all.
   const checkFrom = ctl.code.indexOf("const runCheck");
-  const checkTo = ctl.code.indexOf("const first = window.setTimeout");
+  const checkTo = ctl.code.indexOf("const onOnline");
   check("finding an update does NOT open the modal by itself",
     checkFrom >= 0 && checkTo > checkFrom
     && !/setPhase\("prompt"\)/.test(ctl.code.slice(checkFrom, checkTo)));
@@ -269,6 +288,72 @@ if (!info) {
 
   check("Info reads the SAME fact as the chrome (it cannot say 'up to date' while the header offers an update)",
     /subscribeUpdateAvailability,\s*\n\s*\(\) => getUpdateAvailability\(\)\.version,/.test(info.code));
+}
+
+// ---- 5. EXECUTE the check schedule ----------------------------------------
+//
+// THE REPRO: v1.0.20 went Latest at 13:06Z with a Windows-only latest.json;
+// finish-multihost.sh merged linux/darwin at 14:33Z. THOR (booted 13:46Z) and
+// the MacBook (14:07Z) each checked inside that window, got TargetNotFound,
+// and — on a 6h setInterval — would not have looked again until 19:46Z and
+// 20:07Z. The policy below has to recover from that in minutes.
+
+const SCHEDULE = path.join(HERE, "runtime", "updateSchedule.ts");
+if (!fs.existsSync(SCHEDULE)) {
+  check("runtime/updateSchedule.ts exists", false);
+} else {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-updatesched-"));
+  const bundle = path.join(tmp, "sched.mjs");
+  await esbuild.build({
+    entryPoints: [SCHEDULE], bundle: true, format: "esm", platform: "node",
+    outfile: bundle, logLevel: "silent",
+  });
+  const s = await import(`file://${bundle.replace(/\\/g, "/")}`);
+
+  check("a machine left running finds a release within the hour",
+    Number.isFinite(s.RECHECK_MS) && s.RECHECK_MS > 0 && s.RECHECK_MS <= 60 * 60 * 1000);
+
+  check("an answered check waits the steady period",
+    s.nextCheckDelayMs(0) === s.RECHECK_MS && s.nextCheckDelayMs(-1) === s.RECHECK_MS);
+
+  check("the FIRST failure comes back in about a minute, not the period",
+    s.nextCheckDelayMs(1) <= 60 * 1000 && s.nextCheckDelayMs(1) < s.RECHECK_MS);
+
+  check("the backoff grows but never exceeds its ceiling",
+    (() => {
+      let prev = 0;
+      for (let f = 1; f <= 12; f += 1) {
+        const d = s.nextCheckDelayMs(f);
+        if (!Number.isFinite(d) || d <= 0 || d > s.RETRY_MAX_MS) return false;
+        if (d < prev) return false;
+        prev = d;
+      }
+      return s.nextCheckDelayMs(12) === s.RETRY_MAX_MS;
+    })());
+
+  // The decisive number: once the manifest is complete, how long can a client
+  // that has been failing all along still stay on the old version?
+  check("recovery after a 87-minute publish window is minutes, not hours",
+    (() => {
+      let elapsed = 0, failuresSoFar = 0, worstGap = 0;
+      // Replay ~90 minutes of failing checks to reach the steady-state gap.
+      while (elapsed < 87 * 60 * 1000) {
+        failuresSoFar += 1;
+        const gap = s.nextCheckDelayMs(failuresSoFar);
+        worstGap = gap;
+        elapsed += gap;
+      }
+      return worstGap <= 15 * 60 * 1000;
+    })());
+
+  check("a publish window does not immediately accuse the platform",
+    !s.shouldSurfaceCheckError(1) && !s.shouldSurfaceCheckError(2));
+
+  check("a release that stays broken IS reported",
+    s.shouldSurfaceCheckError(s.FAILURES_BEFORE_SURFACING)
+    && s.shouldSurfaceCheckError(s.FAILURES_BEFORE_SURFACING + 5));
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 console.log("");

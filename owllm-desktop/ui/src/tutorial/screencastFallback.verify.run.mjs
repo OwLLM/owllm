@@ -6,10 +6,10 @@
 // OverconstrainedError ~25 s later and Record silently does nothing. GNOME
 // Shell's own org.gnome.Shell.Screencast sits below the portal and works.
 //
-// These checks keep that fallback wired: the backend holds its D-Bus connection
-// open for the whole recording (dropping it truncates the file to a stub), the
-// commands stay registered, other platforms keep getDisplayMedia, and the
-// recorder prefers the native path rather than waiting for the portal to fail.
+// These checks keep the native fallbacks wired: Linux holds its D-Bus connection
+// open for the whole recording (dropping it truncates the file to a stub), macOS
+// uses the OS recorder because WKWebView has no getDisplayMedia, Windows keeps
+// getDisplayMedia, and the UI prefers native capture before the WebView path.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,9 +36,20 @@ check(/struct Session \{\s*conn: zbus::Connection/.test(rust)
   "the recording's D-Bus connection is parked in a process-global, not dropped per command");
 check(rust.includes("fn safe_stem(") && rust.includes("is_ascii_alphanumeric()"),
   "the file name from the UI is sanitised before it becomes a path");
-check(rust.includes('#[cfg(not(target_os = "linux"))]')
-  && /#\[cfg\(not\(target_os = "linux"\)\)\][\s\S]*?pub async fn supported\(\) -> bool \{\s*false/.test(rust),
-  "macOS and Windows report no native recorder and keep getDisplayMedia");
+check(rust.includes('#[cfg(target_os = "macos")]')
+  && rust.includes('Command::new("/usr/sbin/screencapture")')
+  && rust.includes('arg("-v")'),
+  "macOS records through the bounded native screencapture process instead of absent getDisplayMedia");
+check(rust.includes("CGPreflightScreenCaptureAccess")
+  && rust.includes("CGRequestScreenCaptureAccess")
+  && rust.includes("Privacy & Security > Screen Recording"),
+  "macOS requests Screen Recording access and reports an actionable denial");
+check(rust.includes('#[cfg(not(any(target_os = "linux", target_os = "macos")))]')
+  && /#\[cfg\(not\(any\(target_os = "linux", target_os = "macos"\)\)\)\][\s\S]*?pub async fn supported\(\) -> bool \{\s*false/.test(rust),
+  "Windows reports no native recorder and keeps getDisplayMedia");
+check(rust.includes('arg("-INT")') && rust.includes("FINALIZE_TIMEOUT")
+  && rust.includes("static STARTING: AtomicBool"),
+  "macOS stop is graceful and bounded so capture cannot hold the GUI hostage");
 check(rust.includes("BUS_TIMEOUT") && rust.includes("tokio::time::timeout"),
   "a non-GNOME session cannot hang the recorder on a D-Bus probe");
 
@@ -48,6 +59,8 @@ check(lib.includes("mod screencast;")
   && lib.includes("screencast::screencast_start")
   && lib.includes("screencast::screencast_stop"),
   "the three screencast commands are registered with Tauri");
+check((lib.match(/screencast::shutdown\(\)/g) ?? []).length >= 2,
+  "a native macOS recording is stopped on both normal app-exit paths");
 
 const bridge = read("ui/src/tutorial/nativeScreencast.ts");
 check(/nativeScreencastSupported[\s\S]*?catch \{\s*return false;/.test(bridge),

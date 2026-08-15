@@ -57,6 +57,109 @@ export async function listSkillPacks(force = false): Promise<SkillPack[]> {
 }
 export function invalidateSkillPackCache(): void { _rawCache = null; }
 
+// ── Per-agent skill grant (project graph_json `agentSkills` blob) ─────────
+// The grant list is ADDITIVE by default, but the card's skill picker must also
+// be able to UNEQUIP a skill the role yaml / team template provides. A plain
+// string[] can't express removal, so entries prefixed "-" are DENIES: they
+// subtract that id from the agent's base (role ∪ template) set. Old lists have
+// no prefixes, so existing project blobs keep their exact meaning. The "-"
+// prefix is reserved — pack ids are directory names and never start with "-".
+
+/// Split a grant list into its additions and its denied ids.
+export function splitSkillGrant(grant: string[] | null | undefined): { adds: string[]; denies: Set<string> } {
+  const list = (grant ?? []).filter(Boolean);
+  return {
+    adds: list.filter(s => !s.startsWith("-")),
+    denies: new Set(list.filter(s => s.startsWith("-")).map(s => s.slice(1)).filter(Boolean)),
+  };
+}
+
+/// An agent's equipped skill ids: (base ∪ grant additions) − grant denies.
+/// `baseIds` = role yaml allowlist ∪ team template extra_skills. This is THE
+/// resolver — the card badge, the picker and every dispatch injection site must
+/// agree on it, or a toggle in the picker would lie about what the agent gets.
+export function resolveEquippedSkillIds(baseIds: string[], grant?: string[] | null): string[] {
+  const { adds, denies } = splitSkillGrant(grant);
+  return [...new Set([...baseIds, ...adds])].filter(id => id && !denies.has(id));
+}
+
+/// One picker click: returns the agent's next grant list. Equipping removes a
+/// stale deny (base skill) or appends the id (extra skill); unequipping drops
+/// the granted id or appends a deny for a base-provided one. Pure, so the
+/// regression gate executes it directly.
+export function toggleSkillGrant(grant: string[] | null | undefined, baseIds: string[], id: string): string[] {
+  const list = (grant ?? []).filter(Boolean);
+  const base = new Set(baseIds);
+  if (resolveEquippedSkillIds(baseIds, list).includes(id)) {
+    const next = list.filter(s => s !== id);
+    return base.has(id) ? [...next, `-${id}`] : next;
+  }
+  const next = list.filter(s => s !== `-${id}`);
+  return base.has(id) ? next : [...next, id];
+}
+
+// ── Picker presentation (pure, gate-executed) ─────────────────────────────
+// The skills popup shows ~45 packs from three homes with slug ids — these
+// helpers turn that into readable, deduped, searchable sections. Pure so the
+// regression gate executes them directly.
+
+/// Word-level acronyms that title-casing would mangle ("Pdf", "Mcp Builder").
+const SKILL_ACRONYMS = new Set([
+  "pdf", "pptx", "docx", "xlsx", "csv", "mcp", "api", "gif", "html", "css", "url", "ai", "qa",
+]);
+
+/// "anthropics__pdf" → "PDF"; "code-review" → "Code Review"; "mcp-builder" →
+/// "MCP Builder". Namespace prefix is dropped, words title-cased, known
+/// acronyms uppercased.
+export function prettySkillName(idOrSlug: string): string {
+  const base = idOrSlug.includes("__") ? idOrSlug.split("__").pop()! : idOrSlug;
+  return base
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map(w => (SKILL_ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
+}
+
+/// A pack's display title: the frontmatter name when it's a real name, else
+/// the prettified id. Curated packs often set name to the slug again
+/// ("algorithmic-art"), so slug-like names ride the same prettifier.
+export function skillPackLabel(p: { id: string; name: string }): string {
+  const n = (p.name ?? "").trim();
+  if (n && n !== p.id && !/^[a-z0-9]+([-_][a-z0-9]+)*$/.test(n)) return n;
+  return prettySkillName(n || p.id);
+}
+
+/// Namespace chip: "anthropics__pdf" → "anthropics"; unprefixed ids → null.
+export function skillPackSource(id: string): string | null {
+  const i = id.indexOf("__");
+  return i > 0 ? id.slice(0, i) : null;
+}
+
+/// Shape the picker's list: dedup by id (belt over the Rust-side home dedup),
+/// filter by a search query (label + description + id, case-insensitive),
+/// split into equipped/available sections, each sorted by display label.
+export function organizeSkillPacks(
+  packs: SkillPack[],
+  equippedIds: Iterable<string>,
+  query = "",
+): { equipped: SkillPack[]; available: SkillPack[] } {
+  const eq = new Set(equippedIds);
+  const q = query.trim().toLowerCase();
+  const seen = new Set<string>();
+  const equipped: SkillPack[] = [];
+  const available: SkillPack[] = [];
+  for (const p of packs) {
+    if (!p?.id || seen.has(p.id)) continue;
+    seen.add(p.id);
+    if (q && !`${skillPackLabel(p)} ${p.description} ${p.id}`.toLowerCase().includes(q)) continue;
+    (eq.has(p.id) ? equipped : available).push(p);
+  }
+  const byLabel = (a: SkillPack, b: SkillPack) => skillPackLabel(a).localeCompare(skillPackLabel(b));
+  equipped.sort(byLabel);
+  available.sort(byLabel);
+  return { equipped, available };
+}
+
 /// Resolve equipped skill ids → metadata + full bodies, ready to inject.
 /// Skips ids that aren't installed. Bodies come from the same cached list call,
 /// so this is a pure in-memory lookup (no extra round-trip).
@@ -211,9 +314,16 @@ export async function buildSoloSkillBlock(
   equippedIds: string[],
   goalText: string,
   strict = false,
+  /// Ids already injected into the SAME prompt through a dedicated section
+  /// (e.g. `owllm__parallel-dispatch` rides the PARALLEL DISPATCH block when
+  /// parallel mode is on). Excluded here so one skill's body can never sit in
+  /// the prompt twice — equipped, granted, or auto-selected.
+  excludeIds: string[] = [],
 ): Promise<{ block: string; autoLoaded: string[] }> {
-  const autoLoaded = strict ? [] : await selectRelevantSkillIds(goalText, { max: 2 });
-  const merged = [...new Set([...equippedIds, ...autoLoaded])];
+  const excluded = new Set(excludeIds);
+  const autoLoaded = (strict ? [] : await selectRelevantSkillIds(goalText, { max: 2 }))
+    .filter(id => !excluded.has(id));
+  const merged = [...new Set([...equippedIds, ...autoLoaded])].filter(id => !excluded.has(id));
   const block = await buildAgentSkillBlock(merged, strict);
   return { block, autoLoaded };
 }

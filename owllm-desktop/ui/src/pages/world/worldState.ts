@@ -38,6 +38,14 @@ export function getProgress(): WorldProgress {
   return load();
 }
 
+/// Drop the in-memory copy so the next read re-parses localStorage, then
+/// repaint. A vault adoption writes this key under the running UI; without
+/// this the cache would keep serving the pre-sync XP until an app reload.
+export function invalidateProgress(): void {
+  cached = null;
+  for (const l of listeners) l();
+}
+
 export function subscribeProgress(cb: () => void): () => void {
   listeners.add(cb);
   return () => { listeners.delete(cb); };

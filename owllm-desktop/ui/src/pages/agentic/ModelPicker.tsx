@@ -67,6 +67,15 @@ export type ModelPickerEntry = {
   section: Section;
   variant: Variant;
   available: boolean;
+  /// Entries that differ ONLY by reasoning-effort tier share a `baseId`, so
+  /// the popover can collapse them into ONE line carrying an inline tier
+  /// selector. Absent ⇒ the entry is a row of its own.
+  baseId?: string;
+  /// This entry's effort tier ("low" … "extra_high"). Absent ⇒ untiered.
+  effort?: string;
+  /// Row title once the tiers are collapsed — the model name + account tag,
+  /// without the tier. Absent ⇒ use `label`.
+  groupLabel?: string;
 };
 
 /// What EVERY picker shows when nothing is selected. Surfaces must not
@@ -108,6 +117,64 @@ type CloudModel = CloudModelDef;
 
 function displayEffort(level: string): string {
   return level === "extra_high" ? "extra high" : level;
+}
+
+// Reasoning-effort tiers, cheapest → deepest. The popover renders them as ONE
+// inline strip on the model's row instead of one full-width row per tier —
+// seven Anthropic models × four tiers × two accounts had turned the list into
+// a wall of near-identical lines.
+const EFFORT_TIERS: readonly { level: string; short: string; blurb: string }[] = [
+  { level: "low",        short: "Low",  blurb: "fastest, no extended thinking" },
+  { level: "medium",     short: "Med",  blurb: "balanced thinking budget" },
+  { level: "high",       short: "High", blurb: "deeper reasoning" },
+  { level: "extra_high", short: "Max",  blurb: "largest thinking budget" },
+];
+const EFFORT_RANK = new Map(EFFORT_TIERS.map((t, i) => [t.level, i]));
+
+/// Short label + tooltip for a tier. An unknown tier (a catalogue override can
+/// invent one) still renders — spelled out rather than dropped.
+function effortMeta(level: string): { short: string; blurb: string } {
+  return EFFORT_TIERS[EFFORT_RANK.get(level) ?? -1]
+    ?? { short: displayEffort(level), blurb: "custom effort tier" };
+}
+
+/// One popover line. Entries sharing a `baseId` collapse into a single row
+/// whose tiers are picked from the inline strip; everything else is a row of
+/// one. Exported so gates can exercise the grouping without a DOM.
+export type ModelPickerRow = {
+  key: string;
+  label: string;
+  /// Tier entries in EFFORT_TIERS order (single-element for untiered rows).
+  entries: ModelPickerEntry[];
+  /// Representative entry — carries hint / variant / availability.
+  lead: ModelPickerEntry;
+  tiered: boolean;
+};
+
+export function groupRows(items: ModelPickerEntry[]): ModelPickerRow[] {
+  const rows: ModelPickerRow[] = [];
+  const byKey = new Map<string, ModelPickerRow>();
+  for (const e of items) {
+    const key = e.baseId ?? e.id;
+    const existing = byKey.get(key);
+    if (existing) { existing.entries.push(e); continue; }
+    const row: ModelPickerRow = {
+      key,
+      label: e.groupLabel || e.label,
+      entries: [e],
+      lead: e,
+      tiered: e.effort != null,
+    };
+    byKey.set(key, row);
+    rows.push(row);
+  }
+  for (const r of rows) {
+    if (r.entries.length > 1) {
+      r.entries.sort((a, b) =>
+        (EFFORT_RANK.get(a.effort ?? "") ?? 99) - (EFFORT_RANK.get(b.effort ?? "") ?? 99));
+    }
+  }
+  return rows;
 }
 const AUTO_OPTIONS = [
   { id: "auto/cheapest",       display: "Auto · Cheapest" },
@@ -178,7 +245,12 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       const label = lvl === null
         ? `${m.display} (${tag})`
         : `${m.display} · ${displayEffort(lvl)} (${tag})`;
-      out.push({ id, label, section: "anthropic", variant, available, hint });
+      out.push({
+        id, label, section: "anthropic", variant, available, hint,
+        baseId: `${variant}/${m.id}`,
+        effort: lvl ?? undefined,
+        groupLabel: `${m.display} (${tag})`,
+      });
     }
   };
   for (const m of cat.anthropic) {
@@ -198,7 +270,12 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       const label = lvl === null
         ? `${m.display} (${tag})`
         : `${m.display} · ${displayEffort(lvl)} (${tag})`;
-      out.push({ id, label, section: "openai", variant, available, hint });
+      out.push({
+        id, label, section: "openai", variant, available, hint,
+        baseId: `${variant}/${m.id}`,
+        effort: lvl ?? undefined,
+        groupLabel: `${m.display} (${tag})`,
+      });
     }
   };
   for (const m of cat.openai) {
@@ -445,9 +522,12 @@ export default function ModelPicker({
   // Clamp to a sensible minimum so a tight trigger still shows enough.
   // Vertical: open downward by default; flip upward if the popover
   // wouldn't fit below the trigger.
+  // A tiered row carries its effort strip on the same line, so it needs more
+  // room than a plain one before the model name starts truncating.
+  const hasTiers = entries.some(e => e.effort != null);
   let popStyle: React.CSSProperties = { display: "none" };
   if (open && !disabled && rect) {
-    const desiredWidth = Math.max(rect.width, 320);
+    const desiredWidth = Math.max(rect.width, hasTiers ? 400 : 320);
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - desiredWidth - 8));
     const maxBelow = window.innerHeight - rect.bottom - 16;
     const maxAbove = rect.top - 16;
@@ -511,6 +591,9 @@ export default function ModelPicker({
             const meta = SECTION_META[sec];
             const items = entries.filter(e => e.section === sec);
             if (items.length === 0) return null;
+            // Count what the section actually SHOWS — rows, not tier entries.
+            // Counting entries claimed "28" over a list of 7 Claude lines.
+            const rows = groupRows(items);
             // A lone section (e.g. localOnly with just LOCAL) always shows
             // its items — collapsing it would only add a pointless click.
             const soleSection = sections.filter(s => entries.some(e => e.section === s)).length === 1;
@@ -536,10 +619,90 @@ export default function ModelPicker({
                   )}
                   <span style={{ flex: 1 }}>{meta.label}</span>
                   <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0, color: "var(--fg-muted)" }}>
-                    {items.length}
+                    {rows.length}
                   </span>
                 </button>
-                {isOpen && items.map(e => {
+                {isOpen && rows.map(row => {
+                  // Tiered model: ONE line — name, badges, then the effort
+                  // strip. Each segment is the actual selection control, so no
+                  // tier is ever picked on the user's behalf.
+                  if (row.tiered) {
+                    const lead = row.lead;
+                    const muted = !lead.available;
+                    const activeId = row.entries.find(x => x.id === value)?.id ?? null;
+                    return (
+                      <div
+                        key={row.key}
+                        className="ow-model-picker__option"
+                        data-state={activeId ? "selected" : "unselected"}
+                        title={lead.hint ? `${row.label} — ${lead.hint}` : row.label}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8,
+                          padding: "5px 14px",
+                          ...(appearance === "default" ? {
+                            background: activeId ? "var(--accent-soft)" : "transparent",
+                            color: muted ? "var(--fg-subtle)" : "var(--fg)",
+                          } : {}),
+                          fontSize: 12,
+                          opacity: muted ? 0.55 : 1,
+                        }}
+                      >
+                        <span style={{
+                          width: 6, height: 6, borderRadius: 3,
+                          background: meta.color, flexShrink: 0,
+                          opacity: muted ? 0.4 : 1,
+                        }} />
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {row.label}
+                        </span>
+                        {lead.hint && (
+                          <span style={{ fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>
+                            {lead.hint}
+                          </span>
+                        )}
+                        <span style={{
+                          display: "flex", gap: 2, flexShrink: 0,
+                          padding: 2, borderRadius: 7,
+                          background: "var(--bg-surface)", border: "1px solid var(--border)",
+                        }}>
+                          {row.entries.map(e => {
+                            const on = e.id === value;
+                            const tier = effortMeta(e.effort ?? "");
+                            return (
+                              <button
+                                key={e.id}
+                                type="button"
+                                disabled={muted}
+                                title={`${row.label} · ${tier.short} effort — ${tier.blurb}`}
+                                onClick={() => { onChange(e.id); setOpen(false); }}
+                                className="ow-model-picker__effort"
+                                data-state={on ? "selected" : "unselected"}
+                                style={{
+                                  padding: "2px 7px", borderRadius: 5, border: "none",
+                                  fontSize: 9.5, fontWeight: 800, letterSpacing: 0.3,
+                                  lineHeight: "14px",
+                                  cursor: muted ? "not-allowed" : "pointer",
+                                  ...(appearance === "default" ? {
+                                    background: on ? meta.color : "transparent",
+                                    color: on ? "#0d0f14" : "var(--fg-muted)",
+                                  } : {}),
+                                }}
+                                onMouseEnter={appearance === "default"
+                                  ? (ev) => { if (!muted && !on) { ev.currentTarget.style.background = "var(--bg-input)"; ev.currentTarget.style.color = "var(--fg)"; } }
+                                  : undefined}
+                                onMouseLeave={appearance === "default"
+                                  ? (ev) => { if (!muted && !on) { ev.currentTarget.style.background = "transparent"; ev.currentTarget.style.color = "var(--fg-muted)"; } }
+                                  : undefined}
+                              >
+                                {tier.short}
+                              </button>
+                            );
+                          })}
+                        </span>
+                      </div>
+                    );
+                  }
+                  const e = row.lead;
                   const isActive = e.id === value;
                   const muted = !e.available;
                   return (

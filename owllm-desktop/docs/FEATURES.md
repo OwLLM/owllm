@@ -72,6 +72,15 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
+- **One line per model, effort chosen inline.** A model that exposes reasoning
+  -effort tiers (Claude / GPT) is **one row** whose right edge carries a
+  `Low · Med · High · Max` strip — clicking a segment selects
+  `<variant>/<id>:<tier>`, the same id the dispatch has always parsed. Tiers are
+  normalised to cheapest→deepest whatever order the catalogue lists them in, a
+  disconnected account disables the whole strip, and the section header counts
+  **rows**, not tier entries. Grouping lives in `groupRows()` in
+  `ModelPicker.tsx`, so every surface gets it from the one shared picker.
+  Guarded by `modelPickerEffortRow.verify.run.mjs`.
 - **No surface ever auto-picks a model.** With nothing saved the picker reads
   **“Select model”** (`SELECT_MODEL_LABEL`) and Send/Generate/Run is blocked by
   the rule-based `components/ModelRequiredDialog` — so a run can't use (or bill)
@@ -101,6 +110,20 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   studio (product_owner design sub-team → whitepaper.json → parallel FE/BE
   lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
   through the same graph machinery.
+- **Per-agent skills picker**: the skill ribbon on every agent card (bottom
+  right, rendered even when empty) opens a searchable 4-column popup of ALL
+  installed skill packs, deduped across skills homes and split into
+  Equipped/Available sections sorted by display name — icon tile, real name
+  (frontmatter name or acronym-aware prettified slug: PDF, MCP Builder…),
+  short description, namespace chip, `~Xk ctx` size — and clicking a card
+  equips/unequips it live for this project. Unequips of role/template skills
+  persist as `-id` DENY entries in the graph_json `agentSkills` grant; ONE
+  resolver (`resolveEquippedSkillIds` in `skillRuntime.ts`) backs the badge,
+  the picker, and every dispatch injection site, and ONE pure organizer
+  (`organizeSkillPacks`) shapes the popup. Same-id packs in multiple homes
+  resolve user > legacy > bundled (`skills_dirs_read` precedence +
+  `list_skill_packs` dedup), so a user-edited pack shadows the bundled copy
+  everywhere (gate: `dispatchSkillBlock.verify.run.mjs`).
 - **Auto-skill selection**: before the first model token, the goal text is
   matched against installed skills' `triggers:`/keywords and the best 1–2 are
   injected automatically (Solo, team orchestrator, and bridge paths;
@@ -139,6 +162,37 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   sending, publishing, deleting and other consequential browser actions.
 - **Multi-page**: tab strip opens several Agents pages at once, each with its
   own project + run; tabs stay alive (runs keep going), green ● = running.
+- **Code-page layout** (2026-08-14, first step toward merging the two pages):
+  the Agents page reuses the Code page's column building blocks
+  (`CodeSidePanel.tsx` `SideColumnShell`/`UsagePanel`/`BrowserToggleButton`/
+  `sideTabStyle`, `CodeColumnRails.tsx`, `TreeDir` from `CodePage.tsx`).
+  **Left column** = 🧠 Project Memory + the lazy file tree (a clicked file
+  lands as an `@path` reference in the composer) + the **Producer card** docked
+  at the bottom, where the Code page carries its GitHub cards; collapses to the
+  pink rail (🧠 📁 🚀). The Producer *is* the publish card: the WHOLE
+  `AgentChatTile` (identity + per-agent model picker + `PublisherTilePanel`'s
+  Commit / Merge / Publish + ⚙ Set up repo), a fixed agent for every way of
+  working (team, solo-loop, single coder) — so it is no longer also tiled on
+  the ▦ canvas grid. **Right column** = the Code panel's resizable shell + tab
+  style carrying 📋 Rules / 🏷 Team + the always-visible chat host, **plus the
+  Code panel's 📓 Notebook page** (the shared `RunNotebook` mounted `inline`,
+  kept mounted across tab flips), with the bottom **Usage** + 🌐 Browser
+  container; collapses to the orange rail (📓 📊 ⚡ 🌐). The focused agent's
+  page has **no tab of its own** — the chat/log host below *is* that page and
+  never hides, so the old 📜 Orchestrator tab was redundant; the per-agent
+  Model + Voice it carried moved into the agent editor popup (click the agent's
+  name). The FlowHeader's duplicate 📓 Notebook and 🧠 Memory buttons are gone —
+  both features live in the columns.
+  **Composer** = the same `ChatInputDock` now at the
+  bottom of the canvas column (the Code page's composer position), out of the
+  right column; slash commands still switch the pane's sub-tabs via a ref
+  bridge. Directly above its textarea, `RunToggleRow` puts the three run
+  switches on **one line** — ⚡ auto-approve · critic decides for me ·
+  parallel dispatch — the controls that used to sit in the right column's
+  Super User container (which is gone; auto-approve is no longer *also* a
+  Composer toolbar toggle). Every 🌐 browser control opens the popup **and** splits app +
+  browser side by side (`openWelcomeBrowserSplit`). Gated by
+  `agentsCodeLayoutMerge.verify.run.mjs`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
@@ -228,8 +282,8 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
-  prompt (and every Code-page coder turn). Editable from the Super User card
-  (Agents) and the Code page's right column.
+  prompt (and every Code-page coder turn). Editable from the right column's
+  📋 Rules page (Agents) and the Code page's right column.
 - **Skills**: skill packs auto-equipped by role, badges on agent cards,
   cross-provider self-load (any model reads `.owllm/skills/<id>` from disk).
 - **Personal agents + rule cards**: Studio provides an editor for reusable,
@@ -647,7 +701,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
   diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
   merging — real overlapping edits return a Conflict with both sides
-  preserved; only disposable app runtime files auto-resolve.
+  preserved; only disposable app runtime files auto-resolve. Cleanup never
+  deletes a branch whose work HEAD does not contain (ancestry or
+  squash-equivalent tree, `branch_work_contained`): the worktree directory is
+  reclaimed but the branch ref survives and the run announces it — an agent
+  that committed its own work can never be orphaned by teardown. Only the
+  Code page's explicitly confirmed close passes `discardUnmerged` to really
+  drop one. Gate: `fleetWorktreeWorkLoss.verify.run.mjs`.
 
 ## Support & UX
 
@@ -696,15 +756,27 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
 - **Crash / unclean-shutdown detection** (`session_health.rs`): every process
-  writes a marker on startup and deletes it on `RunEvent::Exit`. A marker whose
-  owner is gone means that session never reached its exit path — the only way to
-  detect a SIGKILL, an OOM kill, or a power cut, none of which leave anything
-  in-process. Markers are per-process (OwLLM is multi-instance) and matched on
-  pid **plus** process start time, so a recycled pid cannot make a dead session
-  look alive. The next launch shows one toast and the records ride along on
-  every support report (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`).
-  Showing the notice never deletes the records — only an explicit
-  `session_health_dismiss` does.
+  writes a marker on startup and deletes it on the way out. Cleanup runs on
+  `WindowEvent::CloseRequested` (the X), `RunEvent::ExitRequested`, and
+  `RunEvent::Exit` because Tauri does not guarantee the later events fire on
+  every path (Windows shutdown skips them, and some close paths have been seen
+  to skip `Exit`). A marker whose owner is gone means that session never reached
+  its exit path — the only way to detect a SIGKILL, an OOM kill, or a power cut,
+  none of which leave anything in-process. Markers are per-process (OwLLM is
+  multi-instance) and matched on pid **plus** process start time, so a recycled
+  pid cannot make a dead session look alive. The next launch shows one toast and
+  the records ride along on every support report
+  (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`). Showing the notice
+  never deletes the records — only an explicit `session_health_dismiss` does.
+  The auto-updater is a legitimate death outside the exit path — `install()`
+  never returns on Windows, it hands the NSIS installer to the shell and calls
+  `std::process::exit(0)` — so `UpdatePrompt` declares it via
+  `session_health_expect_replacement` between `download()` and `install()`, and
+  re-arms with `session_health_rearm` if the install fails instead of replacing
+  us. The Linux AppImage path does the same before launching its helper, whose
+  deferred swap also exits outside `RunEvent::Exit`. Without that, every
+  auto-update made the newly installed build open by accusing the previous one
+  of crashing.
 - **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
   window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
   naming whoever called `app.exit`) and `Exit` are all recorded to stderr and
@@ -717,10 +789,18 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
 - **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
-  `ui/src/runtime/updateAvailability.ts`): the updater checks 2.5 s after launch
-  **and every 6 h after that** — a one-shot per-launch check meant an install
-  left running never learned about a release published an hour later, which is
-  why live presence nodes sat on old versions. Finding one no longer opens a
+  `ui/src/runtime/updateAvailability.ts` + `ui/src/runtime/updateSchedule.ts`):
+  the updater checks 2.5 s after launch, **then every 30 min**, and again as
+  soon as the machine comes back **online**. The next check is scheduled by the
+  one that just finished, never by a fixed `setInterval`, because a check that
+  lands inside a multi-OS publish window does not get "no update" — it gets
+  `TargetNotFound` for whichever platforms `finish-multihost.sh` has not merged
+  into `latest.json` yet (tauri-plugin-updater resolves the platform URL before
+  it compares versions). Those failures back off 1 → 2 → 4 → 8 → 15 min instead
+  of waiting out the period, so a Linux/macOS install picks the release up
+  within ~15 min of the manifest completing rather than hours later; the
+  "unavailable for this platform" notice is withheld until 4 failures in a row
+  and clears itself on the next answered check. Finding one no longer opens a
   modal. It publishes to the `updateAvailability` store, and the owl at the
   top-centre of the frame says so in a **manga speech balloon** on its LEFT (so
   it can never collide with the World Chat bubble on its right) — *"Please,
@@ -748,7 +828,7 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 |---|---|
 | local chat + tool loop | `ui/src/pages/agentic/dispatch.ts` (`streamLocalChat`) |
 | tool specs + MCP | `ui/src/pages/agentic/localTools.ts` |
-| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (own copy of cloud dispatch!) |
+| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (run loop; model calls via shared `dispatch.ts`) |
 | team dispatch (bridges) | `ui/src/pages/agentic/dispatch.ts` |
 | solo coder page | `ui/src/pages/agentic/CodePage.tsx` + `CodeSidePanel.tsx` |
 | notebook | `ui/src/pages/agentic/RunNotebook.tsx` |
@@ -760,6 +840,12 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 | user-facing page docs | `ui/src/support/WatcherDrawer.tsx` (`PAGE_DOCS`) |
 | "why did the app close?" | `src-tauri/src/session_health.rs`, `log_exit_path` in `lib.rs` |
 
-**Known trap for agents**: `AgentsPage.tsx` duplicates parts of `dispatch.ts`
-(prompt builders + cloud dispatch). A fix in one usually needs the other —
-grep BOTH before declaring a dispatch bug fixed.
+**Known trap for agents (updated 2026-08-14)**: `AgentsPage.tsx` used to carry
+its own ~1000-line copy of the cloud dispatch stack (router + provider
+streams); it drifted from `dispatch.ts` 19 documented ways and was collapsed
+onto the shared stack — `streamChatCompletion` and every provider stream now
+live ONLY in `dispatch.ts`, and `teamRunContinuity.verify.run.mjs` fails if a
+page-local CLI invoke ever comes back. The PROMPT BUILDERS
+(`buildOrchestratorPrompt`/`buildSpecialistPrompt`) are still duplicated
+(AgentsPage's richer copy vs dispatch.ts's bridge copy) — a prompt fix still
+needs BOTH until that half is unified.

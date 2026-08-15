@@ -1,4 +1,4 @@
-// Linux screen recording that does not go through xdg-desktop-portal.
+// Native screen recording for WebViews that cannot capture the desktop.
 //
 // `navigator.mediaDevices.getDisplayMedia()` cannot record on a GNOME/Ubuntu
 // desktop: WebKitGTK routes display capture through xdg-desktop-portal, and the
@@ -22,9 +22,10 @@
 //   * There is no picker and no pause. Whole-screen capture is `Screencast`;
 //     "just the app" is `ScreencastArea` over the main window's rectangle.
 //
-// Every other platform keeps getDisplayMedia: `screencast_supported()` returns
-// false off Linux and on Linux desktops that do not run GNOME Shell (KDE,
-// Sway, …), where the portal is the only route and generally works.
+// WKWebView on macOS has MediaRecorder and SpeechRecognition but no
+// navigator.mediaDevices/getDisplayMedia at all. macOS therefore uses its
+// bounded `/usr/sbin/screencapture -v` recorder. Windows keeps
+// getDisplayMedia; Linux desktops without GNOME Shell keep their portal path.
 
 use serde::Serialize;
 
@@ -99,9 +100,10 @@ mod imp {
     }
 
     pub async fn supported() -> bool {
-        let Ok(conn) = connect().await else { return false };
-        let Ok(Ok(proxy)) =
-            tokio::time::timeout(BUS_TIMEOUT, ScreencastProxy::new(&conn)).await
+        let Ok(conn) = connect().await else {
+            return false;
+        };
+        let Ok(Ok(proxy)) = tokio::time::timeout(BUS_TIMEOUT, ScreencastProxy::new(&conn)).await
         else {
             return false;
         };
@@ -157,7 +159,11 @@ mod imp {
         fps: u32,
         area: Option<(i32, i32, i32, i32)>,
     ) -> Result<String, String> {
-        if session().lock().map_err(|_| "recorder state poisoned")?.is_some() {
+        if session()
+            .lock()
+            .map_err(|_| "recorder state poisoned")?
+            .is_some()
+        {
             return Err("A recording is already running.".into());
         }
         let template = output_dir().join(safe_stem(&file_stem));
@@ -185,8 +191,7 @@ mod imp {
         }
 
         let path = PathBuf::from(&filename);
-        *session().lock().map_err(|_| "recorder state poisoned")? =
-            Some(Session { conn, path });
+        *session().lock().map_err(|_| "recorder state poisoned")? = Some(Session { conn, path });
         Ok(filename)
     }
 
@@ -230,7 +235,257 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::ScreencastFile;
+    use std::io::Read as _;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    const STARTUP_CHECK: Duration = Duration::from_millis(400);
+    const FINALIZE_POLL: Duration = Duration::from_millis(150);
+    const FINALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    struct Session {
+        child: Child,
+        path: PathBuf,
+    }
+
+    static STARTING: AtomicBool = AtomicBool::new(false);
+
+    struct StartingGuard;
+
+    impl Drop for StartingGuard {
+        fn drop(&mut self) {
+            STARTING.store(false, Ordering::Release);
+        }
+    }
+
+    fn session() -> &'static Mutex<Option<Session>> {
+        static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+        SESSION.get_or_init(|| Mutex::new(None))
+    }
+
+    fn output_dir() -> PathBuf {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            let downloads = home.join("Downloads");
+            if downloads.is_dir() {
+                return downloads;
+            }
+            return home;
+        }
+        std::env::temp_dir()
+    }
+
+    fn safe_stem(file_stem: &str) -> String {
+        let cleaned: String = file_stem
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        if cleaned.is_empty() {
+            "owllm-recording".to_string()
+        } else {
+            cleaned
+        }
+    }
+
+    async fn ensure_permission(app: &tauri::AppHandle) -> Result<(), String> {
+        // SAFETY: these CoreGraphics permission functions take no pointers and
+        // are the public macOS API for screen-capture preflight/request.
+        if unsafe { CGPreflightScreenCaptureAccess() } {
+            return Ok(());
+        }
+
+        // Ask from AppKit's event-loop thread so macOS can attribute and present
+        // the standard privacy prompt to this signed app. Bound the hand-off so
+        // a wedged UI loop becomes an error rather than a frozen Record click.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || {
+            // SAFETY: same parameter-free public CoreGraphics API as above.
+            let granted = unsafe { CGRequestScreenCaptureAccess() };
+            let _ = tx.send(granted);
+        })
+        .map_err(|e| format!("could not request macOS Screen Recording access: {e}"))?;
+        let granted = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(30)))
+            .await
+            .map_err(|e| format!("Screen Recording permission task failed: {e}"))?
+            .map_err(|_| {
+                "macOS did not answer the Screen Recording permission request.".to_string()
+            })?;
+        if granted {
+            Ok(())
+        } else {
+            Err("Screen Recording is off for OwLLM. Enable OwLLM Desktop in System Settings > Privacy & Security > Screen Recording, then reopen the app.".into())
+        }
+    }
+
+    pub async fn supported() -> bool {
+        std::path::Path::new("/usr/sbin/screencapture").is_file()
+    }
+
+    pub async fn start(
+        app: &tauri::AppHandle,
+        file_stem: String,
+        _fps: u32,
+        area: Option<(i32, i32, i32, i32)>,
+    ) -> Result<String, String> {
+        if STARTING.swap(true, Ordering::AcqRel) {
+            return Err("A recording is already starting.".into());
+        }
+        let _starting = StartingGuard;
+        if session()
+            .lock()
+            .map_err(|_| "recorder state poisoned")?
+            .is_some()
+        {
+            return Err("A recording is already running.".into());
+        }
+        ensure_permission(app).await?;
+
+        let path = output_dir().join(format!("{}.mov", safe_stem(&file_stem)));
+        let mut command = Command::new("/usr/sbin/screencapture");
+        command.arg("-x").arg("-v").arg("-C");
+        if let Some((x, y, width, height)) = area {
+            command.arg(format!("-R{x},{y},{width},{height}"));
+        } else {
+            command.arg("-D").arg("1");
+        }
+        let mut child = command
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start the macOS recorder: {e}"))?;
+
+        // Permission/configuration failures exit immediately. Detect them now
+        // so Record restores its panel with a real error instead of claiming it
+        // is recording an empty file.
+        tokio::time::sleep(STARTUP_CHECK).await;
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("could not inspect the macOS recorder: {e}"))?
+        {
+            let mut detail = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut detail);
+            }
+            let _ = std::fs::remove_file(&path);
+            let detail = detail.trim();
+            return Err(if detail.is_empty() {
+                format!("macOS screen recording exited before capture began ({status}). Check System Settings > Privacy & Security > Screen Recording.")
+            } else {
+                format!("macOS screen recording could not start: {detail}")
+            });
+        }
+
+        *session().lock().map_err(|_| "recorder state poisoned")? = Some(Session {
+            child,
+            path: path.clone(),
+        });
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    pub async fn stop() -> Result<ScreencastFile, String> {
+        let Session { mut child, path } = session()
+            .lock()
+            .map_err(|_| "recorder state poisoned")?
+            .take()
+            .ok_or_else(|| "No recording is running.".to_string())?;
+
+        // SIGINT asks screencapture to close and index the movie. SIGKILL would
+        // leave a corrupt file, so use it only after a bounded graceful wait.
+        let already_finished = child
+            .try_wait()
+            .map_err(|e| format!("could not inspect the macOS recorder: {e}"))?
+            .is_some();
+        if !already_finished {
+            let signal = Command::new("/bin/kill")
+                .arg("-INT")
+                .arg(child.id().to_string())
+                .status()
+                .map_err(|e| format!("could not stop the macOS recorder: {e}"))?;
+            if !signal.success() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("macOS refused to stop the recorder ({signal}); it was terminated so it cannot keep running."));
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + FINALIZE_TIMEOUT;
+        loop {
+            if child
+                .try_wait()
+                .map_err(|e| format!("could not wait for the macOS recorder: {e}"))?
+                .is_some()
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("macOS did not finalize the recording within 10 seconds; the recorder was terminated so it cannot hold the app open.".into());
+            }
+            tokio::time::sleep(FINALIZE_POLL).await;
+        }
+
+        let mut bytes = 0u64;
+        for _ in 0..20 {
+            let now = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if now > 0 && now == bytes {
+                break;
+            }
+            bytes = now;
+            tokio::time::sleep(FINALIZE_POLL).await;
+        }
+        if bytes < 8 {
+            return Err(format!(
+                "macOS wrote no video to {}.",
+                path.to_string_lossy()
+            ));
+        }
+        let mut header = [0u8; 8];
+        std::fs::File::open(&path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|e| format!("could not verify the saved recording: {e}"))?;
+        if &header[4..8] != b"ftyp" {
+            return Err(format!(
+                "macOS did not finalize a valid movie at {}.",
+                path.to_string_lossy()
+            ));
+        }
+        Ok(ScreencastFile {
+            path: path.to_string_lossy().to_string(),
+            bytes,
+        })
+    }
+
+    pub fn shutdown() {
+        let Ok(mut state) = session().lock() else {
+            return;
+        };
+        let Some(mut running) = state.take() else {
+            return;
+        };
+        let _ = Command::new("/bin/kill")
+            .arg("-INT")
+            .arg(running.child.id().to_string())
+            .status();
+        let _ = running.child.try_wait();
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod imp {
     use super::ScreencastFile;
 
@@ -243,16 +498,16 @@ mod imp {
         _fps: u32,
         _area: Option<(i32, i32, i32, i32)>,
     ) -> Result<String, String> {
-        Err("The GNOME Shell recorder only exists on Linux.".into())
+        Err("No native screen recorder is available on this platform.".into())
     }
 
     pub async fn stop() -> Result<ScreencastFile, String> {
-        Err("The GNOME Shell recorder only exists on Linux.".into())
+        Err("No native screen recorder is available on this platform.".into())
     }
 }
 
-/// True only where the portal-free recorder exists: a Linux session running
-/// GNOME Shell. Everywhere else the recorder keeps using getDisplayMedia.
+/// True where a native recorder replaces an unavailable/broken WebView capture
+/// path: always on macOS, or on a Linux session running GNOME Shell.
 #[tauri::command]
 pub async fn screencast_supported() -> bool {
     imp::supported().await
@@ -273,13 +528,24 @@ pub async fn screencast_start(
     } else {
         None
     };
-    imp::start(file_stem, fps, area).await
+    #[cfg(target_os = "macos")]
+    return imp::start(&app, file_stem, fps, area).await;
+    #[cfg(not(target_os = "macos"))]
+    return imp::start(file_stem, fps, area).await;
 }
 
 /// Stop recording and report the finished file.
 #[tauri::command]
 pub async fn screencast_stop() -> Result<ScreencastFile, String> {
     imp::stop().await
+}
+
+/// Stop any native recorder when the app exits. On Linux dropping the D-Bus
+/// connection ends GNOME capture; on macOS explicitly signal screencapture so
+/// it cannot outlive a normal app exit.
+pub fn shutdown() {
+    #[cfg(target_os = "macos")]
+    imp::shutdown();
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -291,18 +557,30 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn screencast_records_a_real_file() {
-        assert!(super::imp::supported().await, "no GNOME Shell recorder on this session");
+        assert!(
+            super::imp::supported().await,
+            "no GNOME Shell recorder on this session"
+        );
         let path = super::imp::start("owllm-screencast-selftest".into(), 15, None)
             .await
             .expect("start");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let file = super::imp::stop().await.expect("stop");
         assert_eq!(file.path, path, "stop reported a different file than start");
-        assert!(file.bytes > 10_000, "recording is a {}-byte stub", file.bytes);
+        assert!(
+            file.bytes > 10_000,
+            "recording is a {}-byte stub",
+            file.bytes
+        );
         // A dropped connection yields a 48-byte header-only stub, so check the
         // container really is an ISO media file rather than just non-empty.
         let head = std::fs::read(&file.path).expect("read recording");
-        assert_eq!(&head[4..8], b"ftyp", "not an ISO media container: {}", file.path);
+        assert_eq!(
+            &head[4..8],
+            b"ftyp",
+            "not an ISO media container: {}",
+            file.path
+        );
         std::fs::remove_file(&file.path).ok();
     }
 

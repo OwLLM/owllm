@@ -94,8 +94,25 @@ echo [owllm-desktop] Done.
 set "RELEASE=%CARGO_TARGET_DIR%\x86_64-pc-windows-gnu\release"
 set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
+rem A RUNNING OwLLM holds these targets open, so the copy fails with "being
+rem used by another process". This used to be swallowed (>nul, errorlevel
+rem ignored) and the summary below still announced "Run now: <path>" -- so a
+rem freshly compiled build reported success while the exe on disk stayed the
+rem PREVIOUS one, and it got launched and tested as if it were new. Fail loudly
+rem instead, naming what to close.
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
+if errorlevel 1 (
+  echo [owllm-desktop] ERROR: could not replace "%cd%\OwLLM Desktop.exe".
+  echo   The build SUCCEEDED -- the fresh exe is "%RELEASE%\owllm-desktop.exe".
+  echo   Close any OwLLM Desktop running from this folder, then re-run the copy.
+  exit /b 1
+)
 copy /Y "%RELEASE%\owllm-desktop.exe" "%DIST%\OwLLM Desktop.exe" >nul
+if errorlevel 1 (
+  echo [owllm-desktop] ERROR: could not replace "%DIST%\OwLLM Desktop.exe".
+  echo   Close any OwLLM Desktop running from dist\, then re-run the copy.
+  exit /b 1
+)
 rem WebView2Loader.dll MUST sit next to the exe -- without it Windows
 rem aborts startup with "WebView2Loader.dll was not found". The release
 rem build emits it into %RELEASE%; copy it to dist, and only seed the

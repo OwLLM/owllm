@@ -18,6 +18,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "./utils/openWebUrl";
 import { OPEN_UPDATE_EVENT, setUpdateAvailable } from "./runtime/updateAvailability";
+import { RECHECK_MS, nextCheckDelayMs, shouldSurfaceCheckError } from "./runtime/updateSchedule";
 
 const ICONS = "/Page_icons";
 
@@ -25,11 +26,6 @@ const ICONS = "/Page_icons";
 // version by hand — the public dist repo's latest release, same target as
 // the download page cards.
 const RELEASES_URL = "https://github.com/OwLLM/owllm/releases/latest";
-
-// How often the running app looks for a new release. Long enough to be
-// invisible, short enough that a machine left running for days still finds
-// out the same day.
-const RECHECK_MS = 6 * 60 * 60 * 1000;
 
 type Phase = "hidden" | "prompt" | "downloading" | "installing" | "error";
 
@@ -39,7 +35,8 @@ type Update = {
   // Tauri's update object — typed loosely so we don't have to import
   // the plugin's TS types at module top level (they're loaded via
   // dynamic import to keep the boot path small).
-  downloadAndInstall: (cb?: (event: any) => void) => Promise<void>;
+  download: (cb?: (event: any) => void) => Promise<void>;
+  install: () => Promise<void>;
 };
 
 /// Turn a release-notes body into a clean bullet list so the modal reads
@@ -97,11 +94,13 @@ export default function UpdateController() {
   // AppImage. deb/rpm remain manual because the package manager owns them.
   const [installMode, setInstallMode] = useState<"auto" | "linux-appimage" | "manual">("auto");
 
-  // First check 2.5s after mount, then REPEATED every RECHECK_MS. A one-shot
-  // per-launch check is why long-running installs sat on old versions: the
-  // check fired once, found nothing newer at that instant, and never looked
-  // again — a release published an hour later was invisible until the user
-  // happened to quit and relaunch.
+  // First check 2.5s after mount, then REPEATEDLY — the next one is scheduled
+  // by the check that just finished, never by a fixed setInterval. A one-shot
+  // per-launch check is why long-running installs sat on old versions, and a
+  // fixed interval is why they still did: a check landing inside a multi-OS
+  // publish window throws TargetNotFound for the platforms not merged yet
+  // (see runtime/updateSchedule), and the app then waited a whole period
+  // before asking again. It now backs off in minutes, not hours.
   //
   // Finding an update no longer opens this modal. It publishes the fact to
   // runtime/updateAvailability, and the chrome greets the user with the owl
@@ -109,11 +108,33 @@ export default function UpdateController() {
   useEffect(() => {
     if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
     let disposed = false;
+    let timer = 0;
+    let failures = 0;
+    let lastRunAt = 0;
+    // Only a check error may clear itself; an install error must survive.
+    let checkErrorShown = false;
+
+    const schedule = (ms: number) => {
+      if (disposed) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(runCheck, ms);
+    };
+
     const runCheck = async () => {
+      if (disposed) return;
+      lastRunAt = Date.now();
       try {
         const { check } = await import("@tauri-apps/plugin-updater");
         const u = await check();
         if (disposed) return;
+        failures = 0;
+        // The release answered, so any "unavailable for this platform" we put
+        // up during a publish window was transient. Take it back down.
+        if (checkErrorShown) {
+          checkErrorShown = false;
+          setError(null);
+          setPhase((p) => (p === "error" ? "hidden" : p));
+        }
         if (u && (u as any).available !== false) {
           try {
             const mode = await invoke<string>("update_install_mode");
@@ -123,21 +144,35 @@ export default function UpdateController() {
           setUpdate(u as unknown as Update);
           setUpdateAvailable(String((u as any).version ?? ""));
         }
+        schedule(RECHECK_MS);
       } catch (e) {
-        console.warn("[updater] check failed:", e);
+        if (disposed) return;
+        failures += 1;
+        console.warn(`[updater] check failed (${failures} in a row):`, e);
         const actionable = actionableCheckError(e);
-        if (actionable && !disposed) {
+        if (actionable && shouldSurfaceCheckError(failures)) {
+          checkErrorShown = true;
           setError(actionable);
           setPhase("error");
         }
+        schedule(nextCheckDelayMs(failures));
       }
     };
-    const first = window.setTimeout(runCheck, 2500);
-    const iv = window.setInterval(runCheck, RECHECK_MS);
+
+    // A laptop that slept through its timer, or a machine that was offline
+    // when the release landed, must not wait out the rest of the period.
+    const onOnline = () => {
+      if (disposed) return;
+      if (Date.now() - lastRunAt < nextCheckDelayMs(1)) return;
+      schedule(0);
+    };
+    window.addEventListener("online", onOnline);
+
+    schedule(2500);
     return () => {
       disposed = true;
-      window.clearTimeout(first);
-      window.clearInterval(iv);
+      window.clearTimeout(timer);
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -177,6 +212,12 @@ export default function UpdateController() {
         await invoke("server_stop").catch(() => {});
       } catch { /* best effort — proceed with the install regardless */ }
       if (installMode === "linux-appimage") {
+        // Same crash-safe marker handling as the Windows/macOS path: the
+        // AppImage helper waits for this process to exit and then swaps
+        // files. If RunEvent::Exit never fires (the event loop can be torn
+        // down before the helper finishes waiting), the marker survives and
+        // the next boot reports a crash that was actually an update.
+        await invoke("session_health_expect_replacement").catch(() => {});
         const { listen } = await import("@tauri-apps/api/event");
         const unlisten = await listen<{ downloaded: number; total?: number }>(
           "owllm:update-progress",
@@ -194,7 +235,7 @@ export default function UpdateController() {
         return;
       }
 
-      await update.downloadAndInstall((evt: any) => {
+      await update.download((evt: any) => {
         // Tauri emits {event, data}: "Started" with contentLength,
         // "Progress" with chunkLength, "Finished".
         if (evt?.event === "Started" && typeof evt?.data?.contentLength === "number") {
@@ -205,11 +246,24 @@ export default function UpdateController() {
           setPhase("installing");
         }
       });
-      // Replace running process with the new one. Done as a separate
-      // dynamic import so we don't pay the cost on every boot.
+      // Download and install are separate calls purely so this can sit between
+      // them: `install()` does not return on Windows — it hands the NSIS
+      // installer to the shell and leaves through `std::process::exit(0)`, and
+      // the installer terminates owllm-desktop.exe besides. Either way
+      // RunEvent::Exit never fires, so the session marker survives and the
+      // freshly installed build opens by telling the user the previous one
+      // crashed. Say the death is expected instead. Doing it here rather than
+      // before the download keeps a real crash mid-download reportable.
+      await invoke("session_health_expect_replacement").catch(() => {});
+      await update.install();
+      // Reached only where install() returns rather than replacing us. Done as
+      // a separate dynamic import so we don't pay the cost on every boot.
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (e: any) {
+      // Still here, so nothing replaced us: put the marker back or this
+      // session's death would go unrecorded.
+      invoke("session_health_rearm").catch(() => {});
       setPhase("error");
       setError(String(e?.message ?? e));
     }

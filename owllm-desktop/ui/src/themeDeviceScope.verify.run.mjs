@@ -101,6 +101,20 @@ fs.writeFileSync(
   path.join(advancedDir, "deviceLiveness.js"),
   transpile(read(path.join(HERE, "pages", "advanced", "deviceLiveness.ts"))),
 );
+// The cache modules repaintAfterAdopt invalidates instead of reloading. All
+// dependency-free, so the REAL sources go in rather than stubs that could drift.
+const worldDir = path.join(temp, "pages", "world");
+fs.mkdirSync(worldDir, { recursive: true });
+for (const [dir, rel] of [
+  [githubDir, ["pages", "agentic", "modelProfiles.ts"]],
+  [githubDir, ["pages", "agentic", "cloudCatalogue.ts"]],
+  [worldDir, ["pages", "world", "worldState.ts"]],
+]) {
+  fs.writeFileSync(
+    path.join(dir, rel[rel.length - 1].replace(/\.ts$/, ".js")),
+    transpile(read(path.join(HERE, ...rel))),
+  );
+}
 // Hot-blob prefixes come from the REAL stateMirror source so this stub cannot
 // drift from the app's idea of which keys bypass localStorage.
 const HOT_PREFIXES = [

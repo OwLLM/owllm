@@ -97,7 +97,7 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "OpenAI-compatible API providers use the host tool loop, not plain chat (v0.8.20)"],
-  ["ui/src/pages/agentic/AgentsPage.tsx", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "Agentic teams give OpenAI-compatible API providers browser/local tools (v0.8.20)"],
+  ["ui/src/pages/agentic/AgentsPage.tsx", /streamChatCompletion,[\s\S]{0,3000}\} from "\.\/dispatch"/, "Agentic teams reach the OpenAI-compatible tool loop via the ONE shared dispatch (v0.8.20; stacks unified 2026-08-14)"],
   ["ui/src/pages/agentic/RunNotebook.tsx", /^(?![\s\S]*digestInput)(?=[\s\S]*Working notes)(?=[\s\S]*Plan board)(?=[\s\S]*Save plan \+ clear notes)(?=[\s\S]*Do NOT create tiny painful micro-steps)[\s\S]*$/s, "Notebook has one notes input, Kanban plan, clears consumed notes, avoids micro-steps (v0.8.23)"],
   ["ui/src/pages/agentic/localTools.ts", /MEMORY_INVOKE_TIMEOUT_MS/, "memory context is bounded and cannot stall agent startup for minutes (v0.8.20)"],
   ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],
@@ -286,6 +286,18 @@ function runHarnesses() {
     // Source-text assertions over wsl.rs/sandbox.rs — no transpile needed, so
     // it must not be parked behind the TypeScript-dependent SKIP.
     "sandboxNetPreflight.verify.run.mjs",
+    // Executes scripts/lib/release-body.sh through bash — no transpile needed,
+    // and it must run on a release host whether or not the UI deps are installed.
+    "releaseBody.verify.run.mjs",
+    // Executes build-release.bat's artifact-install block through cmd.exe. It
+    // guards the step that decides which exe the user actually clicks, so it
+    // must run on any build host, deps installed or not.
+    "buildArtifactCopy.verify.run.mjs",
+    // Source assertions over git.rs/lib.rs/release.rs/github.rs plus two proofs
+    // executed through the installed git. It guards against a background probe
+    // opening a modal credential dialog nobody can answer, so it must run on
+    // every host regardless of whether the UI deps are installed.
+    "backgroundGitNoPrompt.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

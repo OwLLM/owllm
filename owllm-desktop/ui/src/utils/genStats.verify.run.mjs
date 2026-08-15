@@ -45,7 +45,13 @@ globalThis.window = {
 
 try {
   fs.writeFileSync(temp, output);
-  const { makeGenMeter } = await import(pathToFileURL(temp).href);
+  const { makeGenMeter, timingTokensPerSecond } = await import(pathToFileURL(temp).href);
+
+  check("llama-server's final SSE timing is recognized",
+    timingTokensPerSecond({ timings: { predicted_per_second: 29.0515 } }) === 29.0515);
+  check("missing or invalid server timing keeps the portable live fallback",
+    timingTokensPerSecond({}) === undefined &&
+    timingTokensPerSecond({ timings: { predicted_per_second: 0 } }) === undefined);
 
   const first = makeGenMeter();
   first();
@@ -76,8 +82,12 @@ try {
   check("a later tool-loop turn starts with a fresh clock",
     events.at(-1)?.detail?.toksPerSec === 8 &&
     events.at(-1)?.detail?.streams === 1);
+  nextTurn.stop(29.0515);
+  check("llama-server's exact final timing replaces the client estimate",
+    events.at(-1)?.detail?.toksPerSec === 29.0515 &&
+    events.at(-1)?.detail?.complete === true &&
+    events.at(-1)?.detail?.streams === 0);
   const eventCountBeforeStop = events.length;
-  nextTurn.stop();
   nextTurn();
   check("a stopped stream cannot re-enter the active aggregate",
     events.length === eventCountBeforeStop);

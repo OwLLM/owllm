@@ -149,6 +149,29 @@ try {
   check("A project folder OWLLM creates is a repository agents can run in",
     projects.includes("crate::fleet::ensure_owned_git_repo(&workspace)"));
 
+  // Wire-shape guard: on a #[serde(tag = ...)] enum, rename_all renames only
+  // the VARIANT names — struct-variant fields still serialize snake_case
+  // unless rename_all_fields (or a per-field rename) is present. The TS types
+  // are all camelCase, so a leaked snake_case field means `commitSha` etc. is
+  // undefined at runtime and the run crashes at the merge-announce line.
+  {
+    const tagged = [...fleet.matchAll(/#\[serde\(tag = "status"[^\]]*\)\]\s*\npub enum (\w+) \{\n([\s\S]*?)\n\}/g)];
+    check("fleet.rs declares tagged outcome enums to inspect", tagged.length >= 4);
+    for (const [attrAndBody, name, body] of tagged) {
+      if (attrAndBody.includes('rename_all_fields = "camelCase"')) continue;
+      const lines = body.split("\n");
+      const leaked = lines.filter((line, i) =>
+        /^\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+:/.test(line)
+        && !/#\[serde\(rename = "/.test(lines[i - 1] ?? ""));
+      check(`${name} does not leak snake_case fields onto the wire`, leaked.length === 0);
+    }
+  }
+  check("A crashed run cannot leave an agent card ticking forever",
+    /const clearActive = \(\) => \{[\s\S]*?setAgentTiming\(/.test(page));
+  check("Slow pre-dispatch worktree/CLI prep is announced, not silent",
+    page.includes("Preparing an isolated workspace and warming the CLI")
+      && page.includes("isolated workspace(s) — first agent activity"));
+
   check("Notebook worktree preflight failures remain pending and retryable",
     page.includes("e instanceof WorktreePreflightError")
       && page.includes("markNotebookStepPending(selectedProjectId"));

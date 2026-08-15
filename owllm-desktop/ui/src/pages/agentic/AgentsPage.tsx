@@ -7691,6 +7691,20 @@ export function AgentsPage({
     // missed per-agent removal can't leave the header bars spinning forever.
     clearRunActivity("agents:");
     setActiveAgents(new Set());
+    // Bank every still-running per-agent clock too. A crash between an agent's
+    // work and its removeActive() otherwise leaves activeSince set and the
+    // card ticking green forever after the run ended.
+    setAgentTiming(prev => {
+      if (![...prev.values()].some(t => t.activeSince != null)) return prev;
+      const now = Date.now();
+      const next = new Map<string, AgentTiming>();
+      for (const [name, t] of prev) {
+        next.set(name, t.activeSince == null
+          ? t
+          : { activeSince: null, accumMs: t.accumMs + (now - t.activeSince) });
+      }
+      return next;
+    });
   };
   // OrchestratorPane focus needs a single "primary" — pick whichever
   // agent went active most recently (Sets preserve insertion order in
@@ -10890,6 +10904,14 @@ export function AgentsPage({
           );
         }
         const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
+        // Announce the slow pre-dispatch work (git worktree of the whole repo +
+        // CLI preflight/token warm) BEFORE it starts. It can take a minute on a
+        // large repo, and with nothing on screen users re-send the prompt.
+        {
+          const prep = `⏳ Preparing an isolated workspace and warming the CLI — first agent activity can take a minute on a large project.`;
+          appendLog("system", { role: "system", color: "#9fb6d4", text: prep });
+          setSupChat(prev => [...prev, { role: "system", color: "#9fb6d4", text: prep, ts: Date.now(), seq: nextSeq() }]);
+        }
         const soloCreate = await createAgentWorktree(invoke, {
           projectCwd,
           agentName: coder.name,
@@ -11748,6 +11770,12 @@ export function AgentsPage({
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
       if (needWorktrees) {
+        // Same silent-minute problem as the solo path: serial worktree creation
+        // over a large repo shows nothing until the first agent speaks.
+        appendLog("system", {
+          role: "system", color: "#9fb6d4",
+          text: `⏳ Preparing ${dispatches.length} isolated workspace(s) — first agent activity can take a minute on a large project.`,
+        });
         try {
           const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
           if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });

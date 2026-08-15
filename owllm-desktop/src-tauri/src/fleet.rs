@@ -951,7 +951,10 @@ fn git_failure_message(action: &str, stdout: &str, stderr: &str) -> String {
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all only covers the VARIANT names on a tagged enum; without
+// rename_all_fields the struct-variant fields cross the wire as snake_case
+// while every TS consumer types them camelCase (baseSha, checkpointSha…).
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CreateOutcome {
     /// Worktree created and ready.
     Ready {
@@ -1195,7 +1198,8 @@ fn checkpoint_uncommitted(cwd: &Path) -> Result<Checkpoint, String> {
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all_fields: see CreateOutcome — TS reads commitSha/filesChanged.
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FinalizeOutcome {
     /// Commit landed.
     Committed {
@@ -1322,7 +1326,8 @@ pub async fn fleet_worktree_diff(
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all_fields: see CreateOutcome — TS reads commitSha/filesChanged.
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MergeOutcome {
     /// Cleanly merged + committed in project_cwd.
     Merged {

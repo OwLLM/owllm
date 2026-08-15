@@ -5313,6 +5313,7 @@ function ChatInputDock({
   autoApprove, onToggleAutoApprove,
   onSwitchTab,
   needsLoad, loadingModel, onLoadModel,
+  modelId,
 }: {
   draft: string;
   setDraft: (v: string) => void;
@@ -5335,6 +5336,10 @@ function ChatInputDock({
   /// server, waits for the model to actually be ready, then dispatches
   /// the draft as a normal send.
   onLoadModel: () => void;
+  /// The model the next send dispatches with (dockModelId — same
+  /// resolution as onSupSend: per-agent override > team default >
+  /// server model). Shown as a small chip top-right of the composer.
+  modelId: string;
 }) {
   // Slash-command catalog. Each command exposes a name (the trigger),
   // a one-line description for the droplist, and an action invoked
@@ -5469,6 +5474,17 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
+      {modelId && (
+        <div data-ui="DockModelName" title={modelId} style={{
+          display:"flex", justifyContent:"flex-end", marginBottom:4,
+          fontSize:10.5, color:"var(--fg-subtle)",
+          whiteSpace:"nowrap", overflow:"hidden",
+        }}>
+          <span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>
+            🧠 {shortModelLabel(modelId)}
+          </span>
+        </div>
+      )}
       <Composer
         dataUi="UserInput"
         textareaRef={inputRef}
@@ -5532,6 +5548,7 @@ function OrchestratorPane({
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
   needsLoad, loadingModel, onLoadModel,
+  dockModelId,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -5563,6 +5580,8 @@ function OrchestratorPane({
   needsLoad: boolean;
   loadingModel: boolean;
   onLoadModel: () => void;
+  /// Resolved model id the dock's send will use — displayed on the dock.
+  dockModelId: string;
 }) {
   // Sub-tab strip. "Clear Chat" (reply) was removed in favour of "Full Chat"
   // as the single chat view (per user request), which is now the default so the
@@ -6055,6 +6074,7 @@ function OrchestratorPane({
           needsLoad={needsLoad}
           loadingModel={loadingModel}
           onLoadModel={onLoadModel}
+          modelId={dockModelId}
         />
       )}
     </div>
@@ -6131,6 +6151,7 @@ function RightColumnTabs(props: {
   needsLoad: boolean;
   loadingModel: boolean;
   onLoadModel: () => void;
+  dockModelId: string;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -6284,6 +6305,7 @@ function RightColumnTabs(props: {
           needsLoad={props.needsLoad}
           loadingModel={props.loadingModel}
           onLoadModel={props.onLoadModel}
+          dockModelId={props.dockModelId}
         />
       </div>
     </div>
@@ -14514,6 +14536,7 @@ export function AgentsPage({
             needsLoad={dockNeedsLoad}
             loadingModel={dockLoadingModel}
             onLoadModel={dockLoadModel}
+            dockModelId={dockModelId}
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}

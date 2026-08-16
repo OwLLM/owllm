@@ -39,6 +39,18 @@ try {
   check("The running server is used only when neither agent nor team selected a model",
     model.resolveAgentModel("researcher", null, "", new Map(), "local-model") === "local-model");
 
+  const databaseModels = new Map([["coder", "sub/claude-opus-5:high"]]);
+  const staleBrowserModels = new Map([["coder", "auto/balanced"]]);
+  check("Durable project models beat stale WebView model overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(databaseModels, staleBrowserModels).get("coder") === "sub/claude-opus-5:high");
+  check("An explicit empty DB model map cannot resurrect deleted browser overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(new Map(), staleBrowserModels).size === 0);
+  check("Legacy projects without DB model persistence still migrate browser overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(null, staleBrowserModels).get("coder") === "auto/balanced");
+
   const bulk = model.assignTeamModelToAgents(
     ["orchestrator", "coder", "researcher", "coder"],
     "sub/kimi-k3",
@@ -90,6 +102,14 @@ try {
       && source.indexOf("const perAgent =") < source.indexOf("liveTeamModel?.trim()"));
   check("Agent cards and dispatch share the agent-first resolver",
     page.includes("return resolveAgentModel(") && page.includes("teamModelOverride,"));
+  check("Agent cards show the selected shared-picker label instead of a provider/lab badge",
+    (page.match(/data-ui="AgentSelectedModel"/g) ?? []).length === 2
+      && page.includes("labelForModel={labelForModel}")
+      && page.includes("modelDisplayLabel={labelForModel(resolvedModel)}")
+      && !page.includes("modelChipFor(resolvedModel"));
+  check("The shared picker catalogue supplies the card label including effort and account variant",
+    page.includes("new Map(buildEntries(models, accountsStatus).map(entry => [entry.id, entry.label]))")
+      && page.includes("modelEntryLabels.get(modelId) ?? modelId"));
   check("Template default_model_id is loaded and participates in dispatch",
     page.includes("defaultModelId?: string")
       && page.includes("a.default_model_id")

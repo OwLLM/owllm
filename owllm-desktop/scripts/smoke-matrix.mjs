@@ -130,6 +130,33 @@ const TRIPWIRES = [
   ["src-tauri/src/paths.rs", /fn order_module_candidates[\s\S]{0,600}installed\.iter\(\)\.any/, "the module version the installer RECORDED wins over a higher-sorting older build (v1.0.14 engine upgrade)"],
   ["src-tauri/src/paths.rs", /order_module_candidates\(&mut candidates, &installed_module_dirs\(&modules_root\)\)/, "module_binary actually applies that ordering instead of a bare name sort"],
   ["src-tauri/src/paths.rs", /fn installed_module_dirs[\s\S]{0,700}Err\(_\) => return Vec::new\(\)/, "a missing or malformed installed.json degrades to the name sort, never to 'no module'"],
+  // Isolation audit (2026-08-16): four defects that each let the app report
+  // "isolated" while the agent ran unsandboxed on the bare host. Measured on
+  // real aarch64 Ubuntu 24.04 (Thor), not reasoned about. Guarded here because
+  // the gate does not run `cargo test`.
+  //
+  // D1: every agent run is handed a worktree under $HOME/.owllm/fleet, but the
+  // isolation root only matched $HOME/owllm — so CUTTING A WORKTREE was what
+  // silently switched the sandbox off. The two constants must stay paired.
+  ["src-tauri/src/sandbox.rs", /FLEET_SUBDIR: &str = "\.owllm\/fleet"/, "the fleet worktree root is a known isolation root (D1)"],
+  ["src-tauri/src/sandbox.rs", /fn is_under_iso_root[\s\S]{0,400}FLEET_SUBDIR/, "is_under_iso_root actually matches the fleet root, not just ~/owllm (D1)"],
+  ["src-tauri/src/fleet.rs", /join\("\.owllm"\)\.join\("fleet"\)/, "fleet_root still builds ~/.owllm/fleet — the layout FLEET_SUBDIR mirrors (D1)"],
+  // A worktree's .git is a POINTER into the main repo. Bind only the worktree
+  // and every git call inside the jail dies "not a git repository" — reproduced
+  // on Thor: exit 128 without the bind, exit 0 with it.
+  ["src-tauri/src/sandbox.rs", /bwrap_prefix_argv\(&dir, &sb, true, &extra_binds_for\(&dir\)\)/, "the Linux jail binds the worktree's git common dir, so git works inside it"],
+  ["src-tauri/src/sandbox.rs", /GIT_BIND=\(--bind-try/, "the Windows in-distro runner binds the worktree gitdir too"],
+  // D3: `bwrap --version` is not evidence it can build a jail. On Ubuntu 24.04+
+  // an unprofiled bwrap prints its version and then dies "setting up uid map:
+  // Permission denied" on every real run. Probe a REAL jail instead.
+  ["src-tauri/src/sandbox.rs", /fn bwrap_runnable[\s\S]{0,700}bwrap_prefix_argv/, "Linux availability is a real jail spawn, not a version print (D3)"],
+  ["src-tauri/src/sandbox.rs", /fn is_isolated\(cwd: Option<&str>\) -> bool \{\n\s*isolated_dir\(cwd\)\.is_some\(\) && bwrap_runnable\(\)/, "is_isolated reports the probe's verdict, so it cannot claim isolation it lacks (D3)"],
+  ["src-tauri/src/sandbox.rs", /profile bwrap \/usr\/bin\/bwrap[\s\S]{0,120}userns,/, "Harden ships the machine-wide AppArmor profile that unblocks bwrap's userns"],
+  // D2: per-project trust was Windows-only, so Linux/macOS had no opt-out of a
+  // sandbox they could not turn off — contradicting FEATURES.md's graduated
+  // trust. The old build returned this error string on every non-Windows call.
+  ["src-tauri/src/sandbox.rs", /^(?![\s\S]*full host access is a WSL \(Windows\) feature today)[\s\S]*$/, "full-access trust is not stubbed out on Linux/macOS any more (D2)"],
+  ["src-tauri/src/sandbox.rs", /fn isolated_dir[\s\S]{0,400}is_full_access\(Some\(p\)\)/, "a project the user marked trusted actually leaves the Linux/macOS jail (D2)"],
   // Zeroed-ref git storm (2026-08-01): a crash mid-ref-write left refs/heads/main
   // as 41 NUL bytes, every sync retried forever, and a failing gc --auto wrote a
   // pack per attempt — 5,046 packs / 11.5 GB, ~2 git procs/sec, which starved

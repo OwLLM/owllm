@@ -291,8 +291,23 @@ and the browser half/half, the same split the personal-assistant recipe uses.
 - **Folder-sealed sandbox**: bubblewrap inside WSL2 (Windows), Lima (macOS
   beta), bwrap (Linux beta). Agents see ONLY the project folder — the real
   folder, no copy. Cloud CLIs run inside too; logins/API keys auto-mirror in.
-- Graduated trust: isolated by default, per-project Full-access opt-out,
-  write-jail + dangerous-command guard when not isolated.
+- Graduated trust: isolated by default, per-project Full-access opt-out (all
+  three OSes since the 2026-08-16 isolation audit — it was Windows-only before,
+  so Linux/macOS users could not opt out at all), write-jail +
+  dangerous-command guard when not isolated.
+- The jail also binds a fleet worktree's git common dir (a worktree's `.git` is
+  a pointer into the main repo), so `git` works inside the sandbox without
+  exposing the main checkout — only `.git` is visible, not its working files.
+- **Availability is probed, never assumed**: `bwrap`/`limactl --version` only
+  proves the binary exists. OwLLM spawns a real throwaway jail and reports the
+  engine unavailable — with the reason — if that fails, rather than claiming an
+  isolation it does not have.
+  - **Linux one-time setup**: Ubuntu 24.04+ blocks unprivileged user namespaces
+    (`kernel.apparmor_restrict_unprivileged_userns=1`), so bubblewrap cannot
+    build a sandbox until an AppArmor profile grants it `userns`. **Harden**
+    installs `/etc/apparmor.d/bwrap` — **once per machine** (it attaches to the
+    binary, so it covers every user, project, worktree and agent, and survives
+    reboots), asking for a password once. Verified on aarch64 Ubuntu 24.04.
 - Sandbox disk card: usage view, cache clear, WSL disk reclaim, plus
   **anti-inflation** so the WSL `.vhdx` doesn't balloon unattended:
   - **Safe default — automatic cache-trim** (`sandbox_trim` / `auto_housekeep`):

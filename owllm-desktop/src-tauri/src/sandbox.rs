@@ -29,16 +29,24 @@
 // filesystem view and drops the rest of $HOME, with a dedicated sandbox-home so
 // the agent CLIs' logins persist without exposing the real one.
 //
-// ⚠ BETA: the Linux (bwrap) and macOS (lima) command shapes are compile-checked
-// on their CI legs but have NOT yet been runtime-verified on real hardware. They
-// are surfaced to the user as "beta — not yet hardware-verified". The pure
-// helpers below ARE unit-tested (and compile on every OS leg).
+// ⚠ BETA: the macOS (lima) command shape is compile-checked on its CI leg but
+// has NOT yet been runtime-verified on real hardware. The Linux (bwrap) prefix
+// HAS now been run on real aarch64 Ubuntu 24.04 — the production argv shape
+// exits 0 and git works inside the jail — but only once the machine-wide
+// AppArmor profile exists (see BWRAP_APPARMOR_PROFILE); without it every spawn
+// dies at `setting up uid map`. Both engines are still surfaced to the user as
+// "beta". The pure helpers below ARE unit-tested (and compile on every OS leg).
 
 use serde::Serialize;
 
 /// Sub-directory of the sandbox user's home that holds isolated projects
 /// (~/owllm/<name>). Matches the WSL backend layout so the concept is uniform.
 pub const ISO_SUBDIR: &str = "owllm";
+
+/// Sub-directory of the user's home holding OWLLM-managed worktrees
+/// (~/.owllm/fleet/<project>/<page>/<agent>). Must track `fleet::fleet_root()`
+/// — every agent run gets a worktree there, so it is an isolation root too.
+pub const FLEET_SUBDIR: &str = ".owllm/fleet";
 
 /// Cross-platform sandbox availability, surfaced to the UI so it can show the
 /// right engine + honest strength/beta labelling on every OS.
@@ -62,6 +70,10 @@ pub struct SandboxStatus {
     pub targets: Vec<String>,
     /// Preferred target (default distro / instance).
     pub default_target: Option<String>,
+    /// Why the engine is unavailable, when we know something actionable (e.g.
+    /// bubblewrap installed but the kernel blocks unprivileged user namespaces).
+    /// None when available, or when the reason is just "not installed".
+    pub detail: Option<String>,
 }
 
 impl Default for SandboxStatus {
@@ -74,6 +86,7 @@ impl Default for SandboxStatus {
             confined: false,
             targets: Vec::new(),
             default_target: None,
+            detail: None,
         }
     }
 }
@@ -107,13 +120,56 @@ fn sanitize_name(name: &str) -> String {
 
 // ---- pure helpers (unit-tested; compiled on every OS) ---------------------
 
-/// True if `path` is inside `<home>/owllm` (the managed isolated-project root).
-/// Used on Linux/macOS where an isolated project is an ordinary host path under
-/// that root (unlike WSL, where the UNC prefix is the marker).
-pub fn is_under_iso_root(path: &str, home: &str) -> bool {
-    let root = format!("{}/{}", home.trim_end_matches('/'), ISO_SUBDIR);
+/// True if `path` is `root` itself or sits underneath it. Segment-aware, so
+/// `/home/me/owllmx` does NOT match the root `/home/me/owllm`.
+fn is_under(path: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
     let p = path.trim_end_matches('/');
     p == root || p.starts_with(&format!("{root}/"))
+}
+
+/// True if `path` is inside EITHER OWLLM-managed root on Linux/macOS:
+///   `<home>/owllm`        — isolated project copies (ISO_SUBDIR)
+///   `<home>/.owllm/fleet` — per-page/per-agent worktrees (FLEET_SUBDIR)
+/// Used where an isolated project is an ordinary host path under one of those
+/// roots (unlike WSL, where the UNC prefix is the marker).
+///
+/// The fleet arm is load-bearing: every agent run is handed a worktree under
+/// FLEET_SUBDIR, so matching only ISO_SUBDIR meant that cutting a worktree
+/// moved the run OUT of the isolation root and silently onto the bare host
+/// while the UI still reported "isolated". Confirmed on real aarch64 Linux —
+/// `~/.owllm/fleet/…` was rejected while `~/owllm/…` was accepted.
+pub fn is_under_iso_root(path: &str, home: &str) -> bool {
+    let home = home.trim_end_matches('/');
+    is_under(path, &format!("{home}/{ISO_SUBDIR}"))
+        || is_under(path, &format!("{home}/{FLEET_SUBDIR}"))
+}
+
+/// Given the contents of a worktree's `.git` FILE
+/// (`gitdir: /path/to/repo/.git/worktrees/<name>`), the main repository's git
+/// directory — the parent of `worktrees/<name>`. That single path covers BOTH
+/// the worktree's own metadata and the shared object store, so binding it is
+/// enough to make git work inside the jail.
+///
+/// A worktree's `.git` lives OUTSIDE the worktree, so a jail that binds only
+/// the project directory leaves it invisible and every `git` call inside fails.
+/// Returns None for a normal checkout, where `.git` is a directory already
+/// inside the project bind, and for anything that isn't a gitdir pointer.
+pub fn worktree_git_common_dir(dot_git_file: &str) -> Option<String> {
+    let raw = dot_git_file
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))?
+        .trim()
+        .replace('\\', "/");
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    // `<git-dir>/worktrees/<name>` → `<git-dir>`; any other pointer as-is.
+    Some(match trimmed.rfind("/worktrees/") {
+        Some(i) => trimmed[..i].to_string(),
+        None => trimmed.to_string(),
+    })
 }
 
 /// The bubblewrap argv PREFIX (everything before the trailing `bash -lc …`):
@@ -121,7 +177,17 @@ pub fn is_under_iso_root(path: &str, home: &str) -> bool {
 /// bound as $HOME (so CLI logins persist but the real home is invisible), the
 /// project bound read-write and made cwd, and namespaces unshared. `allow_net`
 /// keeps networking (needed for git + cloud CLIs); false fully isolates the net.
-pub fn bwrap_prefix_argv(project_dir: &str, sandbox_home: &str, allow_net: bool) -> Vec<String> {
+///
+/// `extra_rw` are additional paths bound read-write — used for the main repo's
+/// git directory when the project is a worktree (see `worktree_git_common_dir`),
+/// without which git is broken inside the jail. Bound with `--bind-try` so a
+/// path that has since vanished degrades instead of killing the run.
+pub fn bwrap_prefix_argv(
+    project_dir: &str,
+    sandbox_home: &str,
+    allow_net: bool,
+    extra_rw: &[String],
+) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut ro = |p: &str| {
         // --ro-bind-try tolerates paths that don't exist on a given distro.
@@ -151,6 +217,12 @@ pub fn bwrap_prefix_argv(project_dir: &str, sandbox_home: &str, allow_net: bool)
     a.push("--bind".into());
     a.push(project_dir.into());
     a.push(project_dir.into());
+    // Anything the project needs from outside its own tree (worktree gitdir).
+    for p in extra_rw {
+        a.push("--bind-try".into());
+        a.push(p.into());
+        a.push(p.into());
+    }
     a.push("--chdir".into());
     a.push(project_dir.into());
     // Isolate namespaces; drop into a fresh session. (User namespace remaps to
@@ -242,6 +314,16 @@ if [ -n "$RT" ] && [ "$RT" != "/etc/resolv.conf" ]; then
   } > "$SBR" 2>/dev/null
   [ -s "$SBR" ] && RESOLV_BIND=(--ro-bind-try "$SBR" "$RT")
 fi
+# A fleet worktree's .git is a POINTER FILE (`gitdir: <repo>/.git/worktrees/<n>`)
+# to metadata + the object store, both of which live OUTSIDE the worktree. Bind
+# that git dir too or every git call inside the jail fails with "not a git
+# repository". Mirrors sandbox::worktree_git_common_dir — keep the two in step.
+GIT_BIND=()
+if [ -f "$CWD/.git" ]; then
+  GD="$(sed -n 's/^[[:space:]]*gitdir:[[:space:]]*//p' "$CWD/.git" | head -n1)"
+  GD="${GD%/}"; GD="${GD%/worktrees/*}"
+  [ -n "$GD" ] && [ -d "$GD" ] && GIT_BIND=(--bind-try "$GD" "$GD")
+fi
 exec bwrap \
   --ro-bind-try /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
   --ro-bind-try /lib /lib --ro-bind-try /lib32 /lib32 --ro-bind-try /lib64 /lib64 \
@@ -258,7 +340,7 @@ exec bwrap \
   --bind-try "$HOME/.git-credentials" "$SB/.git-credentials" \
   --bind-try "$HOME/.config/gh" "$SB/.config/gh" \
   --bind-try "$HOME/.owllm/agent_env.sh" "$SB/.owllm/agent_env.sh" \
-  --bind "$CWD" "$CWD" --chdir "$CWD" \
+  --bind "$CWD" "$CWD" "${GIT_BIND[@]}" --chdir "$CWD" \
   --unshare-user-try --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
   --die-with-parent --new-session \
   bash -lc '[ -f "$HOME/.owllm/agent_env.sh" ] && . "$HOME/.owllm/agent_env.sh" 2>/dev/null; '"$CMD"
@@ -364,27 +446,34 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 }
 
 // ---- per-project "full host access" (explicit opt-out of the sandbox) -------
-// A project the user has deliberately marked TRUSTED runs OUTSIDE the bwrap
-// jail: plain WSL routing, so the agent can reach the Windows drives (/mnt/c),
-// invoke Windows tools via interop (powershell.exe), and read beyond the project
-// folder — "more power" when the user knowingly wants it (bug #19). OFF by
-// default; the UI gates the ON path behind an explicit confirmation. Keyed by
-// the project cwd (the same value the CLIs run with) so the decision lives in
-// ONE place — program_argv/shell_argv — without threading a flag through every
-// agent-CLI call. This is the "always allow everything, unsandboxed" end of the
+// A project the user has deliberately marked TRUSTED runs OUTSIDE the jail —
+// plain WSL routing on Windows, no bwrap/Lima wrapper on Linux/macOS — so the
+// agent can read and write beyond the project folder and reach host tools:
+// "more power" when the user knowingly wants it (bug #19). OFF by default; the
+// UI gates the ON path behind an explicit confirmation. Keyed by the project
+// cwd (the same value the CLIs run with) so the decision lives in ONE place —
+// program_argv/shell_argv — without threading a flag through every agent-CLI
+// call. This is the "always allow everything, unsandboxed" end of the
 // graduated-trust scale; per-action approval is a planned follow-up.
-#[cfg(windows)]
+//
+// Cross-platform since the isolation audit: it used to be Windows-only, which
+// left Linux/macOS users with no way to opt out of a sandbox they could not
+// turn off, contradicting the graduated-trust promise in FEATURES.md.
 fn full_access_path() -> Option<std::path::PathBuf> {
     // Shared resolver — honors portable mode (USB-portable Block 1).
     Some(crate::paths::owllm_config_home()?.join("full-access.json"))
 }
-#[cfg(windows)]
+/// Normalise a cwd into a stable set key. Case is folded on Windows only —
+/// Linux/macOS agent paths are case-sensitive, so folding there could match a
+/// DIFFERENT directory and hand it full access.
 fn norm_cwd(cwd: &str) -> String {
-    cwd.trim()
-        .trim_end_matches(|c| c == '/' || c == '\\')
-        .to_lowercase()
+    let t = cwd.trim().trim_end_matches(|c| c == '/' || c == '\\');
+    if cfg!(windows) {
+        t.to_lowercase()
+    } else {
+        t.to_string()
+    }
 }
-#[cfg(windows)]
 fn full_access_set() -> std::collections::BTreeSet<String> {
     full_access_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -393,8 +482,7 @@ fn full_access_set() -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 /// True when the user has marked this project's folder full-access (trusted):
-/// agents run OUTSIDE the bwrap jail. Checked in program_argv/shell_argv.
-#[cfg(windows)]
+/// agents run OUTSIDE the jail. Checked in program_argv/shell_argv.
 pub fn is_full_access(cwd: Option<&str>) -> bool {
     matches!(cwd, Some(c) if !c.trim().is_empty() && full_access_set().contains(&norm_cwd(c)))
 }
@@ -418,16 +506,10 @@ pub fn is_bwrap_jailed(_cwd: Option<&str>) -> bool {
     false
 }
 
-#[cfg(windows)]
 fn full_access_get_impl(cwd: String) -> bool {
     is_full_access(Some(&cwd))
 }
-#[cfg(not(windows))]
-fn full_access_get_impl(_cwd: String) -> bool {
-    false
-}
 
-#[cfg(windows)]
 fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
     let p = full_access_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
@@ -446,10 +528,6 @@ fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
     )
     .map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(())
-}
-#[cfg(not(windows))]
-fn full_access_set_impl(_cwd: String, _enabled: bool) -> Result<(), String> {
-    Err("full host access is a WSL (Windows) feature today".into())
 }
 
 // ---- image inbox: let a subscription/CLI agent SEE pasted images -----------
@@ -906,16 +984,57 @@ pub fn cleanup_deleted_project(location: &str) {
     }
 }
 
-// ---- Linux: bubblewrap ----------------------------------------------------
+// ---- engine liveness (Linux/macOS) ----------------------------------------
+//
+// `<engine> --version` is NOT evidence that the engine can isolate anything. It
+// answers "is the binary here?", and both engines fail LATER for reasons a
+// version print cannot see — so the app reported "isolated" while every run was
+// unsandboxed. We spawn a real, throwaway jail instead, and cache the verdict.
 
-#[cfg(target_os = "linux")]
-fn engine_available(exe: &str) -> bool {
-    std::process::Command::new(exe)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// How long an engine verdict is trusted before re-probing. Short enough that a
+/// user who installs the AppArmor profile (or bubblewrap, or the Lima instance)
+/// mid-session is picked up without a restart; long enough that the probe never
+/// runs in the hot path of a busy agent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::type_complexity)]
+fn probe_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
+
+/// Run `probe` at most once per PROBE_TTL per `key`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cached_probe(key: &str, probe: impl FnOnce() -> bool) -> bool {
+    if let Ok(c) = probe_cache().lock() {
+        if let Some((at, v)) = c.get(key) {
+            if at.elapsed() < PROBE_TTL {
+                return *v;
+            }
+        }
+    }
+    let v = probe();
+    if let Ok(mut c) = probe_cache().lock() {
+        c.insert(key.to_string(), (std::time::Instant::now(), v));
+    }
+    v
+}
+
+/// Drop cached verdicts so the next call re-probes immediately — called after
+/// we install bubblewrap or the AppArmor profile.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn invalidate_probe_cache() {
+    if let Ok(mut c) = probe_cache().lock() {
+        c.clear();
+    }
+}
+
+// ---- Linux: bubblewrap ----------------------------------------------------
 
 #[cfg(target_os = "linux")]
 fn sandbox_home() -> Option<String> {
@@ -925,10 +1044,51 @@ fn sandbox_home() -> Option<String> {
     Some(sb)
 }
 
+/// True when bubblewrap is not merely INSTALLED but can actually build a jail.
+///
+/// On Ubuntu 24.04+ (`kernel.apparmor_restrict_unprivileged_userns=1`) an
+/// unprofiled, non-setuid `bwrap` prints its version happily and then dies with
+/// `setting up uid map: Permission denied` on every real run. Measured on
+/// aarch64 Ubuntu 24.04 with identical argv: exit 0 with an AppArmor `userns`
+/// profile attached, exit 1 without, while `--version` returned 0 in both.
+/// So the probe spawns the SAME prefix production uses, over a throwaway dir.
+#[cfg(target_os = "linux")]
+fn bwrap_runnable() -> bool {
+    cached_probe("bwrap", || {
+        let Some(sb) = sandbox_home() else {
+            return false;
+        };
+        let probe_dir = format!("{sb}/.probe");
+        if std::fs::create_dir_all(&probe_dir).is_err() {
+            return false;
+        }
+        let mut argv = bwrap_prefix_argv(&probe_dir, &sb, true, &[]);
+        argv.push("/bin/true".into());
+        std::process::Command::new("bwrap")
+            .args(&argv)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// True when the kernel is blocking unprivileged user namespaces — the reason a
+/// present `bwrap` still can't run. Drives the actionable remedy in `harden`.
+#[cfg(target_os = "linux")]
+fn userns_restricted() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     let p = cwd?;
     if !crate::wsl::wsl_isolation_get_blocking().enabled {
+        return None;
+    }
+    // Explicit per-project trust — the user opted this folder OUT of the jail.
+    if is_full_access(Some(p)) {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
@@ -939,9 +1099,24 @@ fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     }
 }
 
+/// Paths outside the project that must still be bound into the jail: the main
+/// repository's git dir when the project is an OWLLM fleet worktree.
+#[cfg(target_os = "linux")]
+fn extra_binds_for(project_dir: &str) -> Vec<String> {
+    let dot_git = std::path::Path::new(project_dir).join(".git");
+    if !dot_git.is_file() {
+        return Vec::new(); // ordinary checkout — .git is inside the project bind
+    }
+    std::fs::read_to_string(&dot_git)
+        .ok()
+        .and_then(|s| worktree_git_common_dir(&s))
+        .into_iter()
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 pub fn is_isolated(cwd: Option<&str>) -> bool {
-    isolated_dir(cwd).is_some() && engine_available("bwrap")
+    isolated_dir(cwd).is_some() && bwrap_runnable()
 }
 
 #[cfg(target_os = "linux")]
@@ -951,11 +1126,11 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("bwrap") {
+    if !bwrap_runnable() {
         return None;
     }
     let sb = sandbox_home()?;
-    let mut v = bwrap_prefix_argv(&dir, &sb, true);
+    let mut v = bwrap_prefix_argv(&dir, &sb, true, &extra_binds_for(&dir));
     v.push("bash".into());
     v.push("-lc".into());
     v.push(exec_script(program, args));
@@ -965,11 +1140,11 @@ pub fn program_argv(
 #[cfg(target_os = "linux")]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("bwrap") {
+    if !bwrap_runnable() {
         return None;
     }
     let sb = sandbox_home()?;
-    let mut v = bwrap_prefix_argv(&dir, &sb, true);
+    let mut v = bwrap_prefix_argv(&dir, &sb, true, &extra_binds_for(&dir));
     v.push("bash".into());
     v.push("-lc".into());
     v.push(command.to_string());
@@ -981,18 +1156,28 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
 #[cfg(target_os = "macos")]
 const LIMA_INSTANCE: &str = "owllm";
 
+/// True when the Lima VM can actually run a command — not merely that
+/// `limactl` is installed. `limactl --version` succeeds even when the `owllm`
+/// instance was never created or is stopped, in which case every isolated run
+/// fails; same false-positive class as bubblewrap's version check on Linux.
+///
+/// NOT yet runtime-verified: no Mac in reach has Lima installed, so this shape
+/// is reasoned from `limactl shell` semantics, unlike the Linux probe which was
+/// measured. It is strictly stricter than the check it replaces.
 #[cfg(target_os = "macos")]
-fn engine_available(exe: &str) -> bool {
-    std::process::Command::new(exe)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn lima_runnable() -> bool {
+    cached_probe("lima", || {
+        std::process::Command::new("limactl")
+            .args(["shell", LIMA_INSTANCE, "true"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(target_os = "macos")]
 pub fn is_isolated(cwd: Option<&str>) -> bool {
-    isolated_dir(cwd).is_some() && engine_available("limactl")
+    isolated_dir(cwd).is_some() && lima_runnable()
 }
 
 #[cfg(target_os = "macos")]
@@ -1002,7 +1187,7 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("limactl") {
+    if !lima_runnable() {
         return None;
     }
     Some((
@@ -1014,7 +1199,7 @@ pub fn program_argv(
 #[cfg(target_os = "macos")]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("limactl") {
+    if !lima_runnable() {
         return None;
     }
     let bash_args = vec!["-lc".to_string(), command.to_string()];
@@ -1072,12 +1257,25 @@ fn status_impl() -> SandboxStatus {
         confined,
         targets: w.distros,
         default_target,
+        detail: None,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn status_impl() -> SandboxStatus {
-    let ok = engine_available("bwrap");
+    let ok = bwrap_runnable();
+    // Distinguish "not installed" from "installed but the kernel won't let it
+    // build a namespace" — the second is invisible to a version check and is
+    // what made the app claim isolation it did not have.
+    let detail = if ok {
+        None
+    } else if !which("bwrap") {
+        Some("bubblewrap is not installed — use Harden to install it.".into())
+    } else if userns_restricted() {
+        Some(BWRAP_USERNS_HELP.into())
+    } else {
+        Some("bubblewrap is installed but could not create a sandbox.".into())
+    };
     SandboxStatus {
         available: ok,
         kind: if ok {
@@ -1090,12 +1288,22 @@ fn status_impl() -> SandboxStatus {
         confined: ok, // bubblewrap IS the folder-confinement on Linux
         targets: Vec::new(),
         default_target: None,
+        detail,
     }
 }
 
 #[cfg(target_os = "macos")]
 fn status_impl() -> SandboxStatus {
-    let ok = engine_available("limactl");
+    let ok = lima_runnable();
+    let detail = if ok {
+        None
+    } else if which("limactl") {
+        Some(format!(
+            "Lima is installed but the `{LIMA_INSTANCE}` VM isn't running — start it with `limactl start --name {LIMA_INSTANCE}`."
+        ))
+    } else {
+        Some(MAC_PROVISION_HELP.into())
+    };
     SandboxStatus {
         available: ok,
         kind: if ok { "lima".into() } else { "none".into() },
@@ -1104,6 +1312,7 @@ fn status_impl() -> SandboxStatus {
         confined: ok, // Lima is a VM — confinement comes with availability
         targets: Vec::new(),
         default_target: None,
+        detail,
     }
 }
 
@@ -1140,11 +1349,30 @@ fn harden_impl(distro: Option<String>) -> Result<SandboxStatus, String> {
 
 #[cfg(target_os = "linux")]
 fn harden_impl(_distro: Option<String>) -> Result<SandboxStatus, String> {
-    if engine_available("bwrap") {
+    if bwrap_runnable() {
         return Ok(status_impl());
     }
-    linux_provision()?;
-    Ok(status_impl())
+    if !which("bwrap") {
+        linux_provision()?;
+        invalidate_probe_cache();
+        if bwrap_runnable() {
+            return Ok(status_impl());
+        }
+    }
+    // Installed but still can't build a namespace: on Ubuntu 24.04+ that is the
+    // unprivileged-userns restriction, cured ONCE PER MACHINE by giving bwrap
+    // an AppArmor profile (see linux_install_userns_profile).
+    if userns_restricted() {
+        linux_install_userns_profile()?;
+        invalidate_probe_cache();
+    }
+    let st = status_impl();
+    if !st.available {
+        return Err(st
+            .detail
+            .unwrap_or_else(|| "bubblewrap could not create a sandbox.".into()));
+    }
+    Ok(st)
 }
 
 #[cfg(target_os = "macos")]
@@ -2142,7 +2370,7 @@ pub fn sandbox_list_projects() -> Vec<SandboxProject> {
 
 // ---- provisioning ---------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn which(p: &str) -> bool {
     std::process::Command::new("sh")
         .arg("-c")
@@ -2206,6 +2434,62 @@ fn linux_provision() -> Result<String, String> {
     } else {
         Err(format!(
             "Root required and pkexec not found. Run in a terminal:\n  sudo bash -lc '{script}'"
+        ))
+    }
+}
+
+// ---- Linux: unprivileged user namespaces ----------------------------------
+//
+// Ubuntu 24.04 turned on `kernel.apparmor_restrict_unprivileged_userns=1`,
+// which denies unprivileged user namespaces to any binary without an AppArmor
+// profile granting `userns`. bubblewrap ships without one, so a non-setuid
+// `bwrap` dies with `setting up uid map: Permission denied` on every run while
+// `bwrap --version` still succeeds. The remedy is the same 4-line profile
+// Ubuntu already ships for ch-run, crun, chrome and a dozen others.
+//
+// This is installed ONCE PER MACHINE, not per project and not per agent: the
+// profile attaches to the binary path /usr/bin/bwrap, so it covers every user,
+// every project, every worktree and every agent on that host, and it persists
+// across reboots (apparmor.service loads /etc/apparmor.d at boot).
+
+/// The profile path — attaches to the bwrap BINARY, hence machine-wide.
+#[cfg(target_os = "linux")]
+const BWRAP_APPARMOR_PATH: &str = "/etc/apparmor.d/bwrap";
+
+#[cfg(target_os = "linux")]
+const BWRAP_APPARMOR_PROFILE: &str = "abi <abi/4.0>,\n\
+include <tunables/global>\n\
+\n\
+profile bwrap /usr/bin/bwrap flags=(unconfined) {\n\
+\x20 userns,\n\
+\x20 include if exists <local/bwrap>\n\
+}\n";
+
+#[cfg(target_os = "linux")]
+const BWRAP_USERNS_HELP: &str = "bubblewrap is installed but this kernel blocks \
+unprivileged user namespaces (apparmor_restrict_unprivileged_userns), so it \
+cannot create a sandbox. Use Harden to install the one-time AppArmor profile \
+at /etc/apparmor.d/bwrap (needs your password once, machine-wide).";
+
+/// Install the machine-wide AppArmor profile that lets bwrap use user
+/// namespaces, then reload it. Needs root exactly once; idempotent.
+#[cfg(target_os = "linux")]
+fn linux_install_userns_profile() -> Result<String, String> {
+    // Written via a quoted heredoc so the profile lands byte-for-byte.
+    let script = format!(
+        "set -e; cat > {path} <<'OWLLM_AA_EOF'\n{profile}OWLLM_AA_EOF\n\
+         chmod 0644 {path}; \
+         (apparmor_parser -r {path} || systemctl reload apparmor || true); \
+         echo AA_PROFILE_DONE",
+        path = BWRAP_APPARMOR_PATH,
+        profile = BWRAP_APPARMOR_PROFILE,
+    );
+    if which("pkexec") {
+        run_capture("pkexec", &["bash", "-lc", &script])
+    } else {
+        Err(format!(
+            "Root required and pkexec not found. Run this ONCE in a terminal, \
+             then retry Harden:\n  sudo bash -lc '{script}'"
         ))
     }
 }
@@ -3102,9 +3386,37 @@ mod tests {
         assert!(!is_under_iso_root("/etc/passwd", "/home/me"));
     }
 
+    /// D1: a fleet worktree IS an isolation root. Before this, cutting a
+    /// worktree moved the run out of `~/owllm` and silently un-sandboxed it —
+    /// reproduced on real aarch64 Linux with the shipping function.
+    #[test]
+    fn fleet_worktree_is_an_iso_root() {
+        assert!(is_under_iso_root(
+            "/home/farisland/.owllm/fleet/LLM-Studio/main/code",
+            "/home/farisland"
+        ));
+        assert!(is_under_iso_root("/home/me/.owllm/fleet", "/home/me"));
+        // Trailing slash and a redundant home slash both normalise.
+        assert!(is_under_iso_root("/home/me/.owllm/fleet/p/", "/home/me/"));
+        // Siblings of the fleet root stay OUTSIDE — `.owllm` holds the sandbox
+        // home and credentials, which must never count as a project root.
+        assert!(!is_under_iso_root("/home/me/.owllm", "/home/me"));
+        assert!(!is_under_iso_root("/home/me/.owllm/sbhome", "/home/me"));
+        assert!(!is_under_iso_root("/home/me/.owllm/fleetx", "/home/me"));
+        // A DIFFERENT user's fleet is not ours.
+        assert!(!is_under_iso_root("/home/you/.owllm/fleet/p", "/home/me"));
+    }
+
+    /// FLEET_SUBDIR must track fleet::fleet_root(), which builds
+    /// `$HOME/.owllm/fleet` from two joined components.
+    #[test]
+    fn fleet_subdir_matches_fleet_root_layout() {
+        assert_eq!(FLEET_SUBDIR, ".owllm/fleet");
+    }
+
     #[test]
     fn bwrap_prefix_binds_project_and_home_not_real_home() {
-        let a = bwrap_prefix_argv("/home/me/owllm/p", "/home/me/.owllm/sbhome", true);
+        let a = bwrap_prefix_argv("/home/me/owllm/p", "/home/me/.owllm/sbhome", true, &[]);
         let joined = a.join(" ");
         assert!(joined.contains("--bind /home/me/owllm/p /home/me/owllm/p"));
         assert!(joined.contains("--chdir /home/me/owllm/p"));
@@ -3117,8 +3429,96 @@ mod tests {
 
     #[test]
     fn bwrap_prefix_can_isolate_net() {
-        let a = bwrap_prefix_argv("/p", "/sb", false);
+        let a = bwrap_prefix_argv("/p", "/sb", false, &[]);
         assert!(a.join(" ").contains("--unshare-net"));
+    }
+
+    /// The worktree gitdir is bound read-write, and BEFORE --chdir so the jail
+    /// is fully assembled when it enters the project.
+    #[test]
+    fn bwrap_prefix_binds_extra_rw_paths() {
+        let extra = vec!["/repo/.git".to_string()];
+        let a = bwrap_prefix_argv("/home/me/.owllm/fleet/p/code", "/sb", true, &extra);
+        let joined = a.join(" ");
+        assert!(
+            joined.contains("--bind-try /repo/.git /repo/.git"),
+            "{joined}"
+        );
+        let bind_at = joined.find("--bind-try /repo/.git").unwrap();
+        let chdir_at = joined.find("--chdir").unwrap();
+        assert!(bind_at < chdir_at, "gitdir must be bound before --chdir");
+        // Nothing extra leaks in when there is none.
+        assert!(!bwrap_prefix_argv("/p", "/sb", true, &[])
+            .join(" ")
+            .contains("--bind-try /repo"));
+    }
+
+    /// A worktree's `.git` is a POINTER to metadata + objects living in the
+    /// main repo. Binding only the worktree breaks every git call in the jail.
+    #[test]
+    fn worktree_gitdir_resolves_to_main_repo_git_dir() {
+        // Real shapes observed on both machines during the audit.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /home/farisland/Documents/1_Git/LLM-Studio/.git/worktrees/code\n").as_deref(),
+            Some("/home/farisland/Documents/1_Git/LLM-Studio/.git"),
+        );
+        assert_eq!(
+            worktree_git_common_dir("gitdir: D:/1_GitHome/LLM-Studio/.git/worktrees/code7")
+                .as_deref(),
+            Some("D:/1_GitHome/LLM-Studio/.git"),
+        );
+        // Windows-style separators normalise to the forward-slash form bwrap wants.
+        assert_eq!(
+            worktree_git_common_dir(r"gitdir: D:\repo\.git\worktrees\w").as_deref(),
+            Some("D:/repo/.git"),
+        );
+        // A repo whose own path contains "worktrees" must strip only the LAST one.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /srv/worktrees/repo/.git/worktrees/a").as_deref(),
+            Some("/srv/worktrees/repo/.git"),
+        );
+        // A plain gitdir pointer (submodule) is passed through, not mangled.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /repo/.git/modules/sub").as_deref(),
+            Some("/repo/.git/modules/sub"),
+        );
+        // Non-pointer content yields nothing to bind.
+        assert_eq!(worktree_git_common_dir(""), None);
+        assert_eq!(worktree_git_common_dir("ref: refs/heads/main"), None);
+        assert_eq!(worktree_git_common_dir("gitdir:   "), None);
+    }
+
+    /// D2: the trust key must NOT case-fold on Linux/macOS, where `/Repo` and
+    /// `/repo` are different directories — folding would grant full host access
+    /// to a folder the user never approved.
+    #[test]
+    fn full_access_key_case_sensitivity_is_per_os() {
+        let a = norm_cwd("/home/me/Repo/");
+        let b = norm_cwd("/home/me/repo");
+        if cfg!(windows) {
+            assert_eq!(a, b, "Windows paths are case-insensitive");
+        } else {
+            assert_ne!(a, b, "POSIX paths are case-sensitive");
+        }
+        // Trailing separators normalise on every OS.
+        assert_eq!(norm_cwd("/home/me/repo/"), norm_cwd("/home/me/repo"));
+        assert_eq!(norm_cwd("  /home/me/repo  "), norm_cwd("/home/me/repo"));
+    }
+
+    /// The exact profile that made bwrap runnable on Thor. It must attach to
+    /// the BINARY path (that is what makes it machine-wide — one install covers
+    /// every user, project, worktree and agent) and grant `userns`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_apparmor_profile_grants_userns_machine_wide() {
+        let p = BWRAP_APPARMOR_PROFILE;
+        assert!(p.contains("profile bwrap /usr/bin/bwrap"), "{p}");
+        assert!(p.lines().any(|l| l.trim() == "userns,"), "{p}");
+        assert!(p.contains("abi <abi/4.0>"), "{p}");
+        assert!(p.trim_end().ends_with('}'), "{p}");
+        // Machine-wide by construction: the path is under /etc, not a home dir.
+        assert_eq!(BWRAP_APPARMOR_PATH, "/etc/apparmor.d/bwrap");
+        assert!(!BWRAP_APPARMOR_PATH.contains("$HOME"));
     }
 
     #[test]

@@ -809,6 +809,287 @@
   }
 }
 
+/* Workspace launcher — deliberately compact and left-aligned. The hierarchy
+   borrows the useful patterns of modern developer tools (direct prompt,
+   explicit starting mode, quick access) without turning the app into a
+   marketing landing page. */
+.creation-launchpad {
+  min-height: 440px;
+  display: block;
+  border-color: var(--border);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--accent) 6%);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255,255,255,.045);
+}
+
+.creation-launchpad__grid {
+  inset: 0 0 auto 0;
+  height: 190px;
+  opacity: .14;
+  background-image:
+    linear-gradient(rgba(var(--accent-rgb), .18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--accent-rgb), .18) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(to bottom, #000, transparent);
+}
+
+.creation-launchpad__content {
+  width: auto;
+  padding: 0;
+  text-align: left;
+}
+
+.creation-launchpad__header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-card) 70%, transparent);
+}
+
+.creation-launchpad__eyebrow {
+  color: var(--fg-muted);
+  font-size: 10px;
+  letter-spacing: 1.25px;
+}
+
+.creation-launchpad__spark {
+  width: 25px;
+  height: 25px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 11px;
+  letter-spacing: 0;
+  box-shadow: none;
+}
+
+.creation-launchpad__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg-subtle);
+  font-size: 10.5px;
+}
+
+.creation-launchpad__status > span:first-child {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(var(--ok-rgb), .12);
+}
+
+.creation-launchpad__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(270px, .75fr);
+  gap: 0;
+}
+
+.creation-launchpad__primary {
+  min-width: 0;
+  padding: clamp(32px, 5vw, 58px);
+}
+
+.creation-launchpad__kicker,
+.creation-launchpad__choices-label {
+  color: var(--accent-ink);
+  font-size: 10.5px;
+  font-weight: 850;
+  letter-spacing: .9px;
+  text-transform: uppercase;
+}
+
+.creation-launchpad__title {
+  max-width: 700px;
+  margin: 10px 0 12px;
+  font-size: clamp(34px, 4.2vw, 52px);
+  font-weight: 820;
+  letter-spacing: -2px;
+  line-height: 1.02;
+}
+
+.creation-launchpad__title em {
+  color: var(--fg-muted);
+  text-shadow: none;
+}
+
+.creation-launchpad__subtitle {
+  max-width: 620px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.creation-launchpad__composer {
+  width: 100%;
+  margin: 24px 0 0;
+  border-color: var(--border-strong);
+  border-radius: 13px;
+  background: var(--bg-input);
+  box-shadow: 0 14px 35px rgba(0, 0, 0, .18), inset 0 1px rgba(255,255,255,.035);
+  backdrop-filter: none;
+}
+
+.creation-launchpad__composer:focus-within {
+  border-color: rgba(var(--accent-rgb), .72);
+  box-shadow: 0 15px 38px rgba(0,0,0,.2), 0 0 0 3px rgba(var(--accent-rgb), .08);
+  transform: none;
+}
+
+.creation-launchpad__composer textarea {
+  min-height: 102px;
+  padding: 17px 18px 8px;
+  font-size: 14px;
+}
+
+.creation-launchpad__composer-bar {
+  padding: 7px 8px 8px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+.creation-launchpad__submit {
+  min-width: 128px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.creation-launchpad__actions {
+  justify-content: flex-start;
+  margin-top: 14px;
+}
+
+.creation-launchpad__actions button {
+  height: 30px;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.creation-launchpad__choices {
+  min-width: 0;
+  padding: clamp(28px, 4vw, 42px) clamp(20px, 3vw, 34px);
+  border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-card) 58%, transparent);
+}
+
+.creation-launchpad__choices-label {
+  margin-bottom: 11px;
+  color: var(--fg-subtle);
+}
+
+.creation-launchpad__modes {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+}
+
+.creation-launchpad__mode {
+  min-height: 72px;
+  gap: 11px;
+  border-color: transparent;
+  border-radius: 10px;
+  padding: 10px;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.creation-launchpad__mode:hover {
+  transform: none;
+  border-color: var(--border);
+  background: var(--bg-card);
+}
+
+.creation-launchpad__mode.is-active {
+  border-color: rgba(var(--accent-rgb), .4);
+  background: rgba(var(--accent-rgb), .09);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.creation-launchpad__mode-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  font-size: 17px;
+}
+
+.creation-launchpad__mode-copy strong { font-size: 12px; }
+.creation-launchpad__mode-copy small { font-size: 10px; }
+
+.creation-launchpad__badge {
+  position: static;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  font-size: 8px;
+}
+
+.creation-launchpad__mode-arrow {
+  color: var(--fg-subtle);
+  font-size: 13px;
+  opacity: 0;
+  transition: opacity 150ms, transform 150ms;
+}
+
+.creation-launchpad__mode:hover .creation-launchpad__mode-arrow,
+.creation-launchpad__mode.is-active .creation-launchpad__mode-arrow {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+.creation-launchpad__privacy-note {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 13px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-subtle);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.creation-launchpad__privacy-note > span:first-child {
+  color: var(--ok);
+  font-size: 14px;
+}
+
+.creation-launchpad__privacy-note strong {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
+@media (max-width: 840px) {
+  .creation-launchpad__layout { grid-template-columns: 1fr; }
+  .creation-launchpad__choices { border-top: 1px solid var(--border); border-left: 0; }
+  .creation-launchpad__modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .creation-launchpad__mode { align-items: flex-start; min-height: 105px; flex-wrap: wrap; }
+  .creation-launchpad__mode-copy { width: calc(100% - 48px); }
+  .creation-launchpad__privacy-note { display: none; }
+}
+
+@media (max-width: 620px) {
+  .creation-launchpad { border-radius: 14px; }
+  .creation-launchpad__header { padding: 0 14px; }
+  .creation-launchpad__status { display: none; }
+  .creation-launchpad__primary { padding: 28px 18px; }
+  .creation-launchpad__title { font-size: 34px; letter-spacing: -1.4px; }
+  .creation-launchpad__choices { padding: 22px 14px; }
+  .creation-launchpad__modes { grid-template-columns: 1fr; }
+  .creation-launchpad__mode { min-height: 64px; align-items: center; flex-wrap: nowrap; }
+  .creation-launchpad__mode-copy { width: auto; }
+  .creation-launchpad__submit { min-width: 38px; padding: 0 10px; }
+}
+
 /* Dark theme — the original look. Each token has a "semantic" name
    describing what it's for, not the literal hex; component code reads
    `var(--bg-panel)` not `#0e1117`.

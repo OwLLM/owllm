@@ -372,6 +372,22 @@ and the browser half/half, the same split the personal-assistant recipe uses.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
+- **Self-healing session + honest failures**: a wedged session still creates
+  tabs and still accepts `navigate()` without error, but no webview ever
+  commits a document — so every action times out and an agent reading a generic
+  "the page may still be loading" invents a network cause (2026-08-17: a
+  reachable WSL dev server reported as unreachable). Timeouts are now diagnosed
+  by whether the tab holds a live document, and the tools **repair the session
+  themselves**: `browser_open_tab` gives a new tab a 3 s commit budget and
+  `browser_cmd` re-checks after a timeout; if the tab never loaded AND no other
+  tab holds a document either, the browser is restarted and the work replayed
+  (`heal_if_tab_never_loaded` / `recover_wedged_action`), handing back the new
+  tab id plus `"restarted": true`. Bounded: a session with any live page is
+  never restarted, the cooldown is stamped before the teardown so a failed
+  restart cannot loop, an automatic restart does not mark the session closed,
+  and only `navigate`/`open` is replayed — replaying a content read against the
+  fresh blank tab would answer about a page that never loaded. `browser_screenshot`
+  likewise refuses a minimized window instead of returning a picture of nothing.
 - **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
   window that looks like the app, not a stock OS window — an OwLLM chrome-bar
   webview (`ui/public/browser-chrome.html`: launcher app icon + title, tab

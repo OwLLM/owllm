@@ -3521,7 +3521,8 @@ fn heal_if_tab_never_loaded(
     id: u64,
     url: &tauri::Url,
 ) -> (u64, bool, Option<String>) {
-    if id == 0 || tab_committed_document(app, id, TAB_COMMIT_BUDGET) || !session_is_wedged(app) {
+    if id == 0 || tab_committed_document(app, id, TAB_COMMIT_BUDGET) || !browser_engine_is_dead(app)
+    {
         return (id, false, None);
     }
     let fresh = match auto_restart_browser(app) {
@@ -4491,8 +4492,9 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 /// dev server reported as unreachable). So the recovery is done here.
 ///
 /// Two things this deliberately does NOT do:
-/// * It never restarts over a session that still holds a live document
-///   (`session_is_wedged`) — the user is watching this window.
+/// * It never restarts on a timeout alone. The user is watching this window, so
+///   a restart needs positive evidence that the engine itself is broken —
+///   `browser_engine_is_dead`, which is a probe, not a guess.
 /// * It only replays `navigate`/`open`, whose URL is in `params`. Replaying a
 ///   content read against the fresh blank tab would hand back an answer about a
 ///   page that was never loaded, which is exactly the fabrication this whole
@@ -4504,7 +4506,7 @@ fn recover_wedged_action(
     screenshot_scope: &str,
     error: String,
 ) -> Result<String, String> {
-    if !error.contains("timed out") || !session_is_wedged(app) {
+    if !error.contains("timed out") || !browser_engine_is_dead(app) {
         return Err(error);
     }
     let fresh = match auto_restart_browser(app) {
@@ -4607,35 +4609,36 @@ fn live_document_url(win: &Webview) -> Option<String> {
     Some(url.to_string())
 }
 
-/// True when NO tab in this session holds a live document — the whole browser
-/// is wedged, not one slow page.
+/// Tell a broken browser engine apart from a destination that is merely slow.
 ///
-/// Reads each webview's RAW url through `live_document_url`, never the strip
-/// from `list_tabs`: that one maps the internal start page to "about:blank" for
-/// display, so a healthy freshly-started session would read as wedged and be
-/// restarted on a loop.
+/// A tab that holds no document proves neither on its own. Both of these were
+/// MEASURED on 2026-08-17, and they are why the obvious tests do not work:
 ///
-/// Scope matters. If ANY tab still holds a document the session is alive and
-/// must be left alone — the user watches this window, and tearing it down over
-/// one bad tab would cost them the pages they had open.
-fn session_is_wedged(app: &tauri::AppHandle) -> bool {
-    let ids = TABS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
-        .map(|tabs| tabs.order.clone())
-        .unwrap_or_default();
-    if ids.is_empty() {
-        // Single-webview compatibility shape (older builds own no tab strip).
-        return content_webview(app)
-            .map(|wv| live_document_url(&wv).is_none())
-            .unwrap_or(false);
-    }
-    !ids.iter().any(|id| {
-        app.get_webview(&tab_label(*id))
-            .and_then(|wv| live_document_url(&wv))
-            .is_some()
-    })
+/// * A webview pointed at an unresponsive host reports `about:blank` for as
+///   long as the request hangs — byte-identical to a wedged tab. Restarting on
+///   that signal alone would tear the window down over a dev server that is
+///   still compiling.
+/// * Scanning the rest of the strip does not separate them either. Tabs that
+///   loaded BEFORE the session wedged keep reporting their old URL, so the
+///   session still looks healthy while every newly created tab is dead. That is
+///   exactly what the incident looked like: the user's localhost tab still read
+///   as loaded while three consecutive agent tabs committed nothing.
+///
+/// So ask the engine for something that CANNOT be slow: a background tab on the
+/// app's own start page, served locally with no network involved. If even that
+/// never commits, the engine is broken and a restart is the only remedy.
+fn browser_engine_is_dead(app: &tauri::AppHandle) -> bool {
+    let Ok(home) = browser_home_url(app) else {
+        return false;
+    };
+    let probe = match new_tab(app, home.as_str(), false, false) {
+        Ok(id) => id,
+        // A session that can no longer even open a tab will not run an action.
+        Err(_) => return true,
+    };
+    let committed = tab_committed_document(app, probe, TAB_COMMIT_BUDGET);
+    close_tab(app, probe);
+    !committed
 }
 
 /// Restart a wedged browser session in place and hand back the tab the caller

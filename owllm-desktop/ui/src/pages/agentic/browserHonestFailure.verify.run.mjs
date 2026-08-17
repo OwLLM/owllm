@@ -248,27 +248,62 @@ function slice(source, marker, end = "\n}") {
   return close < 0 ? source.slice(at) : source.slice(at, close + end.length);
 }
 
-const wedgedFn = slice(browser, "fn session_is_wedged");
-check("session_is_wedged() exists", wedgedFn.length > 0);
+// Restarting needs POSITIVE evidence that the engine is broken. Two signals
+// that look decisive are not, both measured 2026-08-17 against the live app:
+//
+//   * a webview pointed at an unresponsive host reports "about:blank" for as
+//     long as the request hangs — byte-identical to a wedged tab. Restarting on
+//     an uncommitted tab alone would tear the window down over a dev server
+//     that is still compiling (the very case that started all this).
+//   * scanning the other tabs does not separate them either: tabs that loaded
+//     BEFORE the session wedged keep reporting their old URL. In the incident
+//     the user's localhost tab still read as loaded while three consecutive
+//     agent tabs committed nothing — so an "is any tab alive?" rule would have
+//     stayed silent in the one case this exists for.
+//
+// The probe asks the engine for something that cannot be slow instead.
+const engineFn = slice(browser, "fn browser_engine_is_dead");
+check("browser_engine_is_dead() exists", engineFn.length > 0);
 check(
-  "session_is_wedged slice is real",
-  wedgedFn.includes("TABS") && wedgedFn.length > 200,
-  `slice length ${wedgedFn.length}`,
+  "browser_engine_is_dead slice is real",
+  engineFn.includes("probe") && engineFn.length > 200,
+  `slice length ${engineFn.length}`,
 );
 check(
-  "session_is_wedged judges by the LIVE document url",
-  /live_document_url\(/.test(wedgedFn),
-);
-// list_tabs maps the internal start page to "about:blank" for display, so
-// judging by it would read a healthy fresh session as wedged and restart it
-// on a loop.
-check(
-  "session_is_wedged does not judge by the display strip (list_tabs)",
-  !/list_tabs\(/.test(wedgedFn),
+  "the probe opens a NEW tab (an old tab's stale url proves nothing)",
+  /new_tab\(app, home\.as_str\(\), false, false\)/.test(engineFn),
 );
 check(
-  "a session with ANY live tab is not wedged",
-  /!\s*ids\s*\.iter\(\)\s*\.any\(/s.test(wedgedFn),
+  "the probe loads the app's own start page, which cannot be slow",
+  /browser_home_url\(app\)/.test(engineFn),
+);
+check(
+  "the probe is opened in the background, not in front of the user",
+  /new_tab\(app, home\.as_str\(\), false,/.test(engineFn),
+);
+check(
+  "the verdict is whether that probe committed a document",
+  /tab_committed_document\(app, probe, TAB_COMMIT_BUDGET\)/.test(engineFn) &&
+    /!committed/.test(engineFn),
+);
+check(
+  "the probe tab is closed again rather than left behind",
+  /close_tab\(app, probe\)/.test(engineFn),
+);
+check(
+  "a session that can no longer open a tab counts as dead",
+  /Err\(_\) => return true/.test(engineFn),
+);
+// The trap: judging by the existing strip. Both forms of it must stay out.
+check(
+  "the verdict never depends on the other tabs' urls",
+  !/list_tabs\(/.test(engineFn) &&
+    !/tabs\.order/.test(engineFn) &&
+    !/ids\.iter\(\)/.test(engineFn),
+);
+check(
+  "the all-tabs-dead rule is gone entirely (it missed the real incident)",
+  !/session_is_wedged/.test(browser),
 );
 
 const restartFn = slice(browser, "fn auto_restart_browser");
@@ -334,16 +369,16 @@ check(
   ),
 );
 check(
-  "recovery only triggers on a timeout of a wedged session",
+  "recovery only triggers on a timeout WITH a dead-engine probe",
   /error\.contains\("timed out"\)/.test(recoverFn) &&
-    /session_is_wedged\(app\)/.test(recoverFn),
+    /browser_engine_is_dead\(app\)/.test(recoverFn),
 );
-// A session that still holds a live page belongs to the user; restarting it
-// would cost them their tabs over one bad page.
-const gateAt = recoverFn.indexOf("session_is_wedged(app)");
+// The user is watching this window: a restart needs the probe's positive
+// evidence, never a timeout on its own.
+const gateAt = recoverFn.indexOf("browser_engine_is_dead(app)");
 const restartAt = recoverFn.indexOf("auto_restart_browser(app)");
 check(
-  "the wedged check runs BEFORE the restart",
+  "the engine probe runs BEFORE the restart",
   gateAt >= 0 && restartAt >= 0 && gateAt < restartAt,
   `gate@${gateAt} vs restart@${restartAt}`,
 );
@@ -389,9 +424,9 @@ check(
   ),
 );
 check(
-  "the heal gates on the commit budget AND on the whole session being wedged",
+  "the heal gates on the commit budget AND on the engine probe",
   /tab_committed_document\(app, id, TAB_COMMIT_BUDGET\)/.test(healFn) &&
-    /session_is_wedged\(app\)/.test(healFn),
+    /browser_engine_is_dead\(app\)/.test(healFn),
 );
 check(
   "a failed heal hands back the reason instead of a silently dead tab",

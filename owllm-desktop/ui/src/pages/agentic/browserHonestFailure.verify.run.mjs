@@ -230,6 +230,201 @@ check(
   /never conclude/i.test(openSpec) && /unreachable/i.test(openSpec),
 );
 
+// ---------------------------------------------------------------------------
+// 5. A wedged session must heal itself — the agent should not be handed a chore.
+//
+// Telling the agent to "run browser_close and retry" still left the tool
+// blaming the caller for a fault the tool can fix, and every extra step is
+// another chance for the agent to invent an explanation instead. The recovery
+// below is bounded on purpose: it may not restart a session that still holds a
+// live page, it may not loop, and it may not replay a content read against the
+// fresh blank tab (that would answer about a page that was never loaded — the
+// exact fabrication this whole gate exists to prevent).
+// ---------------------------------------------------------------------------
+function slice(source, marker, end = "\n}") {
+  const at = source.indexOf(marker);
+  if (at < 0) return "";
+  const close = source.indexOf(end, at);
+  return close < 0 ? source.slice(at) : source.slice(at, close + end.length);
+}
+
+const wedgedFn = slice(browser, "fn session_is_wedged");
+check("session_is_wedged() exists", wedgedFn.length > 0);
+check(
+  "session_is_wedged slice is real",
+  wedgedFn.includes("TABS") && wedgedFn.length > 200,
+  `slice length ${wedgedFn.length}`,
+);
+check(
+  "session_is_wedged judges by the LIVE document url",
+  /live_document_url\(/.test(wedgedFn),
+);
+// list_tabs maps the internal start page to "about:blank" for display, so
+// judging by it would read a healthy fresh session as wedged and restart it
+// on a loop.
+check(
+  "session_is_wedged does not judge by the display strip (list_tabs)",
+  !/list_tabs\(/.test(wedgedFn),
+);
+check(
+  "a session with ANY live tab is not wedged",
+  /!\s*ids\s*\.iter\(\)\s*\.any\(/s.test(wedgedFn),
+);
+
+const restartFn = slice(browser, "fn auto_restart_browser");
+check("auto_restart_browser() exists", restartFn.length > 0);
+check(
+  "auto_restart_browser slice is real",
+  restartFn.includes("browser_start_inner") && restartFn.length > 200,
+  `slice length ${restartFn.length}`,
+);
+check(
+  "auto_restart_browser is rate-limited",
+  /LAST_AUTO_RESTART/.test(restartFn) && /AUTO_RESTART_COOLDOWN/.test(restartFn),
+);
+// The stamp must be taken BEFORE the teardown: a restart that fails halfway
+// would otherwise leave the cooldown unset and be retried on every action.
+const stampAt = restartFn.indexOf("*last = Some(Instant::now())");
+const teardownAt = restartFn.indexOf("stop_browser_inner");
+check(
+  "the cooldown is stamped before the teardown, so a failed restart cannot loop",
+  stampAt >= 0 && teardownAt >= 0 && stampAt < teardownAt,
+  `stamp@${stampAt} vs teardown@${teardownAt}`,
+);
+check(
+  "auto_restart_browser hands back the tab to use afterwards",
+  /active_tab_id\(\)/.test(restartFn),
+);
+check(
+  "the cooldown constant is a real window",
+  /const AUTO_RESTART_COOLDOWN: Duration = Duration::from_secs\((\d+)\)/.test(browser) &&
+    Number(
+      browser.match(
+        /const AUTO_RESTART_COOLDOWN: Duration = Duration::from_secs\((\d+)\)/,
+      )[1],
+    ) >= 30,
+);
+
+const stopInner = slice(browser, "fn stop_browser_inner");
+check("stop_browser_inner() exists", stopInner.length > 0);
+check(
+  "an automatic restart does not mark the session closed",
+  /if user_initiated\s*\{\s*mark_session_closed\(\);/s.test(stopInner),
+);
+check(
+  "the user's ✕ still marks the session closed",
+  /stop_browser_inner\(&app, true\)/.test(browser),
+);
+check(
+  "the automatic path passes user_initiated = false",
+  /stop_browser_inner\(app, false\)/.test(restartFn),
+);
+
+const recoverFn = slice(browser, "fn recover_wedged_action");
+check("recover_wedged_action() exists", recoverFn.length > 0);
+check(
+  "recover_wedged_action slice is real",
+  recoverFn.includes("auto_restart_browser") && recoverFn.length > 400,
+  `slice length ${recoverFn.length}`,
+);
+check(
+  "browser_cmd routes a failed action through the recovery",
+  /recover_wedged_action\(&app, &action, &params, &screenshot_scope, error\)/.test(
+    browser,
+  ),
+);
+check(
+  "recovery only triggers on a timeout of a wedged session",
+  /error\.contains\("timed out"\)/.test(recoverFn) &&
+    /session_is_wedged\(app\)/.test(recoverFn),
+);
+// A session that still holds a live page belongs to the user; restarting it
+// would cost them their tabs over one bad page.
+const gateAt = recoverFn.indexOf("session_is_wedged(app)");
+const restartAt = recoverFn.indexOf("auto_restart_browser(app)");
+check(
+  "the wedged check runs BEFORE the restart",
+  gateAt >= 0 && restartAt >= 0 && gateAt < restartAt,
+  `gate@${gateAt} vs restart@${restartAt}`,
+);
+check(
+  "only navigate/open is replayed after the restart",
+  /!matches!\(action, "navigate" \| "open"\)/.test(recoverFn),
+);
+// The replay guard must come before the replay: a content read answered from
+// the fresh blank tab is a fabricated result about a page that never loaded.
+const guardAt2 = recoverFn.indexOf('!matches!(action, "navigate"');
+const replayAt = recoverFn.indexOf("run_browser_action(app,");
+check(
+  "the non-replayable actions return before any replay",
+  guardAt2 >= 0 && replayAt >= 0 && guardAt2 < replayAt,
+  `guard@${guardAt2} vs replay@${replayAt}`,
+);
+const nonReplay = recoverFn.slice(guardAt2, replayAt < 0 ? undefined : replayAt);
+check(
+  "the non-replayable arm returns an error rather than an empty answer",
+  /return Err\(/.test(nonReplay),
+);
+check(
+  "the non-replayable arm still forbids reporting the URL as unreachable",
+  /do not report/i.test(nonReplay) && /unreachable/i.test(nonReplay),
+);
+check(
+  "the non-replayable arm tells the agent the session was already restarted",
+  /restarted automatically/i.test(nonReplay),
+);
+check(
+  "a successful replay reports the NEW tab id",
+  /\{fresh\}/.test(recoverFn.slice(replayAt < 0 ? 0 : replayAt)),
+);
+
+// The earliest catch: browser_open_tab knows the URL, so recovery there is
+// invisible to the caller instead of surfacing later as a mystery timeout.
+const healFn = slice(browser, "fn heal_if_tab_never_loaded");
+check("heal_if_tab_never_loaded() exists", healFn.length > 0);
+check(
+  "browser_open_tab heals a tab that never loaded",
+  /let \(id, restarted, note\) = heal_if_tab_never_loaded\(&app, id, &parsed\)/.test(
+    browser,
+  ),
+);
+check(
+  "the heal gates on the commit budget AND on the whole session being wedged",
+  /tab_committed_document\(app, id, TAB_COMMIT_BUDGET\)/.test(healFn) &&
+    /session_is_wedged\(app\)/.test(healFn),
+);
+check(
+  "a failed heal hands back the reason instead of a silently dead tab",
+  /Some\(format!\(/.test(healFn) && /do not report it as unreachable/i.test(healFn),
+);
+check(
+  "the restart is disclosed to the caller",
+  /opened\["restarted"\] = json!\(true\)/.test(browser) &&
+    /opened\["note"\] = json!\(note\)/.test(browser),
+);
+
+const commitFn = slice(browser, "fn tab_committed_document");
+check("tab_committed_document() exists", commitFn.length > 0);
+check(
+  "tab_committed_document polls the live document url",
+  /live_document_url\(/.test(commitFn),
+);
+check(
+  "tab_committed_document gives up at the budget rather than blocking forever",
+  /start\.elapsed\(\) >= budget/.test(commitFn) && /return false/.test(commitFn),
+);
+// A healthy tab reports its url immediately, so this budget is only ever spent
+// by a broken session — but an unbounded one would stall every open.
+const budget = browser.match(
+  /const TAB_COMMIT_BUDGET: Duration = Duration::from_secs\((\d+)\)/,
+);
+check("TAB_COMMIT_BUDGET is declared", !!budget);
+check(
+  "TAB_COMMIT_BUDGET stays short enough not to stall ordinary opens",
+  !!budget && Number(budget[1]) > 0 && Number(budget[1]) <= 5,
+  budget ? `${budget[1]}s` : "missing",
+);
+
 if (failures) {
   console.error(`\n✗ browser honest-failure gate: ${failures}/${checks} checks failed`);
   process.exit(1);

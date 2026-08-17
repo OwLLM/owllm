@@ -841,12 +841,16 @@
 }
 
 .creation-launchpad__content {
-  width: auto;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
   padding: 0;
   text-align: left;
 }
 
 .creation-launchpad__header {
+  width: 100%;
+  box-sizing: border-box;
   min-height: 54px;
   display: flex;
   align-items: center;

@@ -51,6 +51,9 @@ check("project dialog can open a preselected visual recipe",
     && projectDialog.includes('setStep("form")'));
 check("launchpad visual follows the active accent",
   styles.includes(".creation-launchpad") && styles.includes("rgba(var(--accent-rgb)"));
+check("shared Coding and Agentic header spans the full launchpad width",
+  styles.includes(".creation-launchpad__content {\n  width: 100%;\n  max-width: none;\n  box-sizing: border-box;")
+  && styles.includes(".creation-launchpad__header {\n  width: 100%;\n  box-sizing: border-box;"));
 check("launchpad has a narrow-layout regression rule",
   styles.includes("@media (max-width: 720px)") && styles.includes("grid-template-columns: 1fr"));
 

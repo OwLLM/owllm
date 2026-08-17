@@ -4448,6 +4448,39 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 /// still-loading document (where the bridge isn't defined yet) is retried
 /// until ready. Runs on a threadpool thread (commands are `async`), so the
 /// waiting never touches the main event loop.
+/// The live document URL of a tab, or `None` when its webview never committed
+/// one. A wedged browser session still creates tabs, still accepts `navigate()`
+/// without error and still answers state queries — this is the only signal that
+/// separates "the page is slow" from "this tab never loaded anything at all".
+fn live_document_url(win: &Webview) -> Option<String> {
+    let url = win.url().ok()?.to_string();
+    let url = url.trim();
+    if url.is_empty() || url == "about:blank" {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// Explain an action timeout by what the tab actually holds. The old text
+/// ("the page may still be loading; try again") was identical for both cases,
+/// so an agent whose tab had never loaded ANY document blamed the destination —
+/// reporting a perfectly reachable dev server as unreachable. Name the real
+/// state, and say what clears it.
+fn action_timeout_error(win: &Webview, action: &str) -> String {
+    match live_document_url(win) {
+        Some(url) => format!(
+            "browser action '{action}' timed out on {url} — the document is loaded but did not \
+             answer; try again or browser_reload"
+        ),
+        None => format!(
+            "browser action '{action}' timed out because this tab never loaded a document — the \
+             browser session is wedged, NOT the destination. Run browser_close (the next \
+             browser_open restarts it), then retry. Nothing was ever fetched, so do not report \
+             the URL, its host or its network as unreachable."
+        ),
+    }
+}
+
 fn eval_until_reply(
     win: &Webview,
     req: u64,
@@ -4504,9 +4537,7 @@ fn eval_until_reply(
             }
         }
         if start.elapsed() > timeout {
-            return Err(format!(
-                "browser action '{action}' timed out — the page may still be loading; try again or browser_reload"
-            ));
+            return Err(action_timeout_error(win, action));
         }
         std::thread::sleep(Duration::from_millis(20));
     }

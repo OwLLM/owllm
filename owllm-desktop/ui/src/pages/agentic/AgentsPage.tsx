@@ -5441,7 +5441,7 @@ function ChatInputDock({
   parallelMode, onToggleParallel,
   onSwitchTab,
   needsLoad, loadingModel, onLoadModel,
-  modelId,
+  modelId, modelLabel,
 }: {
   draft: string;
   setDraft: (v: string) => void;
@@ -5474,6 +5474,10 @@ function ChatInputDock({
   /// resolution as onSupSend: per-agent override > team default >
   /// server model). Shown as a small chip top-right of the composer.
   modelId: string;
+  /// The SAME text the ModelPicker shows for `modelId` (model + effort),
+  /// resolved by the page's `labelForModel`. Never re-derive it here: a second
+  /// formatter is how this line drifted into printing a raw router id.
+  modelLabel: string;
 }) {
   // Slash-command catalog. Each command exposes a name (the trigger),
   // a one-line description for the droplist, and an action invoked
@@ -5615,7 +5619,7 @@ function ChatInputDock({
           whiteSpace:"nowrap", overflow:"hidden",
         }}>
           <span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>
-            🧠 {shortModelLabel(modelId)}
+            🧠 {modelLabel || modelId}
           </span>
         </div>
       )}
@@ -13633,6 +13637,7 @@ export function AgentsPage({
             loadingModel={dockLoadingModel}
             onLoadModel={dockLoadModel}
             modelId={dockModelId}
+            modelLabel={labelForModel(dockModelId)}
           />
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />

@@ -298,6 +298,11 @@ function runHarnesses() {
     // opening a modal credential dialog nobody can answer, so it must run on
     // every host regardless of whether the UI deps are installed.
     "backgroundGitNoPrompt.verify.run.mjs",
+    // Source assertions over browser.rs/support.rs/localTools.ts. It guards the
+    // wording an agent reads when the browser fails — the difference between
+    // "this tab never loaded" and a fabricated "the dev server is unreachable"
+    // — so it must run everywhere, deps installed or not.
+    "browserHonestFailure.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

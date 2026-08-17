@@ -819,9 +819,12 @@
   border-color: var(--border);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 8% 18%, rgba(255, 57, 189, .16), transparent 31%),
-    radial-gradient(circle at 54% -8%, rgba(125, 91, 255, .18), transparent 38%),
-    radial-gradient(circle at 96% 78%, rgba(0, 229, 255, .13), transparent 35%),
+    radial-gradient(circle at 7% 16%, rgba(255, 61, 61, .18), transparent 29%),
+    radial-gradient(circle at 30% -12%, rgba(255, 153, 0, .20), transparent 34%),
+    radial-gradient(circle at 62% -8%, rgba(238, 255, 0, .15), transparent 32%),
+    radial-gradient(circle at 94% 28%, rgba(73, 255, 82, .13), transparent 34%),
+    radial-gradient(circle at 84% 100%, rgba(115, 52, 255, .18), transparent 34%),
+    radial-gradient(circle at 18% 108%, rgba(255, 44, 134, .13), transparent 35%),
     color-mix(in srgb, var(--bg-panel) 94%, var(--accent) 6%);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255,255,255,.045);
 }
@@ -831,8 +834,8 @@
   height: 190px;
   opacity: .14;
   background-image:
-    linear-gradient(rgba(var(--accent-rgb), .18) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(var(--accent-rgb), .18) 1px, transparent 1px);
+    linear-gradient(rgba(255, 214, 0, .16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(132, 255, 72, .12) 1px, transparent 1px);
   background-size: 28px 28px;
   mask-image: linear-gradient(to bottom, #000, transparent);
 }
@@ -865,8 +868,8 @@
   height: 25px;
   border: 0;
   border-radius: 7px;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: conic-gradient(from 35deg, #ff3d3d, #ff9d00, #efff00, #49ff52, #3d8bff, #873cff, #ff2c86, #ff3d3d);
+  color: #130d19;
   font-size: 11px;
   letter-spacing: 0;
   box-shadow: none;
@@ -898,13 +901,14 @@
   min-width: 0;
   padding: clamp(32px, 5vw, 58px);
   background:
-    radial-gradient(circle at 10% 100%, rgba(0, 229, 255, .08), transparent 36%),
-    radial-gradient(circle at 86% 8%, rgba(255, 57, 189, .08), transparent 32%);
+    radial-gradient(circle at 7% 100%, rgba(255, 75, 52, .10), transparent 38%),
+    radial-gradient(circle at 54% 2%, rgba(255, 216, 0, .07), transparent 32%),
+    radial-gradient(circle at 91% 16%, rgba(91, 255, 80, .07), transparent 34%);
 }
 
 .creation-launchpad__kicker,
 .creation-launchpad__choices-label {
-  color: #b99cff;
+  color: #ffb52b;
   font-size: 10.5px;
   font-weight: 850;
   letter-spacing: .9px;
@@ -922,7 +926,7 @@
 
 .creation-launchpad__title em {
   color: transparent;
-  background: linear-gradient(100deg, #ff55c8 2%, #9d7bff 43%, #2ee8ff 92%);
+  background: linear-gradient(100deg, #ff3d3d 0%, #ff9d00 18%, #e7f900 36%, #49e95a 54%, #4b83ff 72%, #873cff 86%, #ff2c86 100%);
   background-clip: text;
   -webkit-background-clip: text;
   text-shadow: none;
@@ -943,10 +947,10 @@
   border-radius: 13px;
   background:
     linear-gradient(var(--bg-input), var(--bg-input)) padding-box,
-    linear-gradient(105deg, #ff48bd, #8c6cff 48%, #22dff3) border-box;
+    linear-gradient(105deg, #ff3d3d, #ff9d00 20%, #e7f900 38%, #49e95a 56%, #4b83ff 73%, #873cff 87%, #ff2c86) border-box;
   box-shadow:
     0 14px 35px rgba(0, 0, 0, .18),
-    0 0 28px rgba(136, 92, 255, .10),
+    0 0 28px rgba(255, 157, 0, .10),
     inset 0 1px rgba(255,255,255,.035);
   backdrop-filter: none;
 }
@@ -955,8 +959,8 @@
   border-color: transparent;
   box-shadow:
     0 15px 38px rgba(0,0,0,.2),
-    0 0 0 3px rgba(154, 112, 255, .11),
-    0 0 34px rgba(255, 72, 189, .10);
+    0 0 0 3px rgba(231, 249, 0, .10),
+    0 0 36px rgba(255, 120, 25, .11);
   transform: none;
 }
 
@@ -977,9 +981,9 @@
   border-radius: 8px;
   font-size: 11.5px;
   font-weight: 800;
-  background: linear-gradient(110deg, #ff48bd, #8c6cff 52%, #22dff3);
-  color: #fff;
-  box-shadow: 0 7px 22px rgba(126, 85, 255, .23);
+  background: linear-gradient(105deg, #ff4b32, #ffad00 25%, #dff500 45%, #52e866 64%, #704dff 84%, #ef3f96);
+  color: #160d18;
+  box-shadow: 0 7px 22px rgba(255, 132, 20, .20);
 }
 
 .creation-launchpad__actions {
@@ -998,8 +1002,9 @@
   padding: clamp(28px, 4vw, 42px) clamp(20px, 3vw, 34px);
   border-left: 1px solid var(--border);
   background:
-    radial-gradient(circle at 100% 0, rgba(0, 229, 255, .10), transparent 38%),
-    radial-gradient(circle at 0 100%, rgba(255, 57, 189, .08), transparent 42%),
+    radial-gradient(circle at 100% 0, rgba(101, 255, 70, .10), transparent 38%),
+    radial-gradient(circle at 100% 55%, rgba(80, 110, 255, .08), transparent 37%),
+    radial-gradient(circle at 0 100%, rgba(255, 89, 32, .09), transparent 42%),
     color-mix(in srgb, var(--bg-card) 58%, transparent);
 }
 
@@ -1033,9 +1038,9 @@
 }
 
 .creation-launchpad__mode.is-active {
-  border-color: rgba(157, 123, 255, .48);
-  background: linear-gradient(105deg, rgba(255, 72, 189, .11), rgba(140, 108, 255, .12) 52%, rgba(34, 223, 243, .09));
-  box-shadow: inset 3px 0 0 #b06cff, 0 8px 24px rgba(118, 78, 220, .09);
+  border-color: rgba(255, 178, 30, .48);
+  background: linear-gradient(105deg, rgba(255, 72, 45, .10), rgba(255, 206, 20, .11) 34%, rgba(76, 232, 91, .09) 63%, rgba(112, 77, 255, .10));
+  box-shadow: inset 3px 0 0 #ff9d00, 0 8px 24px rgba(255, 126, 22, .08);
 }
 
 .creation-launchpad__mode-icon {
@@ -1043,20 +1048,21 @@
   height: 36px;
   border-radius: 9px;
   font-size: 17px;
-  border: 1px solid rgba(157, 123, 255, .26);
-  background: rgba(157, 123, 255, .10);
+  border: 1px solid rgba(255, 157, 0, .30);
+  background: rgba(255, 157, 0, .11);
+  color: #ffb52b;
 }
 
 .creation-launchpad__mode:nth-child(2) .creation-launchpad__mode-icon {
-  border-color: rgba(34, 223, 243, .28);
-  background: rgba(34, 223, 243, .09);
-  color: #35dff1;
+  border-color: rgba(75, 233, 90, .30);
+  background: rgba(75, 233, 90, .09);
+  color: #5bea68;
 }
 
 .creation-launchpad__mode:nth-child(3) .creation-launchpad__mode-icon {
-  border-color: rgba(255, 72, 189, .28);
-  background: rgba(255, 72, 189, .09);
-  color: #ff67c8;
+  border-color: rgba(135, 60, 255, .32);
+  background: rgba(135, 60, 255, .10);
+  color: #a77aff;
 }
 
 .creation-launchpad__mode-copy strong { font-size: 12px; }

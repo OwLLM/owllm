@@ -1549,6 +1549,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "that keeps the user's cookies/logins across calls (not a headless scrape). " +
       "Works for the public web AND local dev servers (localhost:5173, 127.0.0.1:3000 " +
       "default to http) — use it to check a web app you are building. " +
+      "A dev server you started INSIDE WSL is reachable here: always preview it as " +
+      "localhost:<port> (Windows forwards that into the distro). Its WSL IP " +
+      "(172.x.y.z) only works if the server binds 0.0.0.0 — a default 127.0.0.1 bind " +
+      "refuses on that address, so never conclude from it that the server is unreachable. " +
       "Starts the browser if needed, opens a NEW background tab, and returns its tab ID. " +
       "Pass that tab_id to later tools so the user can keep working in another tab.",
     args: [

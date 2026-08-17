@@ -28,9 +28,13 @@ function check(name, condition) {
   }
 }
 
+// The scope match moved into run_browser_action when a wedged session became
+// replayable (browser auto-recovery); `screenshot_scope` is a &str there, and
+// the app handle is borrowed rather than re-borrowed. Same invariant: a
+// screenshot is captured pixels, scoped to the requested tab.
 check("browser_screenshot captures pixels instead of returning page metadata",
-  browser.includes('"screenshot" => match screenshot_scope.as_str()') &&
-  browser.includes('capture_browser_window(&app, tab_id, req)') &&
+  browser.includes('"screenshot" => match screenshot_scope {') &&
+  browser.includes('capture_browser_window(app, tab_id, req)') &&
   !browser.includes("return a page summary rather than pixels"));
 check("capture is scoped to an OWLLM-owned window on every desktop platform",
   support.includes("capture_hwnd_rgba(hwnd)") &&

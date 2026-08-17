@@ -144,6 +144,19 @@ static BROWSER_SUSPENDED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static RETIRED_LINUX_TABS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
+/// How long a freshly opened tab is given to commit a document before the
+/// session is judged wedged. A healthy tab records its URL as soon as the
+/// navigation commits — measured live, a new tab already reported both its URL
+/// and its title on the very next call — so this budget is only ever spent by a
+/// session that is actually broken.
+const TAB_COMMIT_BUDGET: Duration = Duration::from_secs(3);
+
+/// At most one automatic restart per window. A wedge that survives a restart is
+/// an environment problem; restarting again would destroy the user's tabs on a
+/// loop while telling the agent nothing new.
+const AUTO_RESTART_COOLDOWN: Duration = Duration::from_secs(120);
+static LAST_AUTO_RESTART: Mutex<Option<Instant>> = Mutex::new(None);
+
 fn tab_label(id: u64) -> String {
     format!("{CONTENT_LABEL}-{id}")
 }
@@ -3459,9 +3472,9 @@ pub fn browser_open_tab(
     let parsed = parse_navigation_url(&url)?;
     let activate = activate.unwrap_or(false);
     let id = if browser_is_suspended() && get_window(&app).is_some() {
-        resume_normal_browser(&app, parsed)?
+        resume_normal_browser(&app, parsed.clone())?
     } else if get_window(&app).is_none() {
-        build_window(&app, parsed, false)?;
+        build_window(&app, parsed.clone(), false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id().unwrap_or(0)
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
@@ -3471,14 +3484,79 @@ pub fn browser_open_tab(
         // single-page build. New framed and Linux-safe sessions both own TABS.
         content_webview(&app)
             .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
-            .navigate(parsed)
+            .navigate(parsed.clone())
             .map_err(|e| format!("navigate failed: {e}"))?;
         0
     };
-    Ok(
-        json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
-            .to_string(),
-    )
+    // A wedged session still hands back a tab id for a webview that will never
+    // load anything. This is the earliest point where that can be caught AND
+    // the URL is still in hand, so recovery here is invisible to the caller
+    // instead of surfacing three calls later as a mystery timeout.
+    let (id, restarted, note) = heal_if_tab_never_loaded(&app, id, &parsed);
+    let mut opened = json!({
+        "tab_id": id,
+        "url": url,
+        "active": id == active_tab_id().unwrap_or(0),
+    });
+    if restarted {
+        opened["restarted"] = json!(true);
+    }
+    if let Some(note) = note {
+        opened["note"] = json!(note);
+    }
+    Ok(opened.to_string())
+}
+
+/// Give a just-opened tab its commit budget; if it never loads AND no other tab
+/// in the session holds a document either, restart the browser and re-open the
+/// same URL in the healthy session. Returns the tab to use, whether a restart
+/// happened, and a note for anything the caller must be told honestly.
+///
+/// Never errors: the tab was created, and failing an open that previously
+/// succeeded would break the user-facing callers (panel "+", session reopen).
+/// When recovery is not possible the dead tab is handed back WITH the reason,
+/// so nothing reads as a healthy tab that is not one.
+fn heal_if_tab_never_loaded(
+    app: &tauri::AppHandle,
+    id: u64,
+    url: &tauri::Url,
+) -> (u64, bool, Option<String>) {
+    if id == 0 || tab_committed_document(app, id, TAB_COMMIT_BUDGET) || !session_is_wedged(app) {
+        return (id, false, None);
+    }
+    let fresh = match auto_restart_browser(app) {
+        Ok(fresh) => fresh,
+        Err(why) => {
+            return (
+                id,
+                false,
+                Some(format!(
+                    "this tab has not loaded a document — the browser session is wedged and {why}. \
+                     Nothing was fetched from this URL, so do not report it as unreachable."
+                )),
+            )
+        }
+    };
+    let navigated = content_webview_for_tab(app, Some(fresh))
+        .ok_or_else(|| "the restarted browser produced no usable tab".to_string())
+        .and_then(|wv| {
+            wv.navigate(url.clone())
+                .map_err(|e| format!("navigate failed after the restart: {e}"))
+        });
+    match navigated {
+        Ok(()) if tab_committed_document(app, fresh, TAB_COMMIT_BUDGET) => (fresh, true, None),
+        Ok(()) => (
+            fresh,
+            true,
+            Some(
+                "the browser session was wedged and was restarted automatically, but the fresh \
+                 tab has not loaded a document either — the browser engine itself is failing, not \
+                 this destination."
+                    .to_string(),
+            ),
+        ),
+        Err(why) => (fresh, true, Some(why)),
+    }
 }
 
 /// Open a new tab on the OwLLM start page — the chrome bar's "+" as a command
@@ -4378,7 +4456,6 @@ pub fn browser_read_capture(app: tauri::AppHandle, path: String) -> Result<Strin
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let _operation = lock_browser_operation();
-    let req = REQ.fetch_add(1, Ordering::SeqCst);
     let screenshot_scope = params
         .get("scope")
         .and_then(Value::as_str)
@@ -4386,6 +4463,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         .trim()
         .to_ascii_lowercase();
     if action == "screenshot" {
+        let req = REQ.fetch_add(1, Ordering::SeqCst);
         match screenshot_scope.as_str() {
             "desktop" => return capture_desktop(&app, None, req),
             "app" | "application" | "owllm" => return capture_app(&app, req),
@@ -4400,7 +4478,75 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         Some(id) => format!("browser tab {id} does not exist"),
         None => "browser did not start".to_string(),
     })?;
-    match action.as_str() {
+    let outcome = run_browser_action(&app, &win, &action, &params, &screenshot_scope, tab_id);
+    let Err(error) = outcome else { return outcome };
+    recover_wedged_action(&app, &action, &params, &screenshot_scope, error)
+}
+
+/// Heal a wedged session instead of handing the agent a chore.
+///
+/// Telling an agent to "run browser_close and retry" was still the tool blaming
+/// the caller for a fault the tool can fix, and an agent that reads a browser
+/// failure tends to invent an explanation for it (2026-08-17: a reachable WSL
+/// dev server reported as unreachable). So the recovery is done here.
+///
+/// Two things this deliberately does NOT do:
+/// * It never restarts over a session that still holds a live document
+///   (`session_is_wedged`) — the user is watching this window.
+/// * It only replays `navigate`/`open`, whose URL is in `params`. Replaying a
+///   content read against the fresh blank tab would hand back an answer about a
+///   page that was never loaded, which is exactly the fabrication this whole
+///   fix exists to prevent.
+fn recover_wedged_action(
+    app: &tauri::AppHandle,
+    action: &str,
+    params: &Value,
+    screenshot_scope: &str,
+    error: String,
+) -> Result<String, String> {
+    if !error.contains("timed out") || !session_is_wedged(app) {
+        return Err(error);
+    }
+    let fresh = match auto_restart_browser(app) {
+        Ok(id) => id,
+        Err(why) => return Err(format!("{error} ({why})")),
+    };
+    let Some(win) = content_webview_for_tab(app, Some(fresh)) else {
+        return Err(format!("{error} (the restarted browser produced no usable tab)"));
+    };
+    if !matches!(action, "navigate" | "open") {
+        return Err(format!(
+            "browser action '{action}' could not run: this tab had never loaded a document, so \
+             the browser session was wedged. It has been restarted automatically and tab {fresh} \
+             is a fresh blank tab — re-open the page with browser_open, then retry. Nothing was \
+             ever fetched, so do not report the URL, its host or its network as unreachable."
+        ));
+    }
+    let replayed = run_browser_action(app, &win, action, params, screenshot_scope, Some(fresh))
+        .map_err(|retry| {
+            format!(
+                "{retry} The session was already restarted automatically, so the browser engine \
+                 itself is failing to load pages — not this destination."
+            )
+        })?;
+    Ok(format!(
+        "{replayed}\n\n(the browser session was wedged and has been restarted automatically; \
+         this page is now tab {fresh} — use that tab_id from here on)"
+    ))
+}
+
+/// One action against one tab. Separate from `browser_cmd` so a wedged session
+/// can be restarted and the same action replayed against the fresh tab.
+fn run_browser_action(
+    app: &tauri::AppHandle,
+    win: &Webview,
+    action: &str,
+    params: &Value,
+    screenshot_scope: &str,
+    tab_id: Option<u64>,
+) -> Result<String, String> {
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
+    match action {
         "navigate" | "open" => {
             let url_s = params
                 .get("url")
@@ -4416,30 +4562,30 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             // Give the new document a moment to begin, then await its load via
             // the (re-injected) bridge. Evaled every poll tick until it reports.
             std::thread::sleep(Duration::from_millis(200));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
         "back" => {
             let _ = win.eval("history.back()");
             std::thread::sleep(Duration::from_millis(300));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
         "reload" => {
             let _ = win.eval("location.reload()");
             std::thread::sleep(Duration::from_millis(300));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
-        "screenshot" => match screenshot_scope.as_str() {
-            "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
-            "app" | "application" | "owllm" => capture_app(&app, req),
+        "screenshot" => match screenshot_scope {
+            "viewport" | "window" | "visible" => capture_browser_window(app, tab_id, req),
+            "app" | "application" | "owllm" => capture_app(app, req),
             "full_page" | "full-page" | "page" => {
-                capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
+                capture_browser_full_page(app, win, tab_id.or_else(active_tab_id), req)
             }
             other => Err(format!(
                 "unknown screenshot scope {other:?}; use viewport, full_page, or desktop"
             )),
         },
-        "upload_file" => upload_file_to_page(&win, req, &params),
-        _ => eval_until_reply(&win, req, &action, &params, Duration::from_secs(12)),
+        "upload_file" => upload_file_to_page(win, req, params),
+        _ => eval_until_reply(win, req, action, params, Duration::from_secs(12)),
     }
 }
 
@@ -4448,6 +4594,121 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 /// still-loading document (where the bridge isn't defined yet) is retried
 /// until ready. Runs on a threadpool thread (commands are `async`), so the
 /// waiting never touches the main event loop.
+/// The live document URL of a tab, or `None` when its webview never committed
+/// one. A wedged browser session still creates tabs, still accepts `navigate()`
+/// without error and still answers state queries — this is the only signal that
+/// separates "the page is slow" from "this tab never loaded anything at all".
+fn live_document_url(win: &Webview) -> Option<String> {
+    let url = win.url().ok()?.to_string();
+    let url = url.trim();
+    if url.is_empty() || url == "about:blank" {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// True when NO tab in this session holds a live document — the whole browser
+/// is wedged, not one slow page.
+///
+/// Reads each webview's RAW url through `live_document_url`, never the strip
+/// from `list_tabs`: that one maps the internal start page to "about:blank" for
+/// display, so a healthy freshly-started session would read as wedged and be
+/// restarted on a loop.
+///
+/// Scope matters. If ANY tab still holds a document the session is alive and
+/// must be left alone — the user watches this window, and tearing it down over
+/// one bad tab would cost them the pages they had open.
+fn session_is_wedged(app: &tauri::AppHandle) -> bool {
+    let ids = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|tabs| tabs.order.clone())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        // Single-webview compatibility shape (older builds own no tab strip).
+        return content_webview(app)
+            .map(|wv| live_document_url(&wv).is_none())
+            .unwrap_or(false);
+    }
+    !ids.iter().any(|id| {
+        app.get_webview(&tab_label(*id))
+            .and_then(|wv| live_document_url(&wv))
+            .is_some()
+    })
+}
+
+/// Restart a wedged browser session in place and hand back the tab the caller
+/// should use afterwards.
+///
+/// Measured 2026-08-17: once a session wedges, every NEW tab created inside it
+/// is dead too — three consecutive `browser_open` calls produced tabs that never
+/// committed a document. Only a full teardown healed it, so recovery cannot be
+/// done per-tab. Tab ids therefore do not survive; callers must report the new
+/// one rather than leave the agent holding a dead id.
+///
+/// Linux tears down to a suspended window instead of destroying it (destroying a
+/// WebKitGTK top-level aborts the process with `BadDrawable` on NVIDIA/Tegra),
+/// so recovery there is a blank-and-resume rather than a rebuild.
+fn auto_restart_browser(app: &tauri::AppHandle) -> Result<u64, String> {
+    {
+        let mut last = LAST_AUTO_RESTART.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(at) = *last {
+            if at.elapsed() < AUTO_RESTART_COOLDOWN {
+                return Err(format!(
+                    "an automatic browser restart {}s ago did not clear it, so it was not \
+                     restarted again",
+                    at.elapsed().as_secs()
+                ));
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    stop_browser_inner(app, false)?;
+    browser_start_inner(app)?;
+    active_tab_id().ok_or_else(|| "the restarted browser produced no tab".to_string())
+}
+
+/// Wait for a freshly opened tab to commit a document. `false` means it never
+/// did — the signature of a wedged session, which still creates tabs and still
+/// accepts `navigate()` without error.
+fn tab_committed_document(app: &tauri::AppHandle, id: u64, budget: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if app
+            .get_webview(&tab_label(id))
+            .and_then(|wv| live_document_url(&wv))
+            .is_some()
+        {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Explain an action timeout by what the tab actually holds. The old text
+/// ("the page may still be loading; try again") was identical for both cases,
+/// so an agent whose tab had never loaded ANY document blamed the destination —
+/// reporting a perfectly reachable dev server as unreachable. Name the real
+/// state, and say what clears it.
+fn action_timeout_error(win: &Webview, action: &str) -> String {
+    match live_document_url(win) {
+        Some(url) => format!(
+            "browser action '{action}' timed out on {url} — the document is loaded but did not \
+             answer; try again or browser_reload"
+        ),
+        None => format!(
+            "browser action '{action}' timed out because this tab never loaded a document — the \
+             browser session is wedged, NOT the destination. Run browser_close (the next \
+             browser_open restarts it), then retry. Nothing was ever fetched, so do not report \
+             the URL, its host or its network as unreachable."
+        ),
+    }
+}
+
 fn eval_until_reply(
     win: &Webview,
     req: u64,
@@ -4504,28 +4765,37 @@ fn eval_until_reply(
             }
         }
         if start.elapsed() > timeout {
-            return Err(format!(
-                "browser action '{action}' timed out — the page may still be loading; try again or browser_reload"
-            ));
+            return Err(action_timeout_error(win, action));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 /// Close the agent-browser window. Safe when nothing is open.
+/// Tear the browser down. `user_initiated` also marks the session closed so it
+/// does not reopen by itself next boot — an automatic restart must NOT do that,
+/// because the window is coming straight back.
+fn stop_browser_inner(app: &tauri::AppHandle, user_initiated: bool) -> Result<(), String> {
+    // Record the pages BEFORE the teardown: once the windows are gone there is
+    // nothing left to read them from. A wedged session reports no urls at all,
+    // and `persist_session` keeps the previous record rather than blanking it.
+    persist_session(app);
+    if user_initiated {
+        mark_session_closed();
+    }
+    #[cfg(target_os = "linux")]
+    suspend_linux_browser(app)?;
+    #[cfg(not(target_os = "linux"))]
+    destroy_browser_windows(app)?;
+    Ok(())
+}
+
 #[tauri::command(async)]
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
     match (get_window(&app), browser_is_suspended()) {
         (_, true) => Ok("browser was not running".to_string()),
         (Some(_), false) => {
-            // Record the pages BEFORE the teardown: once the windows are gone
-            // there is nothing left to read them from.
-            persist_session(&app);
-            mark_session_closed();
-            #[cfg(target_os = "linux")]
-            suspend_linux_browser(&app)?;
-            #[cfg(not(target_os = "linux"))]
-            destroy_browser_windows(&app)?;
+            stop_browser_inner(&app, true)?;
             Ok("browser stopped".to_string())
         }
         (None, false) => Ok("browser was not running".to_string()),

@@ -24,6 +24,11 @@ check("Enter submits while Shift+Enter remains multiline",
   component.includes('event.key === "Enter" && !event.shiftKey'));
 check("mode cards expose pressed state", component.includes("aria-pressed={active}"));
 check("Coding renders the shared launchpad", code.includes("<CreationLaunchpad"));
+check("Coding uses the same centered workspace shell as Agentic",
+  code.includes('data-ui="CodingProjectHubContainer"')
+  && code.includes('maxWidth: 1180')
+  && code.includes('padding: "clamp(20px,4vw,54px)"')
+  && code.includes('radial-gradient(circle at 84% 12%'));
 check("Coding offers project, chat and team modes",
   code.includes('id: "project"') && code.includes('id: "chat"') && code.includes('id: "team"'));
 check("Coding carries a launch prompt into a new chat",

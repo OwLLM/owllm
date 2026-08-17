@@ -3353,9 +3353,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   // get-started screen: open a folder, or reopen a recent project.
   if (!workspace && !preparing) {
     return (
-      <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
-          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 24, padding: "22px clamp(16px,3vw,36px) 36px" }}>
+      <div data-ui="CodingProjectHub" style={{
+        height: "100%", minHeight: 0, overflow: "auto", padding: "clamp(20px,4vw,54px)",
+        color: "var(--fg)", background:
+          "radial-gradient(circle at 84% 12%, rgba(var(--accent-rgb),0.13), transparent 34%), var(--bg-panel)",
+      }}>
+        <div data-ui="CodingProjectHubContainer" style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
             <CreationLaunchpad
               eyebrow="Your private AI workspace"
               title={<>What will you <em>make today?</em></>}
@@ -3626,7 +3629,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             </div>
             </div>
-          </div>
         </div>
 
         {npOpen && (

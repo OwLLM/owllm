@@ -235,6 +235,11 @@ type WtMerge =
   | { status: "noChanges" }
   | { status: "conflict"; files: string[] }
   | { status: "error"; message: string };
+type WtRefresh =
+  | { status: "current"; projectSha: string }
+  | { status: "refreshed"; projectSha: string; previousPageSha: string }
+  | { status: "stale"; projectSha: string; pageSha: string; details: string }
+  | { status: "error"; message: string };
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
 type CodePageMeta = { id: string; title: string };
@@ -1020,6 +1025,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   // The model the second agent actually runs — its own pick, or the primary
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
+  // A persistent page can outlive the commit it was cut from. Keep a visible,
+  // sticky explanation when it cannot be refreshed without integrating pending
+  // work; every run path also executes the native preflight immediately before
+  // handing the cwd to a model.
+  const [worktreeStaleNotice, setWorktreeStaleNotice] = useState("");
 
   // Project rows and Coding sessions are separate durable records. If another
   // surface moves this stable project id to a new local checkout, repair a
@@ -1201,21 +1211,66 @@ function CodeWorkspace({ pageId, onTitle }: {
     onTitle(folder ? (rename ? `${folder}(${rename})` : folder) : "New page");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot, workspace, stx.pageRename]);
+  const ensureWorktreeCurrent = async (cwd: string, announceRefresh = true): Promise<boolean> => {
+    if (!isolated || !projectRoot || !cwd) return true;
+    let outcome: WtRefresh;
+    try {
+      outcome = await invoke<WtRefresh>("fleet_worktree_refresh", {
+        worktreePath: cwd,
+        projectCwd: projectRoot,
+      });
+    } catch (e: any) {
+      outcome = { status: "error", message: String(e?.message ?? e) };
+    }
+    if (outcome.status === "current") {
+      setWorktreeStaleNotice("");
+      return true;
+    }
+    if (outcome.status === "refreshed") {
+      setWorktreeStaleNotice("");
+      if (cwd === workspace) {
+        chatRuntime.setPayload(SID, (prev) => ({
+          ...((prev as CodeState) ?? DEFAULT_CODE_STATE),
+          baseSha: outcome.projectSha,
+        }));
+      }
+      if (announceRefresh) {
+        notify(`Page workspace updated to the project's current commit (${outcome.projectSha.slice(0, 8)}).`);
+      }
+      return true;
+    }
+    const reason = outcome.status === "stale" ? outcome.details : outcome.message;
+    const message = `This page is not current with the project, so no model was allowed to run. ${reason}`;
+    setWorktreeStaleNotice(message);
+    notify(message, "error");
+    return false;
+  };
+
   // Stale-worktree self-heal: a restored session can point at a worktree that
   // was deleted or gutted underneath it (sweep, crash, manual cleanup). The
   // old behaviour was a silently EMPTY file tree that looked broken. Verify
   // the worktree is still a real checkout (its `.git` link exists); if not,
-  // rebuild it from the project root — openWorkspace already handles every
-  // failure with an explicit status message (dirty repo, missing folder, …).
-  const healedRef = useRef(false);
+  // preserve its branch and report the access problem instead of rebuilding by
+  // force (which could delete page-only commits before the user recovers them).
+  const healedWorkspaceRef = useRef("");
   useEffect(() => {
-    if (healedRef.current || !isolated || !workspace || !projectRoot || preparing) return;
-    healedRef.current = true;
+    if (healedWorkspaceRef.current === workspace || !isolated || !workspace || !projectRoot || preparing) return;
+    healedWorkspaceRef.current = workspace;
     invoke<Array<{ name: string; kind: string }>>("tool_list_dir", { path: workspace, cwd: undefined })
       .then((e) => {
-        if (!e.some((x) => x.name === ".git")) void openWorkspace(projectRoot);
+        if (!e.some((x) => x.name === ".git")) {
+          const message = "This page's private worktree link is missing. OWLLM left its branch untouched; close and reopen the project after preserving any recoverable branch work.";
+          setWorktreeStaleNotice(message);
+          notify(message, "error");
+          return;
+        }
+        void ensureWorktreeCurrent(workspace, false);
       })
-      .catch(() => { void openWorkspace(projectRoot); });
+      .catch((e) => {
+        const message = `OWLLM could not inspect this page workspace, so it was left untouched and no model will run until access is restored: ${String(e)}`;
+        setWorktreeStaleNotice(message);
+        notify(message, "error");
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isolated, workspace, projectRoot, preparing]);
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
@@ -1390,6 +1445,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     // Switching project drops both worktrees (see removeWorktree) — never while
     // either agent is mid-run.
     if (!dir || busy || secondaryBusy) return;
+    setWorktreeStaleNotice("");
     const name = dir.replace(/^.*[\\/]/, "");
     const catalogProject = await ensureCatalogProject(dir, name);
     const normPath = (p: string | undefined) =>
@@ -2509,6 +2565,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       blockSend("No model selected — pick one in the Coder header.");
       return;
     }
+    if (!(await ensureWorktreeCurrent(workspace))) return;
     // This Kanban is the execution state of one Plan & Build run, not a durable
     // backlog. A new manual Auto/Chat turn supersedes it. Programmatic Notebook
     // turns leave it alone because that queue owns separate persistent state.
@@ -2695,6 +2752,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       notify("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
       return;
     }
+    const secondaryRunCwd = await ensureSecondaryWorktree();
+    if (!(await ensureWorktreeCurrent(secondaryRunCwd))) return;
     if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
@@ -2722,8 +2781,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       notify("Second agent working…");
       // Its own checkout, cut on first use — so the two agents can edit the same
       // project at the same time without overwriting each other.
-      const cwd = await ensureSecondaryWorktree();
-      replyText = await runSecondaryTurn(CODING_SYSTEM(cwd), text || "(read the attached file)", history, ctrl.signal, cwd, { withEvents: true, attachments });
+      replyText = await runSecondaryTurn(CODING_SYSTEM(secondaryRunCwd), text || "(read the attached file)", history, ctrl.signal, secondaryRunCwd, { withEvents: true, attachments });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -3030,6 +3088,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!goal || busy) return;
     if (!workspace) { notify(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
+    if (!(await ensureWorktreeCurrent(workspace))) return;
     setDraft("");
     setBusy(true);
     setTasks([]);
@@ -3084,6 +3143,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (busy || tasks.every((t) => t.status === "done" || t.status === "failed")) return;
     if (!workspace) { notify("Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
+    if (!(await ensureWorktreeCurrent(workspace))) return;
     const marker = "📋 Plan & build: ";
     const savedGoal = [...messages].reverse().find((m) => m.role === "user" && m.content.startsWith(marker));
     const goal = (stx.planGoal || savedGoal?.content.slice(marker.length) || "").trim();
@@ -3997,6 +4057,16 @@ function CodeWorkspace({ pageId, onTitle }: {
           the SAME column — so the input box is exactly as wide as the chat
           window (the rail and the right panel run the full height beside it). */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+      {worktreeStaleNotice && (
+        <div data-ui="CodeWorktreeStaleGuard" style={{
+          flexShrink: 0, border: "1px solid rgba(255,183,77,.45)", borderRadius: 8,
+          background: "rgba(255,183,77,.08)", color: "#ffd08a", padding: "8px 12px",
+          fontSize: 12, lineHeight: 1.45,
+        }}>
+          ⚠ {worktreeStaleNotice} Use <b>Publisher → Sync</b> to preserve and integrate the page changes, or discard them before reopening the project.
+        </div>
+      )}
+
       {/* Chat panes: the primary chat + an optional second-agent pane. Side by
           side when the viewport is wide (≥1000px), stacked when narrow; each
           pane owns its own scroll. With the second pane closed this wrapper has

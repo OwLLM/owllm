@@ -983,6 +983,31 @@ pub enum CreateOutcome {
     Error { message: String },
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorktreeRefreshOutcome {
+    Current {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+    },
+    Refreshed {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+        #[serde(rename = "previousPageSha")]
+        previous_page_sha: String,
+    },
+    Stale {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+        #[serde(rename = "pageSha")]
+        page_sha: String,
+        details: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
 /// True if `path` exists and is a directory the host can actually reach.
 /// Used by the dispatch loop to detect an unreachable cwd (e.g. a
 /// `\\wsl.localhost\...` isolation path when the WSL distro is stopped) so it
@@ -1134,6 +1159,172 @@ pub async fn fleet_worktree_create(
         base_sha,
         checkpoint_sha,
         checkpoint_files,
+    })
+}
+
+/// Make a persistent Coding-page worktree current with the canonical project's
+/// committed HEAD before an agent is allowed to run.
+///
+/// A clean page that is merely behind is fast-forwarded automatically. Pending
+/// page edits, page-only commits, a diverged history, or tracked edits in the
+/// canonical checkout are never rewritten: the caller gets `Stale` and can ask
+/// the user to use the existing isolated Sync flow. This is intentionally local
+/// only; opening/sending from a page must not fetch, push, or require a network.
+#[tauri::command]
+pub async fn fleet_worktree_refresh(
+    worktree_path: String,
+    project_cwd: String,
+) -> Result<WorktreeRefreshOutcome, String> {
+    tokio::task::spawn_blocking(move || fleet_worktree_refresh_blocking(worktree_path, project_cwd))
+        .await
+        .map_err(|e| format!("page worktree refresh task failed: {e}"))?
+}
+
+fn fleet_worktree_refresh_blocking(
+    worktree_path: String,
+    project_cwd: String,
+) -> Result<WorktreeRefreshOutcome, String> {
+    let project = PathBuf::from(&project_cwd);
+    let worktree = PathBuf::from(&worktree_path);
+    if !path_is_dir_native(&project)? || !path_is_dir_native(&worktree)? {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: "the project or page worktree no longer exists".to_string(),
+        });
+    }
+    if !is_git_repo(&project)? || !is_git_repo(&worktree)? {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: "the project and page workspace must both be Git repositories".to_string(),
+        });
+    }
+
+    let lock = repo_git_lock(&project);
+    let _refresh_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    let (branch_ok, page_branch, branch_err) =
+        git(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    if !branch_ok || !page_branch.trim().starts_with("owllm-page/") {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "refusing to refresh a workspace that is not an OWLLM Coding-page branch: {}",
+                if branch_err.trim().is_empty() {
+                    page_branch.trim()
+                } else {
+                    branch_err.trim()
+                }
+            ),
+        });
+    }
+
+    let (project_ok, project_sha, project_err) = git(&project, &["rev-parse", "HEAD"])?;
+    let (page_ok, page_sha, page_err) = git(&worktree, &["rev-parse", "HEAD"])?;
+    if !project_ok || !page_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "could not read project/page HEAD: {} {}",
+                project_err.trim(),
+                page_err.trim()
+            )
+            .trim()
+            .to_string(),
+        });
+    }
+    let project_sha = project_sha.trim().to_string();
+    let page_sha = page_sha.trim().to_string();
+    // Tracked edits in the canonical checkout are newer project state too, but
+    // they cannot be represented in a linked worktree until the user commits or
+    // stashes them. Do not let the page silently edit the older committed tree.
+    let (project_status_ok, project_status, project_status_err) =
+        git(&project, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !project_status_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not inspect the canonical project before page refresh",
+                &project_status,
+                &project_status_err,
+            ),
+        });
+    }
+    let project_dirty = project_status
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_app_scratch(porcelain_path(line)))
+        .take(20)
+        .collect::<Vec<_>>();
+    if !project_dirty.is_empty() {
+        return Ok(WorktreeRefreshOutcome::Stale {
+            project_sha,
+            page_sha,
+            details: format!(
+                "the project checkout has uncommitted tracked changes that this page cannot see:\n{}",
+                project_dirty.join("\n")
+            ),
+        });
+    }
+
+    let (contains_project, _, _) = git(
+        &worktree,
+        &["merge-base", "--is-ancestor", &project_sha, "HEAD"],
+    )?;
+    if contains_project {
+        return Ok(WorktreeRefreshOutcome::Current { project_sha });
+    }
+
+    let (page_is_behind, _, _) = git(
+        &worktree,
+        &["merge-base", "--is-ancestor", "HEAD", &project_sha],
+    )?;
+    let (page_status_ok, page_status, page_status_err) =
+        git(&worktree, &["status", "--porcelain"])?;
+    if !page_status_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not inspect the page worktree before refresh",
+                &page_status,
+                &page_status_err,
+            ),
+        });
+    }
+    let page_dirty = page_status
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_app_scratch(porcelain_path(line)))
+        .take(20)
+        .collect::<Vec<_>>();
+
+    if !page_is_behind || !page_dirty.is_empty() {
+        let reason = if !page_dirty.is_empty() {
+            format!("the page has pending edits:\n{}", page_dirty.join("\n"))
+        } else {
+            "the page and project contain different commits".to_string()
+        };
+        return Ok(WorktreeRefreshOutcome::Stale {
+            project_sha,
+            page_sha,
+            details: format!("{reason}. Use the Publisher Sync action before running an agent"),
+        });
+    }
+
+    let (ff_ok, ff_out, ff_err) = git(&worktree, &["merge", "--ff-only", &project_sha])?;
+    if !ff_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not fast-forward the clean page worktree",
+                &ff_out,
+                &ff_err,
+            ),
+        });
+    }
+    let (verify_ok, refreshed_sha, verify_err) = git(&worktree, &["rev-parse", "HEAD"])?;
+    if !verify_ok || refreshed_sha.trim() != project_sha {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "page refresh did not reach the project HEAD {}: {}",
+                project_sha,
+                verify_err.trim()
+            ),
+        });
+    }
+    Ok(WorktreeRefreshOutcome::Refreshed {
+        project_sha,
+        previous_page_sha: page_sha,
     })
 }
 
@@ -1970,11 +2161,16 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 mod tests {
     use super::{
         fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
-        fleet_worktree_remove, git_failure_message, git_reported_path_for_host, is_app_scratch,
-        linux_path_to_wsl_unc, path_is_dir_native, porcelain_path, unstage_app_scratch,
-        user_conflict_files, CreateOutcome, FinalizeOutcome, MergeOutcome, RemoveArgs,
+        fleet_worktree_refresh_blocking, fleet_worktree_remove, git_failure_message,
+        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native,
+        porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome, FinalizeOutcome,
+        MergeOutcome, RemoveArgs, WorktreeRefreshOutcome,
     };
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     fn git_ok(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -2010,6 +2206,159 @@ mod tests {
         git_ok(tmp.path(), &["add", "-A"]);
         git_ok(tmp.path(), &["commit", "-m", "base"]);
         tmp
+    }
+
+    fn init_page_refresh_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let page = tmp.path().join("page");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "main"]);
+        git_ok(&repo, &["config", "core.autocrlf", "false"]);
+        git_ok(&repo, &["config", "user.email", "page-refresh@owllm.local"]);
+        git_ok(&repo, &["config", "user.name", "OwLLM Page Refresh Test"]);
+        fs::write(repo.join("version.txt"), "base\n").unwrap();
+        git_ok(&repo, &["add", "version.txt"]);
+        git_ok(&repo, &["commit", "-m", "base"]);
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "owllm-page/test/code",
+                page.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        (tmp, repo, page)
+    }
+
+    fn advance_project(repo: &Path, value: &str) -> String {
+        fs::write(repo.join("version.txt"), format!("{value}\n")).unwrap();
+        git_ok(repo, &["commit", "-am", value]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn worktree_refresh_clean_stale_page_fast_forwards_to_the_project_head() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        let project_sha = advance_project(&repo, "new-gui");
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "base\n"
+        );
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        match outcome {
+            WorktreeRefreshOutcome::Refreshed {
+                project_sha: actual,
+                ..
+            } => {
+                assert_eq!(actual, project_sha);
+            }
+            other => panic!("expected refreshed page, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "new-gui\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_dirty_stale_page_is_preserved_and_blocked() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        let original_page_sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        advance_project(&repo, "new-gui");
+        fs::write(page.join("version.txt"), "pending page edit\n").unwrap();
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("pending edits"))
+        );
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "pending page edit\n"
+        );
+        let after = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        assert_eq!(after.stdout, original_page_sha.stdout);
+    }
+
+    #[test]
+    fn worktree_refresh_diverged_page_is_preserved_for_explicit_sync() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(page.join("page-only.txt"), "page\n").unwrap();
+        git_ok(&page, &["add", "page-only.txt"]);
+        git_ok(&page, &["commit", "-m", "page work"]);
+        advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("different commits"))
+        );
+        assert_eq!(
+            fs::read_to_string(page.join("page-only.txt")).unwrap(),
+            "page\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_current_page_keeps_pending_edits() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(page.join("version.txt"), "pending but current\n").unwrap();
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, WorktreeRefreshOutcome::Current { .. }));
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "pending but current\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_canonical_tracked_edits_block_a_page_run() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(repo.join("version.txt"), "uncommitted canonical edit\n").unwrap();
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("project checkout has uncommitted tracked changes"))
+        );
     }
 
     #[test]

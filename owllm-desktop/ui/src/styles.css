@@ -814,19 +814,41 @@
    explicit starting mode, quick access) without turning the app into a
    marketing landing page. */
 .creation-launchpad {
+  --launch-a: #7dd3fc;
+  --launch-b: #a78bfa;
+  --launch-c: #5eead4;
+  --launch-a-rgb: 125, 211, 252;
+  --launch-b-rgb: 167, 139, 250;
+  --launch-c-rgb: 94, 234, 212;
+  --launch-spectrum: linear-gradient(105deg, var(--launch-a), var(--launch-b) 52%, var(--launch-c));
   min-height: 440px;
   display: block;
   border-color: var(--border);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 7% 16%, rgba(255, 61, 61, .18), transparent 29%),
-    radial-gradient(circle at 30% -12%, rgba(255, 153, 0, .20), transparent 34%),
-    radial-gradient(circle at 62% -8%, rgba(238, 255, 0, .15), transparent 32%),
-    radial-gradient(circle at 94% 28%, rgba(73, 255, 82, .13), transparent 34%),
-    radial-gradient(circle at 84% 100%, rgba(115, 52, 255, .18), transparent 34%),
-    radial-gradient(circle at 18% 108%, rgba(255, 44, 134, .13), transparent 35%),
+    radial-gradient(circle at 10% 4%, rgba(var(--launch-a-rgb), .15), transparent 34%),
+    radial-gradient(circle at 88% 16%, rgba(var(--launch-b-rgb), .13), transparent 36%),
+    radial-gradient(circle at 68% 108%, rgba(var(--launch-c-rgb), .10), transparent 38%),
     color-mix(in srgb, var(--bg-panel) 94%, var(--accent) 6%);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255,255,255,.045);
+}
+
+.creation-launchpad[data-style="aurora"] {
+  --launch-a: #ff9a7a;
+  --launch-b: #9a9cff;
+  --launch-c: #72d7a1;
+  --launch-a-rgb: 255, 154, 122;
+  --launch-b-rgb: 154, 156, 255;
+  --launch-c-rgb: 114, 215, 161;
+}
+
+.creation-launchpad[data-style="graphite"] {
+  --launch-a: #d9e4f0;
+  --launch-b: #91a4ba;
+  --launch-c: #b9c8d8;
+  --launch-a-rgb: 217, 228, 240;
+  --launch-b-rgb: 145, 164, 186;
+  --launch-c-rgb: 185, 200, 216;
 }
 
 .creation-launchpad__grid {
@@ -834,8 +856,8 @@
   height: 190px;
   opacity: .14;
   background-image:
-    linear-gradient(rgba(255, 214, 0, .16) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(132, 255, 72, .12) 1px, transparent 1px);
+    linear-gradient(rgba(var(--launch-a-rgb), .13) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--launch-b-rgb), .11) 1px, transparent 1px);
   background-size: 28px 28px;
   mask-image: linear-gradient(to bottom, #000, transparent);
 }
@@ -861,6 +883,85 @@
   background: color-mix(in srgb, var(--bg-card) 70%, transparent);
 }
 
+.creation-launchpad__header-tools {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+}
+
+.creation-launchpad__style-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-input) 72%, transparent);
+}
+
+.creation-launchpad__style-label {
+  padding: 0 6px;
+  color: var(--fg-subtle);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+}
+
+.creation-launchpad__style-option {
+  min-width: 62px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-subtle);
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 150ms, background 150ms, color 150ms;
+}
+
+.creation-launchpad__style-option:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bg-card) 78%, transparent);
+}
+
+.creation-launchpad__style-option[aria-pressed="true"] {
+  border-color: rgba(var(--launch-a-rgb), .30);
+  background: rgba(var(--launch-a-rgb), .09);
+  color: var(--fg);
+}
+
+.creation-launchpad__style-swatch {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.creation-launchpad__style-option[data-style-option="orbit"] .creation-launchpad__style-swatch {
+  background: linear-gradient(135deg, #7dd3fc, #a78bfa);
+  color: #7dd3fc;
+}
+
+.creation-launchpad__style-option[data-style-option="aurora"] .creation-launchpad__style-swatch {
+  background: linear-gradient(135deg, #ff9a7a, #72d7a1);
+  color: #ff9a7a;
+}
+
+.creation-launchpad__style-option[data-style-option="graphite"] .creation-launchpad__style-swatch {
+  background: linear-gradient(135deg, #e2e8f0, #718096);
+  color: #b9c8d8;
+}
+
 .creation-launchpad__eyebrow {
   color: var(--fg-muted);
   font-size: 10px;
@@ -872,7 +973,7 @@
   height: 25px;
   border: 0;
   border-radius: 7px;
-  background: conic-gradient(from 35deg, #ff3d3d, #ff9d00, #efff00, #49ff52, #3d8bff, #873cff, #ff2c86, #ff3d3d);
+  background: conic-gradient(from 35deg, var(--launch-a), var(--launch-b), var(--launch-c), var(--launch-a));
   color: #130d19;
   font-size: 11px;
   letter-spacing: 0;
@@ -905,14 +1006,14 @@
   min-width: 0;
   padding: clamp(32px, 5vw, 58px);
   background:
-    radial-gradient(circle at 7% 100%, rgba(255, 75, 52, .10), transparent 38%),
-    radial-gradient(circle at 54% 2%, rgba(255, 216, 0, .07), transparent 32%),
-    radial-gradient(circle at 91% 16%, rgba(91, 255, 80, .07), transparent 34%);
+    radial-gradient(circle at 7% 100%, rgba(var(--launch-a-rgb), .07), transparent 38%),
+    radial-gradient(circle at 54% 2%, rgba(var(--launch-b-rgb), .06), transparent 32%),
+    radial-gradient(circle at 91% 16%, rgba(var(--launch-c-rgb), .06), transparent 34%);
 }
 
 .creation-launchpad__kicker,
 .creation-launchpad__choices-label {
-  color: #ffb52b;
+  color: var(--launch-a);
   font-size: 10.5px;
   font-weight: 850;
   letter-spacing: .9px;
@@ -930,7 +1031,7 @@
 
 .creation-launchpad__title em {
   color: transparent;
-  background: linear-gradient(100deg, #ff3d3d 0%, #ff9d00 18%, #e7f900 36%, #49e95a 54%, #4b83ff 72%, #873cff 86%, #ff2c86 100%);
+  background: var(--launch-spectrum);
   background-clip: text;
   -webkit-background-clip: text;
   text-shadow: none;
@@ -951,10 +1052,10 @@
   border-radius: 13px;
   background:
     linear-gradient(var(--bg-input), var(--bg-input)) padding-box,
-    linear-gradient(105deg, #ff3d3d, #ff9d00 20%, #e7f900 38%, #49e95a 56%, #4b83ff 73%, #873cff 87%, #ff2c86) border-box;
+    var(--launch-spectrum) border-box;
   box-shadow:
     0 14px 35px rgba(0, 0, 0, .18),
-    0 0 28px rgba(255, 157, 0, .10),
+    0 0 28px rgba(var(--launch-a-rgb), .08),
     inset 0 1px rgba(255,255,255,.035);
   backdrop-filter: none;
 }
@@ -963,8 +1064,8 @@
   border-color: transparent;
   box-shadow:
     0 15px 38px rgba(0,0,0,.2),
-    0 0 0 3px rgba(231, 249, 0, .10),
-    0 0 36px rgba(255, 120, 25, .11);
+    0 0 0 3px rgba(var(--launch-a-rgb), .09),
+    0 0 36px rgba(var(--launch-b-rgb), .10);
   transform: none;
 }
 
@@ -985,9 +1086,9 @@
   border-radius: 8px;
   font-size: 11.5px;
   font-weight: 800;
-  background: linear-gradient(105deg, #ff4b32, #ffad00 25%, #dff500 45%, #52e866 64%, #704dff 84%, #ef3f96);
+  background: var(--launch-spectrum);
   color: #160d18;
-  box-shadow: 0 7px 22px rgba(255, 132, 20, .20);
+  box-shadow: 0 7px 22px rgba(var(--launch-a-rgb), .16);
 }
 
 .creation-launchpad__actions {
@@ -1006,9 +1107,9 @@
   padding: clamp(28px, 4vw, 42px) clamp(20px, 3vw, 34px);
   border-left: 1px solid var(--border);
   background:
-    radial-gradient(circle at 100% 0, rgba(101, 255, 70, .10), transparent 38%),
-    radial-gradient(circle at 100% 55%, rgba(80, 110, 255, .08), transparent 37%),
-    radial-gradient(circle at 0 100%, rgba(255, 89, 32, .09), transparent 42%),
+    radial-gradient(circle at 100% 0, rgba(var(--launch-c-rgb), .08), transparent 38%),
+    radial-gradient(circle at 100% 55%, rgba(var(--launch-b-rgb), .07), transparent 37%),
+    radial-gradient(circle at 0 100%, rgba(var(--launch-a-rgb), .06), transparent 42%),
     color-mix(in srgb, var(--bg-card) 58%, transparent);
 }
 
@@ -1042,9 +1143,9 @@
 }
 
 .creation-launchpad__mode.is-active {
-  border-color: rgba(255, 178, 30, .48);
-  background: linear-gradient(105deg, rgba(255, 72, 45, .10), rgba(255, 206, 20, .11) 34%, rgba(76, 232, 91, .09) 63%, rgba(112, 77, 255, .10));
-  box-shadow: inset 3px 0 0 #ff9d00, 0 8px 24px rgba(255, 126, 22, .08);
+  border-color: rgba(var(--launch-a-rgb), .38);
+  background: linear-gradient(105deg, rgba(var(--launch-a-rgb), .09), rgba(var(--launch-b-rgb), .09) 52%, rgba(var(--launch-c-rgb), .07));
+  box-shadow: inset 3px 0 0 var(--launch-a), 0 8px 24px rgba(var(--launch-a-rgb), .07);
 }
 
 .creation-launchpad__mode-icon {
@@ -1052,25 +1153,29 @@
   height: 36px;
   border-radius: 9px;
   font-size: 17px;
-  border: 1px solid rgba(255, 157, 0, .30);
-  background: rgba(255, 157, 0, .11);
-  color: #ffb52b;
+  border: 1px solid rgba(var(--launch-a-rgb), .27);
+  background: rgba(var(--launch-a-rgb), .09);
+  color: var(--launch-a);
 }
 
 .creation-launchpad__mode:nth-child(2) .creation-launchpad__mode-icon {
-  border-color: rgba(75, 233, 90, .30);
-  background: rgba(75, 233, 90, .09);
-  color: #5bea68;
+  border-color: rgba(var(--launch-c-rgb), .27);
+  background: rgba(var(--launch-c-rgb), .08);
+  color: var(--launch-c);
 }
 
 .creation-launchpad__mode:nth-child(3) .creation-launchpad__mode-icon {
-  border-color: rgba(135, 60, 255, .32);
-  background: rgba(135, 60, 255, .10);
-  color: #a77aff;
+  border-color: rgba(var(--launch-b-rgb), .28);
+  background: rgba(var(--launch-b-rgb), .09);
+  color: var(--launch-b);
 }
 
 .creation-launchpad__mode-copy strong { font-size: 12px; }
 .creation-launchpad__mode-copy small { font-size: 10px; }
+
+.creation-launchpad__mode-copy {
+  flex: 1 1 auto;
+}
 
 .creation-launchpad__badge {
   position: static;
@@ -1081,6 +1186,7 @@
 }
 
 .creation-launchpad__mode-arrow {
+  flex: 0 0 auto;
   color: var(--fg-subtle);
   font-size: 13px;
   opacity: 0;
@@ -1122,6 +1228,11 @@
   .creation-launchpad__mode { align-items: flex-start; min-height: 105px; flex-wrap: wrap; }
   .creation-launchpad__mode-copy { width: calc(100% - 48px); }
   .creation-launchpad__privacy-note { display: none; }
+  .creation-launchpad__style-label { display: none; }
+}
+
+.creation-launchpad__mode:has(.creation-launchpad__badge) .creation-launchpad__mode-arrow {
+  display: none;
 }
 
 @media (max-width: 620px) {
@@ -1135,6 +1246,8 @@
   .creation-launchpad__mode { min-height: 64px; align-items: center; flex-wrap: nowrap; }
   .creation-launchpad__mode-copy { width: auto; }
   .creation-launchpad__submit { min-width: 38px; padding: 0 10px; }
+  .creation-launchpad__style-option { min-width: 28px; width: 28px; padding: 0; }
+  .creation-launchpad__style-option > span:last-child { display: none; }
 }
 
 /* Dark theme — the original look. Each token has a "semantic" name

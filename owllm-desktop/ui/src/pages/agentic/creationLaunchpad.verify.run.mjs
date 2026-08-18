@@ -23,6 +23,21 @@ check("shared prompt exposes a stable UI marker", component.includes('data-ui="C
 check("Enter submits while Shift+Enter remains multiline",
   component.includes('event.key === "Enter" && !event.shiftKey'));
 check("mode cards expose pressed state", component.includes("aria-pressed={active}"));
+check("launchpad offers three named visual styles",
+  component.includes('id: "orbit"')
+  && component.includes('id: "aurora"')
+  && component.includes('id: "graphite"'));
+check("unknown or missing style preferences safely use the calm Orbit default",
+  component.includes('export function normalizeLaunchpadStyle')
+  && component.includes(': "orbit";'));
+check("visual style is exposed to CSS and its controls expose pressed state",
+  component.includes("data-style={visualStyle}")
+  && component.includes('aria-label="Launchpad visual style"')
+  && component.includes("aria-pressed={visualStyle === style.id}"));
+check("visual style persists across Coding and Agents without backend coupling",
+  component.includes('"owllm:creation-launchpad-style"')
+  && component.includes("window.localStorage.getItem(LAUNCHPAD_STYLE_KEY)")
+  && component.includes("window.localStorage.setItem(LAUNCHPAD_STYLE_KEY, style)"));
 check("Coding renders the shared launchpad", code.includes("<CreationLaunchpad"));
 check("Coding uses the same centered workspace shell as Agentic",
   code.includes('data-ui="CodingProjectHubContainer"')
@@ -56,6 +71,20 @@ check("shared Coding and Agentic header spans the full launchpad width",
   && /\.creation-launchpad__header\s*\{\s*width:\s*100%;\s*box-sizing:\s*border-box;/.test(styles));
 check("launchpad has a narrow-layout regression rule",
   styles.includes("@media (max-width: 720px)") && styles.includes("grid-template-columns: 1fr"));
+check("each launchpad style has a real palette",
+  styles.includes('.creation-launchpad[data-style="aurora"]')
+  && styles.includes('.creation-launchpad[data-style="graphite"]')
+  && styles.includes("--launch-spectrum:"));
+check("launchpad visuals consume palette tokens instead of restoring the aggressive rainbow",
+  styles.includes("background: var(--launch-spectrum);")
+  && styles.includes("rgba(var(--launch-a-rgb)")
+  && !styles.includes("#efff00"));
+check("style choices remain usable at phone width",
+  styles.includes(".creation-launchpad__style-option { min-width: 28px; width: 28px; padding: 0; }")
+  && styles.includes(".creation-launchpad__style-option > span:last-child { display: none; }"));
+check("narrow desktop mode cards reserve readable space for their labels",
+  /\.creation-launchpad__mode-copy\s*\{\s*flex:\s*1 1 auto;/.test(styles)
+  && styles.includes(".creation-launchpad__mode:has(.creation-launchpad__badge) .creation-launchpad__mode-arrow"));
 
 for (const result of checks) {
   console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}`);

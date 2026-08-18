@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::webview::{Color, NewWindowResponse, Webview, WebviewBuilder};
+use tauri::webview::{Color, DownloadEvent, NewWindowResponse, Webview, WebviewBuilder};
 use tauri::{
     Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window,
     WindowEvent,
@@ -2014,6 +2014,13 @@ enum BrowserUiEvent {
     ClaudeAuthCode {
         code: String,
     },
+    /// A native WebView download finished. The engine owns the save operation,
+    /// so forward its otherwise-silent result to the OwLLM browser UI.
+    DownloadFinished {
+        id: u64,
+        path: Option<std::path::PathBuf>,
+        success: bool,
+    },
     /// A page requested a separate browsing context (`target=_blank` or
     /// `window.open`). The native callback denies the engine-owned popup and
     /// queues this event so the URL becomes a managed OwLLM tab instead.
@@ -2044,6 +2051,7 @@ struct BrowserUiBatch {
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
     claude_auth_codes: Vec<String>,
+    downloads: Vec<(u64, Option<std::path::PathBuf>, bool)>,
     open_tabs: Vec<(String, bool, bool)>,
     legacy_close_requested: Vec<u64>,
     legacy_destroyed: Vec<u64>,
@@ -2071,6 +2079,9 @@ impl BrowserUiBatch {
                 self.autofills.insert(id, url);
             }
             BrowserUiEvent::ClaudeAuthCode { code } => self.claude_auth_codes.push(code),
+            BrowserUiEvent::DownloadFinished { id, path, success } => {
+                self.downloads.push((id, path, success));
+            }
             BrowserUiEvent::OpenTab {
                 url,
                 activate,
@@ -2109,6 +2120,61 @@ fn queue_browser_ui(app: &tauri::AppHandle, event: BrowserUiEvent) {
     }
 }
 
+/// Download callbacks run on the shared WebView UI thread. Queue the finished
+/// result and return immediately; `true` preserves the engine's normal save.
+fn handle_download_event(app: &tauri::AppHandle, id: u64, event: DownloadEvent<'_>) -> bool {
+    if let DownloadEvent::Finished { path, success, .. } = event {
+        queue_browser_ui(app, BrowserUiEvent::DownloadFinished { id, path, success });
+    }
+    true
+}
+
+fn show_download_result(
+    app: &tauri::AppHandle,
+    id: u64,
+    path: Option<&std::path::Path>,
+    success: bool,
+) {
+    let info = json!({
+        "success": success,
+        "filename": path
+            .and_then(|value| value.file_name())
+            .map(|value| value.to_string_lossy().into_owned()),
+        "folder": path
+            .and_then(|value| value.parent())
+            .map(|value| value.to_string_lossy().into_owned()),
+    });
+    let payload = serde_json::to_string(&info).unwrap_or_else(|_| "{}".into());
+
+    if let Some(chrome) = app.get_webview(CHROME_LABEL) {
+        let _ = chrome.eval(&format!(
+            "try{{window.__owllmDownloadSet&&window.__owllmDownloadSet({payload})}}catch(e){{}}"
+        ));
+        return;
+    }
+
+    // The Linux safety layout can use a top-level content WebView without the
+    // separate chrome WebView. Give it the same accessible result.
+    if let Some(content) = app.get_webview(&tab_label(id)) {
+        let _ = content.eval(&format!(
+            r#"try{{(function(i){{
+                var old=document.getElementById('__owllmDownloadToast');
+                if(old) old.remove();
+                var el=document.createElement('div');
+                el.id='__owllmDownloadToast';
+                el.setAttribute('role','status');
+                el.setAttribute('aria-live','polite');
+                el.textContent=i.success
+                  ? ('Saved '+(i.filename||'download')+(i.folder?' to '+i.folder:''))
+                  : 'Download failed. Try again.';
+                el.style.cssText='position:fixed;right:18px;top:18px;z-index:2147483647;padding:12px 16px;border-radius:8px;background:'+(i.success?'#166534':'#991b1b')+';color:#fff;font:600 13px system-ui;box-shadow:0 4px 18px #0008;max-width:min(560px,calc(100vw - 36px));overflow-wrap:anywhere';
+                (document.body||document.documentElement).appendChild(el);
+                setTimeout(function(){{try{{el.remove()}}catch(e){{}}}},6000);
+            }})({payload})}}catch(e){{}}"#
+        ));
+    }
+}
+
 fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) {
     while let Ok(first) = rx.recv() {
         let mut batch = BrowserUiBatch::default();
@@ -2138,6 +2204,9 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
             // Send only to the trusted application WebView. Browser tabs must
             // never receive another tab's one-time authorization code.
             let _ = app.emit_to("main", "owllm:claude-auth-code", json!({ "code": code }));
+        }
+        for (id, path, success) in batch.downloads {
+            show_download_result(&app, id, path.as_deref(), success);
         }
         for (url, activate, private_session) in batch.open_tabs {
             if let Err(e) = new_tab(&app, &url, activate, private_session) {
@@ -2378,12 +2447,14 @@ fn attach_tab(
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
+    let download_app = app.clone();
     #[allow(unused_mut)]
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
         // Credential scanning must reach IFRAMES too — the plain
         // initialization_script above is main-frame-only.
         .initialization_script_for_all_frames(FRAME_CRED_JS)
+        .on_download(move |_webview, event| handle_download_event(&download_app, id, event))
         .on_new_window(move |url, _features| {
             // Opener-dependent OAuth popups must stay engine-owned so
             // `window.opener` / `window.close` keep working; everything else
@@ -3133,6 +3204,7 @@ fn attach_legacy_tab(
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
+    let download_app = app.clone();
     #[cfg(target_os = "linux")]
     let requested_url = url.to_string();
     #[cfg(target_os = "linux")]
@@ -3151,6 +3223,7 @@ fn attach_legacy_tab(
         // Credential scanning must reach IFRAMES too — the plain
         // initialization_script above is main-frame-only.
         .initialization_script_for_all_frames(FRAME_CRED_JS)
+        .on_download(move |_webview, event| handle_download_event(&download_app, id, event))
         .on_new_window(move |url, _features| {
             // Same opener-preserving OAuth popup rule as the framed shape.
             if is_opener_dependent_popup(&url) {

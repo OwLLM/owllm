@@ -1,5 +1,17 @@
 export type AgentModelStorage = Pick<Storage, "length" | "key" | "removeItem">;
 
+/// Pick one persistence source for per-agent models. Once graph_json carries
+/// an `agentModels` object, SQLite is authoritative: allowing an older WebView
+/// localStorage value to overlay it made removed/changed selections come back
+/// forever (notably the misleading legacy `auto/balanced` value). localStorage
+/// remains a migration fallback only for projects that predate DB persistence.
+export function persistedAgentModels(
+  databaseModels: ReadonlyMap<string, string> | null,
+  legacyLocalModels: ReadonlyMap<string, string>,
+): Map<string, string> {
+  return new Map(databaseModels ?? legacyLocalModels);
+}
+
 export function resolveAgentModel(
   agentName: string,
   liveTeamModel: string | null,

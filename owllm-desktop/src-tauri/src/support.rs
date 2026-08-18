@@ -87,6 +87,17 @@ pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCaptu
 /// application or monitor. Shared by Watcher and the agent browser so both
 /// surfaces use one platform implementation.
 pub(crate) fn capture_window_png(win: &tauri::Window) -> Result<(Vec<u8>, u32, u32), String> {
+    // A minimized window has no rendered pixels. Windows parks it at 160x28
+    // off-screen, so the capture SUCCEEDS and returns a black sliver that an
+    // agent then treats as a real screenshot of the page. Refuse instead of
+    // handing back evidence of nothing.
+    if win.is_minimized().unwrap_or(false) {
+        return Err(format!(
+            "the {} window is minimized, so it has no rendered pixels to capture — \
+             restore it and retry, or use scope=desktop",
+            win.label()
+        ));
+    }
     #[cfg(windows)]
     {
         let hwnd = win.hwnd().map_err(|e| format!("hwnd: {e}"))?.0 as isize;

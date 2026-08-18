@@ -45,12 +45,8 @@ import IconPickerDialog, {
   setAgentIconOverride,
   loadOverridesForProject,
 } from "./IconPickerDialog";
-import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite, buildEntries } from "./ModelPicker";
 import ModelRequiredDialog from "../../components/ModelRequiredDialog";
-import {
-  OpenAILogo, AnthropicLogo, GeminiLogo, DeepSeekLogo,
-  XaiLogo, MoonshotLogo, MistralLogo,
-} from "../advanced/brandLogos";
 import {
   type VoiceConfig,
   DEFAULT_VOICE,
@@ -162,6 +158,7 @@ import {
   assignTeamModelToAgents,
   clearStoredAgentModelOverrides,
   graphJsonWithAgentModels,
+  persistedAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
 import {
@@ -212,38 +209,36 @@ function setAgentModelOverride(pid: string, agent: string, modelId: string): voi
   } catch { /* private mode */ }
 }
 function loadAgentModelsForProject(pid: string, graphJson?: string | null): Map<string, string> {
-  const m = new Map<string, string>();
-  if (!pid) return m;
-  // BASE layer: the project's DB graph_json. It survives an app reinstall/update
-  // (which wipes WebView2 localStorage), so it's the fallback that keeps picks
-  // across reinstalls.
+  if (!pid) return new Map();
+  // DB source. The presence of an `agentModels` object (including an empty
+  // object) means this project uses durable SQLite persistence and that source
+  // is authoritative.
+  let databaseModels: Map<string, string> | null = null;
   if (graphJson && graphJson.trim()) {
     try {
       const am = JSON.parse(graphJson)?.agentModels;
       if (am && typeof am === "object") {
+        databaseModels = new Map();
         for (const k of Object.keys(am)) {
           const v = (am as Record<string, unknown>)[k];
-          if (typeof v === "string" && v.trim()) m.set(k, v);
+          if (typeof v === "string" && v.trim()) databaseModels.set(k, v);
         }
       }
-    } catch { /* malformed graph_json → fall through to localStorage */ }
+    } catch { /* malformed graph_json -> legacy localStorage fallback */ }
   }
-  // OVERLAY: localStorage is written SYNCHRONOUSLY on every pick, so it is the
-  // FRESHEST source on a normal restart. It must WIN over graph_json, whose
-  // writer is debounced + guarded (skips while a template is active) and can lag
-  // behind — the stale graph_json overwriting the fresh pick is exactly the
-  // "old models come back at restart" bug. On a reinstall localStorage is empty,
-  // so the graph_json base above stands.
+  // Legacy source. It must NOT overlay a DB `agentModels` object: that was how
+  // stale `auto/balanced` values replaced the concrete model the user selected.
+  const legacyLocalModels = new Map<string, string>();
   const prefix = `owllm:agent-model:${pid}:`;
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(prefix)) continue;
       const v = localStorage.getItem(k);
-      if (v && v.trim()) m.set(k.slice(prefix.length), v);
+      if (v && v.trim()) legacyLocalModels.set(k.slice(prefix.length), v);
     }
   } catch { /* private mode */ }
-  return m;
+  return persistedAgentModels(databaseModels, legacyLocalModels);
 }
 
 // Per-agent VOICE picks persist the same way the model picks do — project- and
@@ -1507,106 +1502,6 @@ function tileAccentFor(spec: AgentSpec): string {
   return "#78b4ff";   // build
 }
 
-// Brand tint per model provider — mirrors ModelPicker's SECTION_META so a
-// model's logo-chip on the agent card reads in the provider's colour. Keyed by
-// the provider string providerFor() returns. The app ships no per-provider
-// brand IMAGE assets, so the chip shows the model's short name in the brand
-// colour (the explicit fallback the feature spec allows) rather than inventing
-// an asset pipeline.
-const PROVIDER_TINT: Record<string, string> = {
-  local: "#7fdfff", tuned: "#ffd166",
-  anthropic: "#ff9a3a", openai: "#10a37f", moonshot: "#d36bff", kimi: "#d36bff",
-  gemini: "#4285f4", deepseek: "#2563eb", xai: "#9aa0a6", groq: "#ff5d11",
-  perplexity: "#20b2aa", mistral: "#ff7a00", together: "#7fc8ff", auto: "#c08aff",
-};
-// Short, human label for a resolved model id — strips the sub/api/auto route
-// prefix the ModelPicker encodes plus any :effort suffix and owner/ path, so
-// the card chip stays compact.
-function shortModelLabel(modelId: string): string {
-  if (!modelId) return "";
-  let s = modelId;
-  for (const p of ["sub/", "api/", "auto/"]) if (s.startsWith(p)) { s = s.slice(p.length); break; }
-  const colon = s.indexOf(":");
-  if (colon > 0) s = s.slice(0, colon);
-  if (s.includes("/")) s = s.split("/").pop()!;
-  return s;
-}
-
-// Research-lab brand colour per lab name — tints the model chip in the maker's
-// colour. Falls back through PROVIDER_TINT then a neutral.
-const LAB_TINT: Record<string, string> = {
-  Anthropic: "#ff9a3a", OpenAI: "#10a37f", Google: "#4285f4",
-  Moonshot: "#d36bff", DeepSeek: "#2563eb", xAI: "#c7ccd1", Mistral: "#ff7a00",
-  Meta: "#4267b2", Qwen: "#7a5cff", Microsoft: "#00a4ef", Nous: "#b07cff",
-  "01.AI": "#22c55e", Cohere: "#39c5bb", Unsloth: "#ffb020", IBM: "#0f62fe",
-  NVIDIA: "#76b900", TII: "#1f9d8f", Stability: "#ff5d7a", AllenAI: "#f59e0b",
-  BigCode: "#ffd166",
-};
-// Providers that ARE the model's maker → lab name straight through. Host-style
-// providers (groq/together/perplexity/local/tuned) are intentionally omitted so
-// the chip falls through to id parsing and shows the ACTUAL maker, not the host.
-const PROVIDER_LAB: Record<string, string> = {
-  anthropic: "Anthropic", openai: "OpenAI", gemini: "Google",
-  moonshot: "Moonshot", kimi: "Moonshot", deepseek: "DeepSeek",
-  xai: "xAI", mistral: "Mistral",
-};
-// Maker detected from a local/tuned model id's owner path prefix
-// ("unsloth/…", "google/gemma-…", "Qwen/…", "deepseek-ai/…").
-const OWNER_LAB: Record<string, string> = {
-  unsloth: "Unsloth", google: "Google", "meta-llama": "Meta", meta: "Meta",
-  qwen: "Qwen", "deepseek-ai": "DeepSeek", deepseek: "DeepSeek",
-  mistralai: "Mistral", microsoft: "Microsoft", nousresearch: "Nous",
-  "01-ai": "01.AI", "01.ai": "01.AI", cohereforai: "Cohere", cohere: "Cohere",
-  bigcode: "BigCode", stabilityai: "Stability", allenai: "AllenAI",
-  "ibm-granite": "IBM", ibm: "IBM", nvidia: "NVIDIA", tiiuae: "TII",
-};
-
-// Friendly research-lab label for a resolved model id. A maker-provider maps
-// straight from `provider`; otherwise the lab is parsed from the id's owner path
-// or name keywords. Keeps the card chip compact for long local GGUF names
-// ("unsloth/gemma-3-…-GGUF" → "Google"/"Unsloth") and works for cloud + local +
-// tuned alike. Returns "" only for an empty id. `provider` is an optional hint;
-// the id-only path is used on surfaces (graph canvas) that carry no provider.
-function modelLabFor(modelId: string, provider?: string): string {
-  if (!modelId) return "";
-  if (provider && PROVIDER_LAB[provider]) return PROVIDER_LAB[provider];
-  let bare = modelId;
-  for (const p of ["sub/", "api/", "auto/"]) if (bare.startsWith(p)) { bare = bare.slice(p.length); break; }
-  if (bare.includes("/")) {
-    const owner = bare.split("/")[0].toLowerCase();
-    if (OWNER_LAB[owner]) return OWNER_LAB[owner];
-  }
-  const n = bare.toLowerCase();
-  if (n.includes("gemma") || n.includes("gemini")) return "Google";
-  if (n.includes("qwen")) return "Qwen";
-  if (n.includes("llama")) return "Meta";
-  if (n.includes("mixtral") || n.includes("mistral")) return "Mistral";
-  if (n.includes("deepseek")) return "DeepSeek";
-  if (n.startsWith("phi") || n.includes("phi-")) return "Microsoft";
-  if (n.includes("command-r") || n.includes("command")) return "Cohere";
-  if (n.includes("grok")) return "xAI";
-  if (n.includes("kimi") || n.includes("moonshot")) return "Moonshot";
-  if (n.includes("gpt") || n === "o3" || n.startsWith("o3") || n.includes("codex")) return "OpenAI";
-  if (n.includes("claude")) return "Anthropic";
-  if (n.includes("falcon")) return "TII";
-  if (n.includes("granite")) return "IBM";
-  if (n.startsWith("yi-") || n.includes("/yi-")) return "01.AI";
-  return shortModelLabel(modelId);
-}
-// Lab name + brand tint for the model chip on an agent card.
-function modelChipFor(modelId: string, provider?: string): { lab: string; tint: string } {
-  const lab = modelLabFor(modelId, provider);
-  const tint = LAB_TINT[lab] ?? (provider ? PROVIDER_TINT[provider] : undefined) ?? "#9db4dc";
-  return { lab, tint };
-}
-// Research-lab brand mark per lab NAME, for the model chip. Labs without a
-// dedicated mark are absent here and fall back to the compact lab-name text —
-// the chip never renders blank.
-const LAB_LOGO: Record<string, React.FC<{ size?: number; color?: string }>> = {
-  OpenAI: OpenAILogo, Anthropic: AnthropicLogo, Google: GeminiLogo,
-  DeepSeek: DeepSeekLogo, xAI: XaiLogo, Moonshot: MoonshotLogo, Mistral: MistralLogo,
-};
-
 // Tile arrangement for a 4-column grid. Spatial layout the user spec'd:
 //
 //   Row 0:  Orchestrator | Critic | Design Lead | Design[1]
@@ -1732,7 +1627,7 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, providerFor, onPickAgentModel,
+  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, labelForModel, onPickAgentModel,
   models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
   perAgentSkills, labelOverrides,
 }: {
@@ -1757,9 +1652,9 @@ function AgentChatGrid({
   /// Resolve the model id shown on a tile's header chip (per-agent override >
   /// team default > server model). Same resolver the dispatch path uses.
   modelFor: (agentName: string) => string;
-  /// Map a resolved model id → provider string, for the header chip tint.
-  providerFor: (modelId: string) => string;
-  /// Reuse the shared model picker from the small logo trigger on every card.
+  /// Exact human-facing label from the shared ModelPicker catalogue.
+  labelForModel: (modelId: string) => string;
+  /// Reuse the shared model picker from the model-name trigger on every card.
   onPickAgentModel: (agentName: string, modelId: string) => void;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
@@ -1867,13 +1762,7 @@ function AgentChatGrid({
         const outerPx = isActive ? 14 + 12 * pulse : 0;
         const alphaA = 0.65 + 0.30 * pulse;
         const alphaB = 0.40 + 0.30 * pulse;
-        // Show the model's research-lab (e.g. "OpenAI", "Google", "Unsloth") on
-        // EVERY agent INCLUDING the critical_thinker — it runs on a real model
-        // (often Codex) and was previously blanked, so its chip was the only one
-        // missing. The lab label also keeps long local GGUF names from overflowing.
         const resolvedModel = modelFor(a.name);
-        const { lab: modelLabel, tint: modelTint } = modelChipFor(resolvedModel, providerFor(resolvedModel));
-        const modelTitle = shortModelLabel(resolvedModel);
         return (
           <AgentChatTile
             key={a.name}
@@ -1894,9 +1783,7 @@ function AgentChatGrid({
             criticEnabled={criticEnabled}
             onToggleCritic={onToggleCritic}
             modelId={resolvedModel}
-            modelLabel={modelLabel}
-            modelTint={modelTint}
-            modelTitle={modelTitle}
+            modelDisplayLabel={labelForModel(resolvedModel)}
             ringPx={ringPx}
             outerPx={outerPx}
             alphaA={alphaA}
@@ -2397,7 +2284,7 @@ function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick, onOpenEditor, onOpenSkills,
   onPickModel, models, accountsStatus, isCritic, criticEnabled, onToggleCritic,
-  modelId, modelLabel, modelTint, modelTitle,
+  modelId, modelDisplayLabel,
   ringPx, outerPx, alphaA, alphaB,
   timing, skills, isPublisher, isBrowser, projectCwd, label,
 }: {
@@ -2439,13 +2326,9 @@ function AgentChatTile({
   /// Click the bottom-right skill ribbon → the skills picker popup for this
   /// agent (like the model chip, the ribbon is the selection control).
   onOpenSkills: () => void;
-  /// Short model name shown as a logo-chip on the right of the header.
+  /// The selected model id and its exact shared-picker label.
   modelId: string;
-  modelLabel: string;
-  /// Provider brand colour for the model chip.
-  modelTint: string;
-  /// Full model short-name for the chip tooltip (chip shows the lab label).
-  modelTitle: string;
+  modelDisplayLabel: string;
   onPickModel: (modelId: string) => void;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
@@ -2595,39 +2478,23 @@ function AgentChatTile({
             />
           </button>
         )}
-        {/* Model logo-chip — right side of the header. The app has no per-
-            provider brand image, so show the resolved model's short name in the
-            provider's brand colour (spec-allowed fallback). */}
-        {(() => {
-          const Logo = LAB_LOGO[modelLabel];
-          return (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              style={{ width: 30, height: 30, flexShrink: 0 }}
-            >
-              <ModelPicker
-                value={modelId}
-                onChange={onPickModel}
-                models={models}
-                status={accountsStatus}
-                fallbackLabel={modelLabel || SELECT_MODEL_LABEL}
-                compactTitle={`Model: ${modelTitle || modelLabel || SELECT_MODEL_LABEL}`}
-                compactTrigger={
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      width: 24, height: 24, fontSize: 9, fontWeight: 800,
-                      color: modelTint, background: "rgba(0,0,0,0.30)",
-                      border: `1px solid ${modelTint}66`, borderRadius: 5,
-                    }}
-                  >{Logo ? <Logo size={19} color={modelTint} /> : (modelLabel || "◌")}</span>
-                }
-              />
-            </div>
-          );
-        })()}
+        {/* Show the model the user selected, not its provider/lab and not an
+            internal route id. The shared picker owns the exact display label. */}
+        <div
+          data-ui="AgentSelectedModel"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          title={`Selected model: ${modelDisplayLabel || SELECT_MODEL_LABEL}`}
+          style={{ flex:"0 1 138px", minWidth:72, height:30 }}
+        >
+          <ModelPicker
+            value={modelId}
+            onChange={onPickModel}
+            models={models}
+            status={accountsStatus}
+            fallbackLabel={SELECT_MODEL_LABEL}
+          />
+        </div>
         {/* Per-agent working time — to the RIGHT of the name. Green while this
             agent is active, muted once it's done; shows cumulative work time. */}
         {elapsedMs > 0 && (
@@ -4452,7 +4319,7 @@ function GraphCanvas({
   edges, onEdgesChange,
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
-  modelFor,
+  modelFor, labelForModel,
   labelOverrides,
   soloLayout,
 }: {
@@ -4470,6 +4337,8 @@ function GraphCanvas({
   /// graph card so the user can see at a glance which model each
   /// agent is wired to.
   modelFor: (agentName: string) => string;
+  /// Exact human-facing label from the shared ModelPicker catalogue.
+  labelForModel: (modelId: string) => string;
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
   /// "Coder"). Never touches the underlying agent name — that's identity.
   labelOverrides?: Record<string, string>;
@@ -5155,19 +5024,21 @@ function GraphCanvas({
                 const desc = (n.spec.description?.trim() || role?.description?.trim() || "").trim();
                 const shortDesc = desc.length > 70 ? desc.slice(0, 67) + "…" : desc;
                 const modelId = modelFor(n.name);
-                const modelLab = modelLabFor(modelId);
-                const ModelLogo = LAB_LOGO[modelLab];
-                const modelLabTint = LAB_TINT[modelLab] ?? "var(--fg)";
+                const selectedModelLabel = labelForModel(modelId);
                 return (
                   <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:2, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ display:"flex", justifyContent:"space-between", gap:6, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.3 }}>
                       <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textTransform:"capitalize" }} title={n.spec.base}>{n.spec.base}</span>
                       <span style={{ flexShrink:0 }}>· {temp} temp</span>
                     </div>
-                    <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
-                      {ModelLogo
-                        ? <ModelLogo size={12} color={modelLabTint} />
-                        : <span>🧠 {modelLab || "(no model)"}</span>}
+                    <div
+                      data-ui="AgentSelectedModel"
+                      style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}
+                      title={selectedModelLabel || SELECT_MODEL_LABEL}
+                    >
+                      <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {selectedModelLabel || SELECT_MODEL_LABEL}
+                      </span>
                     </div>
                     {shortDesc && (
                       <div style={{ fontSize:10, color:"var(--fg-subtle)", lineHeight:1.3, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={desc}>
@@ -5570,6 +5441,7 @@ function ChatInputDock({
   parallelMode, onToggleParallel,
   onSwitchTab,
   needsLoad, loadingModel, onLoadModel,
+  modelId, modelLabel,
 }: {
   draft: string;
   setDraft: (v: string) => void;
@@ -5598,6 +5470,14 @@ function ChatInputDock({
   /// server, waits for the model to actually be ready, then dispatches
   /// the draft as a normal send.
   onLoadModel: () => void;
+  /// The model the next send dispatches with (dockModelId — same
+  /// resolution as onSupSend: per-agent override > team default >
+  /// server model). Shown as a small chip top-right of the composer.
+  modelId: string;
+  /// The SAME text the ModelPicker shows for `modelId` (model + effort),
+  /// resolved by the page's `labelForModel`. Never re-derive it here: a second
+  /// formatter is how this line drifted into printing a raw router id.
+  modelLabel: string;
 }) {
   // Slash-command catalog. Each command exposes a name (the trigger),
   // a one-line description for the droplist, and an action invoked
@@ -5732,6 +5612,17 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
+      {modelId && (
+        <div data-ui="DockModelName" title={modelId} style={{
+          display:"flex", justifyContent:"flex-end", marginBottom:4,
+          fontSize:10.5, color:"var(--fg-subtle)",
+          whiteSpace:"nowrap", overflow:"hidden",
+        }}>
+          <span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>
+            🧠 {modelLabel || modelId}
+          </span>
+        </div>
+      )}
       <RunToggleRow
         autoApprove={autoApprove}
         onToggleAutoApprove={onToggleAutoApprove}
@@ -10043,6 +9934,14 @@ export function AgentsPage({
       agentTemplateModelFor(agentName),
     );
   };
+  // The cards show the SAME label as the shared picker (model + effort/account
+  // variant), never a provider logo or the raw route id.
+  const modelEntryLabels = useMemo(
+    () => new Map(buildEntries(models, accountsStatus).map(entry => [entry.id, entry.label])),
+    [models, accountsStatus],
+  );
+  const labelForModel = (modelId: string): string =>
+    modelEntryLabels.get(modelId) ?? modelId ?? "";
   const onPickAgentModel = (agentName: string, modelId: string) => {
     setPerAgentModel(prev => {
       const next = new Map(prev);
@@ -13628,7 +13527,6 @@ export function AgentsPage({
                 <div data-ui="AgentsProjectRailPublisher" style={{ flexShrink: 0, height: 292, marginTop: 6, display: "flex", flexDirection: "column" }}>
                   {(() => {
                     const resolved = modelFor(producerSpec.name);
-                    const chip = modelChipFor(resolved, providerFor(resolved));
                     return (
                       <AgentChatTile
                         name={producerSpec.name}
@@ -13648,9 +13546,7 @@ export function AgentsPage({
                         criticEnabled={criticEnabled}
                         onToggleCritic={() => setCriticEnabled(v => !v)}
                         modelId={resolved}
-                        modelLabel={chip.lab}
-                        modelTint={chip.tint}
-                        modelTitle={shortModelLabel(resolved)}
+                        modelDisplayLabel={labelForModel(resolved)}
                         ringPx={0}
                         outerPx={0}
                         alphaA={0.65}
@@ -13725,6 +13621,7 @@ export function AgentsPage({
                 positions={soloMode ? soloPositions : nodePositions}
                 onPositionsChange={soloMode ? setSoloPositions : setNodePositions}
                 modelFor={modelFor}
+                labelForModel={labelForModel}
                 labelOverrides={soloMode ? soloLabels : undefined}
                 soloLayout={soloMode}
               />
@@ -13741,7 +13638,7 @@ export function AgentsPage({
                 onOpenEditor={(name) => setEditingAgent(name)}
                 onOpenSkills={(name) => setSkillsAgent(name)}
                 modelFor={modelFor}
-                providerFor={providerFor}
+                labelForModel={labelForModel}
                 onPickAgentModel={onPickAgentModel}
                 models={models}
                 accountsStatus={accountsStatus}
@@ -13808,6 +13705,8 @@ export function AgentsPage({
             needsLoad={dockNeedsLoad}
             loadingModel={dockLoadingModel}
             onLoadModel={dockLoadModel}
+            modelId={dockModelId}
+            modelLabel={labelForModel(dockModelId)}
           />
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />

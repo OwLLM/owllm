@@ -9985,6 +9985,11 @@ export function AgentsPage({
       } catch { /* event dispatch failed — desktop UI already shows it, only phone misses */ }
     }
     } finally {
+      // Same wholesale sweep dispatchGoal's finally does. This path also runs
+      // addActive() (critic + orchestrator), so a throw that skips an inner
+      // removeActive would otherwise leave the card's clock ticking green
+      // forever after the run ended.
+      clearActive();
       supSendBusyRef.current = false;
       setSupSendBusy(false);
       setLlamaLoading(null);
@@ -12918,6 +12923,35 @@ export function AgentsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, activeTeam?.id]);
 
+  // Bridge liveness watchdog. A bridge-lit agent is cleared ONLY by a matching
+  // `end` event, so a bridge run that dies (phone drops, runner crashes, the
+  // AppShell unmounts mid-dispatch) leaves its card ticking green forever —
+  // the same runaway clock clearActive() fixes for local runs, which no local
+  // path can reach because the bridge never went through dispatchGoal.
+  // Every bridge event refreshes the beat; once the bridge has been silent
+  // this long with no local run in flight, the agents IT lit are released.
+  // Tolerant by design: a bridge run can sit quiet through a long tool call,
+  // and the sweep is cosmetic (it banks the clock, it never stops a run).
+  const BRIDGE_SILENCE_MS = 300_000;
+  const bridgeLitRef = useRef<Set<string>>(new Set());
+  const bridgeBeatRef = useRef(0);
+  const noteBridgeBeat = useCallback(() => { bridgeBeatRef.current = Date.now(); }, []);
+  // Read through a ref so the mount-only sweep below never closes over a
+  // stale removeActive.
+  const removeActiveRef = useRef(removeActive);
+  removeActiveRef.current = removeActive;
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      if (bridgeLitRef.current.size === 0) return;
+      // A local dispatch owns the lighting while it runs — never sweep under it.
+      if (supSendBusyRef.current || dispatchInFlightRef.current) return;
+      if (Date.now() - bridgeBeatRef.current < BRIDGE_SILENCE_MS) return;
+      for (const name of [...bridgeLitRef.current]) removeActiveRef.current(name);
+      bridgeLitRef.current.clear();
+    }, 15_000);
+    return () => window.clearInterval(iv);
+  }, []);
+
   // Active-agent lighting — Telegram-driven dispatches fire from the
   // AppShell runner, so the local dispatchGoal / onSupSend setters
   // never run. Listen for an explicit event so the orbital pulse +
@@ -12930,6 +12964,7 @@ export function AgentsPage({
       const detail = (e as CustomEvent<{ agent: string | null; action?: "start" | "end"; projectId?: string }>).detail;
       if (!detail) return;
       if (detail.projectId && detail.projectId !== selectedProjectId) return;
+      noteBridgeBeat();
       // Resolve the agent name through the local team so Telegram's
       // generic "orchestrator" label maps to whatever this team
       // actually named its orchestrator.
@@ -12939,12 +12974,15 @@ export function AgentsPage({
         if (spec) resolved = spec.name;
       }
       if (!resolved) {
+        bridgeLitRef.current.clear();
         clearActive();
         return;
       }
       if (detail.action === "end") {
+        bridgeLitRef.current.delete(resolved);
         removeActive(resolved);
       } else {
+        bridgeLitRef.current.add(resolved);
         addActive(resolved);
       }
     };
@@ -12963,6 +13001,7 @@ export function AgentsPage({
       if (!detail || !detail.message) return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       appendThought(agent, detail.message);
     };
     window.addEventListener("owllm:thought:appended", handler as EventListener);
@@ -12980,6 +13019,7 @@ export function AgentsPage({
       if (!detail || typeof detail.delta !== "string") return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       streamThought(agent, detail.channel || "thinking", detail.role || "🧠 thinking", detail.delta);
     };
     window.addEventListener("owllm:thought:delta", handler as EventListener);
@@ -12996,6 +13036,7 @@ export function AgentsPage({
       if (!detail || !detail.message) return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       appendLog(agent, detail.message);
     };
     window.addEventListener("owllm:log:appended", handler as EventListener);

@@ -171,6 +171,20 @@ try {
   check("Slow pre-dispatch worktree/CLI prep is announced, not silent",
     page.includes("Preparing an isolated workspace and warming the CLI")
       && page.includes("isolated workspace(s) — first agent activity"));
+  // Same runaway-clock class as clearActive() above, on the two run paths that
+  // never went through dispatchGoal: the single-assistant send, and the
+  // Telegram bridge (whose only clock-clearing signal is an `end` event that a
+  // dead bridge never sends).
+  check("The single-assistant path sweeps its clocks on every exit",
+    /clearActive\(\);\s*\n\s*supSendBusyRef\.current = false;/.test(page));
+  check("A dead bridge run cannot light an agent forever",
+    page.includes("bridgeLitRef")
+      && /Date\.now\(\) - bridgeBeatRef\.current < BRIDGE_SILENCE_MS/.test(page)
+      // Fed by more than the start/end event, so a long quiet tool call is not
+      // mistaken for a dead bridge.
+      && (page.match(/noteBridgeBeat\(\);/g) ?? []).length >= 4);
+  check("The bridge sweep never fires under a live local dispatch",
+    /if \(supSendBusyRef\.current \|\| dispatchInFlightRef\.current\) return;\s*\n\s*if \(Date\.now\(\) - bridgeBeatRef\.current/.test(page));
 
   check("Notebook worktree preflight failures remain pending and retryable",
     page.includes("e instanceof WorktreePreflightError")

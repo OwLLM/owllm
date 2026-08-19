@@ -6,15 +6,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = (name) => fs.readFileSync(path.join(here, name), "utf8");
+// Read line-ending agnostically: on a Windows release host core.autocrlf checks
+// sources out with CRLF, which would break every multi-line assertion below.
+const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+const src = (name) => read(path.join(here, name));
 const component = src("CreationLaunchpad.tsx");
 const code = src("CodePage.tsx");
 const agents = src("AgentsPage.tsx");
 const projectDialog = src("ProjectSettingsDialog.tsx");
-const styles = fs.readFileSync(path.resolve(here, "../../styles.css"), "utf8");
+const styles = read(path.resolve(here, "../../styles.css"));
 const foldStyles = src("CreationLaunchpad.fold.css");
-const theme = fs.readFileSync(path.resolve(here, "../../theme.ts"), "utf8");
-const themePreferences = fs.readFileSync(path.resolve(here, "../../themePreferences.ts"), "utf8");
+const theme = read(path.resolve(here, "../../theme.ts"));
+const themePreferences = read(path.resolve(here, "../../themePreferences.ts"));
 
 const checks = [];
 function check(name, condition) {

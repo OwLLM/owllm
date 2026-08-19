@@ -7,6 +7,12 @@
  * GUI skin instead of imposing a fixed purple mini-theme.
  */
 
+@property --fold-aura-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
 .creation-launchpad[data-design="fold"] {
   --fold-accent-rgb: var(--accent-rgb);
   --fold-tone-a: color-mix(in srgb, var(--accent) 88%, white 12%);
@@ -27,16 +33,29 @@
   min-height: 560px;
   overflow: hidden;
   isolation: isolate;
-  border: 1px solid var(--fold-line);
+  border: 2px solid transparent;
   border-radius: 22px 5px 22px 5px;
   background:
-    radial-gradient(ellipse at 15% 4%, rgba(var(--fold-accent-rgb), .25), transparent 38%),
-    radial-gradient(ellipse at 92% 88%, rgba(var(--fold-accent-rgb), .18), transparent 34%),
-    linear-gradient(142deg, var(--fold-base), var(--fold-rail) 62%, var(--fold-plane));
+    radial-gradient(ellipse at 15% 4%, rgba(var(--fold-accent-rgb), .25), transparent 38%) padding-box,
+    radial-gradient(ellipse at 92% 88%, rgba(var(--fold-accent-rgb), .18), transparent 34%) padding-box,
+    linear-gradient(142deg, var(--fold-base), var(--fold-rail) 62%, var(--fold-plane)) padding-box,
+    conic-gradient(
+      from var(--fold-aura-angle),
+      #3cf26b,
+      #ffd93c,
+      #ff9a3c,
+      #ff5c8a,
+      #b07cff,
+      #7fd4ff,
+      #3cf26b
+    ) border-box;
   color: var(--fold-ink);
   box-shadow:
+    0 0 12px rgba(176, 124, 255, .22),
+    0 0 20px rgba(127, 212, 255, .14),
     0 26px 70px rgba(0, 0, 0, .27),
     inset 0 1px 0 rgba(255, 255, 255, .045);
+  animation: fold-aura-border-turn 8s linear infinite;
 }
 
 :root[data-theme="light"] .creation-launchpad[data-design="fold"] {
@@ -69,44 +88,6 @@
   filter: blur(34px);
   animation: fold-aurora-drift 16s ease-in-out infinite alternate;
   pointer-events: none;
-}
-
-/* A full-spectrum light ring turns inside the clipped Fold surface. The live
- * accent leads the spectrum, while the secondary wavelengths keep neutral,
- * warm and cool app themes visibly colourful instead of monochrome. */
-.creation-launchpad[data-design="fold"] .creation-launchpad__aura {
-  position: absolute;
-  z-index: 4;
-  top: 51%;
-  left: 50%;
-  width: 112%;
-  aspect-ratio: 1;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  opacity: .52;
-  pointer-events: none;
-  mix-blend-mode: screen;
-  filter: saturate(1.35);
-}
-
-.creation-launchpad[data-design="fold"] .creation-launchpad__aura::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: conic-gradient(
-    from 0turn,
-    rgba(var(--fold-accent-rgb), .98) 0deg,
-    var(--fold-spectrum-cyan) 58deg,
-    var(--fold-spectrum-violet) 132deg,
-    var(--fold-spectrum-rose) 205deg,
-    var(--fold-spectrum-gold) 278deg,
-    rgba(var(--fold-accent-rgb), .98) 360deg
-  );
-  -webkit-mask-image: radial-gradient(circle, transparent 0 52%, #000 62% 70%, transparent 80%);
-  mask-image: radial-gradient(circle, transparent 0 52%, #000 62% 70%, transparent 80%);
-  filter: blur(30px);
-  animation: fold-aura-turn 18s linear infinite;
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__grid {
@@ -504,8 +485,8 @@
   to { transform: translate3d(5%, 5%, 0) rotate(7deg) scale(1.05); opacity: .92; }
 }
 
-@keyframes fold-aura-turn {
-  to { transform: rotate(1turn); }
+@keyframes fold-aura-border-turn {
+  to { --fold-aura-angle: 360deg; }
 }
 
 @keyframes fold-field-drift {
@@ -540,7 +521,7 @@
     transition: none;
   }
 
-  .creation-launchpad[data-design="fold"] .creation-launchpad__aura::before {
+  .creation-launchpad[data-design="fold"] {
     animation-duration: 48s;
   }
 }

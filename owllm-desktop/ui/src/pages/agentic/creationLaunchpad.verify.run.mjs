@@ -97,13 +97,17 @@ check("Fold effects are ambient and interaction-specific",
   && foldStyles.includes("@keyframes fold-seam-breathe")
   && foldStyles.includes(".creation-launchpad__composer:focus-within")
   && foldStyles.includes(".creation-launchpad__mode:hover"));
-check("Fold turns a vivid spectral aura inside its clipped container",
-  component.includes('className="creation-launchpad__aura"')
-  && foldStyles.includes("@keyframes fold-aura-turn")
-  && foldStyles.includes("animation: fold-aura-turn 18s linear infinite;")
-  && foldStyles.includes("mix-blend-mode: screen;")
-  && ["#2fe4ff", "#7968ff", "#ff5ca8", "#ffc857"].every((colour) => foldStyles.includes(colour))
-  && foldStyles.includes("rgba(var(--fold-accent-rgb), .98)"));
+check("Fold turns the established chat aura around its own perimeter",
+  !component.includes('className="creation-launchpad__aura"')
+  && foldStyles.includes("@property --fold-aura-angle")
+  && foldStyles.includes("@keyframes fold-aura-border-turn")
+  && foldStyles.includes("animation: fold-aura-border-turn 8s linear infinite;")
+  && foldStyles.includes("border: 2px solid transparent;")
+  && foldStyles.includes("conic-gradient(\n      from var(--fold-aura-angle)")
+  && foldStyles.includes(") border-box;")
+  && ["#3cf26b", "#ffd93c", "#ff9a3c", "#ff5c8a", "#b07cff", "#7fd4ff"].every((colour) => foldStyles.includes(colour))
+  && foldStyles.includes("0 0 12px rgba(176, 124, 255, .22)")
+  && foldStyles.includes("0 0 20px rgba(127, 212, 255, .14)"));
 check("Fold carries the visible spectrum into its outcome headline",
   ["--fold-spectrum-cyan", "--fold-spectrum-violet", "--fold-spectrum-rose", "--fold-spectrum-gold"].every((tone) =>
     foldStyles.includes(`var(${tone})`))

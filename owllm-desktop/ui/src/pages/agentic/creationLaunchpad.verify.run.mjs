@@ -72,6 +72,18 @@ check("Fold adds a deliberate three-colour spectral material",
   && foldStyles.includes("--fold-violet: #a38aff;")
   && foldStyles.includes("--fold-coral: #ffab91;")
   && foldStyles.includes("linear-gradient(102deg, var(--fold-cyan) 0%, var(--fold-violet) 56%, var(--fold-coral) 108%)"));
+check("Fold uses saturated material surfaces instead of diluted gray overlays",
+  foldStyles.includes("--fold-base: #15182c;")
+  && foldStyles.includes("--fold-plane: #1c213b;")
+  && foldStyles.includes("--fold-rail: #201d39;")
+  && foldStyles.includes("--fold-card: #272a47;")
+  && foldStyles.includes("rgba(var(--fold-cyan-rgb), .30)")
+  && foldStyles.includes("rgba(var(--fold-violet-rgb), .22)"));
+check("Fold mode layers carry distinct cyan, violet and coral identities",
+  foldStyles.includes('var(--fold-violet) 45%, var(--fold-line)')
+  && foldStyles.includes('rgba(var(--fold-violet-rgb), .21)')
+  && foldStyles.includes('var(--fold-coral) 38%, var(--fold-line)')
+  && foldStyles.includes('rgba(var(--fold-coral-rgb), .17)'));
 check("Fold keeps its spectral colours legible in the light app theme",
   foldStyles.includes(':root[data-theme="light"] .creation-launchpad[data-design="fold"]')
   && foldStyles.includes("--fold-cyan: #007f9d;")

@@ -14,6 +14,10 @@
   --fold-violet-rgb: 163, 138, 255;
   --fold-coral: #ffab91;
   --fold-coral-rgb: 255, 171, 145;
+  --fold-base: #15182c;
+  --fold-plane: #1c213b;
+  --fold-rail: #201d39;
+  --fold-card: #272a47;
   --fold-ink: var(--fg-strong);
   --fold-muted: var(--fg-muted);
   --fold-line: color-mix(in srgb, var(--border-strong) 72%, var(--fold-violet) 28%);
@@ -24,9 +28,9 @@
   border: 1px solid var(--fold-line);
   border-radius: 22px 5px 22px 5px;
   background:
-    radial-gradient(ellipse at 15% 4%, rgba(var(--fold-violet-rgb), .13), transparent 38%),
-    radial-gradient(ellipse at 92% 88%, rgba(var(--fold-cyan-rgb), .09), transparent 34%),
-    color-mix(in srgb, var(--bg-panel) 96%, #151529 4%);
+    radial-gradient(ellipse at 15% 4%, rgba(var(--fold-violet-rgb), .25), transparent 38%),
+    radial-gradient(ellipse at 92% 88%, rgba(var(--fold-cyan-rgb), .18), transparent 34%),
+    linear-gradient(142deg, var(--fold-base), #19172f 62%, #122735);
   color: var(--fold-ink);
   box-shadow:
     0 26px 70px rgba(0, 0, 0, .27),
@@ -40,6 +44,10 @@
   --fold-violet-rgb: 103, 75, 210;
   --fold-coral: #b94f38;
   --fold-coral-rgb: 185, 79, 56;
+  --fold-base: #edf3fb;
+  --fold-plane: #f7f9ff;
+  --fold-rail: #eeeaff;
+  --fold-card: #ffffff;
 }
 
 .creation-launchpad[data-design="fold"]::before {
@@ -54,9 +62,9 @@
   background: conic-gradient(
     from 210deg,
     transparent 0 22%,
-    rgba(var(--fold-cyan-rgb), .12) 30%,
-    rgba(var(--fold-violet-rgb), .13) 42%,
-    rgba(var(--fold-coral-rgb), .08) 52%,
+    rgba(var(--fold-cyan-rgb), .24) 30%,
+    rgba(var(--fold-violet-rgb), .28) 42%,
+    rgba(var(--fold-coral-rgb), .18) 52%,
     transparent 62% 100%
   );
   filter: blur(34px);
@@ -158,8 +166,9 @@
   z-index: 2;
   padding: clamp(42px, 6vw, 72px) clamp(64px, 8vw, 98px) clamp(42px, 6vw, 72px) clamp(42px, 6vw, 72px);
   background:
-    linear-gradient(116deg, rgba(var(--fold-violet-rgb), .045), transparent 34%),
-    color-mix(in srgb, var(--bg-input) 61%, transparent);
+    radial-gradient(ellipse at 84% 48%, rgba(var(--fold-cyan-rgb), .16), transparent 36%),
+    linear-gradient(116deg, rgba(var(--fold-violet-rgb), .20), transparent 38%),
+    var(--fold-plane);
   clip-path: polygon(0 0, 94% 0, 100% 50%, 94% 100%, 0 100%);
 }
 
@@ -169,8 +178,8 @@
   z-index: -1;
   inset: 0 4.9% 0 0;
   background:
-    radial-gradient(ellipse at 82% 46%, rgba(var(--fold-cyan-rgb), .10), transparent 34%),
-    linear-gradient(160deg, transparent 0 61%, rgba(var(--fold-violet-rgb), .055) 61.2% 61.4%, transparent 61.6%);
+    radial-gradient(ellipse at 82% 46%, rgba(var(--fold-cyan-rgb), .19), transparent 34%),
+    linear-gradient(160deg, transparent 0 61%, rgba(var(--fold-violet-rgb), .14) 61.2% 61.4%, transparent 61.6%);
   pointer-events: none;
 }
 
@@ -238,8 +247,8 @@
   border: 1px solid transparent;
   border-radius: 3px 26px 3px 26px;
   background:
-    linear-gradient(color-mix(in srgb, var(--bg-panel) 92%, transparent), color-mix(in srgb, var(--bg-panel) 92%, transparent)) padding-box,
-    linear-gradient(128deg, rgba(var(--fold-cyan-rgb), .62), rgba(var(--fold-violet-rgb), .25) 52%, rgba(var(--fold-coral-rgb), .40)) border-box;
+    linear-gradient(color-mix(in srgb, var(--fold-base) 76%, var(--fold-card) 24%), color-mix(in srgb, var(--fold-base) 76%, var(--fold-card) 24%)) padding-box,
+    linear-gradient(128deg, rgba(var(--fold-cyan-rgb), .88), rgba(var(--fold-violet-rgb), .62) 52%, rgba(var(--fold-coral-rgb), .76)) border-box;
   box-shadow:
     0 22px 54px rgba(0, 0, 0, .24),
     inset 0 1px 0 rgba(255, 255, 255, .035);
@@ -251,7 +260,7 @@
 .creation-launchpad[data-design="fold"] .creation-launchpad__composer:focus-within {
   border-color: transparent;
   background:
-    linear-gradient(color-mix(in srgb, var(--bg-panel) 88%, transparent), color-mix(in srgb, var(--bg-panel) 88%, transparent)) padding-box,
+    linear-gradient(color-mix(in srgb, var(--fold-base) 64%, var(--fold-card) 36%), color-mix(in srgb, var(--fold-base) 64%, var(--fold-card) 36%)) padding-box,
     linear-gradient(128deg, var(--fold-cyan), var(--fold-violet) 52%, var(--fold-coral)) border-box;
   box-shadow:
     0 0 0 3px rgba(var(--fold-cyan-rgb), .08),
@@ -317,8 +326,9 @@
   padding: 37px 23px 36px 0;
   border: 0;
   background:
-    linear-gradient(160deg, rgba(var(--fold-violet-rgb), .035), transparent 52%),
-    transparent;
+    radial-gradient(ellipse at 100% 2%, rgba(var(--fold-coral-rgb), .13), transparent 40%),
+    linear-gradient(160deg, rgba(var(--fold-violet-rgb), .21), transparent 58%),
+    var(--fold-rail);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__choices::before {
@@ -349,8 +359,8 @@
   border-radius: 4px 19px 4px 19px;
   padding: 12px 14px;
   background:
-    linear-gradient(116deg, rgba(var(--fold-violet-rgb), .06), transparent 44%),
-    color-mix(in srgb, var(--bg-card) 91%, transparent);
+    linear-gradient(116deg, rgba(var(--fold-violet-rgb), .15), transparent 52%),
+    var(--fold-card);
   color: var(--fold-ink);
   box-shadow:
     0 14px 30px rgba(0, 0, 0, .18),
@@ -361,17 +371,25 @@
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2) {
   transform: translateX(19px);
+  border-color: color-mix(in srgb, var(--fold-violet) 45%, var(--fold-line));
+  background:
+    linear-gradient(116deg, rgba(var(--fold-violet-rgb), .21), transparent 58%),
+    var(--fold-card);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3) {
   transform: translateX(7px);
+  border-color: color-mix(in srgb, var(--fold-coral) 38%, var(--fold-line));
+  background:
+    linear-gradient(116deg, rgba(var(--fold-coral-rgb), .17), transparent 58%),
+    var(--fold-card);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:hover {
   border-color: color-mix(in srgb, var(--fold-cyan) 58%, var(--fold-violet));
   background:
-    linear-gradient(116deg, rgba(var(--fold-cyan-rgb), .09), rgba(var(--fold-violet-rgb), .04) 54%, transparent),
-    color-mix(in srgb, var(--bg-card) 94%, transparent);
+    linear-gradient(116deg, rgba(var(--fold-cyan-rgb), .21), rgba(var(--fold-violet-rgb), .14) 54%, transparent),
+    var(--fold-card);
   box-shadow:
     0 18px 38px rgba(0, 0, 0, .23),
     0 0 24px rgba(var(--fold-cyan-rgb), .07);
@@ -389,8 +407,8 @@
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode.is-active {
   border-color: color-mix(in srgb, var(--fold-cyan) 68%, var(--fold-violet));
   background:
-    linear-gradient(116deg, rgba(var(--fold-cyan-rgb), .16), rgba(var(--fold-violet-rgb), .11) 58%, rgba(var(--fold-coral-rgb), .035)),
-    color-mix(in srgb, var(--bg-card) 93%, transparent);
+    linear-gradient(116deg, rgba(var(--fold-cyan-rgb), .30), rgba(var(--fold-violet-rgb), .22) 58%, rgba(var(--fold-coral-rgb), .10)),
+    color-mix(in srgb, var(--fold-card) 82%, var(--fold-cyan) 18%);
   box-shadow:
     -5px 0 0 var(--fold-cyan),
     0 18px 40px rgba(0, 0, 0, .25),
@@ -401,7 +419,7 @@
   border-color: color-mix(in srgb, var(--fold-line) 72%, var(--fold-cyan) 28%);
   border-radius: 3px 12px 3px 12px;
   background:
-    linear-gradient(145deg, rgba(var(--fold-cyan-rgb), .10), rgba(var(--fold-violet-rgb), .13));
+    linear-gradient(145deg, rgba(var(--fold-cyan-rgb), .24), rgba(var(--fold-violet-rgb), .26));
   color: var(--fold-cyan);
 }
 

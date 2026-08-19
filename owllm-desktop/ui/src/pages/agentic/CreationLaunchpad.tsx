@@ -1,26 +1,27 @@
 import React, { type ReactNode, useState } from "react";
 
-export type CreationLaunchpadStyle = "orbit" | "aurora" | "graphite";
+export type CreationLaunchpadStyle = "signal" | "lumen" | "carbon" | "prism";
 
 const LAUNCHPAD_STYLE_KEY = "owllm:creation-launchpad-style";
 const LAUNCHPAD_STYLES: ReadonlyArray<{ id: CreationLaunchpadStyle; label: string; detail: string }> = [
-  { id: "orbit", label: "Orbit", detail: "Cool glass" },
-  { id: "aurora", label: "Aurora", detail: "Soft color" },
-  { id: "graphite", label: "Graphite", detail: "Quiet contrast" },
+  { id: "signal", label: "Signal", detail: "Crisp console" },
+  { id: "lumen", label: "Lumen", detail: "Light interface" },
+  { id: "carbon", label: "Carbon", detail: "Industrial dark" },
+  { id: "prism", label: "Prism", detail: "Deep spectrum" },
 ];
 
 export function normalizeLaunchpadStyle(value: string | null): CreationLaunchpadStyle {
   return LAUNCHPAD_STYLES.some((style) => style.id === value)
     ? value as CreationLaunchpadStyle
-    : "orbit";
+    : "signal";
 }
 
 function storedLaunchpadStyle(): CreationLaunchpadStyle {
-  if (typeof window === "undefined") return "orbit";
+  if (typeof window === "undefined") return "signal";
   try {
     return normalizeLaunchpadStyle(window.localStorage.getItem(LAUNCHPAD_STYLE_KEY));
   } catch {
-    return "orbit";
+    return "signal";
   }
 }
 

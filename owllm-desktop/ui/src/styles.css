@@ -809,10 +809,9 @@
   }
 }
 
-/* Workspace launcher — deliberately compact and left-aligned. The hierarchy
-   borrows the useful patterns of modern developer tools (direct prompt,
-   explicit starting mode, quick access) without turning the app into a
-   marketing landing page. */
+/* Workspace launcher — the approved split layout, with four genuinely
+   different visual systems. Shared rules below own layout and interaction;
+   the final design-system layer owns shape, contrast, surface and type. */
 .creation-launchpad {
   --launch-a: #7dd3fc;
   --launch-b: #a78bfa;
@@ -833,22 +832,31 @@
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255,255,255,.045);
 }
 
-.creation-launchpad[data-style="aurora"] {
-  --launch-a: #ff9a7a;
-  --launch-b: #9a9cff;
-  --launch-c: #72d7a1;
-  --launch-a-rgb: 255, 154, 122;
-  --launch-b-rgb: 154, 156, 255;
-  --launch-c-rgb: 114, 215, 161;
+.creation-launchpad[data-style="lumen"] {
+  --launch-a: #0057ff;
+  --launch-b: #6c2cff;
+  --launch-c: #00a57a;
+  --launch-a-rgb: 0, 87, 255;
+  --launch-b-rgb: 108, 44, 255;
+  --launch-c-rgb: 0, 165, 122;
 }
 
-.creation-launchpad[data-style="graphite"] {
-  --launch-a: #d9e4f0;
-  --launch-b: #91a4ba;
-  --launch-c: #b9c8d8;
-  --launch-a-rgb: 217, 228, 240;
-  --launch-b-rgb: 145, 164, 186;
-  --launch-c-rgb: 185, 200, 216;
+.creation-launchpad[data-style="carbon"] {
+  --launch-a: #ffb000;
+  --launch-b: #ffcf66;
+  --launch-c: #e8e2d5;
+  --launch-a-rgb: 255, 176, 0;
+  --launch-b-rgb: 255, 207, 102;
+  --launch-c-rgb: 232, 226, 213;
+}
+
+.creation-launchpad[data-style="prism"] {
+  --launch-a: #28d7ff;
+  --launch-b: #8a5cff;
+  --launch-c: #ff4fa3;
+  --launch-a-rgb: 40, 215, 255;
+  --launch-b-rgb: 138, 92, 255;
+  --launch-c-rgb: 255, 79, 163;
 }
 
 .creation-launchpad__grid {
@@ -947,19 +955,27 @@
   box-shadow: 0 0 8px currentColor;
 }
 
-.creation-launchpad__style-option[data-style-option="orbit"] .creation-launchpad__style-swatch {
-  background: linear-gradient(135deg, #7dd3fc, #a78bfa);
-  color: #7dd3fc;
+.creation-launchpad__style-option[data-style-option="signal"] .creation-launchpad__style-swatch {
+  border-radius: 1px;
+  background: #18e0ff;
+  color: #18e0ff;
 }
 
-.creation-launchpad__style-option[data-style-option="aurora"] .creation-launchpad__style-swatch {
-  background: linear-gradient(135deg, #ff9a7a, #72d7a1);
-  color: #ff9a7a;
+.creation-launchpad__style-option[data-style-option="lumen"] .creation-launchpad__style-swatch {
+  border: 2px solid #fff;
+  background: #0057ff;
+  color: #0057ff;
 }
 
-.creation-launchpad__style-option[data-style-option="graphite"] .creation-launchpad__style-swatch {
-  background: linear-gradient(135deg, #e2e8f0, #718096);
-  color: #b9c8d8;
+.creation-launchpad__style-option[data-style-option="carbon"] .creation-launchpad__style-swatch {
+  border-radius: 0;
+  background: #ffb000;
+  color: #ffb000;
+}
+
+.creation-launchpad__style-option[data-style-option="prism"] .creation-launchpad__style-swatch {
+  background: linear-gradient(135deg, #28d7ff 10%, #8a5cff 52%, #ff4fa3 90%);
+  color: #8a5cff;
 }
 
 .creation-launchpad__eyebrow {
@@ -1248,6 +1264,384 @@
   .creation-launchpad__submit { min-width: 38px; padding: 0 10px; }
   .creation-launchpad__style-option { min-width: 28px; width: 28px; padding: 0; }
   .creation-launchpad__style-option > span:last-child { display: none; }
+}
+
+/* Launchpad design systems -------------------------------------------------
+   These are intentionally more than palettes. Each choice controls contrast,
+   geometry, surface depth, grid language and active-state treatment. */
+.creation-launchpad[data-style="signal"] {
+  --lp-bg: #070b10;
+  --lp-primary: #090f16;
+  --lp-rail: #0d141d;
+  --lp-panel: #0b121a;
+  --lp-panel-hover: #111c27;
+  --lp-ink: #f4fbff;
+  --lp-muted: #a9bdc9;
+  --lp-subtle: #657b88;
+  --lp-line: #243844;
+  --lp-accent: #18e0ff;
+  --lp-accent-2: #79f2c0;
+  --lp-accent-rgb: 24, 224, 255;
+  --lp-button-ink: #00171c;
+  --lp-radius: 4px;
+  --lp-control-radius: 2px;
+  --lp-shadow: 0 24px 64px rgba(0, 0, 0, .38);
+}
+
+.creation-launchpad[data-style="lumen"] {
+  --lp-bg: #f6f8fc;
+  --lp-primary: #ffffff;
+  --lp-rail: #edf1f7;
+  --lp-panel: #ffffff;
+  --lp-panel-hover: #e7edff;
+  --lp-ink: #101522;
+  --lp-muted: #48546a;
+  --lp-subtle: #78849a;
+  --lp-line: #c8d1e0;
+  --lp-accent: #0057ff;
+  --lp-accent-2: #6936e8;
+  --lp-accent-rgb: 0, 87, 255;
+  --lp-button-ink: #ffffff;
+  --lp-radius: 22px;
+  --lp-control-radius: 12px;
+  --lp-shadow: 0 22px 60px rgba(17, 35, 70, .22);
+}
+
+.creation-launchpad[data-style="carbon"] {
+  --lp-bg: #11110f;
+  --lp-primary: #181815;
+  --lp-rail: #20201b;
+  --lp-panel: #171713;
+  --lp-panel-hover: #292820;
+  --lp-ink: #f1eee6;
+  --lp-muted: #b8b2a5;
+  --lp-subtle: #777267;
+  --lp-line: #48443a;
+  --lp-accent: #ffb000;
+  --lp-accent-2: #ffd36a;
+  --lp-accent-rgb: 255, 176, 0;
+  --lp-button-ink: #191100;
+  --lp-radius: 1px;
+  --lp-control-radius: 1px;
+  --lp-shadow: 10px 10px 0 rgba(0, 0, 0, .32);
+}
+
+.creation-launchpad[data-style="prism"] {
+  --lp-bg: #070a19;
+  --lp-primary: #0b1024;
+  --lp-rail: #101630;
+  --lp-panel: #0c1229;
+  --lp-panel-hover: #151e41;
+  --lp-ink: #fbfaff;
+  --lp-muted: #bfc4df;
+  --lp-subtle: #737caa;
+  --lp-line: #2b3566;
+  --lp-accent: #28d7ff;
+  --lp-accent-2: #9a70ff;
+  --lp-accent-rgb: 40, 215, 255;
+  --lp-button-ink: #07101d;
+  --lp-radius: 20px;
+  --lp-control-radius: 10px;
+  --lp-shadow: 0 28px 72px rgba(0, 0, 0, .46);
+}
+
+.creation-launchpad[data-style] {
+  border: 1px solid var(--lp-line);
+  border-radius: var(--lp-radius);
+  background: var(--lp-bg);
+  box-shadow: var(--lp-shadow);
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__grid {
+  height: 100%;
+  opacity: .34;
+  background-image:
+    linear-gradient(rgba(var(--lp-accent-rgb), .10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(var(--lp-accent-rgb), .10) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: linear-gradient(115deg, #000, rgba(0,0,0,.28) 58%, transparent 92%);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__header {
+  border-color: var(--lp-line);
+  background: var(--lp-bg);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__eyebrow,
+.creation-launchpad[data-style] .creation-launchpad__status,
+.creation-launchpad[data-style] .creation-launchpad__choices-label,
+.creation-launchpad[data-style] .creation-launchpad__start-label {
+  color: var(--lp-subtle);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__spark {
+  border: 1px solid var(--lp-accent);
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-accent);
+  color: var(--lp-button-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-picker {
+  border-color: var(--lp-line);
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-panel);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-label,
+.creation-launchpad[data-style] .creation-launchpad__style-option {
+  color: var(--lp-subtle);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-option {
+  border-radius: max(1px, calc(var(--lp-control-radius) - 4px));
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-option:hover {
+  background: var(--lp-panel-hover);
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-option[aria-pressed="true"] {
+  border-color: var(--lp-accent);
+  background: rgba(var(--lp-accent-rgb), .15);
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__style-swatch {
+  width: 13px;
+  height: 9px;
+  box-shadow: none;
+}
+
+.creation-launchpad[data-style] .creation-launchpad__primary {
+  background: var(--lp-primary);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__kicker {
+  color: var(--lp-accent);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__title {
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__title em {
+  color: var(--lp-accent);
+  background: none;
+  -webkit-text-fill-color: currentColor;
+}
+
+.creation-launchpad[data-style] .creation-launchpad__subtitle {
+  color: var(--lp-muted);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__composer {
+  border: 1px solid var(--lp-line);
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-panel);
+  box-shadow: none;
+}
+
+.creation-launchpad[data-style] .creation-launchpad__composer:focus-within {
+  border-color: var(--lp-accent);
+  box-shadow: 0 0 0 3px rgba(var(--lp-accent-rgb), .14);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__composer textarea {
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__composer textarea::placeholder,
+.creation-launchpad[data-style] .creation-launchpad__enter-hint {
+  color: var(--lp-subtle);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__composer-bar {
+  border-color: var(--lp-line);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode-label {
+  color: var(--lp-muted);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__submit {
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-accent);
+  color: var(--lp-button-ink);
+  box-shadow: none;
+}
+
+.creation-launchpad[data-style] .creation-launchpad__actions button {
+  border-color: var(--lp-line);
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-panel);
+  color: var(--lp-muted);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__actions button:hover {
+  border-color: var(--lp-accent);
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__choices {
+  border-color: var(--lp-line);
+  background: var(--lp-rail);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode {
+  border: 1px solid transparent;
+  border-radius: var(--lp-control-radius);
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode:hover {
+  border-color: var(--lp-line);
+  background: var(--lp-panel-hover);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode.is-active {
+  border-color: var(--lp-accent);
+  background: rgba(var(--lp-accent-rgb), .10);
+  box-shadow: inset 3px 0 0 var(--lp-accent);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode-icon,
+.creation-launchpad[data-style] .creation-launchpad__mode:nth-child(2) .creation-launchpad__mode-icon,
+.creation-launchpad[data-style] .creation-launchpad__mode:nth-child(3) .creation-launchpad__mode-icon {
+  border-color: var(--lp-line);
+  border-radius: var(--lp-control-radius);
+  background: var(--lp-panel);
+  color: var(--lp-accent);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode-copy strong {
+  color: var(--lp-ink);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__mode-copy small,
+.creation-launchpad[data-style] .creation-launchpad__badge,
+.creation-launchpad[data-style] .creation-launchpad__mode-arrow {
+  color: var(--lp-muted);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__privacy-note {
+  border-color: var(--lp-line);
+  color: var(--lp-subtle);
+}
+
+.creation-launchpad[data-style] .creation-launchpad__privacy-note > span:first-child,
+.creation-launchpad[data-style] .creation-launchpad__privacy-note strong {
+  color: var(--lp-accent);
+}
+
+/* Signal: squared terminal precision and a scanning guide line. */
+.creation-launchpad[data-style="signal"] {
+  border-top: 2px solid var(--lp-accent);
+}
+
+.creation-launchpad[data-style="signal"] .creation-launchpad__header {
+  background: #080d13;
+  box-shadow: inset 0 -1px rgba(var(--lp-accent-rgb), .10);
+}
+
+.creation-launchpad[data-style="signal"] .creation-launchpad__kicker,
+.creation-launchpad[data-style="signal"] .creation-launchpad__choices-label,
+.creation-launchpad[data-style="signal"] .creation-launchpad__mode-copy strong {
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.creation-launchpad[data-style="signal"] .creation-launchpad__composer {
+  border-left: 3px solid var(--lp-accent);
+}
+
+/* Lumen: a true light UI, not pale glass over the dark theme. */
+.creation-launchpad[data-style="lumen"] .creation-launchpad__grid {
+  opacity: .32;
+  background-image: radial-gradient(rgba(var(--lp-accent-rgb), .22) .8px, transparent .8px);
+  background-size: 18px 18px;
+}
+
+.creation-launchpad[data-style="lumen"] .creation-launchpad__header {
+  background: #ffffff;
+}
+
+.creation-launchpad[data-style="lumen"] .creation-launchpad__composer,
+.creation-launchpad[data-style="lumen"] .creation-launchpad__mode.is-active {
+  box-shadow: 0 9px 24px rgba(27, 52, 96, .10);
+}
+
+.creation-launchpad[data-style="lumen"] .creation-launchpad__title em {
+  color: #0057ff;
+  text-decoration: underline;
+  text-decoration-color: #a8c2ff;
+  text-decoration-thickness: 6px;
+  text-underline-offset: 5px;
+}
+
+/* Carbon: flat, tactile, warm and deliberately non-glass. */
+.creation-launchpad[data-style="carbon"] {
+  border-left: 5px solid var(--lp-accent);
+}
+
+.creation-launchpad[data-style="carbon"] .creation-launchpad__grid {
+  opacity: .22;
+  background-image: repeating-linear-gradient(135deg, rgba(var(--lp-accent-rgb), .12) 0 1px, transparent 1px 16px);
+  background-size: auto;
+}
+
+.creation-launchpad[data-style="carbon"] .creation-launchpad__header,
+.creation-launchpad[data-style="carbon"] .creation-launchpad__composer-bar {
+  border-style: dashed;
+}
+
+.creation-launchpad[data-style="carbon"] .creation-launchpad__submit,
+.creation-launchpad[data-style="carbon"] .creation-launchpad__spark {
+  text-transform: uppercase;
+  box-shadow: 3px 3px 0 #000;
+}
+
+.creation-launchpad[data-style="carbon"] .creation-launchpad__mode.is-active {
+  box-shadow: inset 5px 0 0 var(--lp-accent);
+}
+
+/* Prism: saturated editorial color on deep navy, with restrained curves. */
+.creation-launchpad[data-style="prism"] {
+  border-color: #3a4380;
+  background: linear-gradient(145deg, #070a19, #0e1430);
+}
+
+.creation-launchpad[data-style="prism"] .creation-launchpad__grid {
+  opacity: .28;
+  background-image:
+    linear-gradient(120deg, rgba(40, 215, 255, .13) 1px, transparent 1px),
+    linear-gradient(60deg, rgba(154, 112, 255, .12) 1px, transparent 1px);
+  background-size: 46px 46px;
+}
+
+.creation-launchpad[data-style="prism"] .creation-launchpad__title em {
+  color: transparent;
+  background: linear-gradient(95deg, #28d7ff 5%, #9a70ff 56%, #ff4fa3 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.creation-launchpad[data-style="prism"] .creation-launchpad__composer {
+  border-color: #46538f;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .32);
+}
+
+.creation-launchpad[data-style="prism"] .creation-launchpad__submit {
+  background: linear-gradient(105deg, #28d7ff, #8a5cff);
+  color: #050914;
+}
+
+.creation-launchpad[data-style="prism"] .creation-launchpad__mode.is-active {
+  border-color: #5262aa;
+  background: linear-gradient(105deg, rgba(40, 215, 255, .13), rgba(138, 92, 255, .16));
+  box-shadow: inset 3px 0 0 #28d7ff;
 }
 
 /* Dark theme — the original look. Each token has a "semantic" name

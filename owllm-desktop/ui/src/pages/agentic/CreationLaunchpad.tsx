@@ -1,29 +1,5 @@
-import React, { type ReactNode, useState } from "react";
-
-export type CreationLaunchpadStyle = "signal" | "lumen" | "carbon" | "prism";
-
-const LAUNCHPAD_STYLE_KEY = "owllm:creation-launchpad-style";
-const LAUNCHPAD_STYLES: ReadonlyArray<{ id: CreationLaunchpadStyle; label: string; detail: string }> = [
-  { id: "signal", label: "Signal", detail: "Crisp console" },
-  { id: "lumen", label: "Lumen", detail: "Light interface" },
-  { id: "carbon", label: "Carbon", detail: "Industrial dark" },
-  { id: "prism", label: "Prism", detail: "Deep spectrum" },
-];
-
-export function normalizeLaunchpadStyle(value: string | null): CreationLaunchpadStyle {
-  return LAUNCHPAD_STYLES.some((style) => style.id === value)
-    ? value as CreationLaunchpadStyle
-    : "signal";
-}
-
-function storedLaunchpadStyle(): CreationLaunchpadStyle {
-  if (typeof window === "undefined") return "signal";
-  try {
-    return normalizeLaunchpadStyle(window.localStorage.getItem(LAUNCHPAD_STYLE_KEY));
-  } catch {
-    return "signal";
-  }
-}
+import React, { type ReactNode } from "react";
+import "./CreationLaunchpad.fold.css";
 
 export type CreationLaunchMode = {
   id: string;
@@ -79,22 +55,12 @@ export default function CreationLaunchpad({
   onSubmit,
 }: CreationLaunchpadProps) {
   const selected = modes.find((mode) => mode.id === selectedMode) ?? modes[0];
-  const [visualStyle, setVisualStyle] = useState<CreationLaunchpadStyle>(storedLaunchpadStyle);
-
-  const chooseVisualStyle = (style: CreationLaunchpadStyle) => {
-    setVisualStyle(style);
-    try {
-      window.localStorage.setItem(LAUNCHPAD_STYLE_KEY, style);
-    } catch {
-      // Presentation preferences must never block workspace creation.
-    }
-  };
 
   return (
     <section
       className="creation-launchpad"
       data-ui="CreationLaunchpad"
-      data-style={visualStyle}
+      data-design="fold"
     >
       <div className="creation-launchpad__grid" aria-hidden="true" />
 
@@ -106,23 +72,6 @@ export default function CreationLaunchpad({
           </div>
           <div className="creation-launchpad__header-tools">
             {status && <div className="creation-launchpad__status"><span aria-hidden="true" />{status}</div>}
-            <div className="creation-launchpad__style-picker" role="group" aria-label="Launchpad visual style">
-              <span className="creation-launchpad__style-label">Look</span>
-              {LAUNCHPAD_STYLES.map((style) => (
-                <button
-                  key={style.id}
-                  type="button"
-                  className="creation-launchpad__style-option"
-                  data-style-option={style.id}
-                  aria-pressed={visualStyle === style.id}
-                  title={`${style.label} — ${style.detail}`}
-                  onClick={() => chooseVisualStyle(style.id)}
-                >
-                  <span className="creation-launchpad__style-swatch" aria-hidden="true" />
-                  <span>{style.label}</span>
-                </button>
-              ))}
-            </div>
           </div>
         </header>
 

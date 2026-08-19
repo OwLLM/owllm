@@ -218,6 +218,10 @@ jobs:
         working-directory: owllm-desktop
         run: node scripts/generate-updater-manifest.verify.run.mjs
 
+      - name: Verify CreationLaunchpad regression checks
+        working-directory: owllm-desktop
+        run: npm run test:launchpad
+
       - name: Build the Vite UI
         working-directory: owllm-desktop
         run: npm run build

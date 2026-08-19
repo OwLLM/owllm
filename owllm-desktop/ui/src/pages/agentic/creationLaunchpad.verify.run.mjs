@@ -113,7 +113,11 @@ check("Fold turns the established chat aura around its own perimeter",
   && foldStyles.includes("0 0 20px rgba(127, 212, 255, .14)"));
 check("Fold carries the same turning aura around every right-column mode card",
   /\.creation-launchpad__mode\s*\{[\s\S]*?border:\s*1px solid transparent;[\s\S]*?conic-gradient\(\s*from var\(--fold-aura-angle\)[\s\S]*?\) border-box;[\s\S]*?animation:\s*fold-aura-border-turn 8s linear infinite;/.test(foldStyles)
-  && /\.creation-launchpad__mode\.is-active\s*\{[\s\S]*?border-color:\s*transparent;/.test(foldStyles));
+  && /\.creation-launchpad__mode\.is-active\s*\{[\s\S]*?border-color:\s*transparent;/.test(foldStyles)
+  && !/\.creation-launchpad__mode\.is-active\s*\{[\s\S]*?-5px\s+0\s+0/.test(foldStyles));
+check("Fold mode copy stays sharp and fully opaque",
+  /\.creation-launchpad__mode-copy strong\s*\{[\s\S]*?color:\s*var\(--fg-strong\);[\s\S]*?font-weight:\s*800;[\s\S]*?opacity:\s*1;/.test(foldStyles)
+  && /\.creation-launchpad__mode-copy small\s*\{[\s\S]*?color:\s*var\(--fg\);[\s\S]*?font-size:\s*11px;[\s\S]*?font-weight:\s*600;[\s\S]*?opacity:\s*1;/.test(foldStyles));
 check("Fold carries the visible spectrum into its outcome headline",
   ["--fold-spectrum-cyan", "--fold-spectrum-violet", "--fold-spectrum-rose", "--fold-spectrum-gold"].every((tone) =>
     foldStyles.includes(`var(${tone})`))

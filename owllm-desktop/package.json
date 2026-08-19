@@ -10,6 +10,7 @@
     "build": "vite build --config ui/vite.config.ts",
     "build:exe": "build-release.bat",
     "preview": "vite preview --config ui/vite.config.ts",
+    "test:launchpad": "node ui/src/pages/agentic/creationLaunchpad.verify.run.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

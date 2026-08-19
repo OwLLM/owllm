@@ -379,45 +379,55 @@
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode {
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .15), transparent 52%);
+  --fold-mode-surface: var(--fold-card);
   min-height: 77px;
-  border: 1px solid var(--fold-line);
+  border: 1px solid transparent;
   border-radius: 4px 19px 4px 19px;
   padding: 12px 14px;
   background:
-    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .15), transparent 52%),
-    var(--fold-card);
+    var(--fold-mode-wash) padding-box,
+    linear-gradient(var(--fold-mode-surface), var(--fold-mode-surface)) padding-box,
+    conic-gradient(
+      from var(--fold-aura-angle),
+      #3cf26b,
+      #ffd93c,
+      #ff9a3c,
+      #ff5c8a,
+      #b07cff,
+      #7fd4ff,
+      #3cf26b
+    ) border-box;
   color: var(--fold-ink);
   box-shadow:
     0 14px 30px rgba(0, 0, 0, .18),
+    0 0 12px rgba(176, 124, 255, .12),
+    0 0 18px rgba(127, 212, 255, .08),
     inset 0 1px 0 rgba(255, 255, 255, .035);
   transform-origin: left center;
   transition: border-color 190ms ease, background 190ms ease, box-shadow 190ms ease, transform 190ms ease;
+  animation: fold-aura-border-turn 8s linear infinite;
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2) {
   transform: translateX(19px);
-  border-color: color-mix(in srgb, var(--fold-tone-b) 45%, var(--fold-line));
-  background:
-    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), transparent 58%),
-    var(--fold-card);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), transparent 58%);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3) {
   transform: translateX(7px);
-  border-color: color-mix(in srgb, var(--fold-tone-c) 38%, var(--fold-line));
-  background:
-    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .17), transparent 58%),
-    var(--fold-card);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .17), transparent 58%);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode:hover {
-  border-color: color-mix(in srgb, var(--fold-tone-a) 58%, var(--fold-tone-b));
-  background:
-    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), rgba(var(--fold-accent-rgb), .14) 54%, transparent),
-    var(--fold-card);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), rgba(var(--fold-accent-rgb), .14) 54%, transparent);
   box-shadow:
     0 18px 38px rgba(0, 0, 0, .23),
-    0 0 24px rgba(var(--fold-accent-rgb), .07);
+    0 0 16px rgba(176, 124, 255, .20),
+    0 0 24px rgba(127, 212, 255, .13);
   transform: translateX(5px) rotateY(-1.2deg);
 }
 
@@ -430,14 +440,14 @@
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode.is-active {
-  border-color: color-mix(in srgb, var(--fold-tone-a) 68%, var(--fold-tone-b));
-  background:
-    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .30), rgba(var(--fold-accent-rgb), .22) 58%, rgba(var(--fold-accent-rgb), .10)),
-    color-mix(in srgb, var(--fold-card) 82%, var(--fold-tone-a) 18%);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .30), rgba(var(--fold-accent-rgb), .22) 58%, rgba(var(--fold-accent-rgb), .10));
+  --fold-mode-surface: color-mix(in srgb, var(--fold-card) 82%, var(--fold-tone-a) 18%);
   box-shadow:
     -5px 0 0 var(--fold-tone-a),
     0 18px 40px rgba(0, 0, 0, .25),
-    0 0 30px rgba(var(--fold-accent-rgb), .09);
+    0 0 18px rgba(176, 124, 255, .23),
+    0 0 30px rgba(127, 212, 255, .15);
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__mode-icon {
@@ -521,7 +531,8 @@
     transition: none;
   }
 
-  .creation-launchpad[data-design="fold"] {
+  .creation-launchpad[data-design="fold"],
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode {
     animation-duration: 48s;
   }
 }

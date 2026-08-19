@@ -108,6 +108,9 @@ check("Fold turns the established chat aura around its own perimeter",
   && ["#3cf26b", "#ffd93c", "#ff9a3c", "#ff5c8a", "#b07cff", "#7fd4ff"].every((colour) => foldStyles.includes(colour))
   && foldStyles.includes("0 0 12px rgba(176, 124, 255, .22)")
   && foldStyles.includes("0 0 20px rgba(127, 212, 255, .14)"));
+check("Fold carries the same turning aura around every right-column mode card",
+  /\.creation-launchpad__mode\s*\{[\s\S]*?border:\s*1px solid transparent;[\s\S]*?conic-gradient\(\s*from var\(--fold-aura-angle\)[\s\S]*?\) border-box;[\s\S]*?animation:\s*fold-aura-border-turn 8s linear infinite;/.test(foldStyles)
+  && /\.creation-launchpad__mode\.is-active\s*\{[\s\S]*?border-color:\s*transparent;/.test(foldStyles));
 check("Fold carries the visible spectrum into its outcome headline",
   ["--fold-spectrum-cyan", "--fold-spectrum-violet", "--fold-spectrum-rose", "--fold-spectrum-gold"].every((tone) =>
     foldStyles.includes(`var(${tone})`))

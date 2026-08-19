@@ -86,8 +86,8 @@ check("Fold receives every named and custom GUI colour through the live accent t
 check("Fold keeps accent-derived material surfaces legible in the light app theme",
   foldStyles.includes(':root[data-theme="light"] .creation-launchpad[data-design="fold"]')
   && foldStyles.includes("--fold-tone-a: color-mix(in srgb, var(--accent) 76%, black 24%);")
-  && foldStyles.includes("--fold-base: color-mix(in srgb, var(--accent) 7%, #f4f6fa 93%);")
-  && foldStyles.includes("--fold-card: color-mix(in srgb, var(--accent) 8%, #ffffff 92%);"));
+  && foldStyles.includes("--fold-base: color-mix(in srgb, var(--accent) 12%, #f4f6fa 88%);")
+  && foldStyles.includes("--fold-card: color-mix(in srgb, var(--accent) 14%, #ffffff 86%);"));
 check("Fold retains the installed app accent for its primary action",
   foldStyles.includes("color-mix(in srgb, var(--accent) 74%, var(--fold-tone-a) 26%)")
   && foldStyles.includes("color: var(--accent-fg);"));
@@ -97,10 +97,27 @@ check("Fold effects are ambient and interaction-specific",
   && foldStyles.includes("@keyframes fold-seam-breathe")
   && foldStyles.includes(".creation-launchpad__composer:focus-within")
   && foldStyles.includes(".creation-launchpad__mode:hover"));
+check("Fold turns a vivid spectral aura inside its clipped container",
+  component.includes('className="creation-launchpad__aura"')
+  && foldStyles.includes("@keyframes fold-aura-turn")
+  && foldStyles.includes("animation: fold-aura-turn 18s linear infinite;")
+  && foldStyles.includes("mix-blend-mode: screen;")
+  && ["#2fe4ff", "#7968ff", "#ff5ca8", "#ffc857"].every((colour) => foldStyles.includes(colour))
+  && foldStyles.includes("rgba(var(--fold-accent-rgb), .98)"));
+check("Fold carries the visible spectrum into its outcome headline",
+  ["--fold-spectrum-cyan", "--fold-spectrum-violet", "--fold-spectrum-rose", "--fold-spectrum-gold"].every((tone) =>
+    foldStyles.includes(`var(${tone})`))
+  && /\.creation-launchpad__title em\s*\{[\s\S]*?var\(--fold-spectrum-cyan\)[\s\S]*?var\(--fold-spectrum-violet\)[\s\S]*?var\(--fold-spectrum-rose\)[\s\S]*?var\(--fold-spectrum-gold\)/.test(foldStyles));
+check("Fold material planes retain visible accent colour",
+  foldStyles.includes("--fold-base: color-mix(in srgb, var(--accent) 28%")
+  && foldStyles.includes("--fold-plane: color-mix(in srgb, var(--accent) 36%")
+  && foldStyles.includes("--fold-rail: color-mix(in srgb, var(--accent) 43%")
+  && foldStyles.includes("--fold-card: color-mix(in srgb, var(--accent) 34%"));
 check("Fold motion respects reduced-motion preferences",
   foldStyles.includes("@media (prefers-reduced-motion: reduce)")
   && foldStyles.includes("animation: none;")
-  && foldStyles.includes("transition: none;"));
+  && foldStyles.includes("transition: none;")
+  && foldStyles.includes("animation-duration: 48s;"));
 check("Fold remains usable below rail and phone breakpoints",
   foldStyles.includes("@media (max-width: 980px)")
   && foldStyles.includes("grid-template-columns: repeat(3, minmax(0, 1fr));")

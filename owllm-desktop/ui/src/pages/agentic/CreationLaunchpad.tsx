@@ -63,6 +63,7 @@ export default function CreationLaunchpad({
       data-design="fold"
     >
       <div className="creation-launchpad__grid" aria-hidden="true" />
+      <div className="creation-launchpad__aura" aria-hidden="true" />
 
       <div className="creation-launchpad__content">
         <header className="creation-launchpad__header">

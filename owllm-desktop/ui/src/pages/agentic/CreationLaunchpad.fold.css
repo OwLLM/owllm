@@ -12,10 +12,14 @@
   --fold-tone-a: color-mix(in srgb, var(--accent) 88%, white 12%);
   --fold-tone-b: color-mix(in srgb, var(--accent) 72%, white 28%);
   --fold-tone-c: color-mix(in srgb, var(--accent) 82%, black 18%);
-  --fold-base: color-mix(in srgb, var(--accent) 18%, #0b0d14 82%);
-  --fold-plane: color-mix(in srgb, var(--accent) 23%, #111520 77%);
-  --fold-rail: color-mix(in srgb, var(--accent) 29%, #12141d 71%);
-  --fold-card: color-mix(in srgb, var(--accent) 25%, #20232d 75%);
+  --fold-base: color-mix(in srgb, var(--accent) 28%, #0b0d14 72%);
+  --fold-plane: color-mix(in srgb, var(--accent) 36%, #111520 64%);
+  --fold-rail: color-mix(in srgb, var(--accent) 43%, #12141d 57%);
+  --fold-card: color-mix(in srgb, var(--accent) 34%, #20232d 66%);
+  --fold-spectrum-cyan: #2fe4ff;
+  --fold-spectrum-violet: #7968ff;
+  --fold-spectrum-rose: #ff5ca8;
+  --fold-spectrum-gold: #ffc857;
   --fold-ink: var(--fg-strong);
   --fold-muted: var(--fg-muted);
   --fold-line: color-mix(in srgb, var(--border-strong) 68%, var(--fold-tone-a) 32%);
@@ -39,10 +43,10 @@
   --fold-tone-a: color-mix(in srgb, var(--accent) 76%, black 24%);
   --fold-tone-b: color-mix(in srgb, var(--accent) 62%, black 38%);
   --fold-tone-c: color-mix(in srgb, var(--accent) 86%, black 14%);
-  --fold-base: color-mix(in srgb, var(--accent) 7%, #f4f6fa 93%);
-  --fold-plane: color-mix(in srgb, var(--accent) 10%, #ffffff 90%);
-  --fold-rail: color-mix(in srgb, var(--accent) 14%, #f7f8fb 86%);
-  --fold-card: color-mix(in srgb, var(--accent) 8%, #ffffff 92%);
+  --fold-base: color-mix(in srgb, var(--accent) 12%, #f4f6fa 88%);
+  --fold-plane: color-mix(in srgb, var(--accent) 17%, #ffffff 83%);
+  --fold-rail: color-mix(in srgb, var(--accent) 22%, #f7f8fb 78%);
+  --fold-card: color-mix(in srgb, var(--accent) 14%, #ffffff 86%);
 }
 
 .creation-launchpad[data-design="fold"]::before {
@@ -65,6 +69,44 @@
   filter: blur(34px);
   animation: fold-aurora-drift 16s ease-in-out infinite alternate;
   pointer-events: none;
+}
+
+/* A full-spectrum light ring turns inside the clipped Fold surface. The live
+ * accent leads the spectrum, while the secondary wavelengths keep neutral,
+ * warm and cool app themes visibly colourful instead of monochrome. */
+.creation-launchpad[data-design="fold"] .creation-launchpad__aura {
+  position: absolute;
+  z-index: 4;
+  top: 51%;
+  left: 50%;
+  width: 112%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  opacity: .52;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  filter: saturate(1.35);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__aura::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: conic-gradient(
+    from 0turn,
+    rgba(var(--fold-accent-rgb), .98) 0deg,
+    var(--fold-spectrum-cyan) 58deg,
+    var(--fold-spectrum-violet) 132deg,
+    var(--fold-spectrum-rose) 205deg,
+    var(--fold-spectrum-gold) 278deg,
+    rgba(var(--fold-accent-rgb), .98) 360deg
+  );
+  -webkit-mask-image: radial-gradient(circle, transparent 0 52%, #000 62% 70%, transparent 80%);
+  mask-image: radial-gradient(circle, transparent 0 52%, #000 62% 70%, transparent 80%);
+  filter: blur(30px);
+  animation: fold-aura-turn 18s linear infinite;
 }
 
 .creation-launchpad[data-design="fold"] .creation-launchpad__grid {
@@ -223,7 +265,14 @@
 .creation-launchpad[data-design="fold"] .creation-launchpad__title em {
   display: block;
   width: fit-content;
-  background: linear-gradient(102deg, var(--fold-tone-a) 0%, var(--fold-tone-b) 56%, var(--fold-tone-c) 108%);
+  background: linear-gradient(
+    102deg,
+    var(--fold-tone-a) 0%,
+    var(--fold-spectrum-cyan) 26%,
+    var(--fold-spectrum-violet) 54%,
+    var(--fold-spectrum-rose) 78%,
+    var(--fold-spectrum-gold) 108%
+  );
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
@@ -455,6 +504,10 @@
   to { transform: translate3d(5%, 5%, 0) rotate(7deg) scale(1.05); opacity: .92; }
 }
 
+@keyframes fold-aura-turn {
+  to { transform: rotate(1turn); }
+}
+
 @keyframes fold-field-drift {
   from { transform: translate3d(-7px, -4px, 0); opacity: .55; }
   to { transform: translate3d(8px, 5px, 0); opacity: .76; }
@@ -485,6 +538,10 @@
   .creation-launchpad[data-design="fold"] .creation-launchpad__actions button,
   .creation-launchpad[data-design="fold"] .creation-launchpad__mode {
     transition: none;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__aura::before {
+    animation-duration: 48s;
   }
 }
 

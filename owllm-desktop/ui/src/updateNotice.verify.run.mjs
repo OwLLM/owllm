@@ -218,6 +218,20 @@ if (!shell) {
       shell.code.slice(shell.code.indexOf('data-ui="UpdateNotice"') - 400,
         shell.code.indexOf('data-ui="UpdateNotice"') + 400)));
 
+  const updateNoticeFrom = shell.code.indexOf('data-ui="UpdateNotice"');
+  const updateNoticeTo = shell.code.indexOf('</button>', updateNoticeFrom);
+  const updateNoticeCode = shell.code.slice(updateNoticeFrom, updateNoticeTo);
+  check("the balloon sits to the owl's right and 20px lower",
+    /left:\s*"calc\(50% \+ 92px\)",\s*top:\s*25/.test(updateNoticeCode)
+    && !/transform:\s*"translateX/.test(updateNoticeCode));
+
+  check("the manga tail leaves the balloon's LEFT edge toward the owl",
+    /left:\s*-17,\s*top:\s*20/.test(updateNoticeCode)
+    && /borderRight:\s*"18px solid #14181f"/.test(updateNoticeCode)
+    && /left:\s*-12,\s*top:\s*21/.test(updateNoticeCode)
+    && /borderRight:\s*"14px solid #fdfdf7"/.test(updateNoticeCode)
+    && !/right:\s*-1[27]/.test(updateNoticeCode));
+
   check("after 10s the offer RESTS in a badge, under the OWLLM mark",
     /data-ui="UpdateBadge"/.test(shell.code)
     && /⬆ Update available/.test(shell.src)

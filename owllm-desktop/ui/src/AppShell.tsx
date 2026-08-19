@@ -1397,11 +1397,12 @@ function ModeBar({
         </>
       )}
 
-      {/* Update announcement — the owl asks, comic-book style, on the LEFT of
-          its head so it can never collide with the World Chat bubble on the
-          right. Ten seconds, clickable, then it hands over to the badge under
-          the OWLLM mark. Deliberately not a modal: an update is an invitation,
-          not an interruption. */}
+      {/* Update announcement — the owl asks, comic-book style, from the LEFT
+          edge of a balloon beside its head. It sits below the World Chat chip,
+          so either notice can appear without covering the other. Ten seconds,
+          clickable, then it hands over to the badge under the OWLLM mark.
+          Deliberately not a modal: an update is an invitation, not an
+          interruption. */}
       {updateNotice && (
         <>
           <style>{`
@@ -1424,8 +1425,11 @@ function ModeBar({
             title={`OwLLM Desktop ${updateNotice} is available — click to update`}
             style={{
               position: "absolute",
-              left: "50%", top: 5,
-              transform: "translateX(-100%) translateX(-92px)",
+              // Keep placement out of `transform`: the entrance/nudge
+              // keyframes animate transform continuously and used to override
+              // it, silently moving the balloon away from its intended side.
+              left: "calc(50% + 92px)", top: 25,
+              transformOrigin: "left 28px",
               zIndex: 9,
               width: 268, textAlign: "left",
               padding: "9px 13px 10px",
@@ -1454,18 +1458,18 @@ function ModeBar({
             {/* The tail, aimed at the owl's beak. Two stacked triangles so the
                 ink outline reads as one continuous balloon edge. */}
             <span aria-hidden="true" style={{
-              position: "absolute", right: -17, top: 20,
+              position: "absolute", left: -17, top: 20,
               width: 0, height: 0,
               borderTop: "8px solid transparent",
               borderBottom: "11px solid transparent",
-              borderLeft: "18px solid #14181f",
+              borderRight: "18px solid #14181f",
             }} />
             <span aria-hidden="true" style={{
-              position: "absolute", right: -12, top: 21,
+              position: "absolute", left: -12, top: 21,
               width: 0, height: 0,
               borderTop: "6px solid transparent",
               borderBottom: "9px solid transparent",
-              borderLeft: "14px solid #fdfdf7",
+              borderRight: "14px solid #fdfdf7",
             }} />
           </button>
         </>
@@ -2096,15 +2100,22 @@ export default function AppShell() {
     subscribeUpdateAvailability,
     () => getUpdateAvailability().version,
   );
+  // TEMPORARY REVIEW HOOK — remove before commit. It keeps the real chrome
+  // surface visible in Vite so the user can approve its geometry in-browser.
+  const reviewUpdateVersion = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get("reviewUpdateBubble")
+    : null;
   const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   useEffect(() => {
-    if (!updateVersion) { setUpdateNotice(null); return; }
-    if (!shouldAnnounceUpdate(updateVersion)) return;
-    markUpdateAnnounced(updateVersion);
-    setUpdateNotice(updateVersion);
+    const noticeVersion = reviewUpdateVersion || updateVersion;
+    if (!noticeVersion) { setUpdateNotice(null); return; }
+    if (!reviewUpdateVersion && !shouldAnnounceUpdate(noticeVersion)) return;
+    if (!reviewUpdateVersion) markUpdateAnnounced(noticeVersion);
+    setUpdateNotice(noticeVersion);
+    if (reviewUpdateVersion) return;
     const t = window.setTimeout(() => setUpdateNotice(null), UPDATE_NOTICE_MS);
     return () => window.clearTimeout(t);
-  }, [updateVersion]);
+  }, [updateVersion, reviewUpdateVersion]);
 
   // A balloon is the OWL talking, so the owl has to be on screen while it does.
   // The decorative frame — which is where the owl lives, inline in HybridFrame

@@ -13,6 +13,8 @@ const agents = src("AgentsPage.tsx");
 const projectDialog = src("ProjectSettingsDialog.tsx");
 const styles = fs.readFileSync(path.resolve(here, "../../styles.css"), "utf8");
 const foldStyles = src("CreationLaunchpad.fold.css");
+const theme = fs.readFileSync(path.resolve(here, "../../theme.ts"), "utf8");
+const themePreferences = fs.readFileSync(path.resolve(here, "../../themePreferences.ts"), "utf8");
 
 const checks = [];
 function check(name, condition) {
@@ -67,30 +69,27 @@ check("Fold preserves overlapping spatial planes and luminous seam",
   && foldStyles.includes("clip-path: polygon(0 0, 94% 0, 100% 50%, 94% 100%, 0 100%);")
   && foldStyles.includes("margin-left: -42px;")
   && foldStyles.includes("animation: fold-seam-breathe"));
-check("Fold adds a deliberate three-colour spectral material",
-  foldStyles.includes("--fold-cyan: #5de8ff;")
-  && foldStyles.includes("--fold-violet: #a38aff;")
-  && foldStyles.includes("--fold-coral: #ffab91;")
-  && foldStyles.includes("linear-gradient(102deg, var(--fold-cyan) 0%, var(--fold-violet) 56%, var(--fold-coral) 108%)"));
-check("Fold uses saturated material surfaces instead of diluted gray overlays",
-  foldStyles.includes("--fold-base: #15182c;")
-  && foldStyles.includes("--fold-plane: #1c213b;")
-  && foldStyles.includes("--fold-rail: #201d39;")
-  && foldStyles.includes("--fold-card: #272a47;")
-  && foldStyles.includes("rgba(var(--fold-cyan-rgb), .30)")
-  && foldStyles.includes("rgba(var(--fold-violet-rgb), .22)"));
-check("Fold mode layers carry distinct cyan, violet and coral identities",
-  foldStyles.includes('var(--fold-violet) 45%, var(--fold-line)')
-  && foldStyles.includes('rgba(var(--fold-violet-rgb), .21)')
-  && foldStyles.includes('var(--fold-coral) 38%, var(--fold-line)')
-  && foldStyles.includes('rgba(var(--fold-coral-rgb), .17)'));
-check("Fold keeps its spectral colours legible in the light app theme",
+check("Fold derives its complete material palette from the active app accent",
+  foldStyles.includes("--fold-accent-rgb: var(--accent-rgb);")
+  && foldStyles.includes("--fold-tone-a: color-mix(in srgb, var(--accent)")
+  && foldStyles.includes("--fold-tone-b: color-mix(in srgb, var(--accent)")
+  && foldStyles.includes("--fold-tone-c: color-mix(in srgb, var(--accent)")
+  && ["base", "plane", "rail", "card"].every((token) =>
+    (foldStyles.match(new RegExp(`--fold-${token}: color-mix\\(in srgb, var\\(--accent\\)`, "g")) ?? []).length === 2)
+  && !/--fold-(?:cyan|violet|coral)/.test(foldStyles));
+check("Fold receives every named and custom GUI colour through the live accent tokens",
+  ["indigo", "amber", "red", "blue", "emerald", "slate"].every((key) =>
+    themePreferences.includes(`key: "${key}"`))
+  && themePreferences.includes("if (value && isHexColor(value)) return value;")
+  && theme.includes('root.style.setProperty("--accent", hex)')
+  && theme.includes('root.style.setProperty("--accent-rgb", rgb)'));
+check("Fold keeps accent-derived material surfaces legible in the light app theme",
   foldStyles.includes(':root[data-theme="light"] .creation-launchpad[data-design="fold"]')
-  && foldStyles.includes("--fold-cyan: #007f9d;")
-  && foldStyles.includes("--fold-violet: #674bd2;")
-  && foldStyles.includes("--fold-coral: #b94f38;"));
+  && foldStyles.includes("--fold-tone-a: color-mix(in srgb, var(--accent) 76%, black 24%);")
+  && foldStyles.includes("--fold-base: color-mix(in srgb, var(--accent) 7%, #f4f6fa 93%);")
+  && foldStyles.includes("--fold-card: color-mix(in srgb, var(--accent) 8%, #ffffff 92%);"));
 check("Fold retains the installed app accent for its primary action",
-  foldStyles.includes("color-mix(in srgb, var(--accent) 74%, var(--fold-cyan) 26%)")
+  foldStyles.includes("color-mix(in srgb, var(--accent) 74%, var(--fold-tone-a) 26%)")
   && foldStyles.includes("color: var(--accent-fg);"));
 check("Fold effects are ambient and interaction-specific",
   foldStyles.includes("@keyframes fold-aurora-drift")

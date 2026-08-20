@@ -1287,12 +1287,24 @@ pub async fn agent_device_exec(
         return Err("device is required (a paired device name or id)".into());
     }
     let self_pub = self_public_record()?;
-    let target = registry::list(&self_pub)
-        .into_iter()
+    // The list is freshness-ordered (registry::order_for_resolution), so the
+    // first name match is the machine's LIVE identity, not a stale re-pair twin.
+    let all = registry::list(&self_pub);
+    let target = all
+        .iter()
         .find(|d| {
             !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want))
         })
+        .cloned()
         .ok_or_else(|| format!("no paired device '{want}' — pair it on the Devices page first"))?;
+    let stale_twins = all
+        .iter()
+        .filter(|d| {
+            !d.is_self
+                && d.public.device_id != target.public.device_id
+                && d.public.name.eq_ignore_ascii_case(&target.public.name)
+        })
+        .count();
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::Shell,
@@ -1300,7 +1312,26 @@ pub async fn agent_device_exec(
         timeout_ms: 60_000,
         ..Default::default()
     };
-    send_request(&target.public.device_id, req).await
+    send_request(&target.public.device_id, req).await.map_err(|e| {
+        // Re-pairing mints a new device_id, so one name can carry dead twins;
+        // say exactly which identity was dialed and how fresh it was, or an
+        // unreachable-but-online machine is undiagnosable from the error alone.
+        let heartbeat = target
+            .public
+            .published_at
+            .as_deref()
+            .or(target.last_seen.as_deref())
+            .unwrap_or("never");
+        let twins = if stale_twins > 0 {
+            format!("; {stale_twins} older identit{} share this name (stale re-pair leftovers, skipped)",
+                if stale_twins == 1 { "y" } else { "ies" })
+        } else {
+            String::new()
+        };
+        let id8 = &target.public.device_id[..target.public.device_id.len().min(8)];
+        format!("{e} [dialed '{}' identity {id8}…, last heartbeat {heartbeat}{twins}]",
+            target.public.name)
+    })
 }
 
 /// Open an interactive remote shell (SSH-like). Returns the session id.

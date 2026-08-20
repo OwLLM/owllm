@@ -338,7 +338,19 @@ export async function refreshBrowserState(): Promise<void> {
     const on = await invoke<boolean>("device_agents_allowed_get");
     if (on) {
       const devs = await invoke<Array<{ name: string; is_self: boolean }>>("devices_list").catch(() => []);
-      const peers = devs.filter((d) => !d.is_self).map((d) => d.name);
+      // devices_list is freshness-ordered and re-pairing mints new identities,
+      // so one machine can appear many times under one name — advertise each
+      // name once (first occurrence = the live identity).
+      const seen = new Set<string>();
+      const peers = devs
+        .filter((d) => !d.is_self)
+        .map((d) => d.name)
+        .filter((n) => {
+          const k = n.toLowerCase();
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
       _browserStateLine +=
         " REMOTE DEVICES — you CAN run shell commands on the user's OTHER paired machines with the device_exec tool " +
         "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). You can also SEE another " +

@@ -55,11 +55,34 @@ check(
     && sandbox.includes("WSL command failed:"),
   "WSL failures expose a precise reason instead of a generic WSL-starting message",
 );
+// WarmCheckResult crosses the Tauri boundary through serde. It is
+// `#[serde(rename_all = "camelCase")]`, so the fallback field arrives as
+// `hostFallback` — and the UI read `host_fallback` for two releases, making the
+// host-fallback branch permanently `undefined`. Every WSL start failure
+// (0x800705aa CreateVm on a resource-starved host) therefore BLOCKED the run
+// instead of degrading to the real Windows folder. `reachable`/`reason` are
+// single words, so they survived the mismatch and the banner still looked
+// informative — which is exactly why this hid for so long. Pin the casing
+// contract itself, not a literal type line: assert the Rust rename attribute
+// and that the UI reads the camelCase spelling and NEVER the snake_case one.
 check(
-  agents.includes("type WarmCheckResult = { reachable: boolean; host_fallback: string | null; reason: string | null }")
+  /#\[serde\(rename_all = "camelCase"\)\]\s*pub struct WarmCheckResult/.test(sandbox),
+  "WarmCheckResult declares the camelCase wire contract it is read through",
+);
+check(
+  /type WarmCheckResult = \{[^}]*hostFallback: string \| null[^}]*\}/.test(agents)
+    && /check\?\.hostFallback/.test(agents)
+    && !/host_fallback/.test(agents)
     && /effectiveRunCwd = fallback/.test(agents)
     && /projectCwd = effectiveRunCwd/.test(agents),
-  "UI falls back to the host folder and runs the rest of dispatch from it",
+  "UI reads the camelCase fallback field and runs the rest of dispatch from it",
+);
+// A WEDGED WSL must degrade like a failed one — the timeout arm returning
+// host_fallback: None was the last path that could still block a run outright.
+check(
+  /timed out — the distro may be starting/.test(sandbox)
+    && /host_fallback: wsl_unc_to_host_path\(&cwd_for_timeout\)/.test(sandbox),
+  "a timed-out WSL warm/check still offers the host folder instead of blocking",
 );
 check(
   agents.includes("WSL isolation path not reachable — running on the host folder")

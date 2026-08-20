@@ -2586,6 +2586,13 @@ pub struct WarmCheckResult {
     pub reason: Option<String>,
 }
 
+/// Off Windows there is no WSL UNC form, so there is never a host twin to fall
+/// back to. Defined so the callers below need no `cfg` fork.
+#[cfg(not(windows))]
+fn wsl_unc_to_host_path(_unc: &str) -> Option<String> {
+    None
+}
+
 #[cfg(windows)]
 fn wsl_unc_to_host_path(unc: &str) -> Option<String> {
     let norm = unc.replace('\\', "/");
@@ -2624,6 +2631,10 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<WarmCheckResu
             reason: Some("No project folder is set.".into()),
         });
     };
+    // Kept for the timeout arm below: a WEDGED WSL must degrade to the host
+    // folder exactly like a failed one, otherwise a stuck distro is the one
+    // remaining way for isolation to block a run outright.
+    let cwd_for_timeout = cwd.clone();
     let fut = tokio::task::spawn_blocking(move || -> WarmCheckResult {
         #[cfg(windows)]
         {
@@ -2684,7 +2695,8 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<WarmCheckResu
         Ok(Ok(v)) => Ok(v),
         Ok(Err(_)) | Err(_) => Ok(WarmCheckResult {
             reachable: false,
-            host_fallback: None,
+            host_fallback: wsl_unc_to_host_path(&cwd_for_timeout)
+                .filter(|p| std::path::Path::new(p).is_dir()),
             reason: Some("WSL warm/check timed out — the distro may be starting.".into()),
         }),
     }

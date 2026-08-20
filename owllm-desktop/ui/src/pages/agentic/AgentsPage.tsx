@@ -10402,7 +10402,14 @@ export function AgentsPage({
     // a clear message instead of sending agents into an empty box. Files on disk are
     // never touched — this is only about reachability.
     if (runCwd && runCwd.trim()) {
-      type WarmCheckResult = { reachable: boolean; host_fallback: string | null; reason: string | null };
+      // Field names are camelCase: WarmCheckResult is `#[serde(rename_all =
+      // "camelCase")]`, so Rust sends `hostFallback`. Reading the snake_case
+      // spelling here made the fallback branch below permanently undefined —
+      // every WSL start failure blocked the run instead of degrading to the
+      // host folder. `reachable`/`reason` are single words, so they kept
+      // working, which is why the banner showed a precise reason and still
+      // never fell back.
+      type WarmCheckResult = { reachable: boolean; hostFallback: string | null; reason: string | null };
       const warmOk = (r: WarmCheckResult | null) => !!r && r.reachable;
       let check = await invoke<WarmCheckResult>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => null);
       if (!warmOk(check)) {
@@ -10412,7 +10419,7 @@ export function AgentsPage({
       if (!warmOk(check)) {
         // WSL-isolated path is unreachable. If the original host folder exists,
         // run there un-isolated with a clear notice instead of failing completely.
-        const fallback = check?.host_fallback;
+        const fallback = check?.hostFallback;
         if (fallback && fallback.trim() && fallback !== runCwd) {
           const notice: GoalMsg = {
             role: "system",

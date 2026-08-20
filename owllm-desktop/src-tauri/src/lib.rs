@@ -457,11 +457,13 @@ pub fn run() {
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
             personal_agent_teams::resume_pending(app.handle().clone());
-            // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
-            // with large regenerable caches, trim them so the .vhdx doesn't balloon
-            // unattended. Background + best-effort — never cold-starts WSL, never
-            // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
-            std::thread::spawn(sandbox::auto_housekeep_startup);
+            // Global disk janitor: sweeps EVERY app-owned fleet worktree (open
+            // or not) for stale build caches and release staging, and runs the
+            // WSL housekeeping (tool caches + stale build targets + fstrim) —
+            // first pass shortly after launch, then twice a day. Background +
+            // best-effort — never cold-starts WSL, never blocks startup, no
+            // admin, no sparse (which modern WSL flags unsafe).
+            fleet::spawn_global_disk_janitor();
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged without
             // F12 console acrobatics. Never write beside the executable:

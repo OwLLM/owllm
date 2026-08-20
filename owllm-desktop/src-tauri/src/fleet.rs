@@ -796,6 +796,110 @@ const BUILD_CACHE_LIVE_SECS: u64 = 60 * 60;
 /// short enough that a parked page stops hoarding gigabytes.
 const PAGE_CACHE_IDLE_SECS: u64 = 24 * 60 * 60;
 
+/// Release-packaging STAGING directories. `.cache` at a packaging root holds
+/// `work/` + `upstream/` payload staging (measured at 17.5 GB in one worktree:
+/// duplicated Whisper models and Torch wheels). It is git-ignored, regenerated
+/// by the next packaging run, and — critically — was invisible to every sweep:
+/// not a build-cache name, and it grew inside the ACTIVE worktree that the
+/// page-open sweep deliberately skips. Reclaimed only by the global janitor,
+/// on the long staging window.
+const STAGING_DIR_NAMES: &[&str] = &[".cache"];
+
+/// The one `dist/` child that must survive every sweep: `dist/modules/` is the
+/// module payload cache — multi-GB archives build-modules.ps1 DOWNLOADS (hours
+/// to re-fetch), which build-release.bat itself refuses to regenerate while its
+/// manifest exists. Everything else under `dist/` is packaging output the next
+/// release rebuilds. `dist` itself is never removed, only its stale children.
+const DIST_KEEP_CHILD: &str = "modules";
+
+/// Staging must sit untouched a full week before the janitor takes it. A
+/// release being actively iterated keeps its staging warm (mtime-fresh); an
+/// abandoned one stops costing double-digit gigabytes forever.
+const STAGING_IDLE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Reclaim release-packaging staging from `worktree`: `.cache` directories and
+/// stale `dist/` children other than `dist/modules`. Same safety contract as
+/// `reclaim_build_caches`: git must confirm the path is ignored, unreadable
+/// mtimes count as live, directories leave rename-first via `evict_cache_dir`,
+/// and quarantine wreckage from an interrupted sweep is retried. `min_idle_secs`
+/// is a parameter (callers pass `STAGING_IDLE_SECS`) so tests can exercise the
+/// walk without waiting a week.
+fn reclaim_staging(worktree: &Path, min_idle_secs: u64) -> u32 {
+    fn stale_and_ignored(root: &Path, path: &Path, min_idle_secs: u64) -> bool {
+        let ignored = git(root, &["check-ignore", "-q", &path.to_string_lossy()])
+            .map(|(ok, _, _)| ok)
+            .unwrap_or(false);
+        // Can't read the mtime → assume live → keep, mirroring the build sweep.
+        let recent = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|e| e.as_secs() < min_idle_secs)
+            .unwrap_or(true);
+        ignored && !recent
+    }
+    fn walk(root: &Path, dir: &Path, depth: u32, min_idle_secs: u64, removed: &mut u32) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name();
+            let path = entry.path();
+            if name == ".git" {
+                continue;
+            }
+            if name.to_string_lossy().starts_with(QUARANTINE_PREFIX) {
+                let _ = std::fs::remove_dir_all(&path);
+                continue;
+            }
+            let Some(n) = name.to_str() else { continue };
+            if STAGING_DIR_NAMES.contains(&n) {
+                if stale_and_ignored(root, &path, min_idle_secs) && evict_cache_dir(&path) {
+                    *removed += 1;
+                }
+                continue; // never descend into staging
+            }
+            if n == "dist" {
+                // `dist` itself stays; stale children other than the downloaded
+                // module payload cache are staging.
+                if let Ok(children) = std::fs::read_dir(&path) {
+                    for c in children.flatten() {
+                        if c.file_name() == DIST_KEEP_CHILD {
+                            continue;
+                        }
+                        let cp = c.path();
+                        if !stale_and_ignored(root, &cp, min_idle_secs) {
+                            continue;
+                        }
+                        let is_dir = c.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        // Files (installer bundles etc.) unlink atomically; a
+                        // locked one just stays for the next pass.
+                        if is_dir && evict_cache_dir(&cp) {
+                            *removed += 1;
+                        } else if !is_dir && std::fs::remove_file(&cp).is_ok() {
+                            *removed += 1;
+                        }
+                    }
+                }
+                continue; // never treat dist itself as reclaimable
+            }
+            if BUILD_CACHE_DIR_NAMES.contains(&n) {
+                continue; // the build-cache sweep's job — never descend
+            }
+            walk(root, &path, depth - 1, min_idle_secs, removed);
+        }
+    }
+    let mut removed = 0;
+    walk(worktree, worktree, 4, min_idle_secs, &mut removed);
+    removed
+}
+
 /// Suppresses the console window that a spawned `git` would otherwise FLASH on
 /// Windows. Without this every git call (and fleet_worktree_create makes ~6)
 /// pops a black CMD window — the storm of flashing the user hit when opening a
@@ -2140,6 +2244,101 @@ pub async fn fleet_reclaim_page_caches(
 }
 
 // ------------------------------------------------------------------
+// 5b. GLOBAL DISK JANITOR — the app's total footprint stays bounded
+// ------------------------------------------------------------------
+//
+// Every earlier reclaim was scoped to ONE project and triggered by USING that
+// project (orphan sweep at team-run start, page-cache sweep at page open). A
+// project the user stops opening was therefore never swept again, and release
+// staging in the ACTIVE worktree was invisible to all of them — which is how a
+// machine lost 21 GB to one worktree's `.cache`/`dist` and kept multi-GB
+// caches across parked projects. The janitor closes that class of hole: it
+// enumerates the app-owned fleet root DIRECTLY (every project, every page,
+// open or not) on a schedule, and applies only the already-guarded reclaimers.
+// It never touches the user's own checkouts — only worktrees the app created.
+
+/// Every producer of multi-GB artifacts this app creates, paired with the
+/// cleaner that bounds it. The disk-janitor release gate parses this table and
+/// fails when a row names a function that no longer exists — so a future
+/// feature that writes big artifacts must register its retention here or it
+/// cannot ship. Format: (what grows, the `fn` that reclaims it).
+pub(crate) const DISK_PRODUCERS: &[(&str, &str)] = &[
+    ("fleet worktree build caches (target, node_modules)", "reclaim_build_caches"),
+    ("release staging in fleet worktrees (.cache, dist/* except dist/modules)", "reclaim_staging"),
+    ("crashed team-run worktrees (owllm-fleet/*)", "fleet_cleanup_orphans"),
+    ("parked Code-page worktree caches at page open", "fleet_reclaim_page_caches"),
+    ("all fleet worktrees on a schedule, open or not", "janitor_sweep_all"),
+    ("WSL distro tool caches (uv/npm/pip)", "trim_impl"),
+    ("WSL linux-build workspace targets (~/owllm-build)", "trim_impl"),
+];
+
+/// The janitor's idle window for build caches. Deliberately LONGER than the
+/// page-open sweep's day: the janitor cannot know which pages are open in
+/// other app instances, so it only takes caches silent for a full week. A live
+/// dev server is additionally protected by the rename-first evict — on Windows
+/// a directory with open handles refuses the rename and is left untouched.
+const JANITOR_BUILD_IDLE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Let launch finish before the first pass; then repeat twice a day so a
+/// long-lived session is swept without ever being restarted.
+const JANITOR_STARTUP_DELAY_SECS: u64 = 120;
+const JANITOR_INTERVAL_SECS: u64 = 12 * 60 * 60;
+
+/// One janitor pass over every app-owned fleet worktree on this machine:
+/// `<fleet_root>/<repo>/<run>/<leaf>`. Reclaims build caches (week-idle) and
+/// release staging from each. Only leaf directories carrying a `.git` link are
+/// touched — anything else under the fleet root is left alone. Best-effort;
+/// returns (build caches, staging entries) removed.
+pub(crate) fn janitor_sweep_all() -> (u32, u32) {
+    let Some(root) = fleet_root() else {
+        return (0, 0);
+    };
+    let (mut caches, mut staging) = (0u32, 0u32);
+    let dirs = |p: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(p)
+            .map(|it| {
+                it.flatten()
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for repo in dirs(&root) {
+        for run in dirs(&repo) {
+            for leaf in dirs(&run) {
+                if !leaf.join(".git").exists() {
+                    continue; // not a worktree the app created
+                }
+                caches += reclaim_build_caches(&leaf, JANITOR_BUILD_IDLE_SECS);
+                staging += reclaim_staging(&leaf, STAGING_IDLE_SECS);
+            }
+        }
+    }
+    (caches, staging)
+}
+
+/// Spawn the janitor thread: first pass after a short startup delay, then one
+/// pass every interval. Each pass also runs the WSL housekeeping (tool caches +
+/// stale linux-build targets + fstrim) so the vhdx is bounded by the same
+/// clock. A panic in one pass is contained — the thread survives to the next.
+pub(crate) fn spawn_global_disk_janitor() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(JANITOR_STARTUP_DELAY_SECS));
+        loop {
+            let _ = std::panic::catch_unwind(|| {
+                let (caches, staging) = janitor_sweep_all();
+                if caches + staging > 0 {
+                    eprintln!("[owllm] disk janitor reclaimed {caches} build caches, {staging} staging entries");
+                }
+                crate::sandbox::auto_housekeep();
+            });
+            std::thread::sleep(std::time::Duration::from_secs(JANITOR_INTERVAL_SECS));
+        }
+    });
+}
+
+// ------------------------------------------------------------------
 // 6. READ-LAST-COMMIT-FILES — for the auto-doc trigger after merge
 // ------------------------------------------------------------------
 
@@ -2189,6 +2388,58 @@ mod tests {
             args.join(" "),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn staging_reclaim_takes_ignored_stale_and_keeps_dist_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main"]);
+        fs::write(tmp.path().join(".gitignore"), ".cache/\ndist/\n").unwrap();
+        fs::create_dir_all(tmp.path().join(".cache/work")).unwrap();
+        fs::write(tmp.path().join(".cache/work/payload.bin"), b"x").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/modules")).unwrap();
+        fs::write(tmp.path().join("dist/modules/manifest.json"), b"{}").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/bundle")).unwrap();
+        fs::write(tmp.path().join("dist/bundle/app.bin"), b"x").unwrap();
+        fs::write(tmp.path().join("dist/OwLLM-setup.exe"), b"x").unwrap();
+
+        // Everything is younger than a huge idle window → live → untouched.
+        assert_eq!(super::reclaim_staging(tmp.path(), u64::MAX), 0);
+        assert!(tmp.path().join(".cache/work/payload.bin").exists());
+        assert!(tmp.path().join("dist/bundle").exists());
+
+        // Idle window zero → stale by definition → staging goes, modules stay.
+        let removed = super::reclaim_staging(tmp.path(), 0);
+        assert!(removed >= 3, "expected .cache + dist/bundle + installer, got {removed}");
+        assert!(!tmp.path().join(".cache").exists());
+        assert!(!tmp.path().join("dist/bundle").exists());
+        assert!(!tmp.path().join("dist/OwLLM-setup.exe").exists());
+        assert!(tmp.path().join("dist/modules/manifest.json").exists());
+        assert!(tmp.path().join("dist").exists());
+    }
+
+    #[test]
+    fn staging_reclaim_never_takes_unignored_paths() {
+        // No .gitignore: the same names now hold tracked-or-untracked USER data,
+        // and the walker must refuse them even when stale.
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main"]);
+        fs::create_dir_all(tmp.path().join(".cache")).unwrap();
+        fs::write(tmp.path().join(".cache/notes.txt"), b"mine").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/bundle")).unwrap();
+        assert_eq!(super::reclaim_staging(tmp.path(), 0), 0);
+        assert!(tmp.path().join(".cache/notes.txt").exists());
+        assert!(tmp.path().join("dist/bundle").exists());
+    }
+
+    #[test]
+    fn disk_producers_registry_is_well_formed() {
+        // The release gate resolves each cleaner name against the sources; this
+        // test pins the registry itself: non-empty, no blank cells.
+        assert!(super::DISK_PRODUCERS.len() >= 6);
+        for (what, cleaner) in super::DISK_PRODUCERS {
+            assert!(!what.trim().is_empty() && !cleaner.trim().is_empty());
+        }
     }
 
     fn init_merge_repo() -> tempfile::TempDir {

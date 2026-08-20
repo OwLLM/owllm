@@ -1187,6 +1187,10 @@ pub struct SandboxDisk {
     pub cache_bytes: u64,
     /// Total size of OwLLM sandbox project COPIES (~/owllm/*).
     pub copies_bytes: u64,
+    /// Linux-release build workspace (~/owllm-build) — cargo targets from WSL
+    /// builds, the single biggest silent grower (30 GB measured). Stale targets
+    /// are pruned by the janitor after a week idle.
+    pub build_bytes: u64,
     /// Meaningful only where there's a managed VM disk (Windows/WSL today).
     pub available: bool,
     /// `.wslconfig` has `sparseVhd=true`, so freed space auto-returns to Windows
@@ -1262,6 +1266,7 @@ for d in "$HOME/.cache/uv" "$HOME/.npm/_cacache" "$HOME/.cache/pip" "$HOME/.cach
 done
 echo "OWLLM_CACHE=$c"
 if [ -d "$HOME/owllm" ]; then echo "OWLLM_COPIES=$(du -sb "$HOME/owllm" 2>/dev/null | cut -f1)"; else echo "OWLLM_COPIES=0"; fi
+if [ -d "$HOME/owllm-build" ]; then echo "OWLLM_BUILD=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)"; else echo "OWLLM_BUILD=0"; fi
 "#;
 
 #[cfg(windows)]
@@ -1281,19 +1286,21 @@ fn disk_usage_impl(distro: Option<String>) -> SandboxDisk {
         Some((p, b)) => (Some(p), b),
         None => (None, 0),
     };
-    let (cache_bytes, copies_bytes) =
+    let (cache_bytes, copies_bytes, build_bytes) =
         match crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT) {
             Ok(out) => (
                 parse_sentinel(&out, "OWLLM_CACHE="),
                 parse_sentinel(&out, "OWLLM_COPIES="),
+                parse_sentinel(&out, "OWLLM_BUILD="),
             ),
-            Err(_) => (0, 0),
+            Err(_) => (0, 0, 0),
         };
     SandboxDisk {
         vhdx_bytes,
         vhdx_path,
         cache_bytes,
         copies_bytes,
+        build_bytes,
         available: true,
         sparse_config: wslconfig_has_sparse(),
     }
@@ -1927,8 +1934,26 @@ fn running_distros() -> Vec<String> {
     }
 }
 
-/// Clear caches when large (or `force`d by the manual button), then fstrim.
-/// Returns bytes of cache freed. Safe: regenerable caches only, no admin.
+/// Stale Linux-build workspaces: any `target/` under the app-owned
+/// `~/owllm-build` with no file touched for a week is deleted. The warm cargo
+/// cache of an active release week survives (mtime-fresh); an abandoned one
+/// stops costing tens of GB forever. Rooted at `$HOME/owllm-build` only —
+/// never a user directory. Reports bytes freed via before/after `du`.
+#[cfg(windows)]
+const PRUNE_BUILD_WORKSPACE_SCRIPT: &str = r#"b=0; a=0
+if [ -d "$HOME/owllm-build" ]; then
+  b=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)
+  find "$HOME/owllm-build" -mindepth 2 -maxdepth 6 -type d -name target 2>/dev/null | while IFS= read -r t; do
+    if [ -z "$(find "$t" -newermt "7 days ago" -print -quit 2>/dev/null)" ]; then rm -rf "$t"; fi
+  done
+  a=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)
+fi
+echo "OWLLM_BUILD_FREED=$(( ${b:-0} - ${a:-0} ))"
+"#;
+
+/// Clear caches when large (or `force`d by the manual button), prune stale
+/// linux-build targets, then fstrim. Returns bytes freed. Safe: regenerable
+/// caches and app-owned build output only, no admin.
 #[cfg(windows)]
 fn trim_impl(distro: Option<String>, force: bool) -> Result<u64, String> {
     let distro = resolve_linux_distro(distro)?;
@@ -1941,6 +1966,11 @@ fn trim_impl(distro: Option<String>, force: bool) -> Result<u64, String> {
         if let Ok(out) = crate::wsl::run_in_distro_script(&distro, CLEAR_CACHE_SCRIPT) {
             freed = parse_sentinel(&out, "OWLLM_FREED=");
         }
+    }
+    // Week-stale cargo targets in the linux-build workspace — the 30 GB class
+    // of growth no cache-clean ever saw.
+    if let Ok(out) = crate::wsl::run_in_distro_script(&distro, PRUNE_BUILD_WORKSPACE_SCRIPT) {
+        freed += parse_sentinel(&out, "OWLLM_BUILD_FREED=");
     }
     // fstrim (root — no password in WSL) marks the freed blocks reclaimable. Safe
     // on any WSL and a no-op when there's nothing to trim.
@@ -1958,11 +1988,12 @@ fn trim_impl(_distro: Option<String>, _force: bool) -> Result<u64, String> {
     Ok(0)
 }
 
-/// Startup housekeeping: if a real Linux distro is ALREADY running and its caches
-/// are over the threshold, clear them. Best-effort, background, never cold-starts
-/// WSL. Keeps a long-lived session's sandbox from ballooning unattended.
+/// Periodic housekeeping (called by the global disk janitor on its schedule):
+/// if a real Linux distro is ALREADY running, clear oversized caches and prune
+/// stale build targets. Best-effort, background, never cold-starts WSL just to
+/// housekeep. Keeps a long-lived session's sandbox from ballooning unattended.
 #[cfg(windows)]
-pub(crate) fn auto_housekeep_startup() {
+pub(crate) fn auto_housekeep() {
     let Some(distro) = crate::wsl::best_linux_distro() else {
         return;
     };
@@ -1973,7 +2004,7 @@ pub(crate) fn auto_housekeep_startup() {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn auto_housekeep_startup() {}
+pub(crate) fn auto_housekeep() {}
 
 /// Trim the sandbox now — clear regenerable caches + fstrim. Safe (no restart,
 /// no admin, no data risk). `force` clears caches regardless of size. Returns

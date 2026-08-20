@@ -2100,22 +2100,15 @@ export default function AppShell() {
     subscribeUpdateAvailability,
     () => getUpdateAvailability().version,
   );
-  // TEMPORARY REVIEW HOOK — remove before commit. It keeps the real chrome
-  // surface visible in Vite so the user can approve its geometry in-browser.
-  const reviewUpdateVersion = import.meta.env.DEV
-    ? new URLSearchParams(window.location.search).get("reviewUpdateBubble")
-    : null;
   const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   useEffect(() => {
-    const noticeVersion = reviewUpdateVersion || updateVersion;
-    if (!noticeVersion) { setUpdateNotice(null); return; }
-    if (!reviewUpdateVersion && !shouldAnnounceUpdate(noticeVersion)) return;
-    if (!reviewUpdateVersion) markUpdateAnnounced(noticeVersion);
-    setUpdateNotice(noticeVersion);
-    if (reviewUpdateVersion) return;
+    if (!updateVersion) { setUpdateNotice(null); return; }
+    if (!shouldAnnounceUpdate(updateVersion)) return;
+    markUpdateAnnounced(updateVersion);
+    setUpdateNotice(updateVersion);
     const t = window.setTimeout(() => setUpdateNotice(null), UPDATE_NOTICE_MS);
     return () => window.clearTimeout(t);
-  }, [updateVersion, reviewUpdateVersion]);
+  }, [updateVersion]);
 
   // A balloon is the OWL talking, so the owl has to be on screen while it does.
   // The decorative frame — which is where the owl lives, inline in HybridFrame

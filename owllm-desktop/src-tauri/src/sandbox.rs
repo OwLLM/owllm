@@ -1512,6 +1512,67 @@ fn wslconfig_key_gb(text: &str, key: &str) -> Option<u32> {
     None
 }
 
+// ---- WSL MEMORY GIVE-BACK: idle vmmem must shrink, not hoard ----------------
+//
+// WSL2 keeps every byte the VM ever touched (page cache from builds, greps,
+// npm installs) until `wsl --shutdown` — which we deliberately never run. So a
+// day of agent runs leaves a multi-GB `vmmem` sitting on the host with the
+// distro internally idle, and the user can't even attribute it to this app.
+// `[experimental] autoMemoryReclaim=gradual` (WSL >= 1.3.10) makes the VM hand
+// idle cached memory back to Windows; older WSL ignores unknown keys, so the
+// setting is safe to write unconditionally.
+
+/// Merge `autoMemoryReclaim=gradual` into a `.wslconfig`'s `[experimental]`
+/// section. Returns the new file text, or `None` when the key is ALREADY set to
+/// any value — a user's own choice (`dropcache`, `disabled`) is never
+/// overridden. Preserves every other setting/section. Pure + unit-tested.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_reclaim_into_wslconfig(existing: &str) -> Option<String> {
+    let is_reclaim_line = |l: &str| {
+        l.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("automemoryreclaim")
+    };
+    if existing.lines().any(|l| is_reclaim_line(l) && l.contains('=')) {
+        return None;
+    }
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    // An [experimental] section exists → add the key just under its header.
+    if let Some(i) = lines
+        .iter()
+        .position(|l| l.trim().eq_ignore_ascii_case("[experimental]"))
+    {
+        lines.insert(i + 1, "autoMemoryReclaim=gradual".to_string());
+        let mut out = lines.join("\n");
+        out.push('\n');
+        return Some(out);
+    }
+    // No section at all → append a fresh one, keeping any existing content.
+    let mut out = existing.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str("[experimental]\nautoMemoryReclaim=gradual\n");
+    Some(out)
+}
+
+/// Ensure the `.wslconfig` global default has `autoMemoryReclaim=gradual`.
+/// No WSL restart — it takes effect on the next VM start, and the warm-check
+/// pre-flight calls this BEFORE starting a cold distro, so every VM this app
+/// boots runs with give-back on. Ok(true) if it wrote a change.
+#[cfg(windows)]
+pub(crate) fn ensure_reclaim_config() -> Result<bool, String> {
+    let p = wslconfig_path().ok_or_else(|| "no USERPROFILE".to_string())?;
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    match merge_reclaim_into_wslconfig(&existing) {
+        None => Ok(false),
+        Some(updated) => {
+            std::fs::write(&p, updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+            Ok(true)
+        }
+    }
+}
+
 /// What the OOM killer recorded, in units the user can act on.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct OomHit {
@@ -1680,6 +1741,11 @@ pub struct WslMemoryPlan {
 pub async fn sandbox_raise_memory() -> Result<WslMemoryPlan, String> {
     #[cfg(windows)]
     {
+        // Raising the cap without give-back would let vmmem hoard even more —
+        // the two settings only make sense together.
+        if let Err(e) = ensure_reclaim_config() {
+            eprintln!("wslconfig autoMemoryReclaim not ensured: {e}");
+        }
         let (memory_gb, swap_gb, changed) = ensure_memory_config()?;
         let restart_required = changed && !running_distros().is_empty();
         Ok(WslMemoryPlan {
@@ -2639,6 +2705,14 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<WarmCheckResu
         #[cfg(windows)]
         {
             if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&cwd) {
+                // `.wslconfig` is read at VM creation, and this pre-flight is the
+                // moment a cold distro gets started — so ensure memory give-back
+                // is configured NOW, or an agent-heavy day leaves vmmem holding
+                // gigabytes of dead page cache until a manual `wsl --shutdown`.
+                // Best-effort: a config-write failure must never block a run.
+                if let Err(e) = ensure_reclaim_config() {
+                    eprintln!("wslconfig autoMemoryReclaim not ensured: {e}");
+                }
                 // Running ANY command starts the distro + mounts /mnt; `test -d`
                 // then verifies the project folder is present. This both warms and
                 // checks in a single trip (run_in_distro_script is mangle-proof).
@@ -3102,6 +3176,52 @@ mod tests {
         // Already-true in any casing/spacing → no rewrite.
         assert!(merge_sparse_into_wslconfig("[experimental]\nsparseVhd = TRUE\n").is_none());
         assert!(merge_sparse_into_wslconfig("[experimental]\nsparseVhd=true\n").is_none());
+    }
+
+    #[test]
+    fn reclaim_merge_adds_section_and_is_idempotent() {
+        // Missing/empty file → a fresh [experimental] section with give-back on.
+        let out = merge_reclaim_into_wslconfig("").unwrap();
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("autoMemoryReclaim=gradual"));
+        // Idempotent: feeding the result back is a no-op.
+        assert!(merge_reclaim_into_wslconfig(&out).is_none());
+    }
+
+    #[test]
+    fn reclaim_merge_never_overrides_a_users_own_choice() {
+        // ANY existing value — including a deliberate opt-out — is respected.
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nautoMemoryReclaim=dropcache\n")
+            .is_none());
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nautoMemoryReclaim=disabled\n")
+            .is_none());
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nAutoMemoryReclaim = Gradual\n")
+            .is_none());
+    }
+
+    #[test]
+    fn reclaim_merge_coexists_with_sparse_and_memory_settings() {
+        // All three writers touch the same file; none may clobber another.
+        let sparse = merge_sparse_into_wslconfig("").unwrap();
+        let mem = merge_memory_into_wslconfig(&sparse, 24, 12).unwrap();
+        let all = merge_reclaim_into_wslconfig(&mem).unwrap();
+        assert!(all.contains("sparseVhd=true"), "{all}");
+        assert!(all.contains("memory=24GB"), "{all}");
+        assert!(all.contains("autoMemoryReclaim=gradual"), "{all}");
+        // Reclaim joined the EXISTING [experimental] section, no duplicate header.
+        assert_eq!(all.matches("[experimental]").count(), 1, "{all}");
+        assert!(merge_sparse_into_wslconfig(&all).is_none(), "{all}");
+        assert!(merge_reclaim_into_wslconfig(&all).is_none(), "{all}");
+    }
+
+    #[test]
+    fn reclaim_merge_preserves_existing_settings() {
+        let existing = "[wsl2]\nmemory=8GB\nprocessors=4\n";
+        let out = merge_reclaim_into_wslconfig(existing).unwrap();
+        assert!(out.contains("memory=8GB"));
+        assert!(out.contains("processors=4"));
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("autoMemoryReclaim=gradual"));
     }
 
     #[test]

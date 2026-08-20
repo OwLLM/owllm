@@ -193,6 +193,25 @@ check(
   !/wsl\.exe[\s\S]{0,80}--shutdown/.test(sandbox.slice(sandbox.indexOf("fn ensure_memory_config"), sandbox.indexOf("fn ensure_memory_config") + 2000)),
   "raising the limit does NOT restart WSL (that would kill every running agent)",
 );
+// Give-back wiring: without autoMemoryReclaim the VM keeps every byte it ever
+// touched until `wsl --shutdown` — multi-GB vmmem from a day of agent runs.
+const warmCheckBody = sandbox.slice(
+  sandbox.indexOf("pub async fn sandbox_warm_and_check"),
+  sandbox.indexOf("pub async fn sandbox_warm_and_check") + 3000,
+);
+check(
+  /ensure_reclaim_config\(\)/.test(warmCheckBody) &&
+    warmCheckBody.indexOf("ensure_reclaim_config") < warmCheckBody.indexOf("run_in_distro_script"),
+  "the warm-check pre-flight ensures autoMemoryReclaim BEFORE cold-starting the distro",
+);
+const raiseBody = sandbox.slice(
+  sandbox.indexOf("pub async fn sandbox_raise_memory"),
+  sandbox.indexOf("pub async fn sandbox_raise_memory") + 1500,
+);
+check(
+  /ensure_reclaim_config\(\)/.test(raiseBody),
+  "raising the WSL cap also ensures give-back (a bigger cap must not just hoard more)",
+);
 
 /// Slice a top-level Rust item out of a source file by brace matching, so the
 /// gate compiles the SHIPPED text rather than a copy that can drift.
@@ -218,6 +237,7 @@ check(!!scopeRule, "the scope rule could be sliced out of accounts.rs");
 const wanted = [
   "fn recommended_wsl_memory_gb(",
   "fn merge_memory_into_wslconfig(",
+  "fn merge_reclaim_into_wslconfig(",
   "fn wslconfig_key_gb(",
   "pub struct OomHit {",
   "pub(crate) fn parse_oom_report(",
@@ -269,6 +289,16 @@ if (slices.every(Boolean) && scopeRule) {
     `  let keep = merge_memory_into_wslconfig("[wsl2]\\nmemory=8GB\\nprocessors=8\\n", 24, 12).unwrap();`,
     `  assert!(keep.contains("memory=24GB") && keep.contains("processors=8"), "{keep}");`,
     `  assert_eq!(keep.matches("[wsl2]").count(), 1, "{keep}");`,
+    // Give-back: WSL2 hoards page cache until shutdown, so the app must write
+    // autoMemoryReclaim=gradual — and must never override a user's own value.
+    `  let rec = merge_reclaim_into_wslconfig("").expect("writes when absent");`,
+    `  assert!(rec.contains("[experimental]") && rec.contains("autoMemoryReclaim=gradual"), "{rec}");`,
+    `  assert!(merge_reclaim_into_wslconfig(&rec).is_none(), "idempotent");`,
+    `  assert!(merge_reclaim_into_wslconfig("[experimental]\\nautoMemoryReclaim=dropcache\\n").is_none(), "user opt-out respected");`,
+    `  assert!(merge_reclaim_into_wslconfig("[experimental]\\nautoMemoryReclaim=disabled\\n").is_none(), "user disable respected");`,
+    `  let joined = merge_reclaim_into_wslconfig("[experimental]\\nsparseVhd=true\\n").unwrap();`,
+    `  assert!(joined.contains("sparseVhd=true"), "{joined}");`,
+    `  assert_eq!(joined.matches("[experimental]").count(), 1, "no duplicate section: {joined}");`,
     // The scope rule that caused the original bug: cancelling run A must not
     // reach run B, and must not reach an unscoped child either.
     `  assert!(cli_child_in_scope(Some("C:/a"), None), "global Stop reaches a scoped child");`,

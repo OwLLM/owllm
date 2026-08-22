@@ -112,6 +112,12 @@ fs.writeFileSync(
   path.join(runtimeDir, "notebookMerge.js"),
   transpile(read(path.join(SRC, "runtime", "notebookMerge.ts"))),
 );
+// The shared watcher fan-out helper — cloudCatalogue/worldState notify
+// through it, so the REAL (dependency-free) module goes in.
+fs.writeFileSync(
+  path.join(runtimeDir, "listenerBus.js"),
+  transpile(read(path.join(SRC, "runtime", "listenerBus.ts"))),
+);
 fs.writeFileSync(
   path.join(runtimeDir, "vaultSync.js"),
   transpile(read(path.join(SRC, "runtime", "vaultSync.ts"))),

@@ -27,6 +27,7 @@ import PtyTerminal from "./PtyTerminal";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
+import { notifyListeners } from "../../runtime/listenerBus";
 import {
   type AccountsStatusFull,
   fetchAccounts,
@@ -463,7 +464,7 @@ class LogHub {
   }
   private emit() {
     const snap = this.snapshot();
-    this.subs.forEach((s) => s(snap));
+    notifyListeners(this.subs, "accountsLogHub", snap);
   }
 }
 const LOG_HUB = new LogHub();

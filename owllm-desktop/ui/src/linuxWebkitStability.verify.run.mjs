@@ -69,8 +69,17 @@ const agents = read("pages/agentic/AgentsPage.tsx");
 const code = read("pages/agentic/CodePage.tsx");
 check(shell.includes('continuousUiAnimation("owllm-aura-spin 4s linear infinite")'),
   "both persistent header auras use the rendering policy");
-check((agents.match(/continuousUiAnimation\("owllm-aura-spin 4s linear infinite"\)/g) || []).length === 2,
-  "agent tiles and graph cards use the rendering policy");
+// The tile + graph-card aura moved behind psychedelicActiveStyle() when the 🍄
+// preference landed (psychedelicMode.ts) — same invariant, one origin: that
+// helper is the single place either card gets its animation, and it still goes
+// through the rendering policy.
+const psychedelic = read("pages/agentic/psychedelicMode.ts");
+check(psychedelic.includes('const PSYCHEDELIC_SPIN = "owllm-aura-spin 4s linear infinite"')
+  && psychedelic.includes("const animation = continuousUiAnimation(PSYCHEDELIC_SPIN)"),
+  "the shared agentic card aura uses the rendering policy");
+check((agents.match(/animation: isActive \? active(Aura|NodeAura)\.animation : undefined/g) || []).length === 2
+  && !agents.includes("continuousUiAnimation("),
+  "agent tiles and graph cards take their animation from that one helper");
 check(code.includes('continuousUiAnimation("owllm-aura-spin 4s linear infinite")'),
   "coding panes use the rendering policy");
 check(code.includes('continuousUiAnimation("owllm-tab-working 1.4s ease-in-out infinite")'),

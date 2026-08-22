@@ -12,6 +12,7 @@
 // whatever is cached and re-renders when a background refresh lands.
 
 import { listDevices, listRemoteModels, type RemoteModel } from "../advanced/remoteDevices";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type PeerCatalogueEntry = {
   deviceId: string;
@@ -29,7 +30,7 @@ let _lastRefreshMs = 0;
 let _inflight: Promise<void> | null = null;
 
 const _listeners = new Set<() => void>();
-function _emit(): void { for (const l of _listeners) l(); }
+function _emit(): void { notifyListeners(_listeners, "peerCatalogue"); }
 
 /// Subscribe to peer-catalogue changes; returns an unsubscribe fn.
 export function subscribePeerCatalogue(cb: () => void): () => void {

@@ -329,6 +329,14 @@
   box-shadow: none;
 }
 
+/* 🍄 psychedelic-effect toggle (agentic cards). Inline styles cannot express
+   :focus-visible, and the button sits on a coloured header band, so keyboard
+   users need an explicit high-contrast ring here. */
+[data-ui="PsychedelicModeToggle"]:focus-visible {
+  outline: 2px solid #ffd93c;
+  outline-offset: 2px;
+}
+
 .ow-model-picker--solid-psychedelic .ow-model-picker__option {
   box-shadow: none;
 }

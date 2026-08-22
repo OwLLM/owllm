@@ -125,6 +125,14 @@ fs.writeFileSync(
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText,
 );
+// The shared watcher fan-out helper — cloudCatalogue/worldState notify
+// through it, so the REAL (dependency-free) module goes in.
+fs.writeFileSync(
+  path.join(runtimeDir, "listenerBus.js"),
+  ts.transpileModule(read(path.join(SRC, "runtime", "listenerBus.ts")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText,
+);
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
 
 function storage() {

@@ -15,6 +15,7 @@
 //      nvidia-smi probes take seconds.
 
 import { invoke } from "@tauri-apps/api/core";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
 export type AppReadiness = {
@@ -51,7 +52,7 @@ let inflight: Promise<AppReadiness | null> | null = null;
 const listeners = new Set<() => void>();
 
 function emit() {
-  for (const l of listeners) l();
+  notifyListeners(listeners, "readinessStore");
 }
 
 export function subscribeReadiness(cb: () => void): () => void {

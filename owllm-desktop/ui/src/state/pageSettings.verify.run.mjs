@@ -56,10 +56,18 @@ const reactPath = req.resolve("react"); // resolve ONCE, before patching (avoid 
 // stateMirror.verify.run.mjs and hotBlobStorage.verify.run.mjs.
 const stubPath = path.join(TMP, "stateMirrorStub.cjs");
 fs.writeFileSync(stubPath, "exports.hotBlobKeys = () => [];\nexports.readHotBlob = () => null;\n");
+// The change-notification fan-out lives in the shared listenerBus; transpile
+// the REAL one (not a stub) so subscribe() keeps being tested end-to-end.
+const busPath = path.join(TMP, "listenerBus.cjs");
+fs.writeFileSync(busPath, ts.transpileModule(
+  fs.readFileSync(path.join(HERE, "../runtime/listenerBus.ts"), "utf8"),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } },
+).outputText);
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
   if (request === "react") return reactPath;
   if (request.endsWith("runtime/stateMirror")) return stubPath;
+  if (request.endsWith("listenerBus")) return busPath;
   return origResolve.call(this, request, ...rest);
 };
 const S = req(modPath);

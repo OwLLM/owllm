@@ -16,6 +16,8 @@
 //
 // Keep this PURE DATA + thin merge logic. No React, no network at import.
 
+import { notifyListeners } from "../../runtime/listenerBus";
+
 export type CloudModelDef = {
   /// Bare model id (no sub//api/ prefix; the picker adds that).
   id: string;
@@ -130,7 +132,7 @@ let _localCache: Partial<CloudCatalogue> | null | undefined = undefined;
 // the NEXT app launch, once it was cached + applied synchronously. Now it
 // shows the same session the fetch completes.
 const _listeners = new Set<() => void>();
-function _emit(): void { for (const l of _listeners) l(); }
+function _emit(): void { notifyListeners(_listeners, "cloudCatalogue"); }
 
 /// Subscribe to catalogue changes; returns an unsubscribe fn.
 export function subscribeCloudCatalogue(cb: () => void): () => void {

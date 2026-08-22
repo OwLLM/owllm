@@ -29,6 +29,7 @@ import {
   type WorldChatStore,
 } from "./worldChat";
 import { presenceNodeIdForDevice, type WorldChatHooks } from "./worldPresence";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export const WORLD_CHAT_ENABLED_KEY = "owllm:world-chat:enabled";
 export const WORLD_CHAT_NICK_KEY = "owllm:world-chat:nick";
@@ -259,7 +260,7 @@ export function worldChatStore(): WorldChatStore {
         if (state.threads !== snapshot.threads) saveWorldChatThreads(state.threads);
         if (state.unread !== snapshot.unread) saveWorldChatUnread(state.unread);
         snapshot = state;
-        for (const listener of listeners) listener(state);
+        notifyListeners(listeners, "worldChatRuntime", state);
       },
     });
     void loadOwnDeviceIds();

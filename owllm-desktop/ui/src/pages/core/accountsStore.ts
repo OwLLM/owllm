@@ -39,6 +39,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountsStatusLite } from "../agentic/ModelPicker";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type { AccountsStatusLite };
 
@@ -91,7 +92,7 @@ let watchers = 0;
 let watchTimer: number | null = null;
 
 function emit() {
-  for (const l of listeners) l();
+  notifyListeners(listeners, "accountsStore");
 }
 
 export function subscribeAccounts(cb: () => void): () => void {

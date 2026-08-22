@@ -55,6 +55,7 @@ import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, 
 import { projectsRootGet, projectPathUnder, projectFolderSlug } from "./projectsRoot";
 import { openSyncOnboarding } from "../core/AccountSyncModal";
 import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
+import { notifyListeners } from "../../runtime/listenerBus";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -417,7 +418,7 @@ function killCliChildren(scope: string): void {
 const pageBusyExtra = new Map<string, boolean>();
 const pageDone = new Set<string>();
 const activityListeners = new Set<() => void>();
-function notifyActivity(): void { for (const cb of activityListeners) cb(); }
+function notifyActivity(): void { notifyListeners(activityListeners, "codePageActivity"); }
 const pageActivity = {
   subscribe(cb: () => void): () => void {
     activityListeners.add(cb);

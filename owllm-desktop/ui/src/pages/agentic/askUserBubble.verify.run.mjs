@@ -23,6 +23,7 @@ const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || 
 const AGENTIC = path.join(ROOT, "ui/src/pages/agentic");
 const UTILS = path.join(ROOT, "ui/src/utils");
 const ADVANCED = path.join(ROOT, "ui/src/pages/advanced");
+const RUNTIME = path.join(ROOT, "ui/src/runtime");
 fs.mkdirSync(AGENTIC, { recursive: true });
 fs.mkdirSync(UTILS, { recursive: true });
 fs.mkdirSync(ADVANCED, { recursive: true });
@@ -39,6 +40,9 @@ transpile("askUserBubble.verify.ts", AGENTIC, "verify.js");
 // Real (not stubbed): dispatch's model routing calls these peer-id helpers on
 // EVERY model id, so a stub would silently change which branch is taken.
 transpile("peerCatalogue.ts", AGENTIC, "peerCatalogue.js");
+// peerCatalogue notifies through the shared watcher fan-out; real, not stubbed.
+fs.mkdirSync(RUNTIME, { recursive: true });
+transpile("listenerBus.ts", RUNTIME, "listenerBus.js", path.join(HERE, "../../runtime"));
 // Also real: the run-blocker detector runs on every successful CLI reply, and
 // it is pure — a stub would hide a regression rather than isolate one.
 transpile("runBlockers.ts", AGENTIC, "runBlockers.js");

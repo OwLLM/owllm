@@ -150,7 +150,7 @@ const TRIPWIRES = [
   // an unprofiled bwrap prints its version and then dies "setting up uid map:
   // Permission denied" on every real run. Probe a REAL jail instead.
   ["src-tauri/src/sandbox.rs", /fn bwrap_runnable[\s\S]{0,700}bwrap_prefix_argv/, "Linux availability is a real jail spawn, not a version print (D3)"],
-  ["src-tauri/src/sandbox.rs", /fn is_isolated\(cwd: Option<&str>\) -> bool \{\n\s*isolated_dir\(cwd\)\.is_some\(\) && bwrap_runnable\(\)/, "is_isolated reports the probe's verdict, so it cannot claim isolation it lacks (D3)"],
+  ["src-tauri/src/sandbox.rs", /fn is_isolated\(cwd: Option<&str>\) -> bool \{\r?\n\s*isolated_dir\(cwd\)\.is_some\(\) && bwrap_runnable\(\)/, "is_isolated reports the probe's verdict, so it cannot claim isolation it lacks (D3)"],
   ["src-tauri/src/sandbox.rs", /profile bwrap \/usr\/bin\/bwrap[\s\S]{0,120}userns,/, "Harden ships the machine-wide AppArmor profile that unblocks bwrap's userns"],
   // D2: per-project trust was Windows-only, so Linux/macOS had no opt-out of a
   // sandbox they could not turn off — contradicting FEATURES.md's graduated

@@ -79,6 +79,10 @@ jobs:
         working-directory: owllm-desktop
         run: npm run test:watchers
 
+      - name: Verify psychedelic-effect preference regression checks
+        working-directory: owllm-desktop
+        run: npm run test:psychedelic
+
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop
         run: npm run build
@@ -242,6 +246,10 @@ jobs:
       - name: Verify watcher/callback fan-out regression checks
         working-directory: owllm-desktop
         run: npm run test:watchers
+
+      - name: Verify psychedelic-effect preference regression checks
+        working-directory: owllm-desktop
+        run: npm run test:psychedelic
 
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop

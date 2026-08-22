@@ -14,7 +14,6 @@ import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
 import { safeMarkdownUrlTransform } from "../../components/documentLinks";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
-import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import { projectAvailability, projectCanRun, projectOriginLabel } from "./projectPortability";
 import BrainstormPanel from "./BrainstormPanel";
@@ -46,6 +45,11 @@ import IconPickerDialog, {
   loadOverridesForProject,
 } from "./IconPickerDialog";
 import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite, buildEntries } from "./ModelPicker";
+import {
+  usePsychedelicMode,
+  psychedelicActiveStyle,
+  psychedelicToggleLabel,
+} from "./psychedelicMode";
 import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import {
   type VoiceConfig,
@@ -2284,6 +2288,47 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
 // Single chat-tile in the AgentChatGrid. Pulled out so each tile can
 // own its scroll-pin effect — the parent grid would re-fire the effect
 // for every other tile otherwise.
+/// 🍄 — the agentic page's psychedelic-effect switch, rendered immediately left
+/// of the card's model-selection tab. Pressed (aria-pressed=true) = the full
+/// treatment, which is the default; releasing it drops every agentic card to
+/// the Coding-page chatbox's subtle frame aura. The preference is page-wide, so
+/// whichever card you click it on, all of them follow.
+function PsychedelicModeToggle({ mode, onToggle }: {
+  mode: "full" | "reduced";
+  onToggle: () => void;
+}) {
+  const on = mode === "full";
+  const label = psychedelicToggleLabel(mode);
+  return (
+    <button
+      type="button"
+      data-ui="PsychedelicModeToggle"
+      aria-pressed={on}
+      aria-label={label}
+      title={label}
+      // The tile body is itself a click target (it selects the agent); the
+      // toggle must not also select. Keydown stops so Space/Enter reach the
+      // native button instead of the tile's own handler.
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+      style={{
+        width: 24, height: 24, flexShrink: 0, padding: 0,
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        borderRadius: 7, cursor: "pointer", fontSize: 13, lineHeight: 1,
+        border: `1px solid ${on ? "rgba(176,124,255,0.75)" : "var(--border)"}`,
+        background: on ? "rgba(176,124,255,0.22)" : "rgba(0,0,0,0.30)",
+        // Full opacity in BOTH states: a dimmed glyph was unreadable against
+        // the header's team-colour band.
+        color: "var(--fg-strong)",
+        boxShadow: on ? "0 0 10px rgba(176,124,255,0.28)" : "none",
+      }}
+    >
+      <span aria-hidden="true">🍄</span>
+    </button>
+  );
+}
+
 function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick, onOpenEditor, onOpenSkills,
@@ -2358,6 +2403,13 @@ function AgentChatTile({
     el.scrollTop = el.scrollHeight;
   }, [tailSig]);
   const rgb = hexToRgbStr(accent);
+  // Page-wide effect preference (default "full"). Read per tile so every card
+  // re-renders together when the 🍄 toggle in any header flips it.
+  const [psychedelicMode, togglePsychedelic] = usePsychedelicMode();
+  const tileFill = `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%)`;
+  const activeAura = psychedelicActiveStyle({
+    mode: psychedelicMode, fill: tileFill, alphaA, alphaB, outerPx,
+  });
   // Only show this agent's own reply lines. The user's "you" turn and
   // any system errors live on the SuperUserCard / OrchestratorPane,
   // not in the per-agent grid (user spec: "they only plot their own
@@ -2387,13 +2439,11 @@ function AgentChatTile({
         // rotating rainbow conic-gradient paints the 2px border (border-box),
         // giving the "rainbow aura" the user asked for. The spin comes from the
         // --owllm-aura-angle @property animated by owllm-aura-spin.
-        background: isActive
-          ? `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%) padding-box,`
-            + ` conic-gradient(from var(--owllm-aura-angle),`
-            + ` #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box`
-          : `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%)`,
+        // How LOUD that aura is comes from the 🍄 preference: "full" keeps the
+        // breathing halo, "reduced" keeps only the frame (see psychedelicMode).
+        background: isActive ? activeAura.background : tileFill,
         border: isActive
-          ? "2px solid transparent"
+          ? activeAura.border
           : isSelected
             ? `1.5px solid rgba(${rgb},0.85)`
             : `1px solid rgba(${rgb},0.40)`,
@@ -2401,13 +2451,11 @@ function AgentChatTile({
         // Soft rainbow halo (violet→cyan) that breathes with the pulse, sitting
         // outside the gradient border to read as an aura rather than a hard ring.
         boxShadow: isActive
-          ? `0 0 0 1px rgba(255,255,255,${0.18 * alphaA}),`
-            + ` 0 0 ${12 + outerPx}px rgba(176,124,255,${alphaB}),`
-            + ` 0 0 ${22 + outerPx}px rgba(127,212,255,${alphaB * 0.6})`
+          ? activeAura.boxShadow
           : isSelected
             ? `0 0 0 2px rgba(${rgb},0.45), 0 4px 14px rgba(0,0,0,0.5)`
             : "0 2px 6px rgba(0,0,0,0.4)",
-        animation: isActive ? continuousUiAnimation("owllm-aura-spin 4s linear infinite") : undefined,
+        animation: isActive ? activeAura.animation : undefined,
         display: "flex", flexDirection: "column",
         overflow: "hidden",
         cursor: "pointer",
@@ -2482,6 +2530,9 @@ function AgentChatTile({
             />
           </button>
         )}
+        {/* 🍄 Psychedelic effects — immediately left of the model-selection
+            tab. Page-wide preference, so it reads the same on every card. */}
+        <PsychedelicModeToggle mode={psychedelicMode} onToggle={togglePsychedelic} />
         {/* Show the model the user selected, not its provider/lab and not an
             internal route id. The shared picker owns the exact display label. */}
         <div
@@ -4380,6 +4431,9 @@ function GraphCanvas({
   // graph runs no rAF at all (was a permanent 30fps re-render loop).
   const pulsePhase = useAnimatedPhase(activeAgents.size > 0);
   const activePulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
+  // Same page-wide 🍄 preference the chat tiles honour, so BOTH card kinds
+  // change together instead of the graph staying loud after the toggle.
+  const [graphPsychedelicMode] = usePsychedelicMode();
 
   const LAYER_COLORS = [
     "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
@@ -4930,6 +4984,11 @@ function GraphCanvas({
           const activeOuterPx = 18 + 14 * activePulse;
           const activeAlphaA = 0.65 + 0.30 * activePulse;
           const activeAlphaB = 0.40 + 0.30 * activePulse;
+          const activeNodeAura = psychedelicActiveStyle({
+            mode: graphPsychedelicMode, fill: baseBg,
+            alphaA: activeAlphaA, alphaB: activeAlphaB, outerPx: activeOuterPx,
+            extraShadow: "0 6px 22px rgba(0,0,0,0.6)",
+          });
           return (
             <div
               key={n.name}
@@ -4952,15 +5011,13 @@ function GraphCanvas({
                 // the border (border-box) while the card fill is clipped to
                 // padding-box — the same "aura" the chat tiles show, so the
                 // psychedelic effect is identical in the graph for EVERY agent.
-                background: isActive
-                  ? `${baseBg} padding-box,`
-                    + ` conic-gradient(from var(--owllm-aura-angle),`
-                    + ` #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box`
-                  : baseBg,
-                border: isActive ? "2px solid transparent" : `1.8px solid ${borderColor}`,
-                animation: isActive ? continuousUiAnimation("owllm-aura-spin 4s linear infinite") : undefined,
+                // Loudness follows the page-wide 🍄 preference (see
+                // psychedelicMode): "reduced" keeps the frame, drops the pulse.
+                background: isActive ? activeNodeAura.background : baseBg,
+                border: isActive ? activeNodeAura.border : `1.8px solid ${borderColor}`,
+                animation: isActive ? activeNodeAura.animation : undefined,
                 boxShadow: isActive
-                  ? `0 0 0 1px rgba(255,255,255,${0.18 * activeAlphaA}), 0 0 ${12 + activeOuterPx}px rgba(176,124,255,${activeAlphaB}), 0 0 ${22 + activeOuterPx}px rgba(127,212,255,${activeAlphaB * 0.6}), 0 6px 22px rgba(0,0,0,0.6)`
+                  ? activeNodeAura.boxShadow
                   : sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget

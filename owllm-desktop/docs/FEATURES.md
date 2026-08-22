@@ -132,6 +132,17 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   log (`📦 Auto-loaded skill(s): …`).
 - **Solo-Loop vs Team**: header toggle; Solo = one coder in an edit→verify→fix
   loop with Critic + Publisher; Team = full orchestration.
+- **🍄 Psychedelic-effect preference** (`psychedelicMode.ts`): the running-card
+  aura has two settings, switched by the 🍄 button immediately left of the
+  model-selection tab in every agent card header. `full` (the default) keeps
+  the spinning rainbow frame plus the violet/cyan halo that breathes with the
+  dispatch pulse; `reduced` keeps only the frame, with the Coding-page
+  chatbox's constant soft halo. One page-wide preference stored in the synced
+  `pageSettings` document (global scope, key `agenticPsychedelic`), so it
+  survives navigation, restart and follows the user across machines. Both chat
+  tiles and graph node cards take their active style from the single
+  `psychedelicActiveStyle()` helper, and both modes still go still under
+  `prefers-reduced-motion` (gate: `npm run test:psychedelic`).
 - **Lean prompt profile**: solo and ≤3-agent runs get the trimmed injection
   stack — short memory hint instead of the tutorial, halved snapshot/RAG
   budgets (`setLeanRun` in `localTools.ts`, `lean` param on both

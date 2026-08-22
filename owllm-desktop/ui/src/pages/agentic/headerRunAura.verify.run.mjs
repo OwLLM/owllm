@@ -81,7 +81,10 @@ check(shell.includes("@keyframes owllm-aura-spin") && shell.includes("@property 
   "AppShell declares the same aura keyframes/@property the agent tiles use");
 check(shell.includes('"owllm-aura-spin 4s linear infinite"'),
   "headers reuse the tiles' exact animation name and 4s linear timing");
-check(agents.includes('"owllm-aura-spin 4s linear infinite"'),
+// The tile aura's origin is psychedelicMode.ts since the 🍄 preference landed;
+// AgentsPage consumes it rather than spelling the animation out itself.
+check(readSource("pages/agentic/psychedelicMode.ts").includes('"owllm-aura-spin 4s linear infinite"')
+  && agents.includes("psychedelicActiveStyle({"),
   "…and that timing still matches the tile aura at its origin");
 check(shell.includes("conic-gradient(from var(--owllm-aura-angle)"),
   "headers paint the rotating conic gradient via the shared animated angle");

@@ -39,6 +39,18 @@ try {
   check("The running server is used only when neither agent nor team selected a model",
     model.resolveAgentModel("researcher", null, "", new Map(), "local-model") === "local-model");
 
+  const databaseModels = new Map([["coder", "sub/claude-opus-5:high"]]);
+  const staleBrowserModels = new Map([["coder", "auto/balanced"]]);
+  check("Durable project models beat stale WebView model overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(databaseModels, staleBrowserModels).get("coder") === "sub/claude-opus-5:high");
+  check("An explicit empty DB model map cannot resurrect deleted browser overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(new Map(), staleBrowserModels).size === 0);
+  check("Legacy projects without DB model persistence still migrate browser overrides",
+    typeof model.persistedAgentModels === "function"
+      && model.persistedAgentModels(null, staleBrowserModels).get("coder") === "auto/balanced");
+
   const bulk = model.assignTeamModelToAgents(
     ["orchestrator", "coder", "researcher", "coder"],
     "sub/kimi-k3",
@@ -90,14 +102,28 @@ try {
       && source.indexOf("const perAgent =") < source.indexOf("liveTeamModel?.trim()"));
   check("Agent cards and dispatch share the agent-first resolver",
     page.includes("return resolveAgentModel(") && page.includes("teamModelOverride,"));
+  check("Agent cards show the selected shared-picker label instead of a provider/lab badge",
+    (page.match(/data-ui="AgentSelectedModel"/g) ?? []).length === 2
+      && page.includes("labelForModel={labelForModel}")
+      && page.includes("modelDisplayLabel={labelForModel(resolvedModel)}")
+      && !page.includes("modelChipFor(resolvedModel"));
+  check("The shared picker catalogue supplies the card label including effort and account variant",
+    page.includes("new Map(buildEntries(models, accountsStatus).map(entry => [entry.id, entry.label]))")
+      && page.includes("modelEntryLabels.get(modelId) ?? modelId"));
   check("Template default_model_id is loaded and participates in dispatch",
     page.includes("defaultModelId?: string")
       && page.includes("a.default_model_id")
       && page.includes("agentTemplateModelFor(agentName)"));
+  // The right column's per-agent settings face was removed with its tab (user
+  // spec 2026-08-14); the agent editor is now the ONLY per-agent model picker.
+  // Same invariant, pinned on the surviving surface: the picker's VALUE is the
+  // explicit override (or the template default), never a resolved inherited
+  // model — inheritance is disclosed in the fallback label instead.
   check("Agent settings picker shows only explicit overrides, not resolved inherited models",
-    page.includes("agentModelOverrideFor: (agentName: string) => string")
-      && page.includes("value={explicitModel}")
-      && page.includes("(use inherited · ${inheritedModel})"));
+    page.includes("const agentModelOverrideFor = (agentName: string): string =>")
+      && page.includes("value={model}")
+      && page.includes("`(use team model · ${effectiveTeamModel})`")
+      && !page.includes("value={explicitModel}"));
   check("Agent editor does not materialize inherited team/server models as overrides",
     page.includes("initialModel={agentModelOverrideFor(name) || spec.defaultModelId || \"\"}"));
   check("Team picker bulk-assigns all agents in local and DB persistence",
@@ -114,9 +140,11 @@ try {
       && page.includes('new CustomEvent("owllm:agent-model-changed"')
       && page.includes('window.addEventListener("owllm:agent-model-changed"')
       && page.includes("agentModels: Array.from(assignedModels.entries())"));
+  // The kimi branch moved into the shared dispatch.ts when AgentsPage's
+  // duplicated cloud stack collapsed (2026-08-14) — same invariant, one copy.
   check("Agentic Kimi path runs the execution-environment preflight",
-    /if \(route\.forceSub\) \{\s+[\s\S]*?await ensureCliWarm\("kimi_cli", projectCwd\);/.test(page)
-      && /\}\), projectCwd\);/.test(page));
+    /if \(route\.forceSub === true\) \{\s+await ensureCliWarm\("kimi_cli", projectCwd\);/.test(dispatch)
+      && !/ensureCliWarm\("kimi_cli"/.test(page));
   check("Shared CLI warm-up prepares the actual project environment",
     dispatch.includes('"accounts_prepare_cli_for_cwd"')
       && dispatch.includes('{ kind: "prepare", backend }')
@@ -134,6 +162,40 @@ try {
   check("Codex startup failure is collected instead of masked by broken stdin",
     accounts.includes("let stdin_write_error = match child.stdin.take()")
       && accounts.includes("return Err(match stdin_write_error"));
+
+  // ---- One model, every surface (user bug 2026-08-22: "the chatbox shows
+  // another model, the team shows a different one") ----
+  // The chat dock must resolve the agent the dispatch actually runs: the solo
+  // coder in Solo mode (dispatchGoal uses effectiveModelFor(coder)), the
+  // orchestrator otherwise. Resolving the orchestrator unconditionally made
+  // the chatbox display a model the solo run never used.
+  check("Chat dock resolves the solo coder's model in Solo mode, the orchestrator's otherwise",
+    page.includes("const dispatchLeadName = !activeTeam")
+      && page.includes("soloRenderTeam?.agents[0]?.name ?? findOrchestratorSpec(activeTeam)?.name")
+      && page.includes("? modelFor(dispatchLeadName)"));
+  // Brainstorm / Notebook / Usage must show the SAME model the dock shows and
+  // the next send dispatches — not their own ad-hoc resolution layer.
+  check("Brainstorm panel receives the dock's dispatch model, not a team-override-first inversion",
+    page.includes("modelId={dockModelId}")
+      && !page.includes("modelId={(teamModelOverride || (activeTeam ? modelFor("));
+  check("Notebook and Usage panel derive from the dock's dispatch model",
+    page.includes("usageProvider={providerForShared(dockModelId || serverState.model_id ||")
+      && page.includes('modelId={dockModelId || (serverState.model_id ?? "local")}'));
+  // Tile pickers show only the agent-SPECIFIC pick as their value; inherited
+  // models are disclosed via the fallback label ("(auto · …)"), never claimed
+  // as an explicit per-agent selection.
+  check("Agent tile pickers bind the explicit pick and disclose inheritance in the fallback",
+    page.includes("modelId={explicitModelFor(a.name)}")
+      && page.includes("modelId={agentExplicitModelFor(producerSpec.name)}")
+      && page.includes("`(auto · ${modelDisplayLabel})`")
+      && page.includes("const agentExplicitModelFor = (agentName: string): string =>"));
+  // Clearing the LAST per-agent override must persist (write an explicitly
+  // empty agentModels map) instead of being skipped by the size===0 guard —
+  // otherwise the deleted pick resurrects from the DB on the next restart.
+  check("Clearing the last per-agent model override persists instead of resurrecting on restart",
+    page.includes("const agentModelsHadEntriesRef = useRef(false)")
+      && page.includes("if (allPickMapsEmpty && !agentModelsHadEntriesRef.current) return;")
+      && page.includes("agentModelsHadEntriesRef.current = perAgentModel.size > 0;"));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`team model selection verification: ${checks.length}/${checks.length} passed`);

@@ -58,7 +58,7 @@ check("the second agent dispatches against ITS cwd, not the primary's workspace"
   && !/streamChatCompletion\(0, secModel,[^\n]*?, onSecondaryDelta, workspace,/.test(code)
   // The system prompt must name the SAME root it is dispatched into, or the
   // agent is told to work in the primary's checkout while running in its own.
-  && /runSecondaryTurn\(CODING_SYSTEM\(cwd\)/.test(code));
+  && /runSecondaryTurn\(CODING_SYSTEM\(secondaryRunCwd\)/.test(code));
 
 check("the page's Chat mode governs the SECOND agent too",
   /const runSecondaryTurn = async \([\s\S]{0,2000}?const chatOnly = agentMode === "chat";/.test(code)

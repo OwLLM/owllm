@@ -141,7 +141,10 @@ check(
   libRs.includes("accounts::kimi_cli_stream")
     && dispatch.includes('invoke<string>("kimi_cli_stream"')
     && dispatch.includes("export async function runKimiCliStream")
-    && agents.includes("runKimiCliStream"),
+    // AgentsPage no longer carries its own Kimi path — it rides the ONE
+    // shared router (its ~1000-line dispatch copy was collapsed 2026-08-14),
+    // which is also what fixed team-path Kimi images being silently dropped.
+    && agents.includes("streamChatCompletion,"),
 );
 check(
   "revoked Kimi OAuth fails fast with a reconnect instruction",
@@ -161,6 +164,24 @@ check(
     && accountsPage.includes('state.reauthRequired || state.remediation === "reauth" ? "Reconnect"')
     && accountsPage.includes("if (resetStaleLogin)")
     && accountsPage.includes("Removed the expired ${provider.name} session. Starting a fresh login."),
+);
+// The other half of that invariant (2026-08-14): only a CONFIRMED revocation
+// may write the marker. The old rule marked on ANY 401 ("kimi_output_auth_failed"
+// matches a bare 401/unauthorized), so one transient cold-token blip flipped
+// the whole account to "Reconnect" and every later dispatch refused with
+// "that model isn't signed in" — permanently, because the marker itself
+// blocks the runs that could have proven the credential alive.
+check(
+  "a transient Kimi 401 can NOT write the persistent reauth marker",
+  accounts.includes("fn kimi_output_reauth_required")
+    // every run-path marking is gated on the confirmed-revocation predicate…
+    && !/kimi_output_auth_failed\([^)]*\)\s*\{\s*\n\s*mark_kimi_reauth_required/.test(accounts)
+    // …and the probe distinguishes retryable from revoked.
+    && accounts.includes("the token may be cold or mid-refresh; retrying usually recovers"),
+);
+check(
+  "a successful live probe heals a stale reauth marker",
+  /if res\.0 \{\s*\n\s*clear_kimi_reauth_required\(\);/.test(accounts),
 );
 check(
   "failed notebook cards remain active and expose Re-feed",

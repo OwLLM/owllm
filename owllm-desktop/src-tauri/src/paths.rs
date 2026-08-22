@@ -1316,24 +1316,29 @@ pub fn skills_dir() -> Option<PathBuf> {
     user_data_root().map(|r| r.join("skills"))
 }
 
+/// PRECEDENCE ORDER — first dir wins for same-id packs (list_skill_packs
+/// dedups first-wins; skill_material takes the first hit). Every write path
+/// (install, seed, curated provision) targets the user home, and seeding
+/// promises a user-edited copy is never clobbered — so the user home must
+/// shadow the legacy home, which shadows the read-only bundled packs.
 pub fn skills_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    // Bundled, OwLLM-authored skill packs that ship with the app (read-only).
-    // Listing them here makes list_skill_packs discover them like installed packs,
-    // so roles can auto-equip them by id out of the box.
-    if let Some(root) = resources_root() {
-        let p = root.join("agents").join("skills");
-        if p.is_dir() {
-            out.push(p);
-        }
-    }
     if let Some(p) = skills_dir() {
-        if p.is_dir() && !out.contains(&p) {
+        if p.is_dir() {
             out.push(p);
         }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("skills");
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    // Bundled, OwLLM-authored skill packs that ship with the app (read-only).
+    // Listing them here makes list_skill_packs discover them like installed packs,
+    // so roles can auto-equip them by id out of the box.
+    if let Some(root) = resources_root() {
+        let p = root.join("agents").join("skills");
         if p.is_dir() && !out.contains(&p) {
             out.push(p);
         }

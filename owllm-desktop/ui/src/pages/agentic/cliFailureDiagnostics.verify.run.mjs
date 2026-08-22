@@ -193,6 +193,25 @@ check(
   !/wsl\.exe[\s\S]{0,80}--shutdown/.test(sandbox.slice(sandbox.indexOf("fn ensure_memory_config"), sandbox.indexOf("fn ensure_memory_config") + 2000)),
   "raising the limit does NOT restart WSL (that would kill every running agent)",
 );
+// Give-back wiring: without autoMemoryReclaim the VM keeps every byte it ever
+// touched until `wsl --shutdown` — multi-GB vmmem from a day of agent runs.
+const warmCheckBody = sandbox.slice(
+  sandbox.indexOf("pub async fn sandbox_warm_and_check"),
+  sandbox.indexOf("pub async fn sandbox_warm_and_check") + 3000,
+);
+check(
+  /ensure_reclaim_config\(\)/.test(warmCheckBody) &&
+    warmCheckBody.indexOf("ensure_reclaim_config") < warmCheckBody.indexOf("run_in_distro_script"),
+  "the warm-check pre-flight ensures autoMemoryReclaim BEFORE cold-starting the distro",
+);
+const raiseBody = sandbox.slice(
+  sandbox.indexOf("pub async fn sandbox_raise_memory"),
+  sandbox.indexOf("pub async fn sandbox_raise_memory") + 1500,
+);
+check(
+  /ensure_reclaim_config\(\)/.test(raiseBody),
+  "raising the WSL cap also ensures give-back (a bigger cap must not just hoard more)",
+);
 
 /// Slice a top-level Rust item out of a source file by brace matching, so the
 /// gate compiles the SHIPPED text rather than a copy that can drift.
@@ -218,6 +237,7 @@ check(!!scopeRule, "the scope rule could be sliced out of accounts.rs");
 const wanted = [
   "fn recommended_wsl_memory_gb(",
   "fn merge_memory_into_wslconfig(",
+  "fn merge_reclaim_into_wslconfig(",
   "fn wslconfig_key_gb(",
   "pub struct OomHit {",
   "pub(crate) fn parse_oom_report(",
@@ -269,6 +289,16 @@ if (slices.every(Boolean) && scopeRule) {
     `  let keep = merge_memory_into_wslconfig("[wsl2]\\nmemory=8GB\\nprocessors=8\\n", 24, 12).unwrap();`,
     `  assert!(keep.contains("memory=24GB") && keep.contains("processors=8"), "{keep}");`,
     `  assert_eq!(keep.matches("[wsl2]").count(), 1, "{keep}");`,
+    // Give-back: WSL2 hoards page cache until shutdown, so the app must write
+    // autoMemoryReclaim=gradual — and must never override a user's own value.
+    `  let rec = merge_reclaim_into_wslconfig("").expect("writes when absent");`,
+    `  assert!(rec.contains("[experimental]") && rec.contains("autoMemoryReclaim=gradual"), "{rec}");`,
+    `  assert!(merge_reclaim_into_wslconfig(&rec).is_none(), "idempotent");`,
+    `  assert!(merge_reclaim_into_wslconfig("[experimental]\\nautoMemoryReclaim=dropcache\\n").is_none(), "user opt-out respected");`,
+    `  assert!(merge_reclaim_into_wslconfig("[experimental]\\nautoMemoryReclaim=disabled\\n").is_none(), "user disable respected");`,
+    `  let joined = merge_reclaim_into_wslconfig("[experimental]\\nsparseVhd=true\\n").unwrap();`,
+    `  assert!(joined.contains("sparseVhd=true"), "{joined}");`,
+    `  assert_eq!(joined.matches("[experimental]").count(), 1, "no duplicate section: {joined}");`,
     // The scope rule that caused the original bug: cancelling run A must not
     // reach run B, and must not reach an unscoped child either.
     `  assert!(cli_child_in_scope(Some("C:/a"), None), "global Stop reaches a scoped child");`,
@@ -418,6 +448,69 @@ check(
 check(
   /text\.chars\(\)\.take\(MAX_TOOL_OUTPUT_CHARS\)/.test(gateway),
   "truncation is by chars, so it can never split a UTF-8 sequence",
+);
+
+// ---------------------------------------------------------------------------
+// The Claude STREAM was the one CLI path with no liveness bound (2026-08-14
+// audit): codex streaming, kimi, and every one-shot runner ride the
+// idle/absolute watchdog, but a silently-hung `claude --print --output-format
+// stream-json` waited on the user's Stop forever. The watchdog must live in
+// claude_cli_stream's body, feed on stdout activity, and yield an actionable
+// timeout message instead of a bare kill.
+{
+  const streamFn = accounts.slice(
+    accounts.indexOf("pub async fn claude_cli_stream"),
+    accounts.indexOf("pub async fn", accounts.indexOf("pub async fn claude_cli_stream") + 10),
+  );
+  check(streamFn.length > 1000, "claude_cli_stream body was located");
+  check(
+    /CLI_CHILD_TIMEOUT/.test(streamFn) && /CLI_CHILD_ABS_TIMEOUT/.test(streamFn),
+    "claude_cli_stream is bounded by the shared idle + absolute ceilings",
+  );
+  check(
+    /terminate_cli_child\(child_pid\)/.test(streamFn) && /timed_out/.test(streamFn),
+    "a stalled claude stream is killed by the watchdog, not waited on forever",
+  );
+  check(
+    /last_activity\.store/.test(streamFn),
+    "the watchdog feeds on stdout activity so a chatty long turn is never killed",
+  );
+  check(
+    /Claude CLI stopped after \{\} seconds with no output/.test(streamFn),
+    "a watchdog kill reports an actionable timeout, not a bare exit code",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Argv-overflow protection, ALL providers in ONE place. This class of bug was
+// "fixed" five separate times, once per provider (v0.6.55 orchestrator,
+// v0.6.56 codex, v0.7.88 claude, v0.7.90 kimi, v0.7.94 gemini), and recurred
+// after each fix because nothing pinned the OTHERS. Windows argv is ~8 KB via
+// a .cmd shim / ~32 KB raw; an agentic system prompt exceeds both. Every CLI
+// runner must either write the prompt to STDIN or enforce an explicit argv
+// budget with a pre-spawn reject — and a new provider must join this list.
+check(
+  (accounts.match(/fold_system_into_stdin/g) || []).length >= 4,
+  "claude folds an oversized system prompt into stdin (complete AND stream)",
+);
+check(
+  (accounts.match(/append_codex_input_args\(/g) || []).length >= 4,
+  "codex always takes its input via stdin (append_codex_input_args everywhere)",
+);
+{
+  const gemini = accounts.slice(accounts.indexOf("pub async fn gemini_cli_complete"), accounts.indexOf("pub async fn grok_cli_complete"));
+  const grok = accounts.slice(accounts.indexOf("pub async fn grok_cli_complete"), accounts.indexOf("pub async fn grok_cli_complete") + 6000);
+  check(
+    /fold_prompt_into_stdin = composed\.len\(\) > MAX_PROMPT_ARG/.test(gemini)
+      && /fold_prompt_into_stdin = composed\.len\(\) > MAX_PROMPT_ARG/.test(grok),
+    "gemini AND grok fold an oversized prompt into stdin (os error 206 class)",
+  );
+}
+check(
+  /const KIMI_ARGV_BUDGET/.test(accounts)
+    && /if new_flavor && prompt_len > KIMI_ARGV_BUDGET \{/.test(accounts)
+    && /kimi_prompt_uses_argv\(true, KIMI_ARGV_BUDGET \+ 1\)\.is_err\(\)/.test(accountsRaw),
+  "kimi enforces an argv budget with a pre-spawn reject, and it is unit-tested",
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

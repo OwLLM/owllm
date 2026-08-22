@@ -1,0 +1,638 @@
+/*
+ * Fold launchpad
+ *
+ * One composition shared by Coding and Agentic: two overlapping spatial
+ * planes joined by a spectral seam. Its material palette is derived from the
+ * installed app accent, including custom colours, so Fold belongs to every
+ * GUI skin instead of imposing a fixed purple mini-theme.
+ */
+
+@property --fold-aura-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.creation-launchpad[data-design="fold"] {
+  --fold-accent-rgb: var(--accent-rgb);
+  --fold-tone-a: color-mix(in srgb, var(--accent) 88%, white 12%);
+  --fold-tone-b: color-mix(in srgb, var(--accent) 72%, white 28%);
+  --fold-tone-c: color-mix(in srgb, var(--accent) 82%, black 18%);
+  --fold-base: color-mix(in srgb, var(--accent) 28%, #0b0d14 72%);
+  --fold-plane: color-mix(in srgb, var(--accent) 36%, #111520 64%);
+  --fold-rail: color-mix(in srgb, var(--accent) 43%, #12141d 57%);
+  --fold-card: color-mix(in srgb, var(--accent) 34%, #20232d 66%);
+  --fold-spectrum-cyan: #2fe4ff;
+  --fold-spectrum-violet: #7968ff;
+  --fold-spectrum-rose: #ff5ca8;
+  --fold-spectrum-gold: #ffc857;
+  --fold-ink: var(--fg-strong);
+  --fold-muted: var(--fg-muted);
+  --fold-line: color-mix(in srgb, var(--border-strong) 68%, var(--fold-tone-a) 32%);
+  position: relative;
+  min-height: 560px;
+  overflow: hidden;
+  isolation: isolate;
+  border: 2px solid transparent;
+  border-radius: 22px 5px 22px 5px;
+  background:
+    radial-gradient(ellipse at 15% 4%, rgba(var(--fold-accent-rgb), .25), transparent 38%) padding-box,
+    radial-gradient(ellipse at 92% 88%, rgba(var(--fold-accent-rgb), .18), transparent 34%) padding-box,
+    linear-gradient(142deg, var(--fold-base), var(--fold-rail) 62%, var(--fold-plane)) padding-box,
+    conic-gradient(
+      from var(--fold-aura-angle),
+      #3cf26b,
+      #ffd93c,
+      #ff9a3c,
+      #ff5c8a,
+      #b07cff,
+      #7fd4ff,
+      #3cf26b
+    ) border-box;
+  color: var(--fold-ink);
+  box-shadow:
+    0 0 12px rgba(176, 124, 255, .22),
+    0 0 20px rgba(127, 212, 255, .14),
+    0 26px 70px rgba(0, 0, 0, .27),
+    inset 0 1px 0 rgba(255, 255, 255, .045);
+  animation: fold-aura-border-turn 8s linear infinite;
+}
+
+:root[data-theme="light"] .creation-launchpad[data-design="fold"] {
+  --fold-tone-a: color-mix(in srgb, var(--accent) 76%, black 24%);
+  --fold-tone-b: color-mix(in srgb, var(--accent) 62%, black 38%);
+  --fold-tone-c: color-mix(in srgb, var(--accent) 86%, black 14%);
+  --fold-base: color-mix(in srgb, var(--accent) 12%, #f4f6fa 88%);
+  --fold-plane: color-mix(in srgb, var(--accent) 17%, #ffffff 83%);
+  --fold-rail: color-mix(in srgb, var(--accent) 22%, #f7f8fb 78%);
+  --fold-card: color-mix(in srgb, var(--accent) 14%, #ffffff 86%);
+}
+
+.creation-launchpad[data-design="fold"]::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  width: 560px;
+  height: 560px;
+  top: -340px;
+  right: -80px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 210deg,
+    transparent 0 22%,
+    rgba(var(--fold-accent-rgb), .24) 30%,
+    rgba(var(--fold-accent-rgb), .28) 42%,
+    rgba(var(--fold-accent-rgb), .18) 52%,
+    transparent 62% 100%
+  );
+  filter: blur(34px);
+  animation: fold-aurora-drift 16s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__grid {
+  inset: 56px 0 0;
+  width: auto;
+  height: auto;
+  opacity: .7;
+  background:
+    linear-gradient(132deg, transparent 0 47.7%, rgba(var(--fold-accent-rgb), .13) 47.8% 47.9%, transparent 48%),
+    linear-gradient(48deg, transparent 0 73%, rgba(var(--fold-accent-rgb), .10) 73.1% 73.2%, transparent 73.3%),
+    repeating-linear-gradient(132deg, transparent 0 92px, rgba(var(--fold-accent-rgb), .038) 93px, transparent 94px 186px);
+  -webkit-mask-image: linear-gradient(90deg, #000 0 58%, rgba(0, 0, 0, .18) 88%, transparent);
+  mask-image: linear-gradient(90deg, #000 0 58%, rgba(0, 0, 0, .18) 88%, transparent);
+  animation: fold-field-drift 18s ease-in-out infinite alternate;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__grid::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    108deg,
+    transparent 0 43%,
+    rgba(var(--fold-accent-rgb), .025) 47%,
+    rgba(var(--fold-accent-rgb), .12) 50%,
+    rgba(var(--fold-accent-rgb), .04) 53%,
+    transparent 57% 100%
+  );
+  transform: translateX(-72%);
+  animation: fold-refraction 11s ease-in-out infinite;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__content {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__header {
+  position: relative;
+  z-index: 5;
+  width: 100%;
+  min-height: 57px;
+  padding: 0 22px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--fold-line);
+  background:
+    linear-gradient(90deg, rgba(var(--fold-accent-rgb), .07), transparent 34%),
+    color-mix(in srgb, var(--bg-panel) 91%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.18);
+  backdrop-filter: blur(20px) saturate(1.18);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__eyebrow {
+  color: color-mix(in srgb, var(--fold-ink) 72%, var(--fold-tone-b) 28%);
+  letter-spacing: 1.35px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__spark {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--fold-tone-a) 62%, var(--fold-tone-b));
+  border-radius: 3px 9px 3px 9px;
+  background:
+    linear-gradient(145deg, rgba(var(--fold-accent-rgb), .18), rgba(var(--fold-accent-rgb), .17));
+  color: var(--fold-tone-a);
+  box-shadow:
+    0 0 18px rgba(var(--fold-accent-rgb), .12),
+    inset 0 0 12px rgba(var(--fold-accent-rgb), .12);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__status {
+  color: var(--fold-muted);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__status > span:first-child {
+  background: var(--accent);
+  box-shadow: 0 0 9px rgba(var(--accent-rgb), .64);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 336px;
+  align-items: stretch;
+  min-height: 503px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__primary {
+  position: relative;
+  z-index: 2;
+  padding: clamp(42px, 6vw, 72px) clamp(64px, 8vw, 98px) clamp(42px, 6vw, 72px) clamp(42px, 6vw, 72px);
+  background:
+    radial-gradient(ellipse at 84% 48%, rgba(var(--fold-accent-rgb), .16), transparent 36%),
+    linear-gradient(116deg, rgba(var(--fold-accent-rgb), .20), transparent 38%),
+    var(--fold-plane);
+  clip-path: polygon(0 0, 94% 0, 100% 50%, 94% 100%, 0 100%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__primary::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0 4.9% 0 0;
+  background:
+    radial-gradient(ellipse at 82% 46%, rgba(var(--fold-accent-rgb), .19), transparent 34%),
+    linear-gradient(160deg, transparent 0 61%, rgba(var(--fold-accent-rgb), .14) 61.2% 61.4%, transparent 61.6%);
+  pointer-events: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__primary::after {
+  content: "";
+  position: absolute;
+  top: -9%;
+  right: 4.7%;
+  bottom: -9%;
+  width: 2px;
+  background: linear-gradient(
+    transparent 2%,
+    rgba(var(--fold-accent-rgb), .16) 14%,
+    var(--fold-tone-b) 35%,
+    var(--fold-tone-a) 53%,
+    var(--fold-tone-c) 69%,
+    rgba(var(--fold-accent-rgb), .12) 88%,
+    transparent 98%
+  );
+  box-shadow:
+    0 0 8px rgba(var(--fold-accent-rgb), .72),
+    0 0 26px rgba(var(--fold-accent-rgb), .38),
+    0 0 64px rgba(var(--fold-accent-rgb), .13);
+  transform: rotate(3.4deg) scaleY(.92);
+  transform-origin: center;
+  animation: fold-seam-breathe 6.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__kicker,
+.creation-launchpad[data-design="fold"] .creation-launchpad__choices-label,
+.creation-launchpad[data-design="fold"] .creation-launchpad__start-label {
+  color: var(--fold-tone-a);
+  text-shadow: 0 0 18px rgba(var(--fold-accent-rgb), .16);
+  letter-spacing: 1.7px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__title {
+  max-width: 670px;
+  margin: 10px 0 12px;
+  color: var(--fold-ink);
+  font-size: clamp(40px, 5vw, 62px);
+  letter-spacing: -3.1px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__title em {
+  display: block;
+  width: fit-content;
+  background: linear-gradient(
+    102deg,
+    var(--fold-tone-a) 0%,
+    var(--fold-spectrum-cyan) 26%,
+    var(--fold-spectrum-violet) 54%,
+    var(--fold-spectrum-rose) 78%,
+    var(--fold-spectrum-gold) 108%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 8px 24px rgba(var(--fold-accent-rgb), .12));
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__subtitle {
+  max-width: 650px;
+  color: var(--fold-muted);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__composer {
+  overflow: hidden;
+  margin-top: 28px;
+  border: 1px solid transparent;
+  border-radius: 3px 26px 3px 26px;
+  background:
+    linear-gradient(color-mix(in srgb, var(--fold-base) 76%, var(--fold-card) 24%), color-mix(in srgb, var(--fold-base) 76%, var(--fold-card) 24%)) padding-box,
+    linear-gradient(128deg, rgba(var(--fold-accent-rgb), .88), rgba(var(--fold-accent-rgb), .62) 52%, rgba(var(--fold-accent-rgb), .76)) border-box;
+  box-shadow:
+    0 22px 54px rgba(0, 0, 0, .24),
+    inset 0 1px 0 rgba(255, 255, 255, .035);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  transition: box-shadow 220ms ease, transform 220ms ease;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__composer:focus-within {
+  border-color: transparent;
+  background:
+    linear-gradient(color-mix(in srgb, var(--fold-base) 64%, var(--fold-card) 36%), color-mix(in srgb, var(--fold-base) 64%, var(--fold-card) 36%)) padding-box,
+    linear-gradient(128deg, var(--fold-tone-a), var(--fold-tone-b) 52%, var(--fold-tone-c)) border-box;
+  box-shadow:
+    0 0 0 3px rgba(var(--fold-accent-rgb), .08),
+    0 28px 66px rgba(0, 0, 0, .30),
+    0 0 38px rgba(var(--fold-accent-rgb), .12);
+  transform: translateY(-2px);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__composer textarea {
+  color: var(--fold-ink);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__composer textarea::placeholder,
+.creation-launchpad[data-design="fold"] .creation-launchpad__enter-hint {
+  color: var(--fg-subtle);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__composer-bar {
+  border-top: 1px solid color-mix(in srgb, var(--fold-line) 80%, transparent);
+  background: linear-gradient(90deg, rgba(var(--fold-accent-rgb), .025), rgba(var(--fold-accent-rgb), .035));
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode-label {
+  color: color-mix(in srgb, var(--fold-ink) 82%, var(--fold-tone-a) 18%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__submit {
+  border: 1px solid rgba(var(--fold-accent-rgb), .42);
+  border-radius: 3px 15px 3px 15px;
+  background: linear-gradient(115deg, color-mix(in srgb, var(--accent) 74%, var(--fold-tone-a) 26%), color-mix(in srgb, var(--accent) 62%, var(--fold-tone-b) 38%));
+  color: var(--accent-fg);
+  box-shadow:
+    0 8px 24px rgba(var(--accent-rgb), .18),
+    inset 0 1px 0 rgba(255, 255, 255, .20);
+  transition: filter 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__submit:hover {
+  filter: brightness(1.08) saturate(1.08);
+  transform: translateY(-1px);
+  box-shadow:
+    0 12px 28px rgba(var(--accent-rgb), .23),
+    0 0 22px rgba(var(--fold-accent-rgb), .10);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__actions button {
+  border-color: color-mix(in srgb, var(--fold-line) 78%, transparent);
+  background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+  color: var(--fold-ink);
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__actions button:hover {
+  border-color: color-mix(in srgb, var(--fold-tone-a) 55%, var(--fold-line));
+  background: color-mix(in srgb, var(--bg-card) 88%, var(--fold-tone-b) 12%);
+  transform: translateY(-1px);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__choices {
+  position: relative;
+  z-index: 3;
+  margin-left: -42px;
+  padding: 37px 23px 36px 0;
+  border: 0;
+  background:
+    radial-gradient(ellipse at 100% 2%, rgba(var(--fold-accent-rgb), .13), transparent 40%),
+    linear-gradient(160deg, rgba(var(--fold-accent-rgb), .21), transparent 58%),
+    var(--fold-rail);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__choices::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 18px 0 18px 18px;
+  border: 1px solid rgba(var(--fold-accent-rgb), .07);
+  border-radius: 5px 30px 5px 30px;
+  transform: translate(11px, 8px);
+  pointer-events: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__choices-label {
+  margin: 0 0 16px 43px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__modes {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  perspective: 900px;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode {
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .15), transparent 52%);
+  --fold-mode-surface: var(--fold-card);
+  min-height: 77px;
+  border: 1px solid transparent;
+  border-radius: 4px 19px 4px 19px;
+  padding: 12px 14px;
+  background:
+    var(--fold-mode-wash) padding-box,
+    linear-gradient(var(--fold-mode-surface), var(--fold-mode-surface)) padding-box,
+    conic-gradient(
+      from var(--fold-aura-angle),
+      #3cf26b,
+      #ffd93c,
+      #ff9a3c,
+      #ff5c8a,
+      #b07cff,
+      #7fd4ff,
+      #3cf26b
+    ) border-box;
+  color: var(--fold-ink);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, .18),
+    0 0 12px rgba(176, 124, 255, .12),
+    0 0 18px rgba(127, 212, 255, .08),
+    inset 0 1px 0 rgba(255, 255, 255, .035);
+  transform-origin: left center;
+  transition: border-color 190ms ease, background 190ms ease, box-shadow 190ms ease, transform 190ms ease;
+  animation: fold-aura-border-turn 8s linear infinite;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2) {
+  transform: translateX(19px);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), transparent 58%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3) {
+  transform: translateX(7px);
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .17), transparent 58%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:hover {
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .21), rgba(var(--fold-accent-rgb), .14) 54%, transparent);
+  box-shadow:
+    0 18px 38px rgba(0, 0, 0, .23),
+    0 0 16px rgba(176, 124, 255, .20),
+    0 0 24px rgba(127, 212, 255, .13);
+  transform: translateX(5px) rotateY(-1.2deg);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2):hover {
+  transform: translateX(24px) rotateY(-1.2deg);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3):hover {
+  transform: translateX(12px) rotateY(-1.2deg);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode.is-active {
+  border-color: transparent;
+  --fold-mode-wash: linear-gradient(116deg, rgba(var(--fold-accent-rgb), .30), rgba(var(--fold-accent-rgb), .22) 58%, rgba(var(--fold-accent-rgb), .10));
+  --fold-mode-surface: color-mix(in srgb, var(--fold-card) 82%, var(--fold-tone-a) 18%);
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, .25),
+    0 0 18px rgba(176, 124, 255, .23),
+    0 0 30px rgba(127, 212, 255, .15);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode-icon {
+  border-color: color-mix(in srgb, var(--fold-line) 72%, var(--fold-tone-a) 28%);
+  border-radius: 3px 12px 3px 12px;
+  background:
+    linear-gradient(145deg, rgba(var(--fold-accent-rgb), .24), rgba(var(--fold-accent-rgb), .26));
+  color: var(--fold-tone-a);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2) .creation-launchpad__mode-icon {
+  color: var(--fold-tone-b);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3) .creation-launchpad__mode-icon {
+  color: var(--fold-tone-c);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode-copy strong {
+  color: var(--fg-strong);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  opacity: 1;
+  text-shadow: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode-copy small {
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 1;
+  text-shadow: none;
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__mode-arrow {
+  color: color-mix(in srgb, var(--fg-strong) 72%, var(--fold-muted) 28%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__badge {
+  color: color-mix(in srgb, var(--fold-tone-c) 76%, var(--fold-ink) 24%);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__privacy-note {
+  margin: 21px 0 0 43px;
+  border-color: color-mix(in srgb, var(--fold-line) 74%, transparent);
+  color: var(--fold-muted);
+}
+
+.creation-launchpad[data-design="fold"] .creation-launchpad__privacy-note > span:first-child,
+.creation-launchpad[data-design="fold"] .creation-launchpad__privacy-note strong {
+  color: var(--fold-tone-a);
+}
+
+@keyframes fold-aurora-drift {
+  from { transform: translate3d(-3%, -2%, 0) rotate(-5deg) scale(.96); opacity: .62; }
+  to { transform: translate3d(5%, 5%, 0) rotate(7deg) scale(1.05); opacity: .92; }
+}
+
+@keyframes fold-aura-border-turn {
+  to { --fold-aura-angle: 360deg; }
+}
+
+@keyframes fold-field-drift {
+  from { transform: translate3d(-7px, -4px, 0); opacity: .55; }
+  to { transform: translate3d(8px, 5px, 0); opacity: .76; }
+}
+
+@keyframes fold-refraction {
+  0%, 18% { transform: translateX(-72%); opacity: 0; }
+  38% { opacity: .72; }
+  62% { opacity: .38; }
+  82%, 100% { transform: translateX(72%); opacity: 0; }
+}
+
+@keyframes fold-seam-breathe {
+  0%, 100% { opacity: .72; filter: saturate(.92) brightness(.94); }
+  50% { opacity: 1; filter: saturate(1.14) brightness(1.12); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .creation-launchpad[data-design="fold"]::before,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__grid,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__grid::after,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__primary::after {
+    animation: none;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__composer,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__submit,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__actions button,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode {
+    transition: none;
+  }
+
+  .creation-launchpad[data-design="fold"],
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode {
+    animation-duration: 48s;
+  }
+}
+
+@media (max-width: 980px) {
+  .creation-launchpad[data-design="fold"] .creation-launchpad__layout {
+    grid-template-columns: 1fr;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__primary {
+    padding: 44px;
+    clip-path: none;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__primary::before {
+    inset: 0;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__primary::after {
+    top: auto;
+    right: 0;
+    bottom: -1px;
+    left: 0;
+    width: auto;
+    height: 2px;
+    transform: none;
+    background: linear-gradient(90deg, transparent, var(--fold-tone-b) 28%, var(--fold-tone-a) 58%, var(--fold-tone-c) 78%, transparent);
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__choices {
+    margin: 0;
+    padding: 27px 34px;
+    border-top: 1px solid var(--fold-line);
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__choices::before {
+    display: none;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__choices-label,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__privacy-note {
+    margin-left: 0;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__modes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2),
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3),
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode:hover,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(2):hover,
+  .creation-launchpad[data-design="fold"] .creation-launchpad__mode:nth-child(3):hover {
+    transform: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .creation-launchpad[data-design="fold"] {
+    min-height: 0;
+    border-radius: 14px 3px 14px 3px;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__header {
+    padding: 0 14px;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__primary {
+    padding: 30px 20px;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__title {
+    font-size: 36px;
+    letter-spacing: -1.8px;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__choices {
+    padding: 24px 18px;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__modes {
+    grid-template-columns: 1fr;
+  }
+
+  .creation-launchpad[data-design="fold"] .creation-launchpad__submit {
+    min-width: 38px;
+    padding: 0 10px;
+  }
+}

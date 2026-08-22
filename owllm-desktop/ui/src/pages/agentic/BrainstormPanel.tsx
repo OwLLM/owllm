@@ -16,7 +16,16 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
-import { seedNotebookFromBrief } from "./RunNotebook";
+import { seedNotebookFromBrief, briefImplementationSteps } from "./RunNotebook";
+import {
+  BRAINSTORM_MODES,
+  brainstormMode,
+  checkpointLines,
+  isBrainstormModeId,
+  parseBriefFeatures,
+  webResearchNotice,
+  type BrainstormModeId,
+} from "./brainstormModes";
 import {
   type RoleData,
   type ModelInfo,
@@ -76,8 +85,15 @@ type ConversationTurn = { role: "user" | "assistant"; content: string };
 // session that stops for any reason (crash, close, refresh) can be resumed
 // instead of lost. Lives next to BRIEF.md, under the project's .owllm/ dir.
 const BRAINSTORM_STATE_PATH = ".owllm/brainstorm.json";
+/// The project-disk copy of the checkpoint is the durable one, but it is a real
+/// file write. Debounced edits go to localStorage every 300 ms; the disk copy is
+/// written at most this often (plus an unconditional flush on close, unmount,
+/// project switch and the end of every turn), so typing no longer rewrites a
+/// growing JSON blob on nearly every keystroke.
+const DISK_CHECKPOINT_INTERVAL_MS = 5_000;
 type BrainstormState = {
-  v: 2;
+  v: 3;
+  modeId: BrainstormModeId;
   idea: string;
   selectedModelId: string;
   convHistory: ConversationTurn[];
@@ -92,7 +108,6 @@ type BrainstormState = {
   activeOperation: "brainstorm" | "team" | "apply" | null;
   updatedAt: number;
 };
-type BriefFeature = { feature: string; priority: "v1" | "v2" | "opportunity" | "drop" };
 
 function brainstormStorageKey(projectId?: string, projectCwd?: string): string {
   return `owllm:brainstorm-state:${projectId || projectCwd || "unsaved-project"}`;
@@ -102,7 +117,7 @@ function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
   if (!raw) return null;
   try {
     const value = JSON.parse(raw) as Partial<Omit<BrainstormState, "v">> & { v?: number };
-    if (!value || (value.v !== 1 && value.v !== 2)) return null;
+    if (!value || (value.v !== 1 && value.v !== 2 && value.v !== 3)) return null;
     const convHistory = Array.isArray(value.convHistory)
       ? value.convHistory.filter((turn): turn is ConversationTurn =>
           !!turn && (turn.role === "user" || turn.role === "assistant") && typeof turn.content === "string")
@@ -116,7 +131,10 @@ function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
           !!agent && typeof agent.name === "string" && typeof agent.base === "string")
       : null;
     return {
-      v: 2,
+      v: 3,
+      // v1/v2 checkpoints predate explicit modes — they ran the role's own
+      // STEP 0 inference, which is exactly what "auto" does.
+      modeId: isBrainstormModeId(value.modeId) ? value.modeId : "auto",
       idea: typeof value.idea === "string" ? value.idea : "",
       selectedModelId: typeof value.selectedModelId === "string" ? value.selectedModelId : "",
       convHistory,
@@ -136,35 +154,6 @@ function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
   } catch {
     return null;
   }
-}
-
-// Parse the "## Feature Priority" table out of BRIEF.md into structured rows so
-// the board view can show features as columns. Forgiving: returns [] when the
-// section/table isn't there (board just stays empty, no crash).
-function parseBriefFeatures(brief: string): BriefFeature[] {
-  const out: BriefFeature[] = [];
-  if (!brief) return out;
-  const lines = brief.split("\n");
-  let inSection = false;
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (/^##\s+feature priority/i.test(line)) { inSection = true; continue; }
-    if (inSection && /^##\s+/.test(line)) break; // next section ends it
-    if (!inSection || !line.startsWith("|")) continue;
-    const cells = line.split("|").slice(1, -1).map(c => c.trim());
-    if (cells.length < 2) continue;
-    const feature = cells[0];
-    const prioRaw = cells[cells.length - 1].toLowerCase();
-    if (!feature || /^feature$/i.test(feature) || /^[-:\s]+$/.test(feature)) continue; // header/separator
-    const priority: BriefFeature["priority"] =
-      prioRaw.includes("v1") ? "v1"
-      : prioRaw.includes("opportunity") ? "opportunity"
-      : prioRaw.includes("v2") ? "v2"
-      : prioRaw.includes("drop") ? "drop"
-      : "v2";
-    out.push({ feature, priority });
-  }
-  return out;
 }
 
 // Default building-block roles when the parent doesn't pass the live set.
@@ -203,6 +192,7 @@ export default function BrainstormPanel(props: Props) {
   const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, accountsStatus,
     initialIdea, onBriefSaved, projectId, availableRoles, onTeamApplied, hasTeam = false, onOpenNotebook } = props;
 
+  const [modeId, setModeId] = useState<BrainstormModeId>("auto");
   const [idea, setIdea] = useState("");
   const [selectedModelId, setSelectedModelId] = useState(modelId);
   const [running, setRunning] = useState(false);
@@ -228,6 +218,8 @@ export default function BrainstormPanel(props: Props) {
   const loadedTargetRef = useRef("");
   const persistTimerRef = useRef<number | null>(null);
   const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const lastDiskWriteRef = useRef(0);
+  const diskTimerRef = useRef<number | null>(null);
   const checkpointRef = useRef<{
     targetKey: string;
     storageKey: string;
@@ -242,12 +234,17 @@ export default function BrainstormPanel(props: Props) {
   const logSticky = useStickyScroll(lines.length, open);
 
   const liveState: BrainstormState = {
-    v: 2,
+    v: 3,
+    modeId,
     idea,
     selectedModelId,
     convHistory,
     chatInput,
-    lines,
+    // The streamed log is a rendering of convHistory, so past a size budget it
+    // is dropped from the checkpoint rather than stored a second time and
+    // rewritten as it grows; hydration rebuilds a readable transcript from the
+    // history below.
+    lines: checkpointLines(lines),
     done,
     proposedTeam,
     teamApplied,
@@ -263,11 +260,33 @@ export default function BrainstormPanel(props: Props) {
 
   // localStorage is synchronous, so even a fast page switch preserves the
   // latest draft. Project-disk writes are serialized to prevent an older,
-  // slower write from overwriting a newer checkpoint.
-  const queueCheckpoint = (checkpoint = checkpointRef.current): Promise<void> => {
+  // slower write from overwriting a newer checkpoint, and rate-limited so a
+  // typing user doesn't rewrite the file on every debounce tick. `flush` forces
+  // the write for the moments that must survive (close, unmount, end of turn).
+  const queueCheckpoint = (
+    checkpoint = checkpointRef.current,
+    opts?: { flush?: boolean },
+  ): Promise<void> => {
     if (!checkpoint) return Promise.resolve();
     try { localStorage.setItem(checkpoint.storageKey, JSON.stringify(checkpoint.state)); } catch { /* best effort */ }
     if (!checkpoint.cwd) return Promise.resolve();
+    const now = Date.now();
+    const waited = now - lastDiskWriteRef.current;
+    if (!opts?.flush && waited < DISK_CHECKPOINT_INTERVAL_MS) {
+      // Too soon: leave a trailing write armed so the newest state still lands.
+      if (diskTimerRef.current === null) {
+        diskTimerRef.current = window.setTimeout(() => {
+          diskTimerRef.current = null;
+          void queueCheckpoint(checkpointRef.current, { flush: true });
+        }, DISK_CHECKPOINT_INTERVAL_MS - waited);
+      }
+      return Promise.resolve();
+    }
+    if (diskTimerRef.current !== null) {
+      window.clearTimeout(diskTimerRef.current);
+      diskTimerRef.current = null;
+    }
+    lastDiskWriteRef.current = now;
     writeChainRef.current = writeChainRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -296,13 +315,13 @@ export default function BrainstormPanel(props: Props) {
   // generated field even when no conversation turn has been completed yet.
   useEffect(() => {
     if (!open) {
-      if (hydratedRef.current) void queueCheckpoint();
+      if (hydratedRef.current) void queueCheckpoint(checkpointRef.current, { flush: true });
       hydratedRef.current = false;
       loadedTargetRef.current = "";
       setHydrated(false);
       return;
     }
-    if (hydratedRef.current && loadedTargetRef.current !== targetKey) void queueCheckpoint();
+    if (hydratedRef.current && loadedTargetRef.current !== targetKey) void queueCheckpoint(checkpointRef.current, { flush: true });
     hydratedRef.current = false;
     loadedTargetRef.current = "";
     setHydrated(false);
@@ -320,6 +339,7 @@ export default function BrainstormPanel(props: Props) {
     setChatInput("");
     setBriefText("");
     setBoardView(false);
+    setModeId("auto");
     const modelKey = projectId ? `owllm:brainstorm-model:${projectId}` : "";
     let savedModel = "";
     try { if (modelKey) savedModel = localStorage.getItem(modelKey) ?? ""; } catch { /* ignore */ }
@@ -367,6 +387,7 @@ export default function BrainstormPanel(props: Props) {
         } catch { /* saved brief text remains available */ }
       }
       if (cancelled) return;
+      setModeId(st?.modeId ?? "auto");
       setIdea(st?.idea ?? initialIdea ?? "");
       setSelectedModelId(st?.selectedModelId || savedModel || modelId);
       setConvHistory(restoredHistory);
@@ -403,12 +424,13 @@ export default function BrainstormPanel(props: Props) {
         persistTimerRef.current = null;
       }
     };
-  }, [open, hydrated, targetKey, idea, selectedModelId, convHistory, chatInput, lines, done,
+  }, [open, hydrated, targetKey, modeId, idea, selectedModelId, convHistory, chatInput, lines, done,
     proposedTeam, teamApplied, briefText, boardView, error, running, proposing, applying]);
 
   useEffect(() => () => {
     if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current);
-    if (hydratedRef.current) void queueCheckpoint();
+    if (diskTimerRef.current !== null) window.clearTimeout(diskTimerRef.current);
+    if (hydratedRef.current) void queueCheckpoint(checkpointRef.current, { flush: true });
   }, []);
 
   const closeAndSave = () => {
@@ -416,13 +438,15 @@ export default function BrainstormPanel(props: Props) {
       window.clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
     }
-    void queueCheckpoint();
+    void queueCheckpoint(checkpointRef.current, { flush: true });
     onClose();
   };
 
   if (!open) return null;
 
   const activeModelId = selectedModelId.trim();
+  const activeMode = brainstormMode(modeId);
+  const modeLocked = running || convHistory.length > 0;   // the mode framed the conversation; changing it mid-way would contradict it
   const selectBrainstormModel = (next: string) => {
     setSelectedModelId(next);
     if (!projectId) return;
@@ -457,7 +481,8 @@ export default function BrainstormPanel(props: Props) {
     setBriefText("");
     setBoardView(false);
     const fresh: BrainstormState = {
-      v: 2,
+      v: 3,
+      modeId,
       idea: "",
       selectedModelId,
       convHistory: [],
@@ -474,7 +499,7 @@ export default function BrainstormPanel(props: Props) {
     };
     const checkpoint = { targetKey, storageKey, cwd: projectCwd, state: fresh };
     checkpointRef.current = checkpoint;
-    await queueCheckpoint(checkpoint);
+    await queueCheckpoint(checkpoint, { flush: true });
   };
 
   // Conversational co-founder (step 3): wrap the brainstormer role so it FIRST
@@ -484,12 +509,13 @@ export default function BrainstormPanel(props: Props) {
     ? [
         "You are the user's CO-FOUNDER and a friendly SKEPTIC, scoping their idea before any code is written.",
         "Hold a short back-and-forth FIRST: ask 1-3 sharp questions per turn — clarify what they actually want and why, and challenge scope and assumptions. Be concise and direct, not a wall of text.",
-        // Mode-neutral framing: the role's STEP 0 decides NEW vs IMPROVEMENT.
-        // Do NOT presuppose competitor research or an ICP — an improvement to
-        // THIS app needs neither (inspect the code and plan the change), and
-        // forcing that framing here is what made the brainstormer web-search
-        // even for simple improvements.
-        "Before doing anything, decide the MODE per STEP 0 of your role below: is this a brand-NEW app, or an IMPROVEMENT to the app that already exists in this project? An improvement (add/fix/change a feature, 'the app', a named screen/button) needs NO competitor web research — inspect the codebase and plan the change. Only a brand-new product gets competitor research.",
+        // The user picks the mode in the panel. When they leave it on "Auto"
+        // the directive is empty and the role's own STEP 0 decides — never
+        // presuppose competitor research or an ICP here, since forcing that
+        // framing is what made the brainstormer web-search even for a simple
+        // improvement or a plain question.
+        activeMode.directive
+          || "Before doing anything, decide the MODE per STEP 0 of your role below (NEW PROJECT, IMPROVEMENT, RESEARCH, or OPEN) and follow that track. Competitor web research belongs to a brand-new product only; an improvement is planned from this project's code, and a question is answered from sources.",
         "Do NOT start any tools yet — wait until you've clarified enough, OR the user tells you to (e.g. 'go', 'run', 'proceed', 'looks good'). THEN follow the matching track in your role below and WRITE the ordered PLAN to BRIEF.md.",
         "After BRIEF.md exists, the user may keep talking to refine it — re-write BRIEF.md to reflect their changes.",
         "",
@@ -546,14 +572,21 @@ export default function BrainstormPanel(props: Props) {
         }
       } catch { /* not yet */ }
       if (briefOnDisk) {
-        if (projectId && hasTeam) setNotebookStepCount(seedNotebookFromBrief(projectId, briefTextOnDisk));
+        if (projectId && (hasTeam || teamApplied)) setNotebookStepCount(seedNotebookFromBrief(projectId, briefTextOnDisk));
         if (!done) {
           setDone(true);
-          append("system", hasTeam
+          append("system", (hasTeam || teamApplied)
             ? `\n✓ BRIEF.md saved and its implementation steps were added to this project's Notebook.`
             : `\n✓ BRIEF.md saved. This project has no team yet; assemble one below.`);
           onBriefSaved?.();
         }
+      } else if (done) {
+        // The brief was there and is gone (deleted, or the folder changed under
+        // us). Saying "done" while nothing is on disk sends the user to a
+        // Notebook/board built from a file that no longer exists.
+        setDone(false);
+        setBriefText("");
+        append("system", "\n⚠ BRIEF.md is no longer on disk — the brief is not saved. Ask me to write it again.");
       }
     } catch (e: any) {
       if (reply) setConvHistory([...historyWithUser, { role: "assistant", content: reply }]);
@@ -562,6 +595,9 @@ export default function BrainstormPanel(props: Props) {
     } finally {
       setRunning(false);
       abortRef.current = null;
+      // End of a turn is a checkpoint worth the disk write, whatever the
+      // rate limiter would otherwise say.
+      void queueCheckpoint(checkpointRef.current, { flush: true });
     }
   };
 
@@ -573,13 +609,14 @@ export default function BrainstormPanel(props: Props) {
     if (!activeModelId) { setError("Pick the model the Brainstorm agent should use."); return; }
     setDone(false);
     setConvHistory([]);
-    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${activeModelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to write the plan.` }]);
+    setLines([{ kind: "system", text: `🧠 ${activeMode.icon} ${activeMode.label} brainstorm in ${projectCwd} using ${activeModelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to write the plan.` }]);
     await runTurn([
       `Project location (BRIEF.md goes here; for a brand-new app, brainstorm/<png> screenshots too): ${projectCwd}`,
+      ...(activeMode.directive ? ["", activeMode.directive] : []),
       "",
       `My idea: ${trimmed}`,
       "",
-      "Start as my co-founder: ask me your sharpest 1-3 questions (no tools yet).",
+      activeMode.opening,
     ].join("\n"));
   };
 
@@ -668,7 +705,17 @@ export default function BrainstormPanel(props: Props) {
       });
       setTeamApplied(true);
       onTeamApplied?.();
-      append("system", `\n🤝 Team applied (${proposedTeam.length} agents). Close this panel — the canvas now shows your team. Hit Run to build.`);
+      // The project only just got its first team, so the brief's plan was never
+      // seeded (seeding is gated on the project already having one). Do it here
+      // or a brand-new project lands on an empty Notebook.
+      const briefForSeed = briefText.trim()
+        ? briefText
+        : await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd }).catch(() => "");
+      const seeded = seedNotebookFromBrief(projectId, briefForSeed);
+      setNotebookStepCount(seeded);
+      append("system", seeded > 0
+        ? `\n🤝 Team applied (${proposedTeam.length} agents) and ${seeded} plan step${seeded === 1 ? "" : "s"} from BRIEF.md were added to this project's Notebook.`
+        : `\n🤝 Team applied (${proposedTeam.length} agents). Close this panel — the canvas now shows your team. Hit Run to build.`);
     } catch (e: any) {
       setError("Apply failed: " + String(e?.message ?? e));
     } finally {
@@ -735,6 +782,42 @@ export default function BrainstormPanel(props: Props) {
 
         {/* Body */}
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14, flex: 1, minHeight: 0 }}>
+          {/* Mode picker — what KIND of brainstorm this is. It selects the track
+              the brainstormer follows, so a question or a code change no longer
+              gets the product/market treatment. */}
+          <div data-ui="BrainstormModePicker">
+            <label style={{ color: "var(--fg)", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+              What kind of brainstorm?
+            </label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {BRAINSTORM_MODES.map((m) => {
+                const active = m.id === activeMode.id;
+                return (
+                  <button
+                    key={m.id}
+                    data-ui={`BrainstormMode-${m.id}`}
+                    aria-pressed={active}
+                    onClick={() => setModeId(m.id)}
+                    disabled={modeLocked}
+                    title={modeLocked ? "Start fresh to change the mode" : m.hint}
+                    style={{
+                      padding: "6px 12px", fontSize: 12, fontWeight: active ? 700 : 600,
+                      background: active ? "rgba(107,127,255,0.28)" : "transparent",
+                      color: active ? "var(--fg-strong)" : "var(--fg)",
+                      border: `1px solid ${active ? "rgba(140,160,255,0.65)" : "rgba(255,255,255,0.15)"}`,
+                      borderRadius: 6,
+                      cursor: modeLocked ? "not-allowed" : "pointer",
+                      opacity: modeLocked && !active ? 0.45 : 1,
+                    }}
+                  >{m.icon} {m.label}</button>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 5, color: "var(--fg-muted)", fontSize: 11 }}>
+              {activeMode.hint}{modeLocked ? " · locked for this conversation — 🆕 Start fresh to change it" : ""}
+            </div>
+          </div>
+
           {/* Idea input */}
           <div>
             <label style={{ color: "var(--fg)", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
@@ -744,7 +827,7 @@ export default function BrainstormPanel(props: Props) {
               value={idea}
               onChange={(e) => setIdea(e.target.value)}
               disabled={running || convHistory.length > 0}
-              placeholder="e.g. A Gmail-native CRM I can use for my own business contacts. Or: a workout tracker that learns from my history and suggests next week's plan."
+              placeholder={activeMode.placeholder}
               rows={3}
               style={{
                 width: "100%",
@@ -784,7 +867,9 @@ export default function BrainstormPanel(props: Props) {
           }}>
             <span>📂 {projectCwd || <em style={{ color: "#ff9f9f" }}>no project location set</em>}</span>
             <span>🤖 {activeModelId || <em style={{ color: "#ff9f9f" }}>no model</em>}</span>
-            <span>🔑 Brave Search key required (set in Accounts page)</span>
+            {/* Only the tracks that actually call web_search need the key —
+                an improvement brief never searches. */}
+            {webResearchNotice(activeMode) && <span>{webResearchNotice(activeMode)}</span>}
           </div>
 
           {/* Action row */}
@@ -839,7 +924,7 @@ export default function BrainstormPanel(props: Props) {
                 {hasTeam ? (
                   <button
                     data-ui="BrainstormOpenNotebook"
-                    onClick={() => { void queueCheckpoint(); onOpenNotebook?.(); }}
+                    onClick={() => { void queueCheckpoint(checkpointRef.current, { flush: true }); onOpenNotebook?.(); }}
                     disabled={!projectId}
                     title="Open this project's implementation queue"
                     style={{
@@ -872,14 +957,32 @@ export default function BrainstormPanel(props: Props) {
               </>
             )}
             {teamApplied && (
-              <button
-                onClick={closeAndSave}
-                style={{
-                  padding: "8px 16px", fontSize: 13, fontWeight: 700,
-                  background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",
-                  border: "1px solid rgba(100, 220, 140, 0.4)", borderRadius: 6, cursor: "pointer",
-                }}
-              >✓ Team applied — Close &amp; open canvas</button>
+              <>
+                {/* The team now exists, so this project HAS a Notebook seeded
+                    from the brief — send the user there, same as an existing
+                    project's brainstorm does. */}
+                <button
+                  data-ui="BrainstormOpenNotebook"
+                  onClick={() => { void queueCheckpoint(checkpointRef.current, { flush: true }); onOpenNotebook?.(); }}
+                  disabled={!projectId || !onOpenNotebook}
+                  title="Open this project's implementation queue"
+                  style={{
+                    padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                    background: "linear-gradient(180deg, var(--accent), rgba(var(--accent-rgb),0.72))",
+                    color: "var(--accent-fg)", border: "none", borderRadius: 6,
+                    cursor: (projectId && onOpenNotebook) ? "pointer" : "not-allowed",
+                    opacity: (projectId && onOpenNotebook) ? 1 : 0.55,
+                  }}
+                >📓 Open implementation Notebook{notebookStepCount > 0 ? ` · ${notebookStepCount} new` : ""}</button>
+                <button
+                  onClick={closeAndSave}
+                  style={{
+                    padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                    background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",
+                    border: "1px solid rgba(100, 220, 140, 0.4)", borderRadius: 6, cursor: "pointer",
+                  }}
+                >✓ Team applied — Close &amp; open canvas</button>
+              </>
             )}
           </div>
 
@@ -927,19 +1030,40 @@ export default function BrainstormPanel(props: Props) {
             </div>
           )}
 
-          {/* Living visual brief — feature columns parsed from BRIEF.md. */}
+          {/* Living visual brief. Only a NEW-PROJECT brief has a Feature
+              Priority table; improvement/research/open briefs end in an ordered
+              ## Plan, which is what the board shows for them — the board used
+              to be permanently empty for every mode but "new product". */}
           {done && boardView && (() => {
             const features = parseBriefFeatures(briefText);
+            const planSteps = features.length === 0
+              ? briefImplementationSteps(briefText, { fallback: false })
+              : [];
             const cols = [
               { key: "v1", title: "🟢 v1 — must have", color: "#36d27a", items: features.filter(f => f.priority === "v1") },
               { key: "opportunity", title: "💡 opportunity", color: "#ffd97a", items: features.filter(f => f.priority === "opportunity") },
               { key: "v2", title: "🟡 v2 — later", color: "var(--fg-muted)", items: features.filter(f => f.priority === "v2") },
             ];
+            if (features.length === 0 && planSteps.length > 0) {
+              return (
+                <div data-ui="BrainstormPlanBoard" style={{ flex: 1, minHeight: 200, maxHeight: "50vh", overflowY: "auto", display: "flex", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0, background: "rgba(8,11,18,0.92)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ color: "#9ad9ff", fontSize: 12, fontWeight: 700 }}>🧭 Plan · {planSteps.length} step{planSteps.length === 1 ? "" : "s"}</div>
+                    {planSteps.map((step, i) => (
+                      <div key={i} style={{ background: "rgba(20,26,40,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "7px 9px", fontSize: 12, color: "#e6ebf7", display: "flex", gap: 8 }}>
+                        <span style={{ color: "#8aa0c0", fontFamily: "Consolas, monospace" }}>{i + 1}</span>
+                        <span style={{ minWidth: 0 }}>{step}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            }
             return (
               <div style={{ flex: 1, minHeight: 200, maxHeight: "50vh", overflowY: "auto", display: "flex", gap: 10 }}>
                 {features.length === 0 ? (
                   <div style={{ color: "var(--fg-muted)", fontSize: 12, padding: 12 }}>
-                    No Feature Priority table in BRIEF.md yet — ask the co-founder to add one, or use the Conversation view.
+                    BRIEF.md has no Feature Priority table and no ordered ## Plan yet — ask the co-founder to finish the brief, or use the Conversation view.
                   </div>
                 ) : cols.map(col => (
                   <div key={col.key} style={{ flex: 1, minWidth: 0, background: "rgba(8,11,18,0.92)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -975,7 +1099,7 @@ export default function BrainstormPanel(props: Props) {
           >
             {lines.length === 0 && !running ? (
               <div style={{ color: "var(--fg-dim)", fontStyle: "italic" }}>
-                Output will appear here once you click Run Brainstorm.
+                Output will appear here once you click Start brainstorm.
               </div>
             ) : (
               lines.map((l, i) => {

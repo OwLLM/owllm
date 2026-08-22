@@ -371,6 +371,7 @@ fn vault_admit_now() -> Option<tokio::sync::SemaphorePermit<'static>> {
 
 fn run_git_once(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
+    cmd.args(crate::git::app_owned_credential_args());
     cmd.args(args);
     if let Some(d) = cwd {
         cmd.current_dir(d);

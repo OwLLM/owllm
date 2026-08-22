@@ -1,4 +1,4 @@
-﻿// AgentsPage — agentic tab body. Frame + header + tabs come from
+// AgentsPage — agentic tab body. Frame + header + tabs come from
 // AppShell. Layout: location strip, goal row, then the workspace
 // (canvas + cards + orchestrator pane).
 //
@@ -30,20 +30,23 @@ import {
   parseProjectEnvironment,
   restoreProjectBrowser,
   reopenPersonalBrowserSession,
+  openWelcomeBrowserSplit,
   type ProjectEnvironment,
 } from "./projectEnvironment";
 import RulesEditor from "./RulesEditor";
+// The Code page's column building blocks — the Agents page reuses them so the
+// two pages converge on ONE layout (user spec 2026-08-14): the resizable
+// right utility column, the collapsed icon rails, and the lazy file tree.
+import { SideColumnShell, sideTabStyle, UsagePanel, BrowserToggleButton } from "./CodeSidePanel";
+import { CodeProjectRailIcons, CodeUtilityRailIcons, RAIL_W } from "./CodeColumnRails";
+import { TreeDir } from "./CodePage";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
   loadOverridesForProject,
 } from "./IconPickerDialog";
-import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite } from "./ModelPicker";
+import ModelPicker, { SELECT_MODEL_LABEL, AccountsStatusLite, buildEntries } from "./ModelPicker";
 import ModelRequiredDialog from "../../components/ModelRequiredDialog";
-import {
-  OpenAILogo, AnthropicLogo, GeminiLogo, DeepSeekLogo,
-  XaiLogo, MoonshotLogo, MistralLogo,
-} from "../advanced/brandLogos";
 import {
   type VoiceConfig,
   DEFAULT_VOICE,
@@ -61,36 +64,16 @@ import {
   buildCriticPrompt,
   buildAskUserBubble,
   extractUserInputRequest,
-  transcribeAudioAttachments,
   imageAttachments,
-  appendImageAttachmentNotes,
-  appendCliImageFiles,
-  saveCliImages,
-  resolveImageCwd,
-  fileToImageAttachment,
   fileToChatAttachment,
   appendDocumentAttachmentText,
   CHAT_ATTACHMENT_ACCEPT,
-  openaiUserContent,
-  anthropicUserContent,
-  parseClaudeModelId,
-  mapClaudeEffort,
   getClaudeSession,
-  resetClaudeSession,
-  clearAllClaudeSessions,
   loadAgentMemory,
   appendAgentMemory,
-  streamLocalChat,
-  streamOpenAiApiWithTools,
-  foldHistoryIntoPrompt,
-  recentTextHistory,
-  runCodexCliStream,
-  runKimiCliStream,
-  makeResponsiveHandlers,
-  makeUiYield,
-  ensureCliWarm,
+  streamChatCompletion,
+  setGrantHomeThisRun,
   CliPreflightError,
-  clearCliWarm,
   withCliAuthRetry,
   setCliAuthWaitHandler,
   type AuthWaitInfo,
@@ -106,7 +89,6 @@ import {
   routingHint,
   nextHandoffs,
   loopExhaustedNotice,
-  fetchNetRetry,
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
   TEAM_MEMORY_HINT_LEAN,
@@ -117,14 +99,15 @@ import {
   sleepAbortable,
 } from "./dispatch";
 import { requiresManagedLocalServer } from "./peerCatalogue";
-// The local-model tool-use loop now lives in ONE shared place
-// (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
-// keeps only the cloud/sub/API routing and delegates the GGUF path to
-// streamLocalChat. stripFabricatedToolOutput is still used to clean the
-// SuperUser orchestrator's streamed reply.
+// The FULL model dispatch (cloud/sub/API routing AND the local tool-use loop)
+// lives in ONE shared place: streamChatCompletion in dispatch.ts. AgentsPage
+// used to carry its own ~1000-line copy of the router + provider streams; the
+// two drifted apart 19 documented ways (Claude 401 retry, Stop scoping, kimi
+// images, gemini warm-up, grok sub, usage metering, …), so the copy is gone.
+// stripFabricatedToolOutput is still used to clean the SuperUser
+// orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
-import { claudeCliUnavailableMessage, type ClaudeCliStatus } from "./cliAuthMessage";
 import { runMemoryCurator } from "./memoryCurator";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -137,7 +120,11 @@ import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomai
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
-import { resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock } from "./skillRuntime";
+import {
+  resolveAgentSkills, buildAgentSkillBlock, buildSoloSkillBlock,
+  listSkillPacks, resolveEquippedSkillIds, toggleSkillGrant, type SkillPack,
+  organizeSkillPacks, skillPackLabel, skillPackSource, prettySkillName,
+} from "./skillRuntime";
 import {
   applyDelegationPolicy,
   assertProviderHonorsPersonalPolicy,
@@ -171,6 +158,7 @@ import {
   assignTeamModelToAgents,
   clearStoredAgentModelOverrides,
   graphJsonWithAgentModels,
+  persistedAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
 import {
@@ -181,13 +169,12 @@ import {
   worktreePreflightError,
   type WorktreeCreateState,
 } from "./worktreeIsolation";
-import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
-import { historyBudgetFor } from "./contextBudget";
+import { READONLY_LOCAL_TOOLS } from "./agentSandbox";
 import { startupFailureReason, localStartFailureText } from "./localServerFailure";
 import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
-// Native tool_call shape harvested by consumeOpenAISse from
-// delta.tool_calls (used by the cloud streaming display path).
+// Native tool_call shape harvested from delta.tool_calls by the shared
+// SSE consumers in dispatch.ts (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
 type QueuedSteer = { text: string; attachments: Attachment[] };
 
@@ -222,38 +209,36 @@ function setAgentModelOverride(pid: string, agent: string, modelId: string): voi
   } catch { /* private mode */ }
 }
 function loadAgentModelsForProject(pid: string, graphJson?: string | null): Map<string, string> {
-  const m = new Map<string, string>();
-  if (!pid) return m;
-  // BASE layer: the project's DB graph_json. It survives an app reinstall/update
-  // (which wipes WebView2 localStorage), so it's the fallback that keeps picks
-  // across reinstalls.
+  if (!pid) return new Map();
+  // DB source. The presence of an `agentModels` object (including an empty
+  // object) means this project uses durable SQLite persistence and that source
+  // is authoritative.
+  let databaseModels: Map<string, string> | null = null;
   if (graphJson && graphJson.trim()) {
     try {
       const am = JSON.parse(graphJson)?.agentModels;
       if (am && typeof am === "object") {
+        databaseModels = new Map();
         for (const k of Object.keys(am)) {
           const v = (am as Record<string, unknown>)[k];
-          if (typeof v === "string" && v.trim()) m.set(k, v);
+          if (typeof v === "string" && v.trim()) databaseModels.set(k, v);
         }
       }
-    } catch { /* malformed graph_json → fall through to localStorage */ }
+    } catch { /* malformed graph_json -> legacy localStorage fallback */ }
   }
-  // OVERLAY: localStorage is written SYNCHRONOUSLY on every pick, so it is the
-  // FRESHEST source on a normal restart. It must WIN over graph_json, whose
-  // writer is debounced + guarded (skips while a template is active) and can lag
-  // behind — the stale graph_json overwriting the fresh pick is exactly the
-  // "old models come back at restart" bug. On a reinstall localStorage is empty,
-  // so the graph_json base above stands.
+  // Legacy source. It must NOT overlay a DB `agentModels` object: that was how
+  // stale `auto/balanced` values replaced the concrete model the user selected.
+  const legacyLocalModels = new Map<string, string>();
   const prefix = `owllm:agent-model:${pid}:`;
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(prefix)) continue;
       const v = localStorage.getItem(k);
-      if (v && v.trim()) m.set(k.slice(prefix.length), v);
+      if (v && v.trim()) legacyLocalModels.set(k.slice(prefix.length), v);
     }
   } catch { /* private mode */ }
-  return m;
+  return persistedAgentModels(databaseModels, legacyLocalModels);
 }
 
 // Per-agent VOICE picks persist the same way the model picks do — project- and
@@ -1234,13 +1219,9 @@ function FlowHeader({
       )}
       <div style={{ flex:1 }} />
       {/* (old FlowSoloBtn removed — the header title-switch above now controls the mode) */}
-      <button
-        data-ui="FlowNotebookBtn"
-        className="ghost-btn"
-        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook"))}
-        title="Notebook — write working notes while agents run, digest them into a Kanban plan board and larger feedable steps, then feed steps to the team or auto-feed them run after run."
-        style={{ height:28, padding:"0 8px", fontSize:11 }}
-      >📓 Notebook</button>
+      {/* (📓 Notebook + 🧠 Memory buttons removed 2026-08-14 — the Notebook is
+          a page of the right column and Project Memory a button on the left
+          column, exactly like the Code page. Nothing to duplicate here.) */}
       <button
         data-ui="FlowBrowserBtn"
         className="ghost-btn"
@@ -1248,13 +1229,6 @@ function FlowHeader({
         title="Agent Browser — view and drive the shared web browser your agents control with the browser_* tools (live page view, open URLs, persistent logins)."
         style={{ height:28, padding:"0 8px", fontSize:11 }}
       >🌐 Browser</button>
-      <button
-        data-ui="FlowMemoryBtn"
-        className="ghost-btn"
-        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
-        title="Team Memory — the shared knowledge base your agents read and write (build commands, decisions, file maps). Syncs across your PCs via the vault."
-        style={{ height:28, padding:"0 8px", fontSize:11 }}
-      >🧠 Memory</button>
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
       {/* Segmented view switch. Graph = editable top-down hierarchy,
           Chat = per-agent grid replacing the canvas entirely.
@@ -1508,6 +1482,14 @@ function AgentInfoCard({
 // matches the green Design Critic card on the canvas. Orchestrator
 // and critic get distinct dedicated colours since they sit OUTSIDE
 // the design/build split.
+/// Is this the release agent (the "Producer")? Either the publisher base role
+/// or any role granted `publish_release`. One predicate so the solo roster, the
+/// chat grid and the left column's fixed Producer card all agree.
+function isPublisherAgent(a: AgentSpec, roleByName: Map<string, RoleData>): boolean {
+  return a.base === "publisher"
+    || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release");
+}
+
 function tileAccentFor(spec: AgentSpec): string {
   if (spec.color && spec.color.trim()) return spec.color;
   const shortName = spec.name.includes(".") ? spec.name.split(".").pop()! : spec.name;
@@ -1519,106 +1501,6 @@ function tileAccentFor(spec: AgentSpec): string {
   if (group === "critic") return "#ffb84c";
   return "#78b4ff";   // build
 }
-
-// Brand tint per model provider — mirrors ModelPicker's SECTION_META so a
-// model's logo-chip on the agent card reads in the provider's colour. Keyed by
-// the provider string providerFor() returns. The app ships no per-provider
-// brand IMAGE assets, so the chip shows the model's short name in the brand
-// colour (the explicit fallback the feature spec allows) rather than inventing
-// an asset pipeline.
-const PROVIDER_TINT: Record<string, string> = {
-  local: "#7fdfff", tuned: "#ffd166",
-  anthropic: "#ff9a3a", openai: "#10a37f", moonshot: "#d36bff", kimi: "#d36bff",
-  gemini: "#4285f4", deepseek: "#2563eb", xai: "#9aa0a6", groq: "#ff5d11",
-  perplexity: "#20b2aa", mistral: "#ff7a00", together: "#7fc8ff", auto: "#c08aff",
-};
-// Short, human label for a resolved model id — strips the sub/api/auto route
-// prefix the ModelPicker encodes plus any :effort suffix and owner/ path, so
-// the card chip stays compact.
-function shortModelLabel(modelId: string): string {
-  if (!modelId) return "";
-  let s = modelId;
-  for (const p of ["sub/", "api/", "auto/"]) if (s.startsWith(p)) { s = s.slice(p.length); break; }
-  const colon = s.indexOf(":");
-  if (colon > 0) s = s.slice(0, colon);
-  if (s.includes("/")) s = s.split("/").pop()!;
-  return s;
-}
-
-// Research-lab brand colour per lab name — tints the model chip in the maker's
-// colour. Falls back through PROVIDER_TINT then a neutral.
-const LAB_TINT: Record<string, string> = {
-  Anthropic: "#ff9a3a", OpenAI: "#10a37f", Google: "#4285f4",
-  Moonshot: "#d36bff", DeepSeek: "#2563eb", xAI: "#c7ccd1", Mistral: "#ff7a00",
-  Meta: "#4267b2", Qwen: "#7a5cff", Microsoft: "#00a4ef", Nous: "#b07cff",
-  "01.AI": "#22c55e", Cohere: "#39c5bb", Unsloth: "#ffb020", IBM: "#0f62fe",
-  NVIDIA: "#76b900", TII: "#1f9d8f", Stability: "#ff5d7a", AllenAI: "#f59e0b",
-  BigCode: "#ffd166",
-};
-// Providers that ARE the model's maker → lab name straight through. Host-style
-// providers (groq/together/perplexity/local/tuned) are intentionally omitted so
-// the chip falls through to id parsing and shows the ACTUAL maker, not the host.
-const PROVIDER_LAB: Record<string, string> = {
-  anthropic: "Anthropic", openai: "OpenAI", gemini: "Google",
-  moonshot: "Moonshot", kimi: "Moonshot", deepseek: "DeepSeek",
-  xai: "xAI", mistral: "Mistral",
-};
-// Maker detected from a local/tuned model id's owner path prefix
-// ("unsloth/…", "google/gemma-…", "Qwen/…", "deepseek-ai/…").
-const OWNER_LAB: Record<string, string> = {
-  unsloth: "Unsloth", google: "Google", "meta-llama": "Meta", meta: "Meta",
-  qwen: "Qwen", "deepseek-ai": "DeepSeek", deepseek: "DeepSeek",
-  mistralai: "Mistral", microsoft: "Microsoft", nousresearch: "Nous",
-  "01-ai": "01.AI", "01.ai": "01.AI", cohereforai: "Cohere", cohere: "Cohere",
-  bigcode: "BigCode", stabilityai: "Stability", allenai: "AllenAI",
-  "ibm-granite": "IBM", ibm: "IBM", nvidia: "NVIDIA", tiiuae: "TII",
-};
-
-// Friendly research-lab label for a resolved model id. A maker-provider maps
-// straight from `provider`; otherwise the lab is parsed from the id's owner path
-// or name keywords. Keeps the card chip compact for long local GGUF names
-// ("unsloth/gemma-3-…-GGUF" → "Google"/"Unsloth") and works for cloud + local +
-// tuned alike. Returns "" only for an empty id. `provider` is an optional hint;
-// the id-only path is used on surfaces (graph canvas) that carry no provider.
-function modelLabFor(modelId: string, provider?: string): string {
-  if (!modelId) return "";
-  if (provider && PROVIDER_LAB[provider]) return PROVIDER_LAB[provider];
-  let bare = modelId;
-  for (const p of ["sub/", "api/", "auto/"]) if (bare.startsWith(p)) { bare = bare.slice(p.length); break; }
-  if (bare.includes("/")) {
-    const owner = bare.split("/")[0].toLowerCase();
-    if (OWNER_LAB[owner]) return OWNER_LAB[owner];
-  }
-  const n = bare.toLowerCase();
-  if (n.includes("gemma") || n.includes("gemini")) return "Google";
-  if (n.includes("qwen")) return "Qwen";
-  if (n.includes("llama")) return "Meta";
-  if (n.includes("mixtral") || n.includes("mistral")) return "Mistral";
-  if (n.includes("deepseek")) return "DeepSeek";
-  if (n.startsWith("phi") || n.includes("phi-")) return "Microsoft";
-  if (n.includes("command-r") || n.includes("command")) return "Cohere";
-  if (n.includes("grok")) return "xAI";
-  if (n.includes("kimi") || n.includes("moonshot")) return "Moonshot";
-  if (n.includes("gpt") || n === "o3" || n.startsWith("o3") || n.includes("codex")) return "OpenAI";
-  if (n.includes("claude")) return "Anthropic";
-  if (n.includes("falcon")) return "TII";
-  if (n.includes("granite")) return "IBM";
-  if (n.startsWith("yi-") || n.includes("/yi-")) return "01.AI";
-  return shortModelLabel(modelId);
-}
-// Lab name + brand tint for the model chip on an agent card.
-function modelChipFor(modelId: string, provider?: string): { lab: string; tint: string } {
-  const lab = modelLabFor(modelId, provider);
-  const tint = LAB_TINT[lab] ?? (provider ? PROVIDER_TINT[provider] : undefined) ?? "#9db4dc";
-  return { lab, tint };
-}
-// Research-lab brand mark per lab NAME, for the model chip. Labs without a
-// dedicated mark are absent here and fall back to the compact lab-name text —
-// the chip never renders blank.
-const LAB_LOGO: Record<string, React.FC<{ size?: number; color?: string }>> = {
-  OpenAI: OpenAILogo, Anthropic: AnthropicLogo, Google: GeminiLogo,
-  DeepSeek: DeepSeekLogo, xAI: XaiLogo, Moonshot: MoonshotLogo, Mistral: MistralLogo,
-};
 
 // Tile arrangement for a 4-column grid. Spatial layout the user spec'd:
 //
@@ -1710,24 +1592,30 @@ export function skillIcon(id: string): string {
   if (/docs|documentation/.test(s)) return "📚";
   return "📦";
 }
-// "anthropics__pdf" → "Pdf"; "code-review" → "Code Review". Tooltip label.
+// "anthropics__pdf" → "PDF"; "code-review" → "Code Review". Tooltip label —
+// delegates to the shared prettifier so ribbon tooltips and the picker's card
+// titles can never disagree on a skill's name.
 function skillShortName(id: string): string {
-  const base = id.includes("__") ? id.split("__").pop()! : id;
-  return base.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return prettySkillName(id);
 }
-// An agent's equipped skill ids — role allowlist + team extras + per-project
-// grant, deduped. The SAME sources buildSpecialistPrompt injects, so the badge
-// reflects exactly what the agent actually has equipped.
+// An agent's BASE skill ids — role yaml allowlist ∪ team-template extras.
+// The per-project grant is applied on top by resolveEquippedSkillIds, whose
+// "-id" entries can also DENY one of these base skills (card-picker unequip).
+function baseAgentSkillIds(a: AgentSpec, roleByName: Map<string, RoleData>): string[] {
+  return [...new Set([
+    ...(roleByName.get(a.base)?.skillAllowlist ?? []),
+    ...(a.extraSkills ?? []),
+  ])].filter(Boolean);
+}
+// An agent's equipped skill ids — THE resolver behind the card badge, the
+// skills picker AND every dispatch injection site. One implementation, so a
+// picker toggle can never lie about what the agent actually gets injected.
 function resolveAgentSkillIds(
   a: AgentSpec,
   roleByName: Map<string, RoleData>,
   perAgentSkills?: Map<string, string[]>,
 ): string[] {
-  return [...new Set([
-    ...(roleByName.get(a.base)?.skillAllowlist ?? []),
-    ...(a.extraSkills ?? []),
-    ...(perAgentSkills?.get(a.name) ?? []),
-  ])].filter(Boolean);
+  return resolveEquippedSkillIds(baseAgentSkillIds(a, roleByName), perAgentSkills?.get(a.name));
 }
 
 // AgentChatGrid — per-agent chat windows tiled into a square grid in
@@ -1739,16 +1627,13 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, onPickAgentModel,
+  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, explicitModelFor, labelForModel, onPickAgentModel,
   models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
-  perAgentSkills, projectCwd, labelOverrides,
+  perAgentSkills, labelOverrides,
 }: {
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
   /// "Coder"). Never touches the underlying agent name — that's identity.
   labelOverrides?: Record<string, string>;
-  /// Project working directory — threaded to the publisher tile's
-  /// Commit / Merge / Publish host controls.
-  projectCwd?: string | null;
   team: Team | null;
   roleByName: Map<string, RoleData>;
   /// Per-agent skill grants (project overrides) — combined with each agent's
@@ -1762,12 +1647,18 @@ function AgentChatGrid({
   /// Open the per-agent editor popup (model / colour / prompt) for this agent.
   /// Fired in addition to onSelectAgent when a tile is clicked.
   onOpenEditor: (name: string) => void;
+  /// Open the skills picker popup for this agent (tile skill-ribbon click).
+  onOpenSkills: (name: string) => void;
   /// Resolve the model id shown on a tile's header chip (per-agent override >
   /// team default > server model). Same resolver the dispatch path uses.
   modelFor: (agentName: string) => string;
-  /// Map a resolved model id → provider string, for the header chip tint.
-  providerFor: (modelId: string) => string;
-  /// Reuse the shared model picker from the small logo trigger on every card.
+  /// The agent-SPECIFIC pick only (per-agent override or template pin) — the
+  /// picker's value. Empty means "inherits"; the resolved model is disclosed
+  /// via the fallback label instead of being shown as an explicit selection.
+  explicitModelFor: (agentName: string) => string;
+  /// Exact human-facing label from the shared ModelPicker catalogue.
+  labelForModel: (modelId: string) => string;
+  /// Reuse the shared model picker from the model-name trigger on every card.
   onPickAgentModel: (agentName: string, modelId: string) => void;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
@@ -1789,8 +1680,14 @@ function AgentChatGrid({
   // uneven — we render those as empty grid cells so the placement
   // doesn't drift. Tiny teams (<6 agents) fall back to the original
   // densely-packed square grid.
-  const filledArr = useMemo(() => team?.agents ?? [], [team]);
-  const fourCol = useMemo(() => arrangeTilesFourCol(team), [team]);
+  // The Producer (publisher) card is FIXED to the bottom of the left project
+  // column now (user spec 2026-08-14) — it belongs to every mode (team,
+  // solo-loop, single coder), so it is not also tiled here.
+  const gridTeam = useMemo<Team | null>(() => (
+    team ? { ...team, agents: team.agents.filter(a => !isPublisherAgent(a, roleByName)) } : null
+  ), [team, roleByName]);
+  const filledArr = useMemo(() => gridTeam?.agents ?? [], [gridTeam]);
+  const fourCol = useMemo(() => arrangeTilesFourCol(gridTeam), [gridTeam]);
   // Only use the 4-column build/design SPLIT when the team actually HAS a design
   // sub-team. A single team with no design agents (e.g. an ops team like RED)
   // was still forced into 4 columns, leaving the right two columns as empty
@@ -1869,13 +1766,7 @@ function AgentChatGrid({
         const outerPx = isActive ? 14 + 12 * pulse : 0;
         const alphaA = 0.65 + 0.30 * pulse;
         const alphaB = 0.40 + 0.30 * pulse;
-        // Show the model's research-lab (e.g. "OpenAI", "Google", "Unsloth") on
-        // EVERY agent INCLUDING the critical_thinker — it runs on a real model
-        // (often Codex) and was previously blanked, so its chip was the only one
-        // missing. The lab label also keeps long local GGUF names from overflowing.
         const resolvedModel = modelFor(a.name);
-        const { lab: modelLabel, tint: modelTint } = modelChipFor(resolvedModel, providerFor(resolvedModel));
-        const modelTitle = shortModelLabel(resolvedModel);
         return (
           <AgentChatTile
             key={a.name}
@@ -1888,26 +1779,22 @@ function AgentChatGrid({
             accent={accent}
             onClick={() => onSelectAgent(a.name)}
             onOpenEditor={() => onOpenEditor(a.name)}
+            onOpenSkills={() => onOpenSkills(a.name)}
             onPickModel={(id) => onPickAgentModel(a.name, id)}
             models={models}
             accountsStatus={accountsStatus}
             isCritic={a.name === CRITIC_AGENT_NAME}
             criticEnabled={criticEnabled}
             onToggleCritic={onToggleCritic}
-            modelId={resolvedModel}
-            modelLabel={modelLabel}
-            modelTint={modelTint}
-            modelTitle={modelTitle}
+            modelId={explicitModelFor(a.name)}
+            modelDisplayLabel={labelForModel(resolvedModel)}
             ringPx={ringPx}
             outerPx={outerPx}
             alphaA={alphaA}
             alphaB={alphaB}
             timing={agentTiming?.get(a.name)}
             skills={resolveAgentSkillIds(a, roleByName, perAgentSkills)}
-            isPublisher={a.base === "publisher"
-              || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release")}
             isBrowser={a.base === "browser"}
-            projectCwd={projectCwd}
           />
         );
       })}
@@ -2399,9 +2286,9 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
 // for every other tile otherwise.
 function AgentChatTile({
   name, icon, messages,
-  isActive, isSelected, accent, onClick, onOpenEditor,
+  isActive, isSelected, accent, onClick, onOpenEditor, onOpenSkills,
   onPickModel, models, accountsStatus, isCritic, criticEnabled, onToggleCritic,
-  modelId, modelLabel, modelTint, modelTitle,
+  modelId, modelDisplayLabel,
   ringPx, outerPx, alphaA, alphaB,
   timing, skills, isPublisher, isBrowser, projectCwd, label,
 }: {
@@ -2440,13 +2327,12 @@ function AgentChatTile({
   /// Click the tile also opens the per-agent editor popup (model / colour /
   /// prompt). Suppressed while the user is mid text-selection in the tile.
   onOpenEditor: () => void;
-  /// Short model name shown as a logo-chip on the right of the header.
+  /// Click the bottom-right skill ribbon → the skills picker popup for this
+  /// agent (like the model chip, the ribbon is the selection control).
+  onOpenSkills: () => void;
+  /// The selected model id and its exact shared-picker label.
   modelId: string;
-  modelLabel: string;
-  /// Provider brand colour for the model chip.
-  modelTint: string;
-  /// Full model short-name for the chip tooltip (chip shows the lab label).
-  modelTitle: string;
+  modelDisplayLabel: string;
   onPickModel: (modelId: string) => void;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
@@ -2459,7 +2345,6 @@ function AgentChatTile({
   alphaB: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [showSkills, setShowSkills] = useState(false); // skill-badge hover → named list
   useTick(timing?.activeSince != null); // tick this card's clock while it's working
   const elapsedMs = agentElapsedMs(timing);
   const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
@@ -2597,39 +2482,26 @@ function AgentChatTile({
             />
           </button>
         )}
-        {/* Model logo-chip — right side of the header. The app has no per-
-            provider brand image, so show the resolved model's short name in the
-            provider's brand colour (spec-allowed fallback). */}
-        {(() => {
-          const Logo = LAB_LOGO[modelLabel];
-          return (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              style={{ width: 30, height: 30, flexShrink: 0 }}
-            >
-              <ModelPicker
-                value={modelId}
-                onChange={onPickModel}
-                models={models}
-                status={accountsStatus}
-                fallbackLabel={modelLabel || SELECT_MODEL_LABEL}
-                compactTitle={`Model: ${modelTitle || modelLabel || SELECT_MODEL_LABEL}`}
-                compactTrigger={
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      width: 24, height: 24, fontSize: 9, fontWeight: 800,
-                      color: modelTint, background: "rgba(0,0,0,0.30)",
-                      border: `1px solid ${modelTint}66`, borderRadius: 5,
-                    }}
-                  >{Logo ? <Logo size={19} color={modelTint} /> : (modelLabel || "◌")}</span>
-                }
-              />
-            </div>
-          );
-        })()}
+        {/* Show the model the user selected, not its provider/lab and not an
+            internal route id. The shared picker owns the exact display label. */}
+        <div
+          data-ui="AgentSelectedModel"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          title={`Selected model: ${modelDisplayLabel || SELECT_MODEL_LABEL}`}
+          style={{ flex:"0 1 138px", minWidth:72, height:30 }}
+        >
+          <ModelPicker
+            value={modelId}
+            onChange={onPickModel}
+            models={models}
+            status={accountsStatus}
+            // With no explicit pick the agent INHERITS (team default / server
+            // model) — disclose that instead of pretending the inherited model
+            // was selected on this agent (same invariant as the agent editor).
+            fallbackLabel={modelDisplayLabel ? `(auto · ${modelDisplayLabel})` : SELECT_MODEL_LABEL}
+          />
+        </div>
         {/* Per-agent working time — to the RIGHT of the name. Green while this
             agent is active, muted once it's done; shows cumulative work time. */}
         {elapsedMs > 0 && (
@@ -2714,62 +2586,238 @@ function AgentChatTile({
       </>
       )}
       {/* Skill ribbon — a corner stack of skill icons (like a soldier's
-          badges). Hover the corner → the full named list. Shows what this
-          agent has equipped; lit whether it's mid-run or idle. */}
-      {skills && skills.length > 0 && (
-        <div
-          onMouseEnter={() => setShowSkills(true)}
-          onMouseLeave={() => setShowSkills(false)}
-          onClick={(e) => e.stopPropagation()}
-          title={`Skills: ${skills.map(skillShortName).join(", ")}`}
-          style={{
-            position: "absolute", bottom: 6, right: 6, zIndex: 4,
-            display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 1,
-          }}
-        >
-          {skills.slice(0, 5).map((id, i) => (
-            <span
-              key={id}
-              style={{
-                fontSize: 11, width: 18, height: 18,
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-                background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
-                borderRadius: 4,
-                transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
-                boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
-              }}
-            >{skillIcon(id)}</span>
-          ))}
-          {skills.length > 5 && (
-            <span style={{
-              fontSize: 9, fontWeight: 800, color: "var(--fg-muted)",
-              alignSelf: "center", padding: "0 2px",
-            }}>+{skills.length - 5}</span>
-          )}
-          {showSkills && (
-            <div style={{
-              position: "absolute", bottom: 24, right: 0, zIndex: 6,
-              minWidth: 150, maxWidth: 210,
-              background: "rgba(10,13,20,0.98)", border: `1px solid rgba(${rgb},0.6)`,
-              borderRadius: 8, padding: "7px 9px", boxShadow: "0 6px 20px rgba(0,0,0,0.6)",
-            }}>
-              <div style={{
-                fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase",
-                color: "var(--fg-muted)", marginBottom: 5,
-              }}>Skills ({skills.length})</div>
-              {skills.map((id) => (
-                <div key={id} style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  fontSize: 11.5, color: "var(--fg-strong)", padding: "2px 0",
-                }}>
-                  <span style={{ width: 15, textAlign: "center", flexShrink: 0 }}>{skillIcon(id)}</span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{skillShortName(id)}</span>
-                </div>
-              ))}
+          badges). Click → the skills picker popup for this agent, the same
+          way the model chip opens the model picker. Rendered even with zero
+          skills so the picker stays reachable from every card. */}
+      <div
+        onClick={(e) => { e.stopPropagation(); onOpenSkills(); }}
+        title={skills && skills.length > 0
+          ? `Skills: ${skills.map(skillShortName).join(", ")} — click to change`
+          : "No skills equipped — click to add"}
+        style={{
+          position: "absolute", bottom: 6, right: 6, zIndex: 4, cursor: "pointer",
+          display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 0,
+        }}
+      >
+        {(skills ?? []).slice(0, 5).map((id, i) => (
+          <span
+            key={id}
+            style={{
+              fontSize: 17, width: 27, height: 27,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
+              borderRadius: 6,
+              // Bigger badges would run a flat row across a narrow card, so they
+              // overlap into a fanned stack (negative margin — `gap` cannot go
+              // negative and would silently no-op).
+              marginLeft: -4,
+              transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
+              boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+            }}
+          >{skillIcon(id)}</span>
+        ))}
+        {(skills ?? []).length > 5 && (
+          <span style={{
+            fontSize: 11, fontWeight: 800, color: "var(--fg-muted)",
+            alignSelf: "center", padding: "0 2px",
+          }}>+{(skills ?? []).length - 5}</span>
+        )}
+        {(!skills || skills.length === 0) && (
+          <span style={{
+            fontSize: 16, width: 27, height: 27, opacity: 0.75,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(8,11,17,0.78)", border: `1px dashed rgba(${rgb},0.5)`,
+            borderRadius: 6,
+          }}>🧩</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// AgentSkillsModal — the skills picker opened by clicking a card's skill
+// ribbon. Shows every installed skill pack in a 4-column grid (icon + name +
+// short description); equipped ones are lit. A toggle rewrites the agent's
+// per-project grant via toggleSkillGrant, whose "-id" entries DENY a role/
+// template-provided skill — the same deny-aware grant resolveAgentSkillIds
+// reads, so this picker, the card badge and every dispatch injection agree.
+// Mirrors AgentEditorModal's overlay chrome (backdrop click-to-close, ✕, Esc).
+function AgentSkillsModal({
+  displayName, icon, accent, baseIds, grant, onToggle, onClose,
+}: {
+  displayName: string;
+  icon: string;
+  /// The tile's accent colour — carried into the header + lit cells so the
+  /// popup visibly belongs to the card that opened it.
+  accent: string;
+  /// Role yaml allowlist ∪ team-template extras — what the agent has before
+  /// the per-project grant is applied (deny targets resolve against these).
+  baseIds: string[];
+  /// The agent's per-project grant list (additions + "-id" denies).
+  grant: string[] | undefined;
+  onToggle: (skillId: string) => void;
+  onClose: () => void;
+}) {
+  const [packs, setPacks] = useState<SkillPack[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  useEffect(() => {
+    listSkillPacks()
+      .then(setPacks)
+      .catch(e => setErr(`Skill packs unavailable: ${String((e as { message?: string })?.message ?? e)}`));
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const equipped = new Set(resolveEquippedSkillIds(baseIds, grant ?? []));
+  // Dedup + search + equipped-first sections, sorted by display label — one
+  // pure helper so the gate can execute the exact shaping the popup renders.
+  const sections = organizeSkillPacks(packs, equipped, query);
+  const installedCount = new Set(packs.map(p => p.id)).size;
+  return (
+    <div
+      data-ui="AgentSkillsOverlay"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(8,12,20,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        data-ui="AgentSkillsModal"
+        onClick={e => e.stopPropagation()}
+        style={{
+          // Header + search stay pinned; only the card sections scroll. The
+          // grid uses minmax(0,1fr) columns so nowrap titles can never force
+          // a horizontal overflow that clips the 4th column.
+          width: 940, maxWidth: "94vw", maxHeight: "84vh", overflow: "hidden",
+          background: "var(--bg-elevated)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "16px 18px",
+          display: "flex", flexDirection: "column", gap: 12,
+          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        {/* Header — same shape as the agent editor's */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: accent, flexShrink: 0 }} />
+          <img src={owlSrc(icon)} style={{ width: 26, height: 26, objectFit: "contain" }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg)" }}>{displayName} — Skills</div>
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 2 }}>
+              {equipped.size} equipped of {installedCount} installed · click a skill to equip or unequip it for this agent (saved with the project)
             </div>
-          )}
+          </div>
+          <button
+            onClick={onClose}
+            title="Close (Esc)"
+            style={{ width: 28, height: 28, padding: 0, borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: "pointer", fontSize: 14, flexShrink: 0 }}
+          >✕</button>
         </div>
-      )}
+        {/* Search — with ~45 packs across three homes a flat wall is unusable */}
+        <input
+          type="text"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="🔍 Search skills by name or description…"
+          autoFocus
+          style={{
+            width: "100%", boxSizing: "border-box", padding: "7px 11px",
+            fontSize: 12, borderRadius: 8, outline: "none",
+            border: "1px solid var(--border-strong)", background: "var(--bg-deep)",
+            color: "var(--fg)",
+          }}
+        />
+        {err && (
+          <div style={{ fontSize: 12, color: "#ffb4a8" }}>⚠ {err}</div>
+        )}
+        {!err && packs.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>Loading skill packs…</div>
+        )}
+        {packs.length > 0 && sections.equipped.length === 0 && sections.available.length === 0 && (
+          <div style={{ fontSize: 12, color: "var(--fg-muted)", padding: "8px 2px" }}>
+            No skills match “{query.trim()}”.
+          </div>
+        )}
+        <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, paddingRight: 2 }}>
+          {([
+            ["Equipped", sections.equipped],
+            ["Available", sections.available],
+          ] as const).map(([label, list]) => list.length === 0 ? null : (
+            <div key={label}>
+              <div style={{
+                fontSize: 10, fontWeight: 800, letterSpacing: 0.8, textTransform: "uppercase",
+                color: label === "Equipped" ? accent : "var(--fg-subtle)",
+                margin: "0 0 6px 2px",
+              }}>{label} · {list.length}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
+                {list.map(p => {
+                  const on = equipped.has(p.id);
+                  const hot = hoverId === p.id;
+                  const source = skillPackSource(p.id);
+                  const est = p.ctx_estimate >= 1000 ? `${Math.round(p.ctx_estimate / 1000)}k` : "<1k";
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => onToggle(p.id)}
+                      onMouseEnter={() => setHoverId(p.id)}
+                      onMouseLeave={() => setHoverId(cur => (cur === p.id ? null : cur))}
+                      title={`${skillPackLabel(p)} — ${p.description || "no description"}\n~${est} tokens of instructions · ${on ? "equipped, click to remove" : "click to equip"}`}
+                      style={{
+                        display: "flex", flexDirection: "column", alignItems: "stretch", gap: 5,
+                        textAlign: "left", padding: "9px 10px", minHeight: 104, minWidth: 0,
+                        cursor: "pointer", borderRadius: 9, color: "var(--fg)",
+                        border: on ? `1px solid ${accent}` : hot ? "1px solid var(--border-strong)" : "1px solid var(--border)",
+                        background: on
+                          ? `linear-gradient(180deg, ${accent}26, ${accent}0d)`
+                          : hot ? "var(--bg-elevated)" : "var(--bg-surface)",
+                        boxShadow: hot ? "0 3px 10px rgba(0,0,0,0.35)" : "none",
+                        transform: hot ? "translateY(-1px)" : "none",
+                        transition: "border-color 80ms, background 80ms, box-shadow 80ms, transform 80ms",
+                      }}
+                    >
+                      <span style={{ display: "flex", alignItems: "center", gap: 7, width: "100%" }}>
+                        <span style={{
+                          width: 36, height: 36, flexShrink: 0, fontSize: 21, borderRadius: 9,
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          background: on ? `${accent}33` : "var(--bg-deep)",
+                          border: `1px solid ${on ? accent : "var(--border)"}`,
+                        }}>{skillIcon(p.id)}</span>
+                        <span style={{
+                          fontSize: 12, fontWeight: 700, flex: 1, minWidth: 0,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        }}>{skillPackLabel(p)}</span>
+                        {on && <span style={{ fontSize: 11, fontWeight: 800, color: accent, flexShrink: 0 }}>✓</span>}
+                      </span>
+                      <span style={{
+                        fontSize: 10, lineHeight: 1.35, color: "var(--fg-muted)",
+                        display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                      }}>{p.description || "(no description)"}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 5, marginTop: "auto", minWidth: 0 }}>
+                        {source && (
+                          <span style={{
+                            fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                            padding: "1px 5px", borderRadius: 4, color: "var(--fg-subtle)",
+                            border: "1px solid var(--border)", background: "var(--bg-deep)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>{source}</span>
+                        )}
+                        <span style={{ fontSize: 8.5, color: "var(--fg-subtle)", marginLeft: "auto", flexShrink: 0 }}>
+                          ~{est} ctx
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2784,6 +2832,7 @@ function AgentEditorModal({
   agentName, displayName, icon,
   initialModel, initialColor, initialPrompt, initialProfileRef, projectId, projectCwd,
   models, accountsStatus, serverState, effectiveTeamModel, providerFor,
+  voiceFor, onPickAgentVoice, ttsVoices,
   templateId, onPickModel, onPreviewColor, onClose, onSaved,
 }: {
   agentName: string;
@@ -2802,6 +2851,11 @@ function AgentEditorModal({
   /// Model → provider resolver (same one the run loop uses) so the ✨ Organize
   /// button can call the agent's own model to split the freeform prompt.
   providerFor: (modelId: string) => string;
+  /// Per-agent TTS wiring for the Voice row (same handlers the right column's
+  /// agent tab used before it was removed).
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  ttsVoices: SpeechSynthesisVoice[];
   /// Template id (= save_team_template fileStem) backing the active team, or
   /// null when the roster is a custom project with no saved template.
   templateId: string | null;
@@ -3010,6 +3064,20 @@ function AgentEditorModal({
                   ? `(use team / server model · ${serverState.model_id})`
                   : "(use team / server model — none running)"
             }
+          />
+        </div>
+
+        {/* Voice — the per-agent TTS row. It used to sit on the right column's
+            agent tab; that tab is gone (user spec 2026-08-14), so it lives with
+            the agent's other per-agent setting, its model, in this editor. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Voice</span>
+          <AgentVoiceRow
+            agent={agentName}
+            cfg={voiceFor(agentName)}
+            voices={ttsVoices}
+            onChange={(partial) => onPickAgentVoice(agentName, partial)}
+            disabled={false}
           />
         </div>
 
@@ -4258,7 +4326,7 @@ function GraphCanvas({
   edges, onEdgesChange,
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
-  modelFor,
+  modelFor, labelForModel,
   labelOverrides,
   soloLayout,
 }: {
@@ -4276,6 +4344,8 @@ function GraphCanvas({
   /// graph card so the user can see at a glance which model each
   /// agent is wired to.
   modelFor: (agentName: string) => string;
+  /// Exact human-facing label from the shared ModelPicker catalogue.
+  labelForModel: (modelId: string) => string;
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
   /// "Coder"). Never touches the underlying agent name — that's identity.
   labelOverrides?: Record<string, string>;
@@ -4961,19 +5031,21 @@ function GraphCanvas({
                 const desc = (n.spec.description?.trim() || role?.description?.trim() || "").trim();
                 const shortDesc = desc.length > 70 ? desc.slice(0, 67) + "…" : desc;
                 const modelId = modelFor(n.name);
-                const modelLab = modelLabFor(modelId);
-                const ModelLogo = LAB_LOGO[modelLab];
-                const modelLabTint = LAB_TINT[modelLab] ?? "var(--fg)";
+                const selectedModelLabel = labelForModel(modelId);
                 return (
                   <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:2, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ display:"flex", justifyContent:"space-between", gap:6, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.3 }}>
                       <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textTransform:"capitalize" }} title={n.spec.base}>{n.spec.base}</span>
                       <span style={{ flexShrink:0 }}>· {temp} temp</span>
                     </div>
-                    <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
-                      {ModelLogo
-                        ? <ModelLogo size={12} color={modelLabTint} />
-                        : <span>🧠 {modelLab || "(no model)"}</span>}
+                    <div
+                      data-ui="AgentSelectedModel"
+                      style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}
+                      title={selectedModelLabel || SELECT_MODEL_LABEL}
+                    >
+                      <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {selectedModelLabel || SELECT_MODEL_LABEL}
+                      </span>
                     </div>
                     {shortDesc && (
                       <div style={{ fontSize:10, color:"var(--fg-subtle)", lineHeight:1.3, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={desc}>
@@ -5068,6 +5140,9 @@ type FleetMergeResult =
   | { status: "conflict"; files: string[] }
   | { status: "noChanges" }
   | { status: "error"; message: string };
+// fleet_worktree_remove reports what happened to the BRANCH: an unmerged
+// branch is preserved (never silently deleted), and the caller announces it.
+type FleetRemoveResult = { branchPreserved: boolean; branch: string };
 
 // File extensions the auto-doc trigger considers "code" — touching any
 // of these in a merged commit dispatches the documentation agent on
@@ -5308,19 +5383,86 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
 //     square (orange) while the dispatch is in flight. Tomorrow we
 //     wire the stop button to an AbortController; for now it just
 //     reflects state.
+// RunToggleRow — the three run-scope switches that used to live in the right
+// column's Super User container (user spec 2026-08-14: "put those 3 check
+// boxes above the input text box in 1 line"). They are run settings, so they
+// belong with the composer that starts the run. Each keeps its old accent
+// colour and its explanation, now as the tooltip so the row stays one line.
+function RunToggleRow({
+  autoApprove, onToggleAutoApprove,
+  directorMode, onToggleDirectorMode,
+  parallelMode, onToggleParallel,
+}: {
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
+}) {
+  const row: React.CSSProperties = { display:"flex", alignItems:"center", gap:5, fontSize:11, cursor:"pointer", whiteSpace:"nowrap" };
+  return (
+    <div data-ui="RunToggleRow" style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap", padding:"0 2px 8px" }}>
+      <label
+        style={{ ...row, color: autoApprove ? "#ff8c8c" : "#7888a8" }}
+        title={autoApprove ? "Agents auto-accept tool calls" : "Agents wait for your approval on every tool call"}
+      >
+        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+        <span>⚡ auto-approve tool requests</span>
+      </label>
+      {/* The ONE critic-authority control (formerly two: "director mode" +
+          "critic = super user" — merged per user, they meant the same thing).
+          OFF (default): the Critical Thinker is advisory — it reviews in bounded
+          loops but can NEVER block the team (so a guarded critic can't stall a
+          Red-Team run). ON: it is the Super User and decides in your place. */}
+      <label
+        style={{ ...row, color: directorMode ? "#ffb3e6" : "#7888a8" }}
+        title={directorMode
+          ? "ON: the critic answers my decisions + approves/rejects the plan and the answer"
+          : "OFF: the critic is advisory only — it never blocks the team"}
+      >
+        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#ff79d2" }} />
+        <span>critic decides for me</span>
+      </label>
+      {/* Parallel dispatch — lets the orchestrator fan out INDEPENDENT tasks in
+          one turn; the team already runs them concurrently in isolated worktrees. */}
+      <label
+        style={{ ...row, color: parallelMode ? "#7fd4ff" : "#7888a8" }}
+        title={parallelMode
+          ? "ON: the orchestrator batches independent tasks into one wave"
+          : "OFF: one task at a time (sequential)"}
+      >
+        <input type="checkbox" checked={parallelMode} onChange={onToggleParallel} style={{ width:12, height:12, accentColor:"#3aa0ff" }} />
+        <span>parallel dispatch</span>
+      </label>
+      {/* Solo-loop lives on the canvas header toggle (⚡ Solo / 👥 Team) — it was
+          duplicated as a redundant checkbox and removed (v0.7.14). */}
+    </div>
+  );
+}
+
 function ChatInputDock({
   draft, setDraft, inputRef, onSend, busy,
   autoApprove, onToggleAutoApprove,
+  directorMode, onToggleDirectorMode,
+  parallelMode, onToggleParallel,
   onSwitchTab,
   needsLoad, loadingModel, onLoadModel,
+  modelId, modelLabel,
 }: {
   draft: string;
   setDraft: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
   onSend: (attachments: Attachment[]) => void;
   busy: boolean;
+  /// The three run switches rendered on one line above the textarea — they
+  /// moved here from the right column's Super User container.
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
   onSwitchTab: (tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void;
   /// True when the team's currently-resolved model is local AND
   /// llama-server isn't already serving it. The send button label
@@ -5335,6 +5477,14 @@ function ChatInputDock({
   /// server, waits for the model to actually be ready, then dispatches
   /// the draft as a normal send.
   onLoadModel: () => void;
+  /// The model the next send dispatches with (dockModelId — same
+  /// resolution as onSupSend: per-agent override > team default >
+  /// server model). Shown as a small chip top-right of the composer.
+  modelId: string;
+  /// The SAME text the ModelPicker shows for `modelId` (model + effort),
+  /// resolved by the page's `labelForModel`. Never re-derive it here: a second
+  /// formatter is how this line drifted into printing a raw router id.
+  modelLabel: string;
 }) {
   // Slash-command catalog. Each command exposes a name (the trigger),
   // a one-line description for the droplist, and an action invoked
@@ -5469,6 +5619,27 @@ function ChatInputDock({
       background:"var(--bg-elevated)",
       flexShrink:0, minWidth:0, position:"relative",
     }}>
+      {modelId && (
+        <div data-ui="DockModelName" title={modelId} style={{
+          display:"flex", justifyContent:"flex-end", marginBottom:4,
+          fontSize:10.5, color:"var(--fg-subtle)",
+          whiteSpace:"nowrap", overflow:"hidden",
+        }}>
+          <span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>
+            🧠 {modelLabel || modelId}
+          </span>
+        </div>
+      )}
+      <RunToggleRow
+        autoApprove={autoApprove}
+        onToggleAutoApprove={onToggleAutoApprove}
+        directorMode={directorMode}
+        onToggleDirectorMode={onToggleDirectorMode}
+        parallelMode={parallelMode}
+        onToggleParallel={onToggleParallel}
+      />
+      {/* Auto mode is NOT a Composer toolbar toggle any more — it is the first
+          of the three switches on RunToggleRow above. One control per setting. */}
       <Composer
         dataUi="UserInput"
         textareaRef={inputRef}
@@ -5498,13 +5669,6 @@ function ChatInputDock({
         mic
         showCounter
         slashCommands={slashCommands.map(c => ({ name: c.name, hint: c.description, run: () => runCommand(c) }))}
-        toggles={[{
-          key: "auto",
-          label: "⚡ Auto mode",
-          title: autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval",
-          on: autoApprove,
-          onToggle: onToggleAutoApprove,
-        }]}
         canSend={loadingModel || !!draft.trim() || attachments.length > 0}
         sendLabel={loadingModel ? "⏳ Loading" : needsLoad ? "⚡ Load" : "▶"}
         sendTitle={loadingModel
@@ -5526,12 +5690,11 @@ function ChatInputDock({
 function OrchestratorPane({
   agentLogs, agentThoughts, runError, serverState,
   selectedAgent, activeAgent,
-  team, isSuperUser,
+  team, rulesPage,
   projectId, directives, onDirectivesChanged,
   projectCwd,
-  supChat, onSupSend, supSendBusy,
-  autoApprove, onToggleAutoApprove,
-  needsLoad, loadingModel, onLoadModel,
+  supChat, supSendBusy,
+  switchTabRef,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -5540,42 +5703,43 @@ function OrchestratorPane({
   selectedAgent: string | null;
   activeAgent: string | null;
   team: Team | null;
-  /// True only on the Super User top page — gates the Rules sub-tab so rules
+  /// True only on the 📋 Rules top page — gates the Rules sub-tab so rules
   /// are visible ONLY there (per user request).
-  isSuperUser: boolean;
+  rulesPage: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
   projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
   /// Super-User chat — feeds the User Input sub-tab's HISTORY view
-  /// (filtered to role="you"). The bottom input dock writes to this
-  /// stream via onSupSend.
+  /// (filtered to role="you"). New sends come from the canvas-column
+  /// composer (ChatInputDock, Code-page position) via onSupSend up in
+  /// AgentsPage.
   supChat: GoalMsg[];
-  onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
-  /// VS Code-style dock's "Auto mode" toggle — wires to the project's
-  /// autoApprove flag (drives the dispatch's auto-accept of tool calls).
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
-  /// Send-button → Load-button state. True when the team uses a
-  /// local model that isn't currently served by llama-server.
-  needsLoad: boolean;
-  loadingModel: boolean;
-  onLoadModel: () => void;
+  /// The composer lives in the canvas column now; its slash commands still
+  /// switch this pane's sub-tabs through this ref bridge.
+  switchTabRef: React.MutableRefObject<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>;
 }) {
   // Sub-tab strip. "Clear Chat" (reply) was removed in favour of "Full Chat"
   // as the single chat view (per user request), which is now the default so the
   // whole run is visible at startup. Rules shows ONLY on the Super User page.
   const [activeTab, setActiveTab] = useState<"rules"|"userinput"|"reply"|"thought"|"tools"|"full">("full");
+  // The canvas-column composer's slash commands (/rules, /thought, …) switch
+  // this pane's sub-tabs through the ref bridge — instance-scoped, so a
+  // background Agents page never flips a foreground pane's tab.
+  useEffect(() => {
+    switchTabRef.current = setActiveTab;
+    return () => { if (switchTabRef.current === setActiveTab) switchTabRef.current = null; };
+  }, [switchTabRef]);
   // Effective (displayed) tab: gracefully fold away tabs that no longer exist
   // or aren't allowed here — the removed "reply" tab, and "rules" when we're not
-  // on the Super User page — both fall back to Full Chat. Keeps slash commands
+  // on the 📋 Rules page — both fall back to Full Chat. Keeps slash commands
   // and stale state from showing a blank/forbidden pane.
-  // Super User is the human operator — its card shows ONLY the operator's info +
-  // settings (Rules), never the agent chat log (user spec #4). So on the Super
-  // User page the pane is pinned to Rules and the chat tabs/dock are hidden.
-  const effTab = isSuperUser
+  // The Rules page shows ONLY the rules editor, never the agent chat log
+  // (user spec #4), so there the pane is pinned to Rules and the chat tabs
+  // are hidden.
+  const effTab = rulesPage
     ? "rules"
     : (activeTab === "reply" || activeTab === "rules") ? "full" : activeTab;
   // Pick which buffer to show: explicit selection > currently-active
@@ -5696,46 +5860,9 @@ function OrchestratorPane({
     return () => { el.removeEventListener("scroll", onScroll); mo.disconnect(); cancelAnimationFrame(r1); };
   }, [effTab, focus, tailSig]);
 
-  // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
-  // Persistent draft per project (localStorage); auto-resize textarea
-  // grows with content up to a max height; Enter sends, Shift+Enter
-  // inserts a newline.
-  const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
-  const draftKeyRef = useRef(draftKey);
-  draftKeyRef.current = draftKey;
-  const [draft, setDraftState] = useState<string>(() => {
-    if (!draftKey) return "";
-    try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
-  });
-  useEffect(() => {
-    if (!draftKey) { setDraftState(""); return; }
-    try { setDraftState(localStorage.getItem(draftKey) ?? ""); } catch { setDraftState(""); }
-  }, [draftKey]);
-  const setDraft = (v: string) => {
-    setDraftState(v);
-    const k = draftKeyRef.current;
-    if (k) { try { localStorage.setItem(k, v); } catch {} }
-  };
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  // Auto-resize: reset to "auto" so the textarea can shrink, then set
-  // height to its content's scrollHeight up to a cap. Runs on every
-  // draft change so the box grows as the user types.
-  useLayoutEffect(() => {
-    const ta = inputRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    const next = Math.min(ta.scrollHeight, 240);
-    ta.style.height = `${Math.max(36, next)}px`;
-  }, [draft]);
-  const submitInput = (images: Attachment[] = []) => {
-    const t = draft.trim();
-    if (!t && images.length === 0) return;
-    // NOTE: no busy-guard — when a run is active, onSupSend queues this as a
-    // mid-run steer instead of starting a second run. That's what lets the user
-    // type + send while the team works (the ■ button still stops the run).
-    onSupSend(t, images);
-    setDraft("");
-  };
+  // (The user-input dock and its draft state moved up to AgentsPage — the
+  // composer now sits at the bottom of the canvas column, the same position
+  // as the Code page's composer. This pane is purely the log/chat viewer.)
 
   // ---- Rules sub-tab state (inline CRUD, mirrors the SuperUserCard
   // rules tab; the rules surface lives here now per user spec) ----
@@ -5790,9 +5917,9 @@ function OrchestratorPane({
             smaller than full-screen). flexShrink:0 + whiteSpace:nowrap
             on each button keeps the labels on one line. */}
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)", flexShrink:0, overflowX:"auto", overflowY:"hidden" }}>
-          {(isSuperUser
-            // Super User page = operator info + settings only. Show JUST the
-            // Rules (settings) tab; no agent chat tabs (user spec #4).
+          {(rulesPage
+            // Rules page = the project rules only. Show JUST the Rules
+            // (settings) tab; no agent chat tabs (user spec #4).
             ? [{ id:"rules" as const, label:"📋 Rules", accent:"#ff6b6b", count: directives.length }]
             : [
                 { id:"userinput" as const, label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
@@ -6040,23 +6167,8 @@ function OrchestratorPane({
           </>)}
         </div>
       </div>
-      {/* Super User is settings-only — no chat composer there (user spec #4).
-          The dock stays on the Orchestrator/Team pages where chatting happens. */}
-      {!isSuperUser && (
-        <ChatInputDock
-          draft={draft}
-          setDraft={setDraft}
-          inputRef={inputRef}
-          onSend={submitInput}
-          busy={supSendBusy}
-          autoApprove={autoApprove}
-          onToggleAutoApprove={onToggleAutoApprove}
-          onSwitchTab={setActiveTab}
-          needsLoad={needsLoad}
-          loadingModel={loadingModel}
-          onLoadModel={onLoadModel}
-        />
-      )}
+      {/* The composer (ChatInputDock) is no longer docked here — it sits at
+          the bottom of the canvas column, the Code page's composer position. */}
     </div>
   );
 }
@@ -6074,43 +6186,53 @@ function OrchestratorPane({
 // now driven by which top-level tab is open. The SuperUserCard canvas
 // overlay is gone too — the card lives entirely inside this column.
 
-// Rules is no longer a top-level tab — the user spec 2026-05-28
-// places it as a sub-tab inside the Orchestrator (chat container).
-// Three top-level pages remain: Super User (Y), Orchestrator (B),
-// Team (G).
-type RightTabId = "super" | "orch" | "team";
-const RIGHT_TAB_COLOR: Record<RightTabId, string> = {
-  super: "#ffd97a",
-  orch:  "#74a4ff",
-  team:  "#6cd28e",
-};
-const RIGHT_TAB_BG_ON: Record<RightTabId, string> = {
-  super: "rgba(255,217,122,0.18)",
-  orch:  "rgba(116,164,255,0.18)",
-  team:  "rgba(108,210,142,0.18)",
-};
+// 2026-08-14: the Code page's 📓 Notebook page joins them as a page of this
+// column — the right column now carries EVERY feature both pages had, so the
+// Notebook no longer needs its own header button.
+// 2026-08-14 (later, user spec): the agent's page has NO button of its own —
+// the chat/log host below is ALWAYS the focused agent's page, so a tab that
+// only collapsed the settings strip was redundant. And the old "Super User"
+// page is now just what it shows: Rules.
+type RightTabId = "rules" | "team" | "notebook";
 const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
-  super: "👤 Super User",
-  orch:  "📜 Orchestrator",
+  rules: "📋 Rules",
   team:  "🏷 Team",
+  notebook: "📓 Notebook",
 };
+
+// The right column's width + open tab persist like the Code page's
+// (owllm:code:sidew / owllm:code:sidetab) so the two columns behave the same.
+const AGENTS_SIDE_WIDTH_KEY = "owllm:agents:sidew";
+const AGENTS_SIDE_TAB_KEY = "owllm:agents:sidetab";
+// The old flex column bottomed out at 360px; the resizable one keeps that floor.
+const AGENTS_SIDE_MIN_W = 360;
+
+/// Choose which page the right column shows the next time it mounts. The
+/// collapsed rail uses this so its ⚡ icon lands on Rules — the panel
+/// unmounts while shrunk, so the stored preference IS the handover.
+function selectAgentsSideTab(tab: RightTabId): void {
+  try { localStorage.setItem(AGENTS_SIDE_TAB_KEY, tab); } catch { /* keeps the last choice */ }
+}
+function loadAgentsSideTab(): RightTabId {
+  try {
+    const t = localStorage.getItem(AGENTS_SIDE_TAB_KEY);
+    // "super" is the pre-rename id for the Rules page — migrate it so a user
+    // who left the column on that page doesn't get bounced elsewhere.
+    if (t === "rules" || t === "super") return "rules";
+    if (t === "notebook") return "notebook";
+    return "team";
+  } catch { return "team"; }
+}
 
 function RightColumnTabs(props: {
   team: Team | null;
-  roleByName: Map<string, RoleData>;
   supChat: GoalMsg[];
   onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
   projectId: string;
   projectCwd?: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
-  directorMode: boolean;
-  onToggleDirectorMode: () => void;
-  parallelMode: boolean;
-  onToggleParallel: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -6119,110 +6241,89 @@ function RightColumnTabs(props: {
   activeAgent: string | null;
   phase: DispatchPhase;
   models: ModelInfo[];
-  modelFor: (agentName: string) => string;
-  agentModelOverrideFor: (agentName: string) => string;
-  onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
   onPickTeamModel: (id: string) => void;
   voiceFor: (agentName: string) => VoiceConfig;
   onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
   ttsVoices: SpeechSynthesisVoice[];
-  needsLoad: boolean;
-  loadingModel: boolean;
-  onLoadModel: () => void;
+  /// providerFor(effective team model) — drives the bottom Usage panel,
+  /// exactly like the Code page's side panel.
+  usageProvider: string;
+  /// Agent Browser popup (owned by AgentsPage; the 🌐 button here toggles it
+  /// AND arranges the app + browser side by side, like the Code page).
+  browserOpen: boolean;
+  onToggleBrowser: () => void;
+  /// Collapse this outer column to its icon rail. AgentsPage owns the state.
+  onCollapse: () => void;
+  /// The composer moved to the canvas column (Code-page position); its slash
+  /// commands still switch this pane's sub-tabs through this ref bridge.
+  switchTabRef: React.MutableRefObject<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>;
+  /// The inline RunNotebook — the Code page's 📓 page, rendered as a page of
+  /// this column too (AgentsPage owns its wiring, exactly like CodePage).
+  notebook: React.ReactNode;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
   // container — which stays put. So the chat is ALWAYS visible no
   // matter which top tab is active.
-  const [tab, setTab] = useState<RightTabId>("orch");
-
-  // Dynamic label for the middle (Orchestrator) tab. The pane *is*
-  // the generic agent page: when the user clicks the orchestrator
-  // node, it reads "Orchestrator"; when they click another agent, it
-  // reads that agent's display name. No more second-line title strip
-  // below the tabs — the title lives on the tab itself.
-  const orchName = props.team ? (findOrchestratorSpec(props.team)?.name ?? null) : null;
-  const focusAgent =
-    props.selectedAgent ??
-    props.activeAgent ??
-    orchName ??
-    null;
-  const orchTabLabel =
-    focusAgent && focusAgent !== orchName && focusAgent !== "you" && props.team
-      ? `📜 ${displayLabel(focusAgent)}`
-      : "📜 Orchestrator";
+  const [tab, setTabState] = useState<RightTabId>(loadAgentsSideTab);
+  const setTab = (t: RightTabId) => { setTabState(t); selectAgentsSideTab(t); };
+  // The Notebook used to be a popup opened by this event (Brainstorm's "open
+  // the notebook" hand-off still fires it). It is a PAGE of this column now, so
+  // the event selects that page instead of popping a window.
+  useEffect(() => {
+    const open = () => setTab("notebook");
+    window.addEventListener("owllm:open-run-notebook", open);
+    return () => window.removeEventListener("owllm:open-run-notebook", open);
+  }, []);
 
   return (
-    <div data-ui="RightColumnTabs" className="selectable-chat" style={{
-      display:"flex", flexDirection:"column", height:"100%",
-      background:"var(--bg-elevated)",
-    }}>
-      {/* Tab strip — 3 small coloured "page selectors". */}
-      <div data-ui="RightTabs" style={{
-        display:"flex", gap:0,
-        borderBottom: `1px solid ${RIGHT_TAB_COLOR[tab]}55`,
-        background: `linear-gradient(180deg, ${RIGHT_TAB_COLOR[tab]}10 0%, transparent 100%)`,
-        flexShrink:0,
-      }}>
-        {(["super","orch","team"] as const).map(id => {
-          const on = tab === id;
-          const c  = RIGHT_TAB_COLOR[id];
-          const bg = RIGHT_TAB_BG_ON[id];
-          const label = id === "orch" ? orchTabLabel : RIGHT_TAB_LABEL[id];
+    <SideColumnShell widthKey={AGENTS_SIDE_WIDTH_KEY} minW={AGENTS_SIDE_MIN_W} dataUi="RightColumnTabs" className="selectable-chat">
+      {/* Tab strip — the Code side panel's strip (same tab style), carrying
+          the agentic pages: 📋 Rules | 🏷 Team | 📓 Notebook. The focused
+          agent's page needs no button: the chat/log host below IS it, and it
+          is always on screen. */}
+      <div data-ui="RightTabs" style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2, flexShrink: 0 }}>
+        <button
+          data-ui="AgentsUtilityPanelCollapse"
+          onClick={props.onCollapse}
+          aria-label="Shrink right utility column"
+          title="Shrink right column"
+          style={{ height: 28, width: 28, padding: 0, flexShrink: 0, cursor: "pointer", fontSize: 18, lineHeight: 1, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-surface)", color: "var(--fg-muted)" }}
+        >›</button>
+        {(["rules","team","notebook"] as const).map(id => {
+          const label = RIGHT_TAB_LABEL[id];
           return (
             <button
               key={id}
               data-ui={`RightTab-${id}`}
               onClick={() => setTab(id)}
-              style={{
-                flex:1, height:34, padding:"0 10px",
-                background: on ? bg : "transparent",
-                color: on ? c : "var(--fg-muted)",
-                border:"none",
-                borderBottom: on ? `2.5px solid ${c}` : "2.5px solid transparent",
-                fontSize:12, fontWeight:700, cursor:"pointer",
-                letterSpacing:0.3,
-                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-              }} title={label}>{label}</button>
+              style={{ ...sideTabStyle(tab === id), overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}
+              title={label}
+            >{label}</button>
           );
         })}
       </div>
-      {/* Top settings panel — only the Orchestrator face is gone now
-          (its per-agent info — Model / Voice / Info — lives on each
-          graph card). Super User and Team are project / team scope
-          and still belong here. The panel is sized to ~22 % of the
-          right column when active; collapses to 0 px when the
-          Orchestrator tab is open. */}
+      {/* Top settings panel — Team scope only. The Super User container that
+          used to sit here is gone: its three run switches moved onto one line
+          above the composer (user spec 2026-08-14), so the Rules page is the
+          rules editor and nothing else. */}
       <div data-ui="RightSettingsPanel" style={{
+        // Rules and Notebook are full pages (like the Code page's) — no
+        // team/agent settings strip above them.
+        display: tab === "team" ? "block" : "none",
         flex:"0 0 auto",
         maxHeight:"22%",
-        // Natural height (no forced minHeight) so Team + Orch panels
-        // hug their 2-row content. The old 120 px minimum on Team
-        // produced a visible empty gap below the voice row that the
-        // Orch panel didn't have, breaking the symmetric look.
+        // Natural height (no forced minHeight) so the panel hugs its 2-row
+        // content. The old 120 px minimum produced a visible empty gap below
+        // the voice row.
         minHeight: 0,
         overflow:"auto",
-        // Orch + Team get matching padding so the model/voice rows sit
-        // identically on both tabs (used to be 0 on Orch because the
-        // pane rendered nothing; now it has content too).
-        padding: tab === "super" ? "8px 12px" : "8px 12px",
+        padding: "8px 12px",
         borderBottom: "1px solid var(--border)",
         background:"var(--bg-elevated)",
       }}>
-        {tab === "super" && (
-          <SuperUserSettings
-            autoApprove={props.autoApprove}
-            onToggleAutoApprove={props.onToggleAutoApprove}
-            directorMode={props.directorMode}
-            onToggleDirectorMode={props.onToggleDirectorMode}
-            parallelMode={props.parallelMode}
-            onToggleParallel={props.onToggleParallel}
-            team={props.team}
-            roleByName={props.roleByName}
-          />
-        )}
         {tab === "team" && (
           <TeamSettings
             team={props.team}
@@ -6236,33 +6337,17 @@ function RightColumnTabs(props: {
             voices={props.ttsVoices}
           />
         )}
-        {tab === "orch" && (
-          // Per user spec 2026-05-29: the Orchestrator/agent tab mirrors
-          // the Team tab — two rows: model picker + voice picker. The
-          // focus agent is whatever the user has selected (or the
-          // orchestrator by default), and the model + voice apply to
-          // that agent specifically.
-          <OrchAgentSettings
-            team={props.team}
-            selectedAgent={props.selectedAgent}
-            activeAgent={props.activeAgent}
-            models={props.models}
-            modelFor={props.modelFor}
-            agentModelOverrideFor={props.agentModelOverrideFor}
-            onPickAgentModel={props.onPickAgentModel}
-            accountsStatus={props.accountsStatus}
-            effectiveTeamModel={props.effectiveTeamModel}
-            serverState={props.serverState}
-            voiceFor={props.voiceFor}
-            onPickAgentVoice={props.onPickAgentVoice}
-            voices={props.ttsVoices}
-          />
-        )}
       </div>
-      {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
-          Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
-          when the top tab changes. */}
-      <div data-ui="RightChatHost" className="selectable-chat" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+      {/* Chat container — the focused agent's page. ALWAYS visible (that is
+          why it needs no tab of its own); the Rules page pins it to the rules
+          editor, the Notebook page swaps it out. */}
+      {/* ---- Page: Notebook — the SAME inline RunNotebook the Code page's
+          right column renders (kept mounted so notes/digest survive tab
+          flips, exactly like CodeSidePanel). ---- */}
+      <div data-ui="RightNotebookHost" style={{ flex: 1, minHeight: 0, display: tab === "notebook" ? "flex" : "none", flexDirection: "column" }}>
+        {props.notebook}
+      </div>
+      <div data-ui="RightChatHost" className="selectable-chat" style={{ flex:1, minHeight:0, display: tab === "notebook" ? "none" : "flex", overflow:"hidden" }}>
         <OrchestratorPane
           agentLogs={props.agentLogs}
           agentThoughts={props.agentThoughts}
@@ -6271,97 +6356,27 @@ function RightColumnTabs(props: {
           selectedAgent={props.selectedAgent}
           activeAgent={props.activeAgent}
           team={props.team}
-          isSuperUser={tab === "super"}
+          rulesPage={tab === "rules"}
           projectId={props.projectId}
           projectCwd={props.projectCwd}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
           supChat={props.supChat}
-          onSupSend={props.onSupSend}
           supSendBusy={props.supSendBusy}
-          autoApprove={props.autoApprove}
-          onToggleAutoApprove={props.onToggleAutoApprove}
-          needsLoad={props.needsLoad}
-          loadingModel={props.loadingModel}
-          onLoadModel={props.onLoadModel}
+          switchTabRef={props.switchTabRef}
         />
       </div>
-    </div>
-  );
-}
-
-// ---------- SuperUserSettings ----------
-// Compact yellow info container for the Super User top tab. Shows the
-// avatar + auto-approve + director-mode controls. Sized to ~18% of
-// the right column's available height.
-function SuperUserSettings({
-  autoApprove, onToggleAutoApprove,
-  directorMode, onToggleDirectorMode,
-  parallelMode, onToggleParallel,
-  team, roleByName,
-}: {
-  autoApprove: boolean;
-  onToggleAutoApprove: () => void;
-  directorMode: boolean;
-  onToggleDirectorMode: () => void;
-  parallelMode: boolean;
-  onToggleParallel: () => void;
-  team: Team | null;
-  roleByName: Map<string, RoleData>;
-}) {
-  const peekAgents = (team?.agents ?? []).slice(0, 6);
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:"#ffd97a", lineHeight:"18px" }}>Super User</div>
-          <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase" }}>
-            {team?.agents.length ?? 0} agents on team
-          </div>
+      {/* ---- Bottom utility container — same as the Code page's side panel:
+          USAGE for the team's effective model, then the 🌐 Browser toggle
+          (opens the popup AND splits the app + browser side by side). ---- */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)", flexShrink: 0 }}>
+        <UsagePanel provider={props.usageProvider} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          <span style={{ flex: 1 }} />
+          <BrowserToggleButton open={props.browserOpen} onToggle={props.onToggleBrowser} />
         </div>
-        {peekAgents.length > 0 && (
-          <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-            {peekAgents.map((a, i) => (
-              <img key={i} src={owlSrc(agentIconRef(a, roleByName))} title={displayLabel(a.name)} style={{ width:18, height:18, opacity:0.85 }} />
-            ))}
-          </div>
-        )}
       </div>
-      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-        <span>auto-approve tool requests</span>
-      </label>
-      {/* The ONE critic-authority control (formerly two: "director mode" +
-          "critic = super user" — merged per user, they meant the same thing).
-          OFF (default): the Critical Thinker is advisory — it reviews in bounded
-          loops but can NEVER block the team (so a guarded critic can't stall a
-          Red-Team run). ON: it is the Super User and decides in your place —
-          answers the orchestrator's mid-run decisions AND approves/rejects the
-          plan + final answer, with higher (still capped) round limits. Backed by
-          the director_mode flag, which already drives the "answer my decisions"
-          prompt block. */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: directorMode ? "#ffb3e6" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, marginTop:2, accentColor:"#ff79d2" }} />
-        <span>critic = super user (decides for me)
-          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {directorMode ? "answers my decisions + approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
-          </span>
-        </span>
-      </label>
-      {/* Parallel dispatch — lets the orchestrator fan out INDEPENDENT tasks in
-          one turn; the team already runs them concurrently in isolated worktrees. */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: parallelMode ? "#7fd4ff" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={parallelMode} onChange={onToggleParallel} style={{ width:12, height:12, marginTop:2, accentColor:"#3aa0ff" }} />
-        <span>parallel dispatch (run independent agents at once)
-          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {parallelMode ? "orchestrator batches independent tasks into one wave" : "off: one task at a time (sequential)"}
-          </span>
-        </span>
-      </label>
-      {/* Solo-loop lives on the canvas header toggle (⚡ Solo / 👥 Team) — it was
-          duplicated here as a redundant checkbox and removed (v0.7.14). */}
-    </div>
+    </SideColumnShell>
   );
 }
 
@@ -6542,74 +6557,6 @@ function OrchestratorSettings({
 // ---------- TeamSettings ----------
 // Compact green info container for the Team top tab. Team identity +
 // team-wide model picker.
-// OrchAgentSettings — minimal two-row settings panel for the
-// Orchestrator tab. Same shape as TeamSettings (model + voice), but
-// scoped to whichever agent the user has focused on the canvas.
-// Tab label is handled in RightColumnTabs (it flips to the focus
-// agent's display name when an agent other than the orchestrator
-// is selected).
-function OrchAgentSettings({
-  team, selectedAgent, activeAgent,
-  models, modelFor, agentModelOverrideFor, onPickAgentModel, accountsStatus,
-  effectiveTeamModel, serverState,
-  voiceFor, onPickAgentVoice, voices,
-}: {
-  team: Team | null;
-  selectedAgent: string | null;
-  activeAgent: string | null;
-  models: ModelInfo[];
-  modelFor: (agentName: string) => string;
-  agentModelOverrideFor: (agentName: string) => string;
-  onPickAgentModel: (agentName: string, modelId: string) => void;
-  accountsStatus: AccountsStatusLite | null;
-  effectiveTeamModel: string;
-  serverState: ServerStatus;
-  voiceFor: (agentName: string) => VoiceConfig;
-  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
-  voices: SpeechSynthesisVoice[];
-}) {
-  const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
-  const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
-  const explicitModel = agentModelOverrideFor(focus);
-  const inheritedModel = modelFor(focus);
-  const disabled = focus === "you" || focus === "system";
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
-        <ModelPicker
-          value={explicitModel}
-          onChange={(id) => onPickAgentModel(focus, id)}
-          models={models}
-          status={accountsStatus}
-          disabled={disabled}
-          fallbackLabel={
-            inheritedModel && inheritedModel !== "local"
-              ? `(use inherited · ${inheritedModel})`
-              : effectiveTeamModel
-              ? `(use team model · ${effectiveTeamModel})`
-              : serverState.model_id
-                ? `(use team / server model · ${serverState.model_id})`
-                : "(use team / server model — none running)"
-          }
-        />
-      </div>
-      <AgentVoiceRow
-        agent={focus}
-        cfg={voiceFor(focus)}
-        voices={voices}
-        onChange={(partial) => onPickAgentVoice(focus, partial)}
-        disabled={disabled}
-      />
-      {/* Skills are NOT selected here. They are associated with the AGENT
-          itself (Studio → Agents → the agent's 📚 Skills checklist, or a
-          team's Workbench). At dispatch the runtime gives each agent its
-          associated skills and loads only the ones a task needs (progressive
-          disclosure) — the user doesn't hand-pick skills per chat. */}
-    </div>
-  );
-}
-
 function TeamSettings({
   team, models, effectiveTeamModel, onPickTeamModel,
   serverModelId, accountsStatus,
@@ -7052,14 +6999,9 @@ function buildOrchestratorPrompt(
   const roster = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     const tools = agentToolCapability(roleByName.get(a.base)?.toolAllowlist);
-    // Full equipped-skill set: role allowlist + team template extras + per-project
-    // grant — the SAME sources the dispatch injects into the specialist, so the
-    // roster reflects exactly what each agent actually knows.
-    const skillIds = [...new Set([
-      ...(roleByName.get(a.base)?.skillAllowlist ?? []),
-      ...(a.extraSkills ?? []),
-      ...(perAgentSkills?.get(a.name) ?? []),
-    ])];
+    // Full equipped-skill set — the SAME deny-aware resolver the dispatch
+    // injects with, so the roster reflects exactly what each agent knows.
+    const skillIds = resolveAgentSkillIds(a, roleByName, perAgentSkills);
     const skills = skillIds.length ? ` [skills: ${skillIds.map(prettySkill).join(", ")}]` : "";
     return `  - ${a.name} (${a.base}): ${desc}${tools}${skills}`;
   }).join("\n");
@@ -7293,32 +7235,6 @@ function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
   return out;
 }
 
-/// Route the SSE chat-completion to whichever backend serves the
-/// model. The signature stays the same so the dispatch loop doesn't
-/// care which provider it's talking to — only the resolver layer
-/// (modelFor + provider lookup) does.
-// Channel-keyed thinking/tool stream. Mirrors dispatch.ts ThoughtHandler.
-// `channel` is a stable per-block id ("thinking", "tool:Write:abc"),
-// `role` is the human label ("🧠 thinking", "🛠 Write"), `delta` the chunk.
-type ThoughtHandler = (channel: string, role: string, delta: string) => void;
-
-// Mirror of accounts.rs ClaudeStreamEvent (Tauri ipc::Channel payload).
-type ClaudeStreamEvent =
-  | { kind: "text"; delta: string }
-  | { kind: "thinking"; delta: string }
-  | { kind: "toolUse"; toolUseId: string; name: string; input: string }
-  | { kind: "toolResult"; toolUseId: string; content: string }
-  | { kind: "error"; message: string };
-
-// Per-run consent to widen the CLI's filesystem scope to the user's home
-// profile (--add-dir). DEFAULT FALSE — the agent stays jailed to the project.
-// Flipped true only when the user approves the "grant home for this run"
-// consent prompt (see FileAccessConsentModal), and RESET to false at the start
-// of every dispatch (dispatchGoal) so a grant never silently leaks into a later
-// run. Module-scoped so runClaudeCliStream (also module-scoped) can read it
-// without threading a param through every stream* signature.
-let grantHomeThisRun = false;
-function setGrantHomeThisRun(v: boolean) { grantHomeThisRun = v; }
 
 // Detect the CLI/local sandbox "file is outside the working directory" block
 // from a streamed error string, and best-effort pull out the path the agent
@@ -7341,1033 +7257,6 @@ function detectOutsideWorkspaceBlock(text: string): { path: string | null } | nu
   return { path };
 }
 
-// Streaming variant of claude_cli_complete — uses claude --print
-// --output-format stream-json --verbose so the Thought tab gets live
-// thinking blocks + tool_use commands as the CLI emits them. Returns
-// the assembled assistant text.
-async function runClaudeCliStream(args: {
-  systemPrompt: string;
-  userMessage: string;
-  cwd?: string | null;
-  autoApprove?: boolean;
-  /// Per-role tool allowlist (OWLLM-style names — read_file, shell,
-  /// edit_file, …). Forwarded to the CLI as --allowedTools after the
-  /// Rust side translates to Claude tool names. Omit / pass empty to
-  /// run unrestricted (operator behaviour).
-  allowedTools?: string[];
-  /// Bare Claude model id (no ":effort" suffix). Forwards as --model.
-  model?: string | null;
-  /// Effort tier: "low"|"medium"|"high"|"xhigh"|"max". Forwards as --effort.
-  effort?: string | null;
-  /// Persistent session UUID for multi-turn memory.
-  sessionId?: string | null;
-  briefMode?: boolean;
-  /// Called when the agent emits a SendUserMessage tool call. Caller
-  /// shows the question to the user (modal, inline prompt, chat
-  /// entry). Phase C v1: not yet wired to bidirectional reply.
-  onAskUser?: (question: string) => void;
-  onDelta: (delta: string) => void;
-  onThought: ThoughtHandler;
-}): Promise<string> {
-  const ch = new Channel<ClaudeStreamEvent>();
-  ch.onmessage = (msg) => {
-    switch (msg.kind) {
-      case "text":
-        args.onDelta(msg.delta);
-        break;
-      case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
-        break;
-      case "toolUse": {
-        if (msg.name === "SendUserMessage") {
-          let q = msg.input || "";
-          try {
-            const parsed = JSON.parse(msg.input);
-            if (parsed && typeof parsed.message === "string") q = parsed.message;
-            else if (parsed && typeof parsed.text === "string") q = parsed.text;
-          } catch { /* raw input */ }
-          if (args.onAskUser) args.onAskUser(q);
-          args.onThought("ask-user", "❓ agent asks", q);
-          break;
-        }
-        const channel = `tool:${msg.name}:${msg.toolUseId}`;
-        args.onThought(channel, `🛠 ${msg.name}`, msg.input || "");
-        break;
-      }
-      case "toolResult": {
-        const channel = `tool-result:${msg.toolUseId}`;
-        const snippet = msg.content.length > 800
-          ? msg.content.slice(0, 800) + "\n…(truncated)"
-          : msg.content;
-        args.onThought(channel, "↩ result", snippet);
-        break;
-      }
-      case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
-        break;
-    }
-  };
-  return await invoke<string>("claude_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    autoApprove: args.autoApprove ?? false,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    sessionId: args.sessionId ?? null,
-    // Default --brief on — matches VS Code Claude Code. The agent can
-    // always ask via SendUserMessage; question lands in the chat as a
-    // prominent "❓ agent asks" entry.
-    briefMode: args.briefMode ?? true,
-    // Per-run, user-consented home-profile access (--add-dir). False unless the
-    // user approved the consent prompt this run. See grantHomeThisRun.
-    grantHome: grantHomeThisRun,
-    readOnly: isAgentReadOnly(args),
-    onEvent: ch,
-  });
-}
-
-// Per-role tool allowlist (OWLLM-style names) forwarded into the
-// Claude CLI subscription path as --allowedTools. See accounts.rs::
-// map_owllm_tool_to_cli for the name translation. Optional on every
-// layer so non-CLI providers (OpenAI / local) ignore it.
-type AllowedTools = string[] | undefined;
-
-async function streamChatCompletion(
-  port: number,
-  modelId: string,
-  provider: string,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  /// Project location, threaded into the Claude Code CLI when the
-  /// dispatch resolves to the subscription path. Without it the CLI
-  /// inherits the desktop app's install dir and ends up reasoning
-  /// about the wrong tree.
-  projectCwd?: string,
-  /// Prior conversation turns. For API paths this becomes the
-  /// `messages` array preceding the current user turn; for the
-  /// Claude CLI subscription path it's folded into the user prompt
-  /// (the CLI's --print mode is one-shot and has no inherent memory).
-  history?: HistoryItem[],
-  /// When true and the dispatch resolves to the Claude CLI sub path,
-  /// the CLI is invoked with --dangerously-skip-permissions so file
-  /// writes / bash runs don't stall on permission prompts. Honoured
-  /// only when the user has opted in via the SuperUserCard checkbox
-  /// or the Telegram bridge's auto_approve flag.
-  autoApprove?: boolean,
-  /// Streaming reasoning + tool-call channel. Fires for Anthropic
-  /// thinking / tool_use blocks, OpenAI reasoning_content + tool_calls,
-  /// and local <think>/<thinking> tag content. Skipped for the Claude
-  /// CLI subscription path (--print mode emits one final blob — see TODO).
-  onThought?: ThoughtHandler,
-  /// Per-role tool allowlist. Only meaningful on the Claude CLI sub
-  /// path; ignored elsewhere.
-  allowedTools?: AllowedTools,
-  /// Multimodal attachments. Audio is transcribed up-front (Whisper);
-  /// images ride to the provider's native image part shape.
-  attachments?: Attachment[],
-  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
-  /// used by CLI subscription branches; OpenAI/local/API paths ignore.
-  sessionId?: string | null,
-  /// Optional callback invoked when this call can't deliver a feature
-  /// the user expected — currently fires when the CLI subscription
-  /// path is selected AND images are attached (those CLIs are
-  /// text-only stdin). The caller wires this to appendLog so the
-  /// user sees a yellow system note in the chat instead of the silent
-  /// thought-tab annotation we used to ship.
-  onSystemWarning?: (text: string) => void,
-  /// Fires once per successfully transcribed audio attachment so the
-  /// caller can surface the transcribed text in the chat as soon as it
-  /// lands (green "🎤 <text>" bubble) instead of waiting for the model
-  /// to echo it back. Mirrors dispatch.ts streamChatCompletion.
-  onTranscript?: (filename: string, text: string) => void,
-  /// Mid-run steering tap — see dispatch.ts streamChatCompletion. Polled at
-  /// each tool-loop boundary on the LOCAL path so a message typed while the
-  /// agent works is injected between tool calls; CLI/API paths ignore it.
-  getSteer?: () => string,
-): Promise<string> {
-  // Strip the optional route prefix encoded by the ModelPicker before
-  // handing the bare model id to the provider-specific call.
-  const forceSub = modelId.startsWith("sub/");
-  const forceApi = modelId.startsWith("api/");
-  const bareId = forceSub || forceApi || modelId.startsWith("auto/")
-    ? modelId.slice(modelId.indexOf("/") + 1)
-    : modelId;
-  assertProviderHonorsPersonalPolicy(provider, modelId, allowedTools);
-
-  // Audio attachments collapse into the user message via Whisper.
-  // Images stay on the side and get a provider-specific encoding.
-  const images = imageAttachments(attachments);
-  // CLI subscription paths take text-only stdin. The Claude (anthropic) CLI now
-  // gets images via the file-reference path (appendCliImageFiles saves them and
-  // the agent reads them), so no warning there. The other CLIs (Kimi, Gemini,
-  // OpenAI) don't yet, so still warn for those.
-  if (forceSub && images.length > 0 && onSystemWarning &&
-      (provider === "moonshot" || provider === "gemini" || provider === "openai")) {
-    const providerName = provider === "moonshot"  ? "Kimi"
-                       : provider === "gemini"    ? "Gemini"
-                       :                            "OpenAI";
-    const apiKey = provider === "moonshot"  ? "MOONSHOT_API_KEY"
-                 : provider === "gemini"    ? "GEMINI_API_KEY"
-                 :                            "OPENAI_API_KEY";
-    onSystemWarning(
-      `⚠ ${images.length} image attachment${images.length === 1 ? "" : "s"} can't be sent via the ${providerName} CLI subscription path (stdin is text-only). ` +
-      `To send images, switch to the API row (set ${apiKey} on the Accounts page) or pick a local vision model.`
-    );
-  }
-  const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
-    images,
-  );
-
-  if (provider === "auto") {
-    // P0-4: resolve "Auto · …" at dispatch time with the shared resolver
-    // (dispatch.ts — same catalogue the picker shows). The pick is ALWAYS
-    // surfaced; a cloud pick is never silent (§0.4: this duplicate stays
-    // in lockstep with dispatch.ts's auto branch).
-    const res = await resolveAutoModel(bareId, effectiveText);
-    onSystemWarning?.(
-      `⚡ Auto → ${res.label} (${res.cloud ? "cloud — uses your account/credits" : "local — free, private"}) · ${res.reason}`,
-    );
-    return streamChatCompletion(
-      port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
-      onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
-      sessionId, onSystemWarning, onTranscript, getSteer,
-    );
-  }
-  const responsive = makeResponsiveHandlers(onDelta, onThought);
-  onDelta = responsive.onDelta;
-  onThought = responsive.onThought;
-  try {
-  if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
-  }
-  if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
-  }
-  if (provider === "moonshot") {
-    return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  }
-  if (provider === "deepseek") {
-    return streamOpenAICompatible({
-      url: "https://api.deepseek.com/v1/chat/completions",
-      keyName: "DEEPSEEK_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "DeepSeek", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "xai") {
-    return streamOpenAICompatible({
-      url: "https://api.x.ai/v1/chat/completions",
-      keyName: "XAI_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "xAI Grok", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "groq") {
-    return streamOpenAICompatible({
-      url: "https://api.groq.com/openai/v1/chat/completions",
-      keyName: "GROQ_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Groq", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "perplexity") {
-    return streamOpenAICompatible({
-      url: "https://api.perplexity.ai/chat/completions",
-      keyName: "PERPLEXITY_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Perplexity", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "mistral") {
-    return streamOpenAICompatible({
-      url: "https://api.mistral.ai/v1/chat/completions",
-      keyName: "MISTRAL_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Mistral", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "together") {
-    return streamOpenAICompatible({
-      url: "https://api.together.xyz/v1/chat/completions",
-      keyName: "TOGETHER_API_KEY",
-      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images,
-      providerLabel: "Together AI", projectCwd, allowedTools,
-    });
-  }
-  if (provider === "gemini") {
-    return streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
-  }
-  // ---- Local llama-server path (GGUF) ----
-  // Native tool-calling only, via the shared streamLocalChat (dispatch.ts).
-  // Tool activity is surfaced on the Thought tab through onThought (which
-  // consumeOpenAISse already drives for delta.tool_calls). The cloud /
-  // sub / API branches above are untouched.
-    return streamLocalChat({
-      port,
-      modelId,
-      systemPrompt,
-      userContent: openaiUserContent(effectiveText, images),
-      temperature,
-      signal,
-      onDelta,
-      onThought,
-      projectCwd,
-      history,
-      allowedTools,
-      getSteer,
-    });
-  } finally {
-    await responsive.flush();
-  }
-}
-
-/// Anthropic Messages API streaming. Format:
-///   event: content_block_delta
-///   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}
-/// We only care about text_delta entries; everything else (ping, stop
-/// events) is ignored for plain-text streaming.
-///
-/// Fallback: when no ANTHROPIC_API_KEY is saved but the user's Claude
-/// Code CLI subscription is connected, we shell out to `claude --print`
-/// instead of hitting api.anthropic.com directly. This works without
-/// the user paying for API credits — they use the same subscription
-/// that powers their normal Claude Code sessions. Trade-off: --print
-/// mode emits the full reply at the end (no token streaming).
-type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
-
-// The Claude CLI subscription path folds prior turns into one prompt because
-// `claude --print` is one-shot with no native history input. It used the same
-// unbounded copy dispatch.ts had, so the shared budgeted version is imported
-// instead — one fold, one budget, every CLI path.
-
-// ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
-// The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
-async function streamAnthropic(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  autoApprove?: boolean,
-  onThought?: ThoughtHandler,
-  allowedTools?: AllowedTools,
-  /// Image attachments only — audio was transcribed in streamChatCompletion.
-  /// API path embeds images natively. CLI subscription path is text-only;
-  /// we surface a note so silently-dropped attachments don't confuse the user.
-  images?: Attachment[],
-  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
-  /// used by CLI subscription branches.
-  sessionId?: string | null,
-): Promise<string> {
-  const wantSub = route.forceSub === true;
-  const wantApi = route.forceApi === true;
-  const imgList = images ?? [];
-  // Split ":effort" off the model id so both the CLI (--model + --effort)
-  // and the API (thinking budget in buildAnthropicBody) get clean inputs.
-  const { wireModel: cliModel, effort: cliEffortRaw } = parseClaudeModelId(modelId);
-  const claudeEffort = mapClaudeEffort(cliEffortRaw);
-  // Save pasted images into the working directory and reference their paths so
-  // the Claude CLI reads them with its own tool (subscription images, no API
-  // key). See appendCliImageFiles. The API path embeds images natively instead.
-  // A no-folder team chat has no projectCwd; fall back to the shared chat-scratch
-  // dir so the CLI has a real place to save+read the image (#24). claudeCwd is
-  // used for BOTH the image save and every claude_cli cwd below.
-  const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
-  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
-  // Claude CLI's --print mode is one-shot — no inherent memory across
-  // calls — so fold the prior conversation into the user prompt the
-  // CLI sees. The CLI then has everything it needs to continue.
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
-  // forceSub: skip the API path entirely and go straight to the CLI.
-  if (wantSub) {
-    const status = await invoke<ClaudeCliStatus>("accounts_status");
-    if (!status?.claude_cli) {
-      throw new Error(claudeCliUnavailableMessage({
-        loggedIn: false,
-        installed: status?.claude_cli_installed === true,
-      }));
-    }
-    // Refresh the CLI token once per session (cold-start 401 fix). Pass the cwd so
-    // a sandboxed project ALSO re-mirrors the refreshed creds into its WSL sandbox
-    // (the agentic-team 401 fix) — the in-distro CLI reads a copy, not the host token.
-    await ensureCliWarm("claude_cli", claudeCwd);
-    // Stream via claude_cli_stream when the consumer wants live
-    // thought traffic (AgentsPage Thought tab); fall back to one-shot
-    // --print blob otherwise. Session-id conflicts get swallowed +
-    // retried with a fresh uuid: Claude CLI rejects a session_id
-    // that's currently locked by another in-flight (or stale-crashed)
-    // process, so we drop the persistent id, regenerate, and try
-    // once more before bubbling up.
-    const runWithSessionRetry = async <T,>(
-      attempt: (sid: string | null | undefined) => Promise<T>,
-    ): Promise<T> => {
-      try {
-        return await attempt(sessionId);
-      } catch (e: unknown) {
-        const msg = (e as { message?: string })?.message ?? String(e);
-        const isSessionConflict = /Session ID .* (is already in use|already in use)/i.test(msg)
-          || (/already in use/i.test(msg) && /session/i.test(msg));
-        if (!isSessionConflict) throw e;
-        // Stale lock from a prior crashed claude process — the
-        // persistent session ID is wedged. Wipe every cached
-        // Claude session across the app so this dispatch AND every
-        // future one gets a fresh UUID, then retry the current call
-        // in one-shot mode (sid=null) so it succeeds now.
-        try { clearAllClaudeSessions(); } catch { /* best-effort */ }
-        return await attempt(null);
-      }
-    };
-    if (onThought) {
-      return await withCliAuthRetry("claude_cli", signal, () =>
-        runWithSessionRetry((sid) => runClaudeCliStream({
-          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false, allowedTools,
-          model: cliModel, effort: claudeEffort, sessionId: sid,
-          onDelta, onThought,
-        })), claudeCwd);
-    }
-    const reply = await withCliAuthRetry("claude_cli", signal, () =>
-      runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
-        autoApprove: autoApprove ?? false,
-        readOnly: isReadOnlyToolAllowlist(allowedTools),
-        model: cliModel, effort: claudeEffort, sessionId: sid,
-        grantHome: grantHomeThisRun,
-      })), claudeCwd);
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
-  if (!key) {
-    if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
-    // Default (unforced) path: try CLI subscription as a fallback.
-    let cliInstalled = false;
-    try {
-      const status = await invoke<ClaudeCliStatus>("accounts_status");
-      cliInstalled = status?.claude_cli_installed === true;
-      if (status?.claude_cli) {
-        await ensureCliWarm("claude_cli", claudeCwd);
-        if (onThought) {
-          return await withCliAuthRetry("claude_cli", signal, () => runClaudeCliStream({
-            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-            autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort, sessionId,
-            onDelta, onThought,
-          }), claudeCwd);
-        }
-        const reply = await withCliAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
-          systemPrompt,
-          userMessage: cliPrompt,
-          cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false,
-          readOnly: isReadOnlyToolAllowlist(allowedTools),
-          model: cliModel, effort: claudeEffort, sessionId,
-          grantHome: grantHomeThisRun,
-        }), claudeCwd);
-        if (reply) onDelta(reply);
-        return reply;
-      }
-    } catch (e) {
-      console.error("claude_cli_complete failed", e);
-    }
-    throw new Error(
-      "No ANTHROPIC_API_KEY saved. " +
-      claudeCliUnavailableMessage({ loggedIn: false, installed: cliInstalled }) +
-      " Or save a key on the Accounts page instead."
-    );
-  }
-  const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify(buildAnthropicBody(modelId, systemPrompt, history, userMessage, imgList, temperature)),
-    signal,
-  }), signal);
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  return consumeAnthropicSse(resp, onDelta, onThought);
-}
-
-/// Parse the optional ":<effort>" suffix off the Anthropic model id
-/// (set by ModelPicker for Opus 4.7 / Sonnet 4.6) and translate the
-/// tier into extended-thinking parameters. Mirrors the same helper in
-/// dispatch.ts — kept in lockstep until the two streams collapse to
-/// one in a future refactor.
-///
-/// Tier → (budget_tokens, max_tokens, forced temperature):
-///   low (or none) → 0    / 4096  / caller's temp
-///   medium        → 4000 / 8192  / 1 (Anthropic mandates temp=1 with thinking)
-///   high          → 8000 / 16384 / 1
-///   extra_high    → 16000/ 24576 / 1
-function buildAnthropicBody(
-  modelId: string,
-  systemPrompt: string,
-  history: HistoryItem[] | undefined,
-  userMessage: string,
-  imgList: Attachment[],
-  temperature: number,
-): unknown {
-  const sep = modelId.indexOf(":");
-  const wireModel = sep === -1 ? modelId : modelId.slice(0, sep);
-  const effort = sep === -1 ? null : modelId.slice(sep + 1);
-  const budget = effort === "extra_high" ? 16000
-              : effort === "high" ? 8000
-              : effort === "medium" ? 4000
-              : 0;
-  const thinkingOn = budget > 0;
-  const maxTokens = thinkingOn ? budget + 4096 : 4096;
-  const reqTemp = thinkingOn ? 1 : temperature;
-  const anthropicBudget = historyBudgetFor(wireModel);
-  return {
-    model: wireModel,
-    max_tokens: maxTokens,
-    ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
-    system: systemPrompt,
-    messages: [
-      // Bounded to the model's window — the API path used to spread the whole
-      // history in raw while only the CLI paths were capped.
-      ...recentTextHistory(history, anthropicBudget.turns, anthropicBudget.chars)
-        .map(h => ({ role: h.role, content: h.content })),
-      { role: "user", content: anthropicUserContent(userMessage, imgList) },
-    ],
-    stream: true,
-    temperature: reqTemp,
-  };
-}
-
-// Anthropic Messages SSE consumer — splits the stream into three
-// channels: text deltas → onDelta, thinking deltas → onThought
-// ("thinking:<idx>"), tool_use blocks → onThought("tool:<name>:<id>").
-async function consumeAnthropicSse(
-  resp: Response,
-  onDelta: StreamHandler,
-  onThought?: ThoughtHandler,
-): Promise<string> {
-  const reader = resp.body!.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body) continue;
-      try {
-        const j = JSON.parse(body);
-        if (j?.type === "content_block_start") {
-          const idx: number = j.index;
-          const block = j.content_block;
-          if (block?.type === "thinking") {
-            blocks.set(idx, { kind: "thinking", channel: `thinking:${idx}`, role: "🧠 thinking" });
-          } else if (block?.type === "tool_use") {
-            const name = String(block?.name ?? "tool");
-            const id = String(block?.id ?? idx);
-            const channel = `tool:${name}:${id}`;
-            blocks.set(idx, { kind: "tool", channel, role: `🛠 ${name}` });
-            onThought?.(channel, `🛠 ${name}`, "");
-          } else {
-            blocks.set(idx, { kind: "text", channel: "", role: "" });
-          }
-        } else if (j?.type === "content_block_delta") {
-          const idx: number = j.index;
-          const meta = blocks.get(idx);
-          const delta = j.delta;
-          if (meta?.kind === "thinking" && typeof delta?.thinking === "string") {
-            onThought?.(meta.channel, meta.role, delta.thinking);
-          } else if (meta?.kind === "tool" && typeof delta?.partial_json === "string") {
-            onThought?.(meta.channel, meta.role, delta.partial_json);
-          } else if (typeof delta?.text === "string" && delta.text) {
-            acc += delta.text;
-            onDelta(delta.text);
-          }
-        }
-      } catch { /* skip malformed chunk */ }
-    }
-  }
-  return acc;
-}
-
-/// OpenAI chat-completions streaming. Same SSE shape as llama-server.
-async function streamOpenAI(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  history?: HistoryItem[],
-  onThought?: ThoughtHandler,
-  /// Image attachments only — audio was transcribed in streamChatCompletion.
-  images?: Attachment[],
-  /// Project working dir — threaded to the Codex CLI so it runs IN the project.
-  projectCwd?: string,
-  /// Per-role tool allowlist — forwarded to the Codex CLI stream so the Rust
-  /// side can detect the Browser role and wire the MCP browser gateway.
-  allowedTools?: AllowedTools,
-): Promise<string> {
-  // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
-  // the Claude / Kimi subscriptions route through their CLIs. Without this,
-  // a `sub/` codex model on the Agents page demanded OPENAI_API_KEY and
-  // failed with "No OPENAI_API_KEY saved" even when a Codex subscription was
-  // logged in — codex was the one provider left stubbed to the API path.
-  if (route.forceSub === true) {
-    // Refresh the Codex CLI token once per session (cold-start 401 fix). Pass cwd
-    // so an isolated project also re-mirrors creds into its WSL sandbox.
-    await ensureCliWarm("codex_cli", projectCwd);
-    // Budgeted fold — an unbounded transcript here is what put 778k characters
-    // (81% of the model's context) into a single orchestrator dispatch.
-    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Pasted images → saved to the cwd inbox + attached via codex's native -i
-    // flag (verified). Same path the Code page uses — consistent everywhere.
-    // A no-folder team chat has no projectCwd; fall back to the shared
-    // chat-scratch dir so codex has a real place to save+read the image (#24).
-    const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
-    let imageSaveNote = "";
-    const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
-    const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
-    const [pickedModel, pickedEffort] = modelId.split(":", 2);
-    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
-    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
-    // Stream live activity (reasoning/commands/tools/web-search) into the
-    // Thought tab when present; fall back to the one-shot blob otherwise.
-    if (onThought) {
-      return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools,
-        readOnly: isReadOnlyToolAllowlist(allowedTools), onDelta, onThought,
-      }), codexCwd);
-    }
-    const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort,
-    }), codexCwd);
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  return streamOpenAiApiWithTools({
-    modelId,
-    systemPrompt,
-    userMessage,
-    temperature,
-    signal,
-    onDelta,
-    history,
-    onThought,
-    images,
-    projectCwd,
-    allowedTools,
-  });
-}
-
-/// Moonshot AI / Kimi streaming. Two routes:
-///   * subscription — shell out to Moonshot's `kimi --print` CLI.
-///     Used when the picker resolved to a `sub/<id>` row AND the
-///     user is logged into the Kimi CLI. Non-streaming: the CLI emits
-///     one final reply, which we flush via a single onDelta call.
-///   * API — OpenAI-compatible REST at api.moonshot.ai/v1, same SSE
-///     shape so we reuse consumeOpenAISse.
-async function streamMoonshot(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  onThought?: ThoughtHandler,
-  images?: Attachment[],
-  allowedTools?: AllowedTools,
-): Promise<string> {
-  // Subscription path — shell to `kimi --print`. Fold history into the
-  // user prompt because the CLI's --print mode is single-turn.
-  if (route.forceSub) {
-    // Agentic has its own provider loop (separate from dispatch.ts). Keep the
-    // same preflight as Code/Chat so an isolated project gets the Kimi binary
-    // and refreshed credentials before the first agent tries to execute it.
-    await ensureCliWarm("kimi_cli", projectCwd);
-    // Bounded fold, same helper as every other CLI path. This joined the WHOLE
-    // transcript before, so a long team run re-sent every prior turn each time.
-    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Retry transient network blips (and surface a clear auth error) like the
-    // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
-    // real auth/network text, so withCliAuthRetry can recognize and retry it.
-    // allowedTools gates the browser gateway to the Browser role only (a normal
-    // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
-    const reply = await withCliAuthRetry("kimi_cli", signal, () => runKimiCliStream({
-      systemPrompt,
-      userMessage: composed,
-      cwd: projectCwd ?? null,
-      model: modelId,
-      allowedTools,
-      onDelta,
-      onThought: onThought ?? (() => {}),
-    }), projectCwd);
-    return reply;
-  }
-  // API path — OpenAI-compatible streaming.
-  return streamOpenAiApiWithTools({
-    modelId,
-    systemPrompt,
-    userMessage,
-    temperature,
-    signal,
-    onDelta,
-    history,
-    onThought,
-    images,
-    projectCwd,
-    allowedTools,
-    apiUrl: "https://api.moonshot.ai/v1/chat/completions",
-    keyName: "MOONSHOT_API_KEY",
-    providerLabel: "Moonshot",
-  });
-}
-
-/// Generic OpenAI-compatible streamer. DeepSeek, xAI Grok, Groq,
-/// Perplexity, Mistral, and Together AI all speak the same JSON
-/// chat-completions shape with /v1/chat/completions endpoints; this
-/// keeps each provider's dispatch entry to a 1-line config.
-async function streamOpenAICompatible(args: {
-  url: string;
-  keyName: string;
-  modelId: string;
-  systemPrompt: string;
-  userMessage: string;
-  temperature: number;
-  signal: AbortSignal;
-  onDelta: StreamHandler;
-  history?: HistoryItem[];
-  onThought?: ThoughtHandler;
-  images?: Attachment[];
-  providerLabel: string;
-  projectCwd?: string;
-  allowedTools?: AllowedTools;
-}): Promise<string> {
-  return streamOpenAiApiWithTools({
-    modelId: args.modelId,
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    temperature: args.temperature,
-    signal: args.signal,
-    onDelta: args.onDelta,
-    history: args.history,
-    onThought: args.onThought,
-    images: args.images,
-    projectCwd: args.projectCwd,
-    allowedTools: args.allowedTools,
-    apiUrl: args.url,
-    keyName: args.keyName,
-    providerLabel: args.providerLabel,
-  });
-}
-
-/// Google Gemini streaming via generativelanguage.googleapis.com.
-/// NOT OpenAI-compatible — different request body and event shape.
-/// Request: POST .../v1beta/models/<id>:streamGenerateContent?alt=sse&key=<K>
-/// Body: { contents: [{ role, parts: [{ text }] }], systemInstruction:
-///         { parts: [{ text }] }, generationConfig: { temperature } }
-/// SSE events: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
-async function streamGemini(
-  modelId: string,
-  route: CloudRoute,
-  systemPrompt: string,
-  userMessage: string,
-  temperature: number,
-  signal: AbortSignal,
-  onDelta: StreamHandler,
-  projectCwd?: string,
-  history?: HistoryItem[],
-  _onThought?: ThoughtHandler,
-  _images?: Attachment[],
-): Promise<string> {
-  // Subscription path — gemini-cli's --print mode (per its docs,
-  // similar to claude/kimi). Folds history into the prompt since
-  // --print is single-turn.
-  if (route.forceSub) {
-    // Bounded fold — see the Kimi path above.
-    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
-    // Retry transient network blips / surface real auth errors, as for the other
-    // subscription CLIs (the Rust non-zero-exit path now carries the auth text).
-    const reply = await withCliAuthRetry("gemini_cli", signal, () => invoke<string>("gemini_cli_complete", {
-      systemPrompt,
-      userMessage: composed,
-      cwd: projectCwd ?? null,
-      model: modelId,
-    }), projectCwd ?? null).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
-    if (reply) onDelta(reply);
-    return reply;
-  }
-  // API path — REST + SSE.
-  const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
-  const fallbackKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
-  if (!fallbackKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
-  // Translate alternating user/assistant history to Gemini's contents
-  // shape. Gemini uses "model" instead of "assistant".
-  const geminiBudget = historyBudgetFor(modelId);
-  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
-    role: h.role === "assistant" ? "model" : (h.role === "user" ? "user" : "model"),
-    parts: [{ text: typeof h.content === "string" ? h.content : "" }],
-  }));
-  contents.push({ role: "user", parts: [{ text: userMessage }] });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(fallbackKey)}`;
-  const resp = await fetchNetRetry(() => fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents,
-      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-      generationConfig: { temperature },
-    }),
-    signal,
-  }), signal);
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body) continue;
-      try {
-        const j = JSON.parse(body);
-        const parts = j?.candidates?.[0]?.content?.parts;
-        if (Array.isArray(parts)) {
-          for (const p of parts) {
-            if (typeof p?.text === "string" && p.text) {
-              acc += p.text;
-              onDelta(p.text);
-            }
-          }
-        }
-      } catch { /* malformed event line, skip */ }
-    }
-  }
-  return acc;
-}
-
-/// Shared SSE consumer for OpenAI-compatible endpoints (llama-server,
-/// api.openai.com). Routes:
-///   - delta.content (with <think>/<thinking> stripped) → onDelta
-///   - text inside <think> tags → onThought("thinking", …)
-///   - delta.reasoning_content (DeepSeek-R1, o-series) → onThought("thinking", …)
-///   - delta.tool_calls[] → onThought("tool:<name>:<i>", "🛠 <name>", …)
-async function consumeOpenAISse(
-  resp: Response,
-  onDelta: StreamHandler,
-  onThought?: ThoughtHandler,
-  toolCallsOut?: NativeToolCall[],
-): Promise<string> {
-  if (!resp.ok || !resp.body) {
-    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let acc = "";
-  let inThink = false;
-  const toolNames = new Map<number, string>();
-  const toolArgsBuf = new Map<number, string>();
-  // Client-side degeneration detectors — backstop for the server-side
-  // DRY/min_p sampling. Mirrors dispatch.ts:
-  //   - checkLineLoop / checkInlineLoop: literal repetition.
-  //   - checkRunawayLine: NON-repeating runaway (a wall of novel tokens
-  //     with no sentence breaks) which the repeat detectors miss.
-  let loopAborted = false;
-  let genTail = "";
-  const checkLineLoop = (full: string): boolean => {
-    const tail = full.length > 600 ? full.slice(-600) : full;
-    const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
-    if (lines.length < 3) return false;
-    const [a, b, c] = lines.slice(-3);
-    return a === b && b === c;
-  };
-  const checkInlineLoop = (full: string): boolean => {
-    if (full.length < 90) return false;
-    const tail = full.slice(-90);
-    for (let chunkLen = 25; chunkLen <= 30; chunkLen++) {
-      const a = tail.slice(0, chunkLen);
-      const b = tail.slice(chunkLen, chunkLen * 2);
-      const c = tail.slice(chunkLen * 2, chunkLen * 3);
-      if (a === b && b === c && a.trim().length >= 15) return true;
-    }
-    return false;
-  };
-  const checkRunawayLine = (full: string): boolean => {
-    const nlIdx = full.lastIndexOf("\n");
-    const lineText = nlIdx >= 0 ? full.slice(nlIdx + 1) : full;
-    if (lineText.length < 2500) return false;
-    return !/[.!?](\s|$)/.test(lineText.slice(-400));
-  };
-  const noteGen = (s: string): boolean => {
-    genTail = (genTail + s).slice(-3600);
-    return checkRunawayLine(genTail);
-  };
-  const maybeYield = makeUiYield();
-  while (true) {
-    await maybeYield();
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      await maybeYield();
-      const line = buf.slice(0, nl).replace(/\r$/, "");
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const body = line.slice(5).trim();
-      if (!body || body === "[DONE]") continue;
-      try {
-        const j = JSON.parse(body);
-        const delta = j?.choices?.[0]?.delta;
-        if (!delta) continue;
-        const abortRunaway = async () => {
-          console.warn("[AgentsPage.sse] runaway degeneration — aborting");
-          onDelta("\n\n⚠ Runaway generation detected — stream aborted.");
-          loopAborted = true;
-          try { await reader.cancel("runaway"); } catch { /* ignore */ }
-        };
-        const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
-        if (typeof reasoning === "string" && reasoning) {
-          onThought?.("thinking", "🧠 thinking", reasoning);
-          if (noteGen(reasoning)) { await abortRunaway(); break; }
-        }
-        const toolCalls: any[] | undefined = delta?.tool_calls;
-        if (Array.isArray(toolCalls)) {
-          for (const tc of toolCalls) {
-            const idx: number = typeof tc?.index === "number" ? tc.index : 0;
-            const fn = tc?.function ?? {};
-            if (typeof fn?.name === "string" && fn.name) {
-              toolNames.set(idx, fn.name);
-              const channel = `tool:${fn.name}:${idx}`;
-              onThought?.(channel, `🛠 ${fn.name}`, "");
-            }
-            if (typeof fn?.arguments === "string" && fn.arguments) {
-              const name = toolNames.get(idx) ?? "tool";
-              const channel = `tool:${name}:${idx}`;
-              onThought?.(channel, `🛠 ${name}`, fn.arguments);
-              toolArgsBuf.set(idx, (toolArgsBuf.get(idx) ?? "") + fn.arguments);
-            }
-          }
-        }
-        const content: string | undefined = delta?.content;
-        if (typeof content === "string" && content) {
-          const split = splitThinkTags(content, inThink);
-          inThink = split.inThink;
-          if (split.thought) {
-            onThought?.("thinking", "🧠 thinking", split.thought);
-            if (noteGen(split.thought)) { await abortRunaway(); break; }
-          }
-          if (split.reply)   { acc += split.reply; onDelta(split.reply); }
-          if (split.reply && (split.reply.includes("\n") || acc.length > 90)) {
-            if (checkLineLoop(acc) || checkInlineLoop(acc)) {
-              console.warn("[AgentsPage.sse] repetition loop detected — aborting");
-              onDelta("\n\n⚠ Repetition loop detected — stream aborted.");
-              loopAborted = true;
-              try { await reader.cancel("loop"); } catch { /* ignore */ }
-              break;
-            }
-          }
-          if (split.reply && noteGen(split.reply)) { await abortRunaway(); break; }
-        }
-      } catch { /* skip malformed chunk */ }
-    }
-    if (loopAborted) break;
-  }
-  // Finalise any native tool_calls: name + accumulated args JSON
-  // → NativeToolCall shape the caller can pass straight to
-  // executeToolCall, same as XML-parsed calls.
-  if (toolCallsOut) {
-    for (const [idx, rawName] of toolNames.entries()) {
-      const argsJson = toolArgsBuf.get(idx) ?? "{}";
-      const args: Record<string, string> = {};
-      try {
-        const parsed = JSON.parse(argsJson);
-        if (parsed && typeof parsed === "object") {
-          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-            args[k] = typeof v === "string" ? v : JSON.stringify(v);
-          }
-        }
-      } catch {
-        args.raw = argsJson;
-      }
-      toolCallsOut.push({ name: rawName, args });
-    }
-  }
-  return acc;
-}
-
-// Streaming-safe <think> / <thinking> tag splitter — see dispatch.ts
-// for the full notes. Tags split across chunks fall through as literal
-// text; full-tag-in-one-chunk (the common case) routes correctly.
-function splitThinkTags(chunk: string, inThink: boolean): { reply: string; thought: string; inThink: boolean } {
-  let reply = "";
-  let thought = "";
-  let i = 0;
-  const open = /<think(?:ing)?>/i;
-  const close = /<\/think(?:ing)?>/i;
-  while (i < chunk.length) {
-    const rest = chunk.slice(i);
-    if (inThink) {
-      const m = rest.match(close);
-      if (!m) { thought += rest; break; }
-      thought += rest.slice(0, m.index!);
-      i += m.index! + m[0].length;
-      inThink = false;
-    } else {
-      const m = rest.match(open);
-      if (!m) { reply += rest; break; }
-      reply += rest.slice(0, m.index!);
-      i += m.index! + m[0].length;
-      inThink = true;
-    }
-  }
-  return { reply, thought, inThink };
-}
 
 // Strip any `@agent: …` directive lines from the orchestrator's reply
 // so the final user-facing rendering doesn't double-show them.
@@ -8525,6 +7414,12 @@ export function AgentsPage({
   /// dropdown. Empty string means "no override" (fall back to the team
   /// default → server model).
   const [perAgentModel, setPerAgentModel] = useState<Map<string, string>>(new Map());
+  /// True when the hydrated per-agent MODEL map had entries. Lets the
+  /// graph_json persist effect write an explicitly-empty agentModels map when
+  /// the user clears the LAST override (the old size===0 guard skipped that
+  /// write, so cleared picks came back from the DB on the next restart) while
+  /// still never writing an empty map before hydration has run.
+  const agentModelsHadEntriesRef = useRef(false);
   /// Per-agent voice picks (TTS). Same lifecycle as perAgentModel — keyed
   /// by agent name, cleared on project/team flip. Missing key means the
   /// agent uses DEFAULT_VOICE (disabled / Auto / default rate).
@@ -8700,6 +7595,20 @@ export function AgentsPage({
     // missed per-agent removal can't leave the header bars spinning forever.
     clearRunActivity("agents:");
     setActiveAgents(new Set());
+    // Bank every still-running per-agent clock too. A crash between an agent's
+    // work and its removeActive() otherwise leaves activeSince set and the
+    // card ticking green forever after the run ended.
+    setAgentTiming(prev => {
+      if (![...prev.values()].some(t => t.activeSince != null)) return prev;
+      const now = Date.now();
+      const next = new Map<string, AgentTiming>();
+      for (const [name, t] of prev) {
+        next.set(name, t.activeSince == null
+          ? t
+          : { activeSince: null, accumMs: t.accumMs + (now - t.activeSince) });
+      }
+      return next;
+    });
   };
   // OrchestratorPane focus needs a single "primary" — pick whichever
   // agent went active most recently (Sets preserve insertion order in
@@ -8883,6 +7792,11 @@ export function AgentsPage({
   // in. The run-end integration gate reuses it when it already verified projectCwd
   // (a solo coder) instead of re-running the full build. Reset at run start.
   const lastGateRef = useRef<GateResult | null>(null);
+  // Last skill-staging outcome announced per cwd ("<count>" or "err:<msg>").
+  // The mirror itself refreshes EVERY dispatch (cheap, keeps skills current),
+  // but the chat line only appears when the outcome CHANGES — it used to print
+  // "🧩 45 skills staged…" on every single send (81× in one project chat).
+  const skillSyncAnnouncedRef = useRef<Map<string, string>>(new Map());
   // Run-trace draft (Layer 2 eval): the objective signals of THIS run, collected
   // as it executes and finalized into a RunTrace at run end (rendered as the Run
   // Report + persisted for team.eval.run.mjs). Pure bookkeeping — never affects
@@ -9136,6 +8050,8 @@ export function AgentsPage({
   const consentSeenRef = useRef<Set<string>>(new Set());
   /// Which agent's editor popup (model / colour / prompt) is open, by name.
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
+  // Which agent's skills-picker popup is open (card skill-ribbon click).
+  const [skillsAgent, setSkillsAgent] = useState<string | null>(null);
   /// Live card-colour preview per agent (name → hex), applied to renderTeam so
   /// the tile / canvas / graph repaint before the user hits Save. Ephemeral —
   /// the persisted colour rides on the team template (spec.color via toTeam);
@@ -9433,16 +8349,96 @@ export function AgentsPage({
     return () => window.removeEventListener("owllm:open-workbench", onOpen as EventListener);
   }, []);
 
-  // 🌐 header button opens the shared Agent Browser panel (daemon is app-global).
+  // 🌐 header button opens the shared Agent Browser panel (daemon is app-global)
+  // AND arranges the app + browser side by side — the same coordinated split
+  // the Code page's browser control performs (user spec 2026-08-14).
   const [browserPanelOpen, setBrowserPanelOpen] = useState(false);
+  const openBrowserSplit = async (): Promise<void> => {
+    try {
+      await openWelcomeBrowserSplit((command, args) => invoke(command, args as Record<string, unknown>));
+    } catch (e) {
+      notify(`Could not open the browser: ${String(e)}`, "error");
+    }
+  };
   useEffect(() => {
     const onOpen = () => {
       if (!isActiveRef.current) return; // only the visible tab opens it
       setBrowserPanelOpen(true);
+      void openBrowserSplit();
     };
     window.addEventListener("owllm:open-browser-panel", onOpen as EventListener);
     return () => window.removeEventListener("owllm:open-browser-panel", onOpen as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ---- Code-page column states (user spec 2026-08-14: the Agents page reuses
+  // the Code page's outer columns). Left = project rail (memory + file tree +
+  // Publisher card); right = the resizable utility column. Both collapse to
+  // the same icon rails as the Code page.
+  const [agentsProjectRailOpen, setAgentsProjectRailOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("owllm:agents:projectrail") !== "closed"; } catch { return true; }
+  });
+  const setProjectRailOpen = (open: boolean) => {
+    setAgentsProjectRailOpen(open);
+    try { localStorage.setItem("owllm:agents:projectrail", open ? "open" : "closed"); } catch { /* keeps default */ }
+  };
+  const [agentsSideOpen, setAgentsSideOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("owllm:agents:sideopen") !== "closed"; } catch { return true; }
+  });
+  const setSideOpen = (open: boolean) => {
+    setAgentsSideOpen(open);
+    try { localStorage.setItem("owllm:agents:sideopen", open ? "open" : "closed"); } catch { /* keeps default */ }
+  };
+  // The composer's slash commands switch the right column's sub-tabs via this
+  // instance-scoped bridge (OrchestratorPane assigns its setter here).
+  const rightTabSwitchRef = useRef<((tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void) | null>(null);
+
+  // ---- User-input composer (canvas column, Code-page position) ----
+  // Persistent draft per project (localStorage); moved up from
+  // OrchestratorPane so the dock renders under the canvas, exactly where the
+  // Code page's composer sits. Same storage key — no draft is lost.
+  const dockDraftKey = selectedProjectId ? `owllm:supdraft:${selectedProjectId}` : "";
+  const dockDraftKeyRef = useRef(dockDraftKey);
+  dockDraftKeyRef.current = dockDraftKey;
+  const [dockDraft, setDockDraftState] = useState<string>(() => {
+    if (!dockDraftKey) return "";
+    try { return localStorage.getItem(dockDraftKey) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    if (!dockDraftKey) { setDockDraftState(""); return; }
+    try { setDockDraftState(localStorage.getItem(dockDraftKey) ?? ""); } catch { setDockDraftState(""); }
+  }, [dockDraftKey]);
+  const setDockDraft = (v: string) => {
+    setDockDraftState(v);
+    const k = dockDraftKeyRef.current;
+    if (k) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  const dockInputRef = useRef<HTMLTextAreaElement>(null);
+  // Auto-resize: reset to "auto" so the textarea can shrink, then set
+  // height to its content's scrollHeight up to a cap.
+  useLayoutEffect(() => {
+    const ta = dockInputRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const next = Math.min(ta.scrollHeight, 240);
+    ta.style.height = `${Math.max(36, next)}px`;
+  }, [dockDraft]);
+  const submitDockInput = (images: Attachment[] = []) => {
+    const t = dockDraft.trim();
+    if (!t && images.length === 0) return;
+    // NOTE: no busy-guard — when a run is active, onSupSend queues this as a
+    // mid-run steer instead of starting a second run. That's what lets the user
+    // type + send while the team works (the ■ button still stops the run).
+    onSupSend(t, images);
+    setDockDraft("");
+  };
+  // A file clicked in the left column's tree lands as an @-reference in the
+  // composer (TreeDir's documented contract), so the team can be pointed at it.
+  const addFileRefToDraft = (abs: string) => {
+    const root = (publisherCwd ?? "").replace(/[\\/]+$/, "");
+    const rel = root && abs.startsWith(root) ? abs.slice(root.length).replace(/^[\\/]/, "") : abs;
+    setDockDraft((dockDraft ? dockDraft.replace(/\s+$/, "") + " " : "") + `@${rel} `);
+  };
 
   // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude,
   // Codex, Gemini, or Kimi) surfaces a visible "team paused / retrying" notice
@@ -9820,7 +8816,9 @@ export function AgentsPage({
         // genuine project switch. chat_json changes after every streamed save;
         // treating those as project switches used to clear a freshly selected
         // team model in the middle of its own run.
-        setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
+        const hydratedModels = loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json);
+        agentModelsHadEntriesRef.current = hydratedModels.size > 0;
+        setPerAgentModel(hydratedModels);
         setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
         setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
         setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
@@ -10012,7 +9010,9 @@ export function AgentsPage({
     // look "random" after a restart. Reloading from localStorage is safe:
     // picks are keyed by agent name, and any name not in the new team's
     // roster is simply never looked up (harmless), while real picks survive.
-    setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
+    const reloadedModels = loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json);
+    agentModelsHadEntriesRef.current = reloadedModels.size > 0;
+    setPerAgentModel(reloadedModels);
     setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
     setPerAgentSkills(loadAgentSkillsForProject(selectedProject?.graph_json));
     setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject?.graph_json));
@@ -10080,7 +9080,13 @@ export function AgentsPage({
     if (!selectedProject) return;
     if (pickedTeamId !== null) return;            // template override → not the project's own roster
     if (!activeTeam) return;                       // team not computed yet → don't write empty edges/roster
-    if (perAgentModel.size === 0 && perAgentVoice.size === 0 && perAgentSkills.size === 0 && perAgentToolExtras.size === 0) return;
+    // Skip pure-empty writes ONLY while nothing was ever hydrated/persisted.
+    // Once the model map has held entries, an all-empty state is a deliberate
+    // clear and MUST be written — otherwise the DB's old agentModels resurrect
+    // the deleted pick on the next restart.
+    const allPickMapsEmpty =
+      perAgentModel.size === 0 && perAgentVoice.size === 0 && perAgentSkills.size === 0 && perAgentToolExtras.size === 0;
+    if (allPickMapsEmpty && !agentModelsHadEntriesRef.current) return;
     const id = window.setTimeout(async () => {
       try {
         await invoke("update_project", {
@@ -10095,6 +9101,7 @@ export function AgentsPage({
             }),
           },
         });
+        agentModelsHadEntriesRef.current = perAgentModel.size > 0;
       } catch (e) {
         console.error("persist agent picks failed", e);
       }
@@ -10243,7 +9250,7 @@ export function AgentsPage({
     const coder = soloGeneralistForTeam(renderTeam);
     const critic = agents.find(a => a.name === CRITIC_AGENT_NAME)
       ?? ({ name: CRITIC_AGENT_NAME, base: "critic", icon: null } as AgentSpec);
-    const publisher = agents.find(a => a.base === "publisher" || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release"))
+    const publisher = agents.find(a => isPublisherAgent(a, roleByName))
       ?? ({ name: "Publisher", base: "publisher", icon: null } as AgentSpec);
     const seen = new Set<string>();
     const soloAgents = [coder, critic, publisher].filter(a => a && !seen.has(a.name) && seen.add(a.name));
@@ -10257,6 +9264,18 @@ export function AgentsPage({
   // Solo card label reflects the actual runtime role. It is deliberately not a
   // team lane ("Frontend") or the old generic "Coder": this agent owns every
   // domain and receives every connected tool in Solo mode.
+  // The Producer — the release agent, FIXED for every way of working (team,
+  // solo-loop, single coder). Its card left the canvas grid and is docked at
+  // the bottom of the left project column instead (user spec 2026-08-14), so
+  // Commit / Merge / Publish, its model picker and its identity are always one
+  // place. Falls back to a synthetic spec when the roster has no publisher, so
+  // the card is present even on a team that never defined one.
+  const producerSpec = useMemo<AgentSpec>(() => {
+    const roster = (soloMode ? soloRenderTeam : renderTeam)?.agents ?? [];
+    return roster.find(a => isPublisherAgent(a, roleByName))
+      ?? ({ name: "Publisher", base: "publisher", icon: null } as AgentSpec);
+  }, [soloMode, soloRenderTeam, renderTeam, roleByName]);
+
   const soloLabels = useMemo<Record<string, string>>(() => {
     const coder = soloRenderTeam?.agents[0];
     return coder ? { [coder.name]: "Solo Generalist" } : {};
@@ -10881,6 +9900,11 @@ export function AgentsPage({
       } catch { /* event dispatch failed — desktop UI already shows it, only phone misses */ }
     }
     } finally {
+      // Same wholesale sweep dispatchGoal's finally does. This path also runs
+      // addActive() (critic + orchestrator), so a throw that skips an inner
+      // removeActive would otherwise leave the card's clock ticking green
+      // forever after the run ended.
+      clearActive();
       supSendBusyRef.current = false;
       setSupSendBusy(false);
       setLlamaLoading(null);
@@ -10917,6 +9941,12 @@ export function AgentsPage({
     perAgentModel.get(agentName)?.trim() ?? "";
   const agentTemplateModelFor = (agentName: string): string =>
     activeTeam?.agents.find(a => a.name === agentName)?.defaultModelId?.trim() ?? "";
+  // The agent-SPECIFIC selection only (override or template pin) — what a
+  // per-agent picker's VALUE must show. Inherited team/server models are
+  // disclosed through the picker's fallback label, never as the value
+  // (same invariant the agent editor's initialModel enforces).
+  const agentExplicitModelFor = (agentName: string): string =>
+    agentModelOverrideFor(agentName) || agentTemplateModelFor(agentName);
 
   // Resolve the model id we should send for a given agent. Priority:
   //   per-agent override > agent template default > team default >
@@ -10934,6 +9964,14 @@ export function AgentsPage({
       agentTemplateModelFor(agentName),
     );
   };
+  // The cards show the SAME label as the shared picker (model + effort/account
+  // variant), never a provider logo or the raw route id.
+  const modelEntryLabels = useMemo(
+    () => new Map(buildEntries(models, accountsStatus).map(entry => [entry.id, entry.label])),
+    [models, accountsStatus],
+  );
+  const labelForModel = (modelId: string): string =>
+    modelEntryLabels.get(modelId) ?? modelId ?? "";
   const onPickAgentModel = (agentName: string, modelId: string) => {
     setPerAgentModel(prev => {
       const next = new Map(prev);
@@ -11176,13 +10214,22 @@ export function AgentsPage({
   // ensureLocalServer triggered a temporal-dead-zone crash
   // ('Cannot access "sn" before initialization') when React rendered
   // the right column.
-  // Resolve the dock's model the SAME way onSupSend dispatches it —
-  // modelFor(orchestrator), which honours per-agent override > team
-  // default > server model. (Was effectiveTeamModel-first, which
-  // ignored a per-orchestrator override, so the Load button and the
+  // Resolve the dock's model the SAME way the dispatch path does —
+  // modelFor(<the agent that actually runs>), which honours per-agent
+  // override > team default > server model. (Was effectiveTeamModel-first,
+  // which ignored a per-orchestrator override, so the Load button and the
   // send could disagree on which model to use.)
+  // In SOLO mode the run goes to the solo coder (effectiveModelFor(coder)
+  // in dispatchGoal), NOT the orchestrator — resolving the orchestrator
+  // here made the chatbox display a different model than the one the send
+  // actually used whenever the two agents' picks differed.
+  const dispatchLeadName = !activeTeam
+    ? "orchestrator"
+    : soloMode
+      ? (soloRenderTeam?.agents[0]?.name ?? findOrchestratorSpec(activeTeam)?.name ?? "orchestrator")
+      : (findOrchestratorSpec(activeTeam)?.name ?? "orchestrator");
   const dockModelId = (activeTeam
-    ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "orchestrator")
+    ? modelFor(dispatchLeadName)
     : effectiveTeamModel
     || "").trim();
   const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
@@ -11394,7 +10441,14 @@ export function AgentsPage({
     // a clear message instead of sending agents into an empty box. Files on disk are
     // never touched — this is only about reachability.
     if (runCwd && runCwd.trim()) {
-      type WarmCheckResult = { reachable: boolean; host_fallback: string | null; reason: string | null };
+      // Field names are camelCase: WarmCheckResult is `#[serde(rename_all =
+      // "camelCase")]`, so Rust sends `hostFallback`. Reading the snake_case
+      // spelling here made the fallback branch below permanently undefined —
+      // every WSL start failure blocked the run instead of degrading to the
+      // host folder. `reachable`/`reason` are single words, so they kept
+      // working, which is why the banner showed a precise reason and still
+      // never fell back.
+      type WarmCheckResult = { reachable: boolean; hostFallback: string | null; reason: string | null };
       const warmOk = (r: WarmCheckResult | null) => !!r && r.reachable;
       let check = await invoke<WarmCheckResult>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => null);
       if (!warmOk(check)) {
@@ -11404,7 +10458,7 @@ export function AgentsPage({
       if (!warmOk(check)) {
         // WSL-isolated path is unreachable. If the original host folder exists,
         // run there un-isolated with a clear notice instead of failing completely.
-        const fallback = check?.host_fallback;
+        const fallback = check?.hostFallback;
         if (fallback && fallback.trim() && fallback !== runCwd) {
           const notice: GoalMsg = {
             role: "system",
@@ -11546,20 +10600,32 @@ export function AgentsPage({
     // swallowed .catch(), so a failed/empty sync was invisible and there was no
     // way to tell whether skills were actually staged for this run.
     if (effectiveRunCwd) {
+      // Announce only when the outcome CHANGES for this cwd (first sync,
+      // count moved, or a new failure). The sync itself still runs every
+      // dispatch so the mirror stays fresh; the chat just stops repeating it.
+      const announced = skillSyncAnnouncedRef.current;
       try {
         const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: effectiveRunCwd });
-        const syncMsg: GoalMsg = sync.count > 0
-          ? { role: "system", color: "#8aa0b4",
-              text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
-          : { role: "system", color: "#ffb74d",
-              text: "🧩 Skill sync ran but staged 0 skills — none are installed, so agents have none to self-load." };
-        setSupChat(prev => [...prev, syncMsg]);
-        appendLog("system", syncMsg);
+        const outcome = String(sync.count);
+        if (announced.get(effectiveRunCwd) !== outcome) {
+          announced.set(effectiveRunCwd, outcome);
+          const syncMsg: GoalMsg = sync.count > 0
+            ? { role: "system", color: "#8aa0b4",
+                text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
+            : { role: "system", color: "#ffb74d",
+                text: "🧩 Skill sync ran but staged 0 skills — none are installed, so agents have none to self-load." };
+          setSupChat(prev => [...prev, syncMsg]);
+          appendLog("system", syncMsg);
+        }
       } catch (e: any) {
-        const errMsg: GoalMsg = { role: "system", color: "#ff8c8c",
-          text: `⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}` };
-        setSupChat(prev => [...prev, errMsg]);
-        appendLog("system", errMsg);
+        const outcome = `err:${String(e?.message ?? e)}`;
+        if (announced.get(effectiveRunCwd) !== outcome) {
+          announced.set(effectiveRunCwd, outcome);
+          const errMsg: GoalMsg = { role: "system", color: "#ff8c8c",
+            text: `⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}` };
+          setSupChat(prev => [...prev, errMsg]);
+          appendLog("system", errMsg);
+        }
       }
     }
     runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
@@ -11788,6 +10854,14 @@ export function AgentsPage({
           );
         }
         const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
+        // Announce the slow pre-dispatch work (git worktree of the whole repo +
+        // CLI preflight/token warm) BEFORE it starts. It can take a minute on a
+        // large repo, and with nothing on screen users re-send the prompt.
+        {
+          const prep = `⏳ Preparing an isolated workspace and warming the CLI — first agent activity can take a minute on a large project.`;
+          appendLog("system", { role: "system", color: "#9fb6d4", text: prep });
+          setSupChat(prev => [...prev, { role: "system", color: "#9fb6d4", text: prep, ts: Date.now(), seq: nextSeq() }]);
+        }
         const soloCreate = await createAgentWorktree(invoke, {
           projectCwd,
           agentName: coder.name,
@@ -11817,11 +10891,7 @@ export function AgentsPage({
         appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
         appendLog(coder.name, { role: coder.name, color: colorForAgent(coder), text: "" });
         runTraceRef.current?.agents.set(coder.name, { domain: agentDomain(coder), runs: 1 });
-        const sIds = [
-          ...(roleByName.get(coder.base)?.skillAllowlist ?? []),
-          ...(coder.extraSkills ?? []),
-          ...(perAgentSkills.get(coder.name) ?? []),
-        ];
+        const sIds = resolveAgentSkillIds(coder, roleByName, perAgentSkills);
         const { block: sBlock, autoLoaded: sAutoLoaded } = await buildSoloSkillBlock(
           runtimeSkillIds(coder, sIds),
           text,
@@ -12016,7 +11086,10 @@ export function AgentsPage({
             agentName: coder.name,
             summary: text,
           });
-          if (soloFinalize.status === "committed") {
+          // noChanges still merges: a CLI coder that committed its own work
+          // leaves finalize nothing to stage while the branch is ahead of the
+          // project. The merge itself answers "nothing to integrate" when true.
+          if (soloFinalize.status === "committed" || soloFinalize.status === "noChanges") {
             const soloMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
               projectCwd,
               agentName: coder.name,
@@ -12116,7 +11189,7 @@ export function AgentsPage({
         return;
         } finally {
           try {
-            await invoke("fleet_worktree_remove", {
+            const removed = await invoke<FleetRemoveResult>("fleet_worktree_remove", {
               args: {
                 projectCwd,
                 worktreePath: soloWt.path,
@@ -12124,6 +11197,12 @@ export function AgentsPage({
                 keep: keepSoloWorktree,
               },
             });
+            if (!keepSoloWorktree && removed.branchPreserved) {
+              appendThought(coder.name, {
+                role: "fleet", color: "#ffb86c",
+                text: `🛟 branch ${removed.branch} still holds unmerged commits — kept in the repo (merge or inspect it with git).`,
+              });
+            }
           } catch { /* worktree remains recoverable on disk */ }
         }
       }
@@ -12143,13 +11222,9 @@ export function AgentsPage({
       }
       // The orchestrator consumes its OWN equipped skills exactly like specialists
       // do — so any skill (incl. downloaded community/Anthropic packs) equipped on
-      // the orchestrator is injected, not silently dropped. Same id sources as the
-      // specialist path: role allowlist + team extras + per-project grant.
-      const orchSkillIds = [
-        ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
-        ...(orch.extraSkills ?? []),
-        ...(perAgentSkills.get(orch.name) ?? []),
-      ];
+      // the orchestrator is injected, not silently dropped. Same deny-aware
+      // resolver as the card badge and the specialist path.
+      const orchSkillIds = resolveAgentSkillIds(orch, roleByName, perAgentSkills);
       // Auto-skill selection (same engine as the Solo path): merge the
       // orchestrator's equipped skills with skills matched from the goal text,
       // so a relevant procedure loads without the model having to discover it.
@@ -12157,6 +11232,10 @@ export function AgentsPage({
         runtimeSkillIds(orch, orchSkillIds),
         text,
         !!orch.runtimePersonal,
+        // Parallel mode injects the parallel-dispatch pack as its own PARALLEL
+        // DISPATCH section — keep it out of the skill block so its body can't
+        // appear in the same prompt twice.
+        parallelMode ? ["owllm__parallel-dispatch"] : [],
       );
       if (orchAutoLoaded.length > 0) {
         appendThought(orch.name, {
@@ -12641,6 +11720,12 @@ export function AgentsPage({
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
       if (needWorktrees) {
+        // Same silent-minute problem as the solo path: serial worktree creation
+        // over a large repo shows nothing until the first agent speaks.
+        appendLog("system", {
+          role: "system", color: "#9fb6d4",
+          text: `⏳ Preparing ${dispatches.length} isolated workspace(s) — first agent activity can take a minute on a large project.`,
+        });
         try {
           const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
           if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });
@@ -12721,14 +11806,10 @@ export function AgentsPage({
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
           const specModel = effectiveModelFor(spec);
           const allowed = effectiveToolsFor(spec);
-          // Resolve this agent's equipped skills (template extra_skills + the
-          // per-project graph_json grant) and inject them (budgeted progressive
-          // disclosure). Skills not installed are skipped.
-          const skillIds = [
-            ...(roleByName.get(spec.base)?.skillAllowlist ?? []),  // Studio agent-card skills
-            ...(spec.extraSkills ?? []),                           // team template extra_skills
-            ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
-          ];
+          // Resolve this agent's equipped skills (role allowlist + template
+          // extra_skills + the deny-aware per-project grant) and inject them
+          // (budgeted progressive disclosure). Skills not installed are skipped.
+          const skillIds = resolveAgentSkillIds(spec, roleByName, perAgentSkills);
           const skillBlock = await buildAgentSkillBlock(
             runtimeSkillIds(spec, skillIds),
             !!spec.runtimePersonal,
@@ -13249,7 +12330,19 @@ export function AgentsPage({
       const codeFilesChanged = new Set<string>();
       const keepOnDisk = new Set<string>();
       for (const o of outcomes) {
-        if (!o.worktree || !o.finalize || o.finalize.status !== "committed") continue;
+        if (!o.worktree) continue;
+        if (!o.finalize || o.finalize.status === "error") {
+          // Finalize failed (or never ran): the branch may still hold the
+          // agent's own commits — keep everything for inspection rather than
+          // letting cleanup drop unmerged work.
+          keepOnDisk.add(o.name);
+          continue;
+        }
+        // "committed" AND "noChanges" both attempt the merge. A capable CLI
+        // agent commits its own work in the worktree, so finalize correctly
+        // finds nothing left to stage — but the BRANCH is ahead of the project.
+        // Skipping the merge on noChanges is exactly how four whole site
+        // builds were orphaned in one team run (Website Red Hair, 2026-08-13).
         let merge: FleetMergeResult;
         try {
           merge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
@@ -13263,7 +12356,9 @@ export function AgentsPage({
             role: "fleet", color: "#7ff0c5",
             text: `🔀 merged ${o.name} → ${merge.commitSha.slice(0,7)} · ${merge.filesChanged} file${merge.filesChanged === 1 ? "" : "s"}`,
           });
-          for (const f of o.finalize.files) {
+          // A noChanges finalize (self-committed branch) has no file list.
+          const finalizedFiles = o.finalize.status === "committed" ? o.finalize.files : [];
+          for (const f of finalizedFiles) {
             // files entries are "STATUS\tpath" — take the path part.
             const tab = f.indexOf("\t");
             const p = tab >= 0 ? f.slice(tab + 1).trim() : f.trim();
@@ -13325,7 +12420,7 @@ export function AgentsPage({
         if (!docWt) throw new Error(`Required worktree for @${docSpec.name} was not created.`);
         const docCwd = docWt.path;
         const docAllowed = effectiveToolsFor(docSpec);
-        const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
+        const docSkillIds = resolveAgentSkillIds(docSpec, roleByName, perAgentSkills);
         const docSkillBlock = await buildAgentSkillBlock(
           runtimeSkillIds(docSpec, docSkillIds),
           !!docSpec.runtimePersonal,
@@ -13347,11 +12442,18 @@ export function AgentsPage({
             const docFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
               worktreePath: docWt.path, agentName: docSpec.name, summary: "auto-doc after merge",
             });
-            if (docFinalize.status === "committed") {
-              appendThought(docSpec.name, {
-                role: "fleet", color: "#7ff0c5",
-                text: `📦 committed ${docFinalize.commitSha.slice(0,7)} · ${docFinalize.filesChanged} file${docFinalize.filesChanged === 1 ? "" : "s"}`,
-              });
+            if (docFinalize.status === "error") {
+              // The branch may hold the doc agent's own commits — keep it.
+              keepOnDisk.add(docSpec.name);
+              appendThought(docSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${docFinalize.message} — worktree kept` });
+            }
+            if (docFinalize.status === "committed" || docFinalize.status === "noChanges") {
+              if (docFinalize.status === "committed") {
+                appendThought(docSpec.name, {
+                  role: "fleet", color: "#7ff0c5",
+                  text: `📦 committed ${docFinalize.commitSha.slice(0,7)} · ${docFinalize.filesChanged} file${docFinalize.filesChanged === 1 ? "" : "s"}`,
+                });
+              }
               const docMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
                 projectCwd, agentName: docSpec.name, branch: docWt.branch,
               });
@@ -13363,6 +12465,9 @@ export function AgentsPage({
               } else if (docMerge.status === "conflict") {
                 keepOnDisk.add(docSpec.name);
                 appendThought(orch.name, { role: "fleet", color: "#ffb86c", text: `⚠ docs merge conflict — branch ${docWt.branch} kept` });
+              } else if (docMerge.status === "error") {
+                keepOnDisk.add(docSpec.name);
+                appendThought(orch.name, { role: "fleet", color: "#ff8c8c", text: `⚠ docs merge failed: ${docMerge.message} — branch ${docWt.branch} kept` });
               }
             }
           }
@@ -13381,9 +12486,17 @@ export function AgentsPage({
         if (!o.worktree) continue;
         const keep = keepOnDisk.has(o.name);
         try {
-          await invoke("fleet_worktree_remove", {
+          const removed = await invoke<FleetRemoveResult>("fleet_worktree_remove", {
             args: { projectCwd, worktreePath: o.worktree.path, branch: o.worktree.branch, keep },
           });
+          // The backend refused to delete a branch with unmerged commits —
+          // say so, so preserved work is findable instead of silently parked.
+          if (!keep && removed.branchPreserved) {
+            appendThought(orch.name, {
+              role: "fleet", color: "#ffb86c",
+              text: `🛟 @${o.name}'s branch ${removed.branch} still holds unmerged commits — kept in the repo (merge or inspect it with git).`,
+            });
+          }
         } catch { /* best-effort — worktree is recoverable on disk */ }
       }
 
@@ -13755,6 +12868,35 @@ export function AgentsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, activeTeam?.id]);
 
+  // Bridge liveness watchdog. A bridge-lit agent is cleared ONLY by a matching
+  // `end` event, so a bridge run that dies (phone drops, runner crashes, the
+  // AppShell unmounts mid-dispatch) leaves its card ticking green forever —
+  // the same runaway clock clearActive() fixes for local runs, which no local
+  // path can reach because the bridge never went through dispatchGoal.
+  // Every bridge event refreshes the beat; once the bridge has been silent
+  // this long with no local run in flight, the agents IT lit are released.
+  // Tolerant by design: a bridge run can sit quiet through a long tool call,
+  // and the sweep is cosmetic (it banks the clock, it never stops a run).
+  const BRIDGE_SILENCE_MS = 300_000;
+  const bridgeLitRef = useRef<Set<string>>(new Set());
+  const bridgeBeatRef = useRef(0);
+  const noteBridgeBeat = useCallback(() => { bridgeBeatRef.current = Date.now(); }, []);
+  // Read through a ref so the mount-only sweep below never closes over a
+  // stale removeActive.
+  const removeActiveRef = useRef(removeActive);
+  removeActiveRef.current = removeActive;
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      if (bridgeLitRef.current.size === 0) return;
+      // A local dispatch owns the lighting while it runs — never sweep under it.
+      if (supSendBusyRef.current || dispatchInFlightRef.current) return;
+      if (Date.now() - bridgeBeatRef.current < BRIDGE_SILENCE_MS) return;
+      for (const name of [...bridgeLitRef.current]) removeActiveRef.current(name);
+      bridgeLitRef.current.clear();
+    }, 15_000);
+    return () => window.clearInterval(iv);
+  }, []);
+
   // Active-agent lighting — Telegram-driven dispatches fire from the
   // AppShell runner, so the local dispatchGoal / onSupSend setters
   // never run. Listen for an explicit event so the orbital pulse +
@@ -13767,6 +12909,7 @@ export function AgentsPage({
       const detail = (e as CustomEvent<{ agent: string | null; action?: "start" | "end"; projectId?: string }>).detail;
       if (!detail) return;
       if (detail.projectId && detail.projectId !== selectedProjectId) return;
+      noteBridgeBeat();
       // Resolve the agent name through the local team so Telegram's
       // generic "orchestrator" label maps to whatever this team
       // actually named its orchestrator.
@@ -13776,12 +12919,15 @@ export function AgentsPage({
         if (spec) resolved = spec.name;
       }
       if (!resolved) {
+        bridgeLitRef.current.clear();
         clearActive();
         return;
       }
       if (detail.action === "end") {
+        bridgeLitRef.current.delete(resolved);
         removeActive(resolved);
       } else {
+        bridgeLitRef.current.add(resolved);
         addActive(resolved);
       }
     };
@@ -13800,6 +12946,7 @@ export function AgentsPage({
       if (!detail || !detail.message) return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       appendThought(agent, detail.message);
     };
     window.addEventListener("owllm:thought:appended", handler as EventListener);
@@ -13817,6 +12964,7 @@ export function AgentsPage({
       if (!detail || typeof detail.delta !== "string") return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       streamThought(agent, detail.channel || "thinking", detail.role || "🧠 thinking", detail.delta);
     };
     window.addEventListener("owllm:thought:delta", handler as EventListener);
@@ -13833,6 +12981,7 @@ export function AgentsPage({
       if (!detail || !detail.message) return;
       if (detail.projectId !== selectedProjectId) return;
       const agent = detail.agent || "orchestrator";
+      noteBridgeBeat();
       appendLog(agent, detail.message);
     };
     window.addEventListener("owllm:log:appended", handler as EventListener);
@@ -14114,7 +13263,7 @@ export function AgentsPage({
               onClick={onNewProject}
               title="Create a new project"
               style={{ height:38, padding:"0 12px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:13, fontWeight:700, cursor:"pointer" }}
-            >+ New</button>
+            >+ New Project</button>
             <div style={{ width:1, height:24, background:"var(--border-strong)", margin:"0 2px" }} />
           </div>
         }
@@ -14252,11 +13401,11 @@ export function AgentsPage({
         onClose={() => { setBrainstormOpen(false); setBrainstormSeed(""); }}
         projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
-        // Use the team's default model. Fallback to the orchestrator's
-        // model, which respects per-agent overrides. Brainstormer is
-        // research-heavy; users should pick Opus 4.7 medium for best
-        // results but anything that handles tool calls works.
-        modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
+        // Same model the chat dock shows and the next send dispatches
+        // (per-agent override > template pin > team default > server).
+        // Was teamModelOverride-first, which inverted that priority and
+        // made Brainstorm show a different model than the chatbox.
+        modelId={dockModelId}
         port={serverState.port ?? 0}
         models={models}
         accountsStatus={accountsStatus}
@@ -14315,6 +13464,9 @@ export function AgentsPage({
             serverState={serverState}
             effectiveTeamModel={effectiveTeamModel}
             providerFor={providerFor}
+            voiceFor={voiceFor}
+            onPickAgentVoice={onPickAgentVoice}
+            ttsVoices={ttsVoices}
             templateId={activeTeamTemplate?.id ?? null}
             onPickModel={(id) => onPickAgentModel(name, id)}
             onPreviewColor={(hex) => setPerAgentColor(prev => {
@@ -14328,6 +13480,32 @@ export function AgentsPage({
           />
         );
       })()}
+      {skillsAgent && (() => {
+        // Same lookup rule as the editor modal: renderTeam resolves every
+        // visible tile (incl. the synthetic critic and the docked Producer).
+        const spec = (soloMode ? soloRenderTeam : renderTeam)?.agents.find(a => a.name === skillsAgent)
+          ?? renderTeam?.agents.find(a => a.name === skillsAgent) ?? null;
+        if (!spec) return null;
+        const agentName = skillsAgent;
+        const baseIds = baseAgentSkillIds(spec, roleByName);
+        return (
+          <AgentSkillsModal
+            displayName={displayLabel(agentName)}
+            icon={agentIconRef(spec, roleByName, agentIconOverrides)}
+            accent={tileAccentFor(spec)}
+            baseIds={baseIds}
+            grant={perAgentSkills.get(agentName)}
+            onToggle={(skillId) => setPerAgentSkills(prev => {
+              // One picker click → the next deny-aware grant list. The existing
+              // persistence effect saves it into the project's graph_json.
+              const next = new Map(prev);
+              next.set(agentName, toggleSkillGrant(prev.get(agentName), baseIds, skillId));
+              return next;
+            })}
+            onClose={() => setSkillsAgent(null)}
+          />
+        );
+      })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
       <BrowserPanel open={browserPanelOpen} onClose={() => setBrowserPanelOpen(false)} />
       <ModelRequiredDialog
@@ -14335,18 +13513,6 @@ export function AgentsPage({
         where={modelRequired?.where || "the team / agent Model picker"}
         detail={modelRequired?.detail}
         onClose={() => setModelRequired(null)}
-      />
-      <RunNotebook
-        projectId={selectedProjectId}
-        projectName={activeTeam?.display}
-        surfaceId={notebookSurfaceId}
-        active={isActive}
-        running={busy || supSendBusy}
-        onFeed={feedFromNotebook}
-        modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
-        port={serverState.port ?? 0}
-        models={models}
-        accountsStatus={accountsStatus}
       />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
@@ -14367,6 +13533,90 @@ export function AgentsPage({
         flex:1, minHeight:0, margin:"0 23px",
         display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0,
       }}>
+        {/* Left project column — the Code page's rail (user spec 2026-08-14):
+            🧠 Project Memory + the file tree, with the release Publisher card
+            (the Publisher agent's exact tile panel) where the Code page
+            carries its GitHub cards. Collapses to the same pink icon rail. */}
+        {publisherCwd && (
+          <div
+            data-ui="AgentsProjectRail"
+            data-state={agentsProjectRailOpen ? "expanded" : "collapsed"}
+            style={{ width: agentsProjectRailOpen ? 220 : RAIL_W, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: agentsProjectRailOpen ? "stretch" : "center", minHeight: 0, overflow: "hidden", background: agentsProjectRailOpen ? "var(--bg-input)" : "rgba(255, 82, 160, 0.12)", border: agentsProjectRailOpen ? "1px solid var(--border-strong)" : "1px solid rgba(255, 105, 180, 0.58)", borderRadius: 8, padding: agentsProjectRailOpen ? 4 : 3, marginRight: 8 }}
+          >
+            {agentsProjectRailOpen ? (
+              <>
+                <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                  <button
+                    data-ui="AgentsProjectMemory"
+                    onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
+                    title="Project Memory — the shared facts and worklog this team reads and writes, synced through the vault."
+                    style={{ flex: 1, minWidth: 0, height: 30, display: "flex", alignItems: "center", justifyContent: "flex-start", padding: "0 10px", borderRadius: 6, border: "1px solid rgba(var(--accent-rgb),0.42)", background: "var(--bg-surface)", color: "var(--accent-ink)", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}
+                  >
+                    🧠 Project Memory
+                  </button>
+                  <button
+                    data-ui="AgentsProjectRailCollapse"
+                    onClick={() => setProjectRailOpen(false)}
+                    aria-label="Shrink left project column"
+                    title="Shrink left column"
+                    style={{ width: 28, height: 30, padding: 0, flexShrink: 0, fontSize: 18, lineHeight: 1, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", cursor: "pointer" }}
+                  >‹</button>
+                </div>
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  <TreeDir path={publisherCwd} name={publisherCwd.replace(/[\\/]+$/, "").replace(/^.*[\\/]/, "")} depth={0} defaultOpen onOpenFile={addFileRefToDraft} />
+                </div>
+                {/* Producer card — the WHOLE agent card the ▦ chat grid used to
+                    tile (header: icon + name + model picker; body: the release
+                    controls), docked here so this fixed agent is present for
+                    every way of working. Same AgentChatTile component, so the
+                    card can never drift from the grid's look. */}
+                <div data-ui="AgentsProjectRailPublisher" style={{ flexShrink: 0, height: 292, marginTop: 6, display: "flex", flexDirection: "column" }}>
+                  {(() => {
+                    const resolved = modelFor(producerSpec.name);
+                    return (
+                      <AgentChatTile
+                        name={producerSpec.name}
+                        label={soloMode ? soloLabels[producerSpec.name] : undefined}
+                        icon={agentIconRef(producerSpec, roleByName, agentIconOverrides)}
+                        messages={agentLogs.get(producerSpec.name) ?? []}
+                        isActive={activeAgents.has(producerSpec.name)}
+                        isSelected={selectedNode === producerSpec.name}
+                        accent={tileAccentFor(producerSpec)}
+                        onClick={() => setSelectedNode(producerSpec.name)}
+                        onOpenEditor={() => setEditingAgent(producerSpec.name)}
+                        onOpenSkills={() => setSkillsAgent(producerSpec.name)}
+                        onPickModel={(id) => onPickAgentModel(producerSpec.name, id)}
+                        models={models}
+                        accountsStatus={accountsStatus}
+                        isCritic={false}
+                        criticEnabled={criticEnabled}
+                        onToggleCritic={() => setCriticEnabled(v => !v)}
+                        modelId={agentExplicitModelFor(producerSpec.name)}
+                        modelDisplayLabel={labelForModel(resolved)}
+                        ringPx={0}
+                        outerPx={0}
+                        alphaA={0.65}
+                        alphaB={0.4}
+                        timing={agentTiming.get(producerSpec.name)}
+                        skills={resolveAgentSkillIds(producerSpec, roleByName, perAgentSkills)}
+                        isPublisher
+                        projectCwd={publisherCwd}
+                      />
+                    );
+                  })()}
+                </div>
+              </>
+            ) : (
+              /* Shrunk: one icon per feature this column holds — memory, the
+                 file tree and the Publisher card. */
+              <CodeProjectRailIcons
+                publisher
+                onMemory={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
+                onExpand={() => setProjectRailOpen(true)}
+              />
+            )}
+          </div>
+        )}
         {/* Canvas column — TeamCanvas / GraphCanvas / AgentChatGrid
             depending on viewMode. The chat-grid is now a CANVAS MODE
             (third option in the FlowHeader segmented switch), not a
@@ -14417,6 +13667,7 @@ export function AgentsPage({
                 positions={soloMode ? soloPositions : nodePositions}
                 onPositionsChange={soloMode ? setSoloPositions : setNodePositions}
                 modelFor={modelFor}
+                labelForModel={labelForModel}
                 labelOverrides={soloMode ? soloLabels : undefined}
                 soloLayout={soloMode}
               />
@@ -14431,8 +13682,10 @@ export function AgentsPage({
                 selectedAgent={selectedNode}
                 onSelectAgent={(name) => setSelectedNode(name)}
                 onOpenEditor={(name) => setEditingAgent(name)}
+                onOpenSkills={(name) => setSkillsAgent(name)}
                 modelFor={modelFor}
-                providerFor={providerFor}
+                explicitModelFor={agentExplicitModelFor}
+                labelForModel={labelForModel}
                 onPickAgentModel={onPickAgentModel}
                 models={models}
                 accountsStatus={accountsStatus}
@@ -14440,7 +13693,6 @@ export function AgentsPage({
                 onToggleCritic={() => setCriticEnabled(v => !v)}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
-                projectCwd={publisherCwd}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the
@@ -14479,24 +13731,41 @@ export function AgentsPage({
               </button>
             )}
           </div>
-        </div>
-        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
-        <div style={{ flex:"1 1 0", minWidth:360 }}>
-          <RightColumnTabs
-            team={renderTeam}
-            roleByName={roleByName}
-            supChat={supChat}
-            onSupSend={onSupSend}
-            supSendBusy={supSendBusy}
+          {/* Composer — the Code page's position (user spec 2026-08-14):
+              bottom of the center column, exactly as wide as the canvas. Same
+              dock features as before (slash commands, ⚡ Auto mode, cold-load
+              button, attachments, mid-run steering); it just no longer lives
+              in the right column. */}
+          <ChatInputDock
+            draft={dockDraft}
+            setDraft={setDockDraft}
+            inputRef={dockInputRef}
+            onSend={submitDockInput}
+            busy={supSendBusy}
             autoApprove={autoApprove}
             onToggleAutoApprove={() => setAutoApprove(v => !v)}
-            projectId={selectedProjectId}
-            directives={directives}
-            onDirectivesChanged={reloadDirectives}
             directorMode={directorMode}
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
             parallelMode={parallelMode}
             onToggleParallel={() => setParallelMode(!parallelMode)}
+            onSwitchTab={(t) => rightTabSwitchRef.current?.(t)}
+            needsLoad={dockNeedsLoad}
+            loadingModel={dockLoadingModel}
+            onLoadModel={dockLoadModel}
+            modelId={dockModelId}
+            modelLabel={labelForModel(dockModelId)}
+          />
+        </div>
+        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
+        {agentsSideOpen ? (
+          <RightColumnTabs
+            team={renderTeam}
+            supChat={supChat}
+            onSupSend={onSupSend}
+            supSendBusy={supSendBusy}
+            projectId={selectedProjectId}
+            directives={directives}
+            onDirectivesChanged={reloadDirectives}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}
@@ -14505,20 +13774,51 @@ export function AgentsPage({
             activeAgent={activeAgent}
             phase={phase}
             models={models}
-            modelFor={modelFor}
-            agentModelOverrideFor={agentModelOverrideFor}
-            onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
-            needsLoad={dockNeedsLoad}
-            loadingModel={dockLoadingModel}
-            onLoadModel={dockLoadModel}
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}
+            usageProvider={providerForShared(dockModelId || serverState.model_id || "", models)}
+            browserOpen={browserPanelOpen}
+            onToggleBrowser={() => { if (!browserPanelOpen) void openBrowserSplit(); setBrowserPanelOpen(v => !v); }}
+            onCollapse={() => setSideOpen(false)}
+            switchTabRef={rightTabSwitchRef}
+            notebook={
+              <RunNotebook
+                inline
+                projectId={selectedProjectId}
+                projectName={activeTeam?.display}
+                surfaceId={notebookSurfaceId}
+                active={isActive}
+                running={busy || supSendBusy}
+                onFeed={feedFromNotebook}
+                modelId={dockModelId || (serverState.model_id ?? "local")}
+                port={serverState.port ?? 0}
+                models={models}
+                accountsStatus={accountsStatus}
+              />
+            }
           />
-        </div>
+        ) : (
+          /* Shrunk: the Code page's orange utility rail — the same four
+             features the expanded column holds: notebook, usage, rules and
+             the browser. */
+          <div
+            data-ui="AgentsUtilityPanelRail"
+            data-state="collapsed"
+            style={{ width: RAIL_W, flexShrink: 0, minHeight: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: 3, background: "rgba(255, 153, 51, 0.12)", border: "1px solid rgba(255, 166, 64, 0.6)", borderRadius: 8 }}
+          >
+            <CodeUtilityRailIcons
+              onNotebook={() => { selectAgentsSideTab("notebook"); setSideOpen(true); }}
+              onUsage={() => setSideOpen(true)}
+              onRules={() => { selectAgentsSideTab("rules"); setSideOpen(true); }}
+              onBrowser={() => { void openBrowserSplit(); }}
+              onExpand={() => setSideOpen(true)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

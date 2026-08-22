@@ -10,6 +10,9 @@
     "build": "vite build --config ui/vite.config.ts",
     "build:exe": "build-release.bat",
     "preview": "vite preview --config ui/vite.config.ts",
+    "test:launchpad": "node ui/src/pages/agentic/creationLaunchpad.verify.run.mjs",
+    "test:brainstorm": "node ui/src/pages/agentic/brainstormModes.verify.run.mjs && node ui/src/pages/agentic/brainstormGraph.verify.run.mjs",
+    "test:teammodel": "node ui/src/pages/agentic/teamModelSelection.verify.run.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

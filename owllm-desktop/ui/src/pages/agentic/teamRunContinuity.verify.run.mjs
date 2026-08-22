@@ -81,13 +81,30 @@ try {
   check("The chat/bridge codex path derives readOnly from the allowlist",
     dispatch.includes("readOnly: isReadOnlyToolAllowlist(allowedTools)"));
   const page = read("pages/agentic/AgentsPage.tsx");
-  check("The agentic codex path derives readOnly from the allowlist",
-    page.includes("readOnly: isReadOnlyToolAllowlist(allowedTools)"));
-  check("The AgentsPage claude_cli_stream copy derives it too",
-    page.includes("readOnly: isAgentReadOnly(args)"));
+  // AgentsPage's ~1000-line dispatch copy was collapsed onto dispatch.ts
+  // (2026-08-14). The read-only invariant now has exactly ONE home — and the
+  // copy must never come back: a page-local CLI invoke would dodge every
+  // derivation below.
+  check("The agentic page carries NO private CLI invoke (the copy stays dead)",
+    !page.includes('invoke<string>("claude_cli_complete"')
+      && !page.includes('invoke<string>("claude_cli_stream"')
+      && !page.includes('invoke<string>("codex_cli_complete"')
+      && !page.includes("async function streamChatCompletion")
+      && !page.includes("async function streamAnthropic"));
+  check("The agentic page routes through the ONE shared dispatch stack",
+    page.includes("streamChatCompletion,") && page.includes('from "./dispatch"'));
+  // Two capabilities that previously existed ONLY in the AgentsPage copy and
+  // would silently vanish if the shared stack regressed:
+  // (a) user-consented home access reaches every Claude CLI invoke;
+  check("grantHome rides every Claude CLI invoke in the shared stack",
+    (dispatch.match(/grantHome: grantHomeThisRun/g) || []).length >= 3
+      && dispatch.includes("export function setGrantHomeThisRun"));
+  // (b) an image attached to a text-only CLI sub path warns instead of
+  //     silently dropping (Kimi/Gemini CLIs have no image channel).
+  check("CLI image drop warns the user in the shared router",
+    dispatch.includes("can't be sent via the ${providerName} CLI subscription path"));
   check("The one-shot claude_cli_complete paths carry it as well",
-    (dispatch.match(/readOnly: isReadOnlyToolAllowlist\(allowedTools\)/g) || []).length >= 3
-      && (page.match(/readOnly: isReadOnlyToolAllowlist\(allowedTools\)/g) || []).length >= 3);
+    (dispatch.match(/readOnly: isReadOnlyToolAllowlist\(allowedTools\)/g) || []).length >= 3);
   check("AgentsPage no longer keeps a private copy of the read-only tool set",
     !page.includes("const READONLY_LOCAL_TOOLS: string[] = [")
       && page.includes('from "./agentSandbox"'));
@@ -191,9 +208,8 @@ try {
     hugeFold.includes("older turn(s) omitted"));
   check("The current request is still the last thing the model reads",
     hugeFold.trimEnd().endsWith("the current step"));
-  check("Both codex paths use the budgeted fold instead of an ad-hoc join",
+  check("The codex path uses the budgeted fold instead of an ad-hoc join",
     !page.includes('.join("\\n\\n");\n    const prompt = convo')
-      && page.includes("foldHistoryIntoPrompt(userMessage, history, modelId)")
       && dispatch.includes("const prompt = foldHistoryIntoPrompt(userMessage, history, modelId)"));
   // The two constants above are now only the FALLBACK. Naming the model sizes the
   // budget to its real window — see contextBudget.verify.run.mjs for that half.

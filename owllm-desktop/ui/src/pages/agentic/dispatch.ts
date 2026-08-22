@@ -190,6 +190,16 @@ export function makeResponsiveHandlers(onDelta: StreamHandler, onThought?: Thoug
 // path AND the caller cares about thinking / tool surfacing — i.e.
 // the AgentsPage Thought tab. Falls back to claude_cli_complete (one
 // final blob) when no onThought handler is supplied.
+// Per-run consent to widen the CLI's filesystem scope to the user's home
+// profile (--add-dir). DEFAULT FALSE — the agent stays jailed to the project.
+// Flipped true only when the user approves the "grant home for this run"
+// consent prompt (AgentsPage's FileAccessConsentModal), and RESET to false at
+// the start of every dispatch so a grant never silently leaks into a later
+// run. Module-scoped so every Claude CLI call site reads it without threading
+// a param through the stream* signatures.
+let grantHomeThisRun = false;
+export function setGrantHomeThisRun(v: boolean) { grantHomeThisRun = v; }
+
 async function runClaudeCliStream(args: {
   systemPrompt: string;
   userMessage: string;
@@ -289,6 +299,9 @@ async function runClaudeCliStream(args: {
       briefMode: args.briefMode ?? true,
       readOnly: isAgentReadOnly(args),
       cancelScope: args.cancelScope ?? null,
+      // Per-run, user-consented home-profile access (--add-dir). False unless
+      // the user approved the consent prompt this run. See grantHomeThisRun.
+      grantHome: grantHomeThisRun,
       onEvent: ch,
     });
   } finally {
@@ -2515,6 +2528,19 @@ export async function streamChatCompletion(
   // `effectiveText` carries the original prompt + transcript blocks
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
+  // CLI subscription paths take text-only stdin. Claude gets images via the
+  // file-reference path (appendCliImageFiles) and Codex via `-i`, so no
+  // warning there. Kimi/Gemini/OpenAI CLIs don't yet — surface the drop as a
+  // visible note instead of letting the model "not see" the attachment.
+  if (forceSub && images.length > 0 && onSystemWarning &&
+      (provider === "moonshot" || provider === "gemini")) {
+    const providerName = provider === "moonshot" ? "Kimi" : "Gemini";
+    const apiKey = provider === "moonshot" ? "MOONSHOT_API_KEY" : "GEMINI_API_KEY";
+    onSystemWarning(
+      `⚠ ${images.length} image attachment${images.length === 1 ? "" : "s"} can't be sent via the ${providerName} CLI subscription path (stdin is text-only). ` +
+      `To send images, switch to the API row (set ${apiKey} on the Accounts page) or pick a local vision model.`
+    );
+  }
   const effectiveText = appendImageAttachmentNotes(
     await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
@@ -3239,26 +3265,34 @@ async function streamAnthropic(
     }
     // Refresh the CLI token once per session so the first chat doesn't hit
     // the cold-start 401 (what "Test" on the Accounts page worked around).
-    await ensureCliWarm("claude_cli");
+    // Pass the cwd so a sandboxed project ALSO re-mirrors the refreshed creds
+    // into its WSL sandbox (the agentic-team 401 fix) — the in-distro CLI
+    // reads a copy, not the host token.
+    await ensureCliWarm("claude_cli", claudeCwd);
     // Stream when the consumer wants thought traffic (AgentsPage); fall
     // back to one-shot --print blob otherwise (the bridge runner that
-    // doesn't display a Thought tab).
+    // doesn't display a Thought tab). Every call rides withCliAuthRetry so a
+    // mid-run 401 (token expired) backs off + re-warms instead of failing the
+    // turn — the same funnel every other subscription CLI already uses.
     if (onThought) {
-      return await runWithSessionRetry((sid) => runClaudeCliStream({
+      return await withCliAuthRetry("claude_cli", signal, () =>
+        runWithSessionRetry((sid) => runClaudeCliStream({
+          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+          autoApprove: autoApprove ?? false, allowedTools,
+          model: cliModel, effort: claudeEffort, sessionId: sid,
+          cancelScope,
+          onDelta, onThought,
+        })), claudeCwd);
+    }
+    const reply = await withCliAuthRetry("claude_cli", signal, () =>
+      runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
         systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-        autoApprove: autoApprove ?? false, allowedTools,
+        autoApprove: autoApprove ?? false,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
         model: cliModel, effort: claudeEffort, sessionId: sid,
         cancelScope,
-        onDelta, onThought,
-      }));
-    }
-    const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-      systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-      autoApprove: autoApprove ?? false,
-      readOnly: isReadOnlyToolAllowlist(allowedTools),
-      model: cliModel, effort: claudeEffort, sessionId: sid,
-      cancelScope,
-    }));
+        grantHome: grantHomeThisRun,
+      })), claudeCwd);
     if (reply) onDelta(reply);
     return reply;
   }
@@ -3270,23 +3304,26 @@ async function streamAnthropic(
       const status = await invoke<ClaudeCliStatus>("accounts_status");
       cliInstalled = status?.claude_cli_installed === true;
       if (status?.claude_cli) {
-        await ensureCliWarm("claude_cli");
+        await ensureCliWarm("claude_cli", claudeCwd);
         if (onThought) {
-          return await runWithSessionRetry((sid) => runClaudeCliStream({
+          return await withCliAuthRetry("claude_cli", signal, () =>
+            runWithSessionRetry((sid) => runClaudeCliStream({
+              systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+              autoApprove: autoApprove ?? false, allowedTools,
+              model: cliModel, effort: claudeEffort, sessionId: sid,
+              cancelScope,
+              onDelta, onThought,
+            })), claudeCwd);
+        }
+        const reply = await withCliAuthRetry("claude_cli", signal, () =>
+          runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
             systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-            autoApprove: autoApprove ?? false, allowedTools,
+            autoApprove: autoApprove ?? false,
+            readOnly: isReadOnlyToolAllowlist(allowedTools),
             model: cliModel, effort: claudeEffort, sessionId: sid,
             cancelScope,
-            onDelta, onThought,
-          }));
-        }
-        const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false,
-          readOnly: isReadOnlyToolAllowlist(allowedTools),
-          model: cliModel, effort: claudeEffort, sessionId: sid,
-          cancelScope,
-        }));
+            grantHome: grantHomeThisRun,
+          })), claudeCwd);
         if (reply) onDelta(reply);
         return reply;
       }

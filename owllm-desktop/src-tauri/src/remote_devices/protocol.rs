@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// The PUBLIC identity of a device — safe to share/sync. `device_id` is
 /// `hex(SHA-256(ed25519_pub))`, so it is bound to the signing key and cannot be
 /// spoofed independently of it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DevicePublic {
     pub device_id: String,
     pub name: String,

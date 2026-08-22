@@ -382,6 +382,10 @@ pub fn run() {
         return;
     }
     install_crash_log_hook();
+    // Before ANY subsystem can spawn git (vault ownership check, readiness
+    // probes, sync): a background git must never be able to open a modal
+    // credential dialog nobody is there to answer.
+    git::forbid_gui_credential_prompts();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
@@ -453,11 +457,13 @@ pub fn run() {
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
             personal_agent_teams::resume_pending(app.handle().clone());
-            // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
-            // with large regenerable caches, trim them so the .vhdx doesn't balloon
-            // unattended. Background + best-effort — never cold-starts WSL, never
-            // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
-            std::thread::spawn(sandbox::auto_housekeep_startup);
+            // Global disk janitor: sweeps EVERY app-owned fleet worktree (open
+            // or not) for stale build caches and release staging, and runs the
+            // WSL housekeeping (tool caches + stale build targets + fstrim) —
+            // first pass shortly after launch, then twice a day. Background +
+            // best-effort — never cold-starts WSL, never blocks startup, no
+            // admin, no sparse (which modern WSL flags unsafe).
+            fleet::spawn_global_disk_janitor();
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged without
             // F12 console acrobatics. Never write beside the executable:
@@ -748,6 +754,7 @@ pub fn run() {
             fleet::fleet_worktree_finalize,
             fleet::fleet_worktree_diff,
             fleet::fleet_worktree_merge,
+            fleet::fleet_worktree_refresh,
             fleet::fleet_worktree_sync,
             fleet::fleet_worktree_remove,
             fleet::fleet_cleanup_orphans,

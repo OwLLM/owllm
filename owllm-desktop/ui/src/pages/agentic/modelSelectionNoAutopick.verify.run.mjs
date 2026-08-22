@@ -66,7 +66,9 @@ check("The trigger falls back to that label instead of an ad-hoc string",
 check("Every surface's own unset label is the shared constant",
   code.includes("fallbackLabel={SELECT_MODEL_LABEL}") &&
   code.includes("busy, SELECT_MODEL_LABEL)") &&
-  agents.includes("fallbackLabel={modelLabel || SELECT_MODEL_LABEL}") &&
+  // Agent tiles disclose an inherited model as "(auto · <label>)" and fall
+  // back to the shared constant only when nothing resolves at all.
+  agents.includes(": SELECT_MODEL_LABEL}") &&
   chat.includes("fallbackLabel={SELECT_MODEL_LABEL}") &&
   dataset.includes("fallbackLabel={SELECT_MODEL_LABEL}") &&
   server.includes("SELECT_MODEL_LABEL}"));

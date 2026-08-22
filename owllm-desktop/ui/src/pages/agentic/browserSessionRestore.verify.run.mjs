@@ -182,8 +182,17 @@ check("every live tab set is written only to its resolved project-or-personal se
   /fn persist_session[\s\S]*?let stem = live_session_stem\(\)[\s\S]*?write_session\(\s*&stem/.test(browserRs));
 check("session file names are sanitised before touching the filesystem",
   /fn session_file_stem[\s\S]*?is_ascii_alphanumeric\(\)/.test(browserRs));
-check("browser_stop records the pages BEFORE tearing the windows down",
-  /fn browser_stop[\s\S]*?persist_session\(&app\);[\s\S]*?mark_session_closed\(\);[\s\S]*?destroy_browser_windows/.test(browserRs));
+// The teardown was factored into stop_browser_inner so an automatic restart of
+// a wedged session reuses it. Same ordering invariant — once the windows are
+// gone there is nothing left to read the pages from — plus the flag that keeps
+// "the user put it away" distinct from "it is coming straight back".
+check("the teardown records the pages BEFORE tearing the windows down",
+  /fn stop_browser_inner[\s\S]*?persist_session\(app\);[\s\S]*?mark_session_closed\(\);[\s\S]*?destroy_browser_windows/.test(browserRs));
+check("browser_stop is still the deliberate close (it marks the session closed)",
+  /fn browser_stop[\s\S]*?stop_browser_inner\(&app, true\)/.test(browserRs));
+check("an automatic restart does NOT mark the session closed",
+  /fn stop_browser_inner[\s\S]*?if user_initiated \{[\s\S]*?mark_session_closed\(\);/.test(browserRs) &&
+  /stop_browser_inner\(app, false\)/.test(browserRs));
 check("closing the last tab is remembered as a deliberate close",
   /next_active_after_close[\s\S]*?mark_session_closed\(\);[\s\S]*?destroy\(\)/.test(browserRs));
 check("every tab mutation mirrors to disk (open)", /fn new_tab[\s\S]*?sync_tabs\(app\);/.test(browserRs));

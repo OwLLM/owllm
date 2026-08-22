@@ -23,9 +23,10 @@ check(picker.includes("{compactTrigger}"),
 check(agents.includes("onPickAgentModel={onPickAgentModel}"),
   "agent cards receive the existing per-agent model setter");
 check(agents.includes("value={modelId}") && agents.includes("onChange={onPickModel}"),
-  "card logo picker is bound to the full resolved model id");
-check(agents.includes("compactTrigger={"),
-  "model logo is the compact picker trigger");
+  "card model-name picker is bound to the full resolved model id");
+check((agents.match(/data-ui="AgentSelectedModel"/g) ?? []).length === 2
+    && !agents.includes("compactTrigger={"),
+  "graph and chat cards show the selected model name instead of a provider logo");
 check(agents.includes('aria-label={`${criticEnabled ? "Disable" : "Enable"} Critical Thinker`}'),
   "Critical Thinker card exposes an accessible toggle");
 check(agents.includes("aria-pressed={criticEnabled}"),

@@ -268,14 +268,15 @@ check((accountsPage.match(/invalidateAccounts\(\)/g) || []).length >= 4,
 const dispatch = read("src/pages/agentic/dispatch.ts");
 check(/invoke<[^>]*>\("accounts_status"\)/.test(dispatch),
   "dispatch.ts still probes live before using a CLI (functional gate, deliberately uncached)");
-// Same shape as the dispatch.ts check above: the invariant is "probes LIVE",
-// not one particular inline type literal. AgentsPage now types the result as
-// ClaudeCliStatus so it can read claude_cli_installed too (an expired session
-// must not be reported as a missing install) — still an uncached probe.
-check(/invoke<[^>]*>\("accounts_status"\)/.test(agents),
-  "AgentsPage's forceSub gate still probes live before launching the CLI");
+// AgentsPage's forceSub gate moved into the shared dispatch.ts when the
+// page's duplicated cloud stack collapsed (2026-08-14). The "probes LIVE"
+// invariant is pinned on dispatch.ts above; the page's pin is now that it
+// neither runs a CLI gate of its own nor reads the CLI flag from the cache
+// (its remaining getCachedAccounts() uses are the cosmetic badge feed).
+check(!/invoke<[^>]*>\("accounts_status"\)/.test(agents),
+  "AgentsPage runs no CLI gate of its own (the live probe lives in shared dispatch.ts)");
 check(!/getCachedAccounts\(\)[\s\S]{0,200}?claude_cli\b/.test(agents),
-  "AgentsPage's forceSub gate does not read the CLI flag from the session cache");
+  "AgentsPage does not read the CLI flag from the session cache");
 
 // The store documents which callers gate behaviour and which are cosmetic.
 const store = read("src/pages/core/accountsStore.ts");

@@ -34,8 +34,13 @@ check(fleet.includes("pub async fn fleet_worktree_sync"),
   "one backend command owns the isolated Sync transaction");
 check(lib.includes("fleet::fleet_worktree_sync"),
   "the isolated Sync command is registered with Tauri");
-check((fleet.match(/#\[serde\(rename = "projectSha"\)\]/g) ?? []).length === 2 &&
-      fleet.includes('#[serde(rename = "pageSha")]'),
+const syncOutcomeStart = fleet.indexOf("pub enum WorktreeSyncOutcome");
+const syncOutcomeEnd = fleet.indexOf("/// Repair the precise stale-squash shape", syncOutcomeStart);
+const syncOutcome = syncOutcomeStart >= 0 && syncOutcomeEnd > syncOutcomeStart
+  ? fleet.slice(syncOutcomeStart, syncOutcomeEnd)
+  : "";
+check((syncOutcome.match(/#\[serde\(rename = "projectSha"\)\]/g) ?? []).length === 2 &&
+      syncOutcome.includes('#[serde(rename = "pageSha")]'),
   "the native result serializes commit fields with the camelCase names consumed by the UI");
 
 const syncStart = fleet.indexOf("pub async fn fleet_worktree_sync");

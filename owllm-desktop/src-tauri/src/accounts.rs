@@ -897,15 +897,23 @@ fn usage_tally_stats(provider: &str) -> Vec<UsageStat> {
 /// Pretty label for the OAuth usage endpoint's window keys. Unknown keys
 /// (new windows Anthropic adds) fall back to the key with underscores
 /// spaced — never dropped.
-fn usage_window_label(key: &str) -> String {
+/// Friendly name for a quota window we KNOW, or None for a key the provider
+/// has not documented to us.
+fn usage_window_known_label(key: &str) -> Option<&'static str> {
     match key {
-        "five_hour" => "Session (5hr)".to_string(),
-        "seven_day" => "Weekly (7 day)".to_string(),
-        "seven_day_opus" => "Weekly Opus".to_string(),
-        "seven_day_sonnet" => "Weekly Sonnet".to_string(),
-        "seven_day_oauth_apps" => "Weekly (apps)".to_string(),
-        other => other.replace('_', " "),
+        "five_hour" => Some("Session (5hr)"),
+        "seven_day" => Some("Weekly (7 day)"),
+        "seven_day_opus" => Some("Weekly Opus"),
+        "seven_day_sonnet" => Some("Weekly Sonnet"),
+        "seven_day_oauth_apps" => Some("Weekly (apps)"),
+        _ => None,
     }
+}
+
+fn usage_window_label(key: &str) -> String {
+    usage_window_known_label(key)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| key.replace('_', " "))
 }
 
 /// Usage for the account behind `provider` (a `providerFor()` string from
@@ -1078,13 +1086,23 @@ async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUs
             let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else {
                 continue;
             };
+            let resets_at = val
+                .get("resets_at")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+            // The payload also carries the provider's INTERNAL buckets under
+            // codenames ("nimbus_quill", "cinder_cove", "tangelo"…). They are
+            // not user-facing quotas and rendering one as a bar is noise the
+            // user can't act on. A real quota window always says when it
+            // resets — so an undocumented key with no `resets_at` is skipped,
+            // while a genuinely NEW documented window still shows up.
+            if resets_at.is_none() && usage_window_known_label(key).is_none() {
+                continue;
+            }
             windows.push(UsageWindow {
                 label: usage_window_label(key),
                 used_pct: util,
-                resets_at: val
-                    .get("resets_at")
-                    .and_then(|r| r.as_str())
-                    .map(|s| s.to_string()),
+                resets_at,
             });
         }
     }
@@ -1656,7 +1674,14 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             args.extend(kimi_model_args(None));
             args.push("--prompt".into());
             args.push("ok".into());
-            probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
+            let res = probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await;
+            // A live end-to-end success is proof the credential works: heal a
+            // stale reauth marker (e.g. one written by the old any-401 rule)
+            // so a working login doesn't stay stuck on "Reconnect".
+            if res.0 {
+                clear_kimi_reauth_required();
+            }
+            res
         }
         "gemini_cli" => {
             probe_cli_subscription(
@@ -2016,11 +2041,20 @@ async fn probe_cli_subscription(
     }
 
     if name == "Kimi" && kimi_output_auth_failed(&combined) {
-        mark_kimi_reauth_required();
+        // Persist the "Reconnect" state only for a CONFIRMED revocation. A
+        // bare/transient 401 stays a retryable auth error — the warm layer
+        // refreshes the token and the next attempt recovers on its own.
+        if kimi_output_reauth_required(&combined) {
+            mark_kimi_reauth_required();
+            return (
+                false,
+                "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
+                    .to_string(),
+            );
+        }
         return (
             false,
-            "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
-                .to_string(),
+            "Kimi authentication failed (401) — the token may be cold or mid-refresh; retrying usually recovers.".to_string(),
         );
     }
 
@@ -3686,6 +3720,34 @@ pub async fn claude_cli_stream(
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
         let child_pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
+        // The Claude stream was the ONE CLI path with no liveness bound (codex
+        // streaming, kimi, and every one-shot runner already have one): a
+        // silently-hung CLI sat until the user pressed Stop. Same
+        // inactivity/absolute ceilings as every other CLI child, measured from
+        // the last stdout line so a chatty long turn is never killed.
+        let started = Instant::now();
+        let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stream_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog = {
+            use std::sync::atomic::Ordering;
+            let done = std::sync::Arc::clone(&stream_done);
+            let activity = std::sync::Arc::clone(&last_activity);
+            let flag = std::sync::Arc::clone(&timed_out);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let idle = started.elapsed().saturating_sub(Duration::from_millis(
+                        activity.load(Ordering::Relaxed),
+                    ));
+                    if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        flag.store(true, Ordering::Relaxed);
+                        let _ = terminate_cli_child(child_pid);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            })
+        };
         if let Some(mut stdin) = child.stdin.take() {
             // Best-effort: the CLI can read what it needs and exit while we're still
             // writing the (large agentic) payload → "pipe has been ended (os error
@@ -3709,6 +3771,10 @@ pub async fn claude_cli_stream(
         // auth-retry never fires. Drained into an Err after the loop.
         let mut result_error: Option<String> = None;
         for line_res in reader.lines() {
+            last_activity.store(
+                started.elapsed().as_millis() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let line = match line_res {
                 Ok(l) => l,
                 Err(e) => {
@@ -3885,8 +3951,17 @@ pub async fn claude_cli_stream(
             }
         }
         let wait_res = child.wait();
+        stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
         unregister_cli_child(child_pid);
         let status = wait_res.map_err(|e| format!("wait claude: {e}"))?;
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "Claude CLI stopped after {} seconds with no output (or {} seconds total). Try the request again or use a lower effort.",
+                CLI_CHILD_TIMEOUT.as_secs(),
+                CLI_CHILD_ABS_TIMEOUT.as_secs(),
+            ));
+        }
         if !status.success() {
             // Drain stderr after exit to surface the failure reason.
             let mut stderr_buf = String::new();
@@ -4925,6 +5000,23 @@ fn kimi_output_auth_failed(out: &str) -> bool {
     }
     let l = out.to_ascii_lowercase();
     l.contains("401") || l.contains("unauthorized")
+}
+
+/// A CONFIRMED revocation (the refresh grant itself is dead — no retry can
+/// repair it), as opposed to an ordinary/transient 401 (stale access token,
+/// cold start — the retry layer refreshes and recovers). Only the former may
+/// write the persistent reauth marker that flips the account to "Reconnect":
+/// marking on any bare 401 turned one cold-token blip into a sticky
+/// disconnected account that refused every later dispatch ("that model isn't
+/// signed in") until the user manually re-logged. Same vocabulary as the
+/// frontend's isCliReauthRequired (dispatch.ts) — keep them in step.
+fn kimi_output_reauth_required(out: &str) -> bool {
+    let l = out.to_ascii_lowercase();
+    l.contains("authorization grant is invalid")
+        || l.contains("login expired")
+        || l.contains("signed out")
+        || (l.contains("refresh token")
+            && (l.contains("invalid") || l.contains("revoked") || l.contains("expired")))
 }
 
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
@@ -6215,7 +6307,13 @@ async fn kimi_cli_run(
                     return Err("kimi: LLM not set".to_string());
                 }
                 if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
-                    mark_kimi_reauth_required();
+                    // Only a confirmed revocation may flip the account to
+                    // "Reconnect" — a transient 401 rides the normal auth
+                    // retry (re-warm + backoff) like every other provider.
+                    if kimi_output_reauth_required(&stdout) || kimi_output_reauth_required(&stderr)
+                    {
+                        mark_kimi_reauth_required();
+                    }
                     let detail = if kimi_output_auth_failed(&stdout) {
                         stdout.trim()
                     } else {
@@ -6286,7 +6384,9 @@ async fn kimi_cli_run(
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
         if kimi_output_auth_failed(&reply) {
-            mark_kimi_reauth_required();
+            if kimi_output_reauth_required(&reply) {
+                mark_kimi_reauth_required();
+            }
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
 

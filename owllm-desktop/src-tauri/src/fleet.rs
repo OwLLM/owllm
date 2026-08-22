@@ -796,6 +796,110 @@ const BUILD_CACHE_LIVE_SECS: u64 = 60 * 60;
 /// short enough that a parked page stops hoarding gigabytes.
 const PAGE_CACHE_IDLE_SECS: u64 = 24 * 60 * 60;
 
+/// Release-packaging STAGING directories. `.cache` at a packaging root holds
+/// `work/` + `upstream/` payload staging (measured at 17.5 GB in one worktree:
+/// duplicated Whisper models and Torch wheels). It is git-ignored, regenerated
+/// by the next packaging run, and — critically — was invisible to every sweep:
+/// not a build-cache name, and it grew inside the ACTIVE worktree that the
+/// page-open sweep deliberately skips. Reclaimed only by the global janitor,
+/// on the long staging window.
+const STAGING_DIR_NAMES: &[&str] = &[".cache"];
+
+/// The one `dist/` child that must survive every sweep: `dist/modules/` is the
+/// module payload cache — multi-GB archives build-modules.ps1 DOWNLOADS (hours
+/// to re-fetch), which build-release.bat itself refuses to regenerate while its
+/// manifest exists. Everything else under `dist/` is packaging output the next
+/// release rebuilds. `dist` itself is never removed, only its stale children.
+const DIST_KEEP_CHILD: &str = "modules";
+
+/// Staging must sit untouched a full week before the janitor takes it. A
+/// release being actively iterated keeps its staging warm (mtime-fresh); an
+/// abandoned one stops costing double-digit gigabytes forever.
+const STAGING_IDLE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Reclaim release-packaging staging from `worktree`: `.cache` directories and
+/// stale `dist/` children other than `dist/modules`. Same safety contract as
+/// `reclaim_build_caches`: git must confirm the path is ignored, unreadable
+/// mtimes count as live, directories leave rename-first via `evict_cache_dir`,
+/// and quarantine wreckage from an interrupted sweep is retried. `min_idle_secs`
+/// is a parameter (callers pass `STAGING_IDLE_SECS`) so tests can exercise the
+/// walk without waiting a week.
+fn reclaim_staging(worktree: &Path, min_idle_secs: u64) -> u32 {
+    fn stale_and_ignored(root: &Path, path: &Path, min_idle_secs: u64) -> bool {
+        let ignored = git(root, &["check-ignore", "-q", &path.to_string_lossy()])
+            .map(|(ok, _, _)| ok)
+            .unwrap_or(false);
+        // Can't read the mtime → assume live → keep, mirroring the build sweep.
+        let recent = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|e| e.as_secs() < min_idle_secs)
+            .unwrap_or(true);
+        ignored && !recent
+    }
+    fn walk(root: &Path, dir: &Path, depth: u32, min_idle_secs: u64, removed: &mut u32) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name();
+            let path = entry.path();
+            if name == ".git" {
+                continue;
+            }
+            if name.to_string_lossy().starts_with(QUARANTINE_PREFIX) {
+                let _ = std::fs::remove_dir_all(&path);
+                continue;
+            }
+            let Some(n) = name.to_str() else { continue };
+            if STAGING_DIR_NAMES.contains(&n) {
+                if stale_and_ignored(root, &path, min_idle_secs) && evict_cache_dir(&path) {
+                    *removed += 1;
+                }
+                continue; // never descend into staging
+            }
+            if n == "dist" {
+                // `dist` itself stays; stale children other than the downloaded
+                // module payload cache are staging.
+                if let Ok(children) = std::fs::read_dir(&path) {
+                    for c in children.flatten() {
+                        if c.file_name() == DIST_KEEP_CHILD {
+                            continue;
+                        }
+                        let cp = c.path();
+                        if !stale_and_ignored(root, &cp, min_idle_secs) {
+                            continue;
+                        }
+                        let is_dir = c.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        // Files (installer bundles etc.) unlink atomically; a
+                        // locked one just stays for the next pass.
+                        if is_dir && evict_cache_dir(&cp) {
+                            *removed += 1;
+                        } else if !is_dir && std::fs::remove_file(&cp).is_ok() {
+                            *removed += 1;
+                        }
+                    }
+                }
+                continue; // never treat dist itself as reclaimable
+            }
+            if BUILD_CACHE_DIR_NAMES.contains(&n) {
+                continue; // the build-cache sweep's job — never descend
+            }
+            walk(root, &path, depth - 1, min_idle_secs, removed);
+        }
+    }
+    let mut removed = 0;
+    walk(worktree, worktree, 4, min_idle_secs, &mut removed);
+    removed
+}
+
 /// Suppresses the console window that a spawned `git` would otherwise FLASH on
 /// Windows. Without this every git call (and fleet_worktree_create makes ~6)
 /// pops a black CMD window — the storm of flashing the user hit when opening a
@@ -951,7 +1055,10 @@ fn git_failure_message(action: &str, stdout: &str, stderr: &str) -> String {
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all only covers the VARIANT names on a tagged enum; without
+// rename_all_fields the struct-variant fields cross the wire as snake_case
+// while every TS consumer types them camelCase (baseSha, checkpointSha…).
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CreateOutcome {
     /// Worktree created and ready.
     Ready {
@@ -981,6 +1088,31 @@ pub enum CreateOutcome {
     DirtyWorkingTree { details: String },
     /// Anything else (git failure, fs failure). Caller should surface.
     Error { message: String },
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum WorktreeRefreshOutcome {
+    Current {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+    },
+    Refreshed {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+        #[serde(rename = "previousPageSha")]
+        previous_page_sha: String,
+    },
+    Stale {
+        #[serde(rename = "projectSha")]
+        project_sha: String,
+        #[serde(rename = "pageSha")]
+        page_sha: String,
+        details: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// True if `path` exists and is a directory the host can actually reach.
@@ -1137,6 +1269,172 @@ pub async fn fleet_worktree_create(
     })
 }
 
+/// Make a persistent Coding-page worktree current with the canonical project's
+/// committed HEAD before an agent is allowed to run.
+///
+/// A clean page that is merely behind is fast-forwarded automatically. Pending
+/// page edits, page-only commits, a diverged history, or tracked edits in the
+/// canonical checkout are never rewritten: the caller gets `Stale` and can ask
+/// the user to use the existing isolated Sync flow. This is intentionally local
+/// only; opening/sending from a page must not fetch, push, or require a network.
+#[tauri::command]
+pub async fn fleet_worktree_refresh(
+    worktree_path: String,
+    project_cwd: String,
+) -> Result<WorktreeRefreshOutcome, String> {
+    tokio::task::spawn_blocking(move || fleet_worktree_refresh_blocking(worktree_path, project_cwd))
+        .await
+        .map_err(|e| format!("page worktree refresh task failed: {e}"))?
+}
+
+fn fleet_worktree_refresh_blocking(
+    worktree_path: String,
+    project_cwd: String,
+) -> Result<WorktreeRefreshOutcome, String> {
+    let project = PathBuf::from(&project_cwd);
+    let worktree = PathBuf::from(&worktree_path);
+    if !path_is_dir_native(&project)? || !path_is_dir_native(&worktree)? {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: "the project or page worktree no longer exists".to_string(),
+        });
+    }
+    if !is_git_repo(&project)? || !is_git_repo(&worktree)? {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: "the project and page workspace must both be Git repositories".to_string(),
+        });
+    }
+
+    let lock = repo_git_lock(&project);
+    let _refresh_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    let (branch_ok, page_branch, branch_err) =
+        git(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    if !branch_ok || !page_branch.trim().starts_with("owllm-page/") {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "refusing to refresh a workspace that is not an OWLLM Coding-page branch: {}",
+                if branch_err.trim().is_empty() {
+                    page_branch.trim()
+                } else {
+                    branch_err.trim()
+                }
+            ),
+        });
+    }
+
+    let (project_ok, project_sha, project_err) = git(&project, &["rev-parse", "HEAD"])?;
+    let (page_ok, page_sha, page_err) = git(&worktree, &["rev-parse", "HEAD"])?;
+    if !project_ok || !page_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "could not read project/page HEAD: {} {}",
+                project_err.trim(),
+                page_err.trim()
+            )
+            .trim()
+            .to_string(),
+        });
+    }
+    let project_sha = project_sha.trim().to_string();
+    let page_sha = page_sha.trim().to_string();
+    // Tracked edits in the canonical checkout are newer project state too, but
+    // they cannot be represented in a linked worktree until the user commits or
+    // stashes them. Do not let the page silently edit the older committed tree.
+    let (project_status_ok, project_status, project_status_err) =
+        git(&project, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !project_status_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not inspect the canonical project before page refresh",
+                &project_status,
+                &project_status_err,
+            ),
+        });
+    }
+    let project_dirty = project_status
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_app_scratch(porcelain_path(line)))
+        .take(20)
+        .collect::<Vec<_>>();
+    if !project_dirty.is_empty() {
+        return Ok(WorktreeRefreshOutcome::Stale {
+            project_sha,
+            page_sha,
+            details: format!(
+                "the project checkout has uncommitted tracked changes that this page cannot see:\n{}",
+                project_dirty.join("\n")
+            ),
+        });
+    }
+
+    let (contains_project, _, _) = git(
+        &worktree,
+        &["merge-base", "--is-ancestor", &project_sha, "HEAD"],
+    )?;
+    if contains_project {
+        return Ok(WorktreeRefreshOutcome::Current { project_sha });
+    }
+
+    let (page_is_behind, _, _) = git(
+        &worktree,
+        &["merge-base", "--is-ancestor", "HEAD", &project_sha],
+    )?;
+    let (page_status_ok, page_status, page_status_err) =
+        git(&worktree, &["status", "--porcelain"])?;
+    if !page_status_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not inspect the page worktree before refresh",
+                &page_status,
+                &page_status_err,
+            ),
+        });
+    }
+    let page_dirty = page_status
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_app_scratch(porcelain_path(line)))
+        .take(20)
+        .collect::<Vec<_>>();
+
+    if !page_is_behind || !page_dirty.is_empty() {
+        let reason = if !page_dirty.is_empty() {
+            format!("the page has pending edits:\n{}", page_dirty.join("\n"))
+        } else {
+            "the page and project contain different commits".to_string()
+        };
+        return Ok(WorktreeRefreshOutcome::Stale {
+            project_sha,
+            page_sha,
+            details: format!("{reason}. Use the Publisher Sync action before running an agent"),
+        });
+    }
+
+    let (ff_ok, ff_out, ff_err) = git(&worktree, &["merge", "--ff-only", &project_sha])?;
+    if !ff_ok {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: git_failure_message(
+                "could not fast-forward the clean page worktree",
+                &ff_out,
+                &ff_err,
+            ),
+        });
+    }
+    let (verify_ok, refreshed_sha, verify_err) = git(&worktree, &["rev-parse", "HEAD"])?;
+    if !verify_ok || refreshed_sha.trim() != project_sha {
+        return Ok(WorktreeRefreshOutcome::Error {
+            message: format!(
+                "page refresh did not reach the project HEAD {}: {}",
+                project_sha,
+                verify_err.trim()
+            ),
+        });
+    }
+    Ok(WorktreeRefreshOutcome::Refreshed {
+        project_sha,
+        previous_page_sha: page_sha,
+    })
+}
+
 /// Uncommitted tracked work saved so an isolated worktree could be cut.
 struct Checkpoint {
     sha: String,
@@ -1195,7 +1493,8 @@ fn checkpoint_uncommitted(cwd: &Path) -> Result<Checkpoint, String> {
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all_fields: see CreateOutcome — TS reads commitSha/filesChanged.
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FinalizeOutcome {
     /// Commit landed.
     Committed {
@@ -1322,7 +1621,8 @@ pub async fn fleet_worktree_diff(
 // ------------------------------------------------------------------
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(tag = "status", rename_all = "camelCase")]
+// rename_all_fields: see CreateOutcome — TS reads commitSha/filesChanged.
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MergeOutcome {
     /// Cleanly merged + committed in project_cwd.
     Merged {
@@ -1384,11 +1684,48 @@ fn fleet_worktree_merge_blocking(
 /// Keeping the lock outside this helper lets the isolated Sync coordinator
 /// retain exclusive ownership across local integration and remote
 /// reconciliation. The public merge command still takes the same lock above.
+/// True when HEAD already contains the branch's WORK — by ancestry, or by an
+/// earlier squash-merge (which leaves no ancestry, so the merge is simulated
+/// in memory and its tree compared to HEAD's). Unreadable state or a merge
+/// that would conflict answers false: the callers use `true` as a license to
+/// delete the branch or report "nothing to merge", so uncertainty must always
+/// land on the side that keeps the work reachable.
+fn branch_work_contained(cwd: &Path, branch: &str) -> bool {
+    if git(cwd, &["merge-base", "--is-ancestor", branch, "HEAD"])
+        .map(|(ok, _, _)| ok)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // `merge-tree --write-tree` needs git >= 2.38; any failure (conflicts,
+    // older git) stays conservative.
+    let Ok((ok, tree, _)) = git(
+        cwd,
+        &["merge-tree", "--write-tree", "--no-messages", "HEAD", branch],
+    ) else {
+        return false;
+    };
+    if !ok {
+        return false;
+    }
+    let Ok((head_ok, head_tree, _)) = git(cwd, &["rev-parse", "HEAD^{tree}"]) else {
+        return false;
+    };
+    head_ok && !tree.trim().is_empty() && tree.trim() == head_tree.trim()
+}
+
 fn fleet_worktree_merge_locked(
     cwd: &Path,
     agent_name: &str,
     branch: &str,
 ) -> Result<MergeOutcome, String> {
+    // Establish up front whether HEAD already contains the branch's work.
+    // NoChanges may only be reported when it does — a "nothing to merge"
+    // answer for a branch that carries work tells the caller it is safe to
+    // delete that branch, and that is how committed agent work got orphaned.
+    if branch_work_contained(cwd, branch) {
+        return Ok(MergeOutcome::NoChanges);
+    }
     // Integrate into the user's CURRENT local branch. Cross-PC reconciliation
     // belongs to the single repo_sync coordinator after local integration.
     // Fetching here with a fast-forward-only policy made a valid isolated run
@@ -1440,14 +1777,29 @@ fn fleet_worktree_merge_locked(
             });
         }
     }
+    // Captured BEFORE the scratch drop: a branch whose only commits touch
+    // app-owned runtime scratch legitimately merges down to nothing.
+    let (_, staged_before_scratch_drop, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     drop_staged_app_scratch(cwd)?;
     if let Some(backup) = untracked_backup.as_mut() {
         backup.restore_preserved()?;
     }
-    // If `merge --squash` succeeded but staged nothing, the agent's
-    // branch is a fast-forward of HEAD (no new commits to apply).
     let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     if staged.trim().is_empty() {
+        if staged_before_scratch_drop.trim().is_empty() {
+            // The ancestor pre-check said this branch HAS commits beyond HEAD,
+            // yet the squash staged nothing at all. Whatever produced that
+            // state, calling it "no changes" licenses the caller to delete the
+            // branch — refuse loudly instead so the work stays reachable.
+            let _ = git(cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Error {
+                message: format!(
+                    "branch {branch} has commits beyond HEAD but the squash staged nothing — \
+                     refusing to report it as a no-op; the branch is kept for inspection"
+                ),
+            });
+        }
+        // Scratch-only branch: genuinely nothing of the user's to integrate.
         return Ok(MergeOutcome::NoChanges);
     }
     let msg = format!("[merge:{}] integrate parallel dispatch", agent_name);
@@ -1696,18 +2048,55 @@ pub struct RemoveArgs {
     /// When true, leave the worktree + branch on disk (set after a
     /// merge conflict or finalize failure so the user can inspect).
     pub keep: bool,
+    /// When true, delete the branch even if it holds commits the project HEAD
+    /// does not contain. ONLY for flows where the user explicitly confirmed the
+    /// discard (Code-page close). Autonomous run cleanup leaves this unset.
+    #[serde(default)]
+    pub discard_unmerged: Option<bool>,
+}
+
+/// What remove actually did with the BRANCH. Callers that ignore it keep
+/// working (it serializes to a plain object), but the run cleanup surfaces
+/// `branchPreserved` so preserved work is announced, never silent.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveOutcome {
+    /// True when the branch had commits not contained in the project HEAD and
+    /// was therefore kept (the worktree directory is still reclaimed).
+    pub branch_preserved: bool,
+    pub branch: String,
 }
 
 #[tauri::command]
-pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
+pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<RemoveOutcome, String> {
     let cwd = PathBuf::from(&args.project_cwd);
     if args.keep {
         // Keep the worktree (unmerged edits to inspect) but reclaim its
         // regenerable build caches — otherwise every kept worktree hoards an
         // 8-17 GB `target/` forever. Source + git state are left intact.
         reclaim_build_caches(&PathBuf::from(&args.worktree_path), BUILD_CACHE_LIVE_SECS);
-        return Ok(());
+        return Ok(RemoveOutcome {
+            branch_preserved: true,
+            branch: args.branch,
+        });
     }
+    // NEVER delete a branch whose work the project HEAD does not contain —
+    // `branch -D` makes its commits dangling, which is how four whole site
+    // builds vanished from one team run (agents commit their own work,
+    // finalize then reports noChanges, and cleanup used to drop the branch
+    // regardless). The worktree DIRECTORY is still reclaimed; the branch ref
+    // is what keeps the work reachable and costs nothing. Explicit
+    // user-confirmed discards (Code-page close) pass `discard_unmerged` to
+    // really drop it. Containment covers squash-merged work too — a probe
+    // that can't tell answers "not contained" → preserve.
+    let unmerged = !branch_work_contained(&cwd, &args.branch);
+    let branch_exists = git(
+        &cwd,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", args.branch)],
+    )
+    .map(|(ok, _, _)| ok)
+    .unwrap_or(false);
+    let preserve_branch = branch_exists && unmerged && !args.discard_unmerged.unwrap_or(false);
     // Best-effort: remove worktree, then delete the branch. Don't
     // fail the dispatch on cleanup failure — the worktree on disk is
     // recoverable, the run completed.
@@ -1715,7 +2104,9 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
         &cwd,
         &["worktree", "remove", "--force", &args.worktree_path],
     );
-    let _ = git(&cwd, &["branch", "-D", &args.branch]);
+    if !preserve_branch {
+        let _ = git(&cwd, &["branch", "-D", &args.branch]);
+    }
     let _ = remove_dir_all_native(&PathBuf::from(&args.worktree_path));
     // Remove the now-empty parent RUN dir (…/<repo>/<run_id>/) so finished runs
     // don't leave a litter of empty folders (remove_dir only succeeds if empty,
@@ -1723,7 +2114,10 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
     if let Some(run_dir) = PathBuf::from(&args.worktree_path).parent() {
         let _ = remove_empty_dir_native(run_dir);
     }
-    Ok(())
+    Ok(RemoveOutcome {
+        branch_preserved: preserve_branch,
+        branch: args.branch,
+    })
 }
 
 /// Sweep leftover fleet worktrees for this repo. Per-run cleanup
@@ -1850,6 +2244,101 @@ pub async fn fleet_reclaim_page_caches(
 }
 
 // ------------------------------------------------------------------
+// 5b. GLOBAL DISK JANITOR — the app's total footprint stays bounded
+// ------------------------------------------------------------------
+//
+// Every earlier reclaim was scoped to ONE project and triggered by USING that
+// project (orphan sweep at team-run start, page-cache sweep at page open). A
+// project the user stops opening was therefore never swept again, and release
+// staging in the ACTIVE worktree was invisible to all of them — which is how a
+// machine lost 21 GB to one worktree's `.cache`/`dist` and kept multi-GB
+// caches across parked projects. The janitor closes that class of hole: it
+// enumerates the app-owned fleet root DIRECTLY (every project, every page,
+// open or not) on a schedule, and applies only the already-guarded reclaimers.
+// It never touches the user's own checkouts — only worktrees the app created.
+
+/// Every producer of multi-GB artifacts this app creates, paired with the
+/// cleaner that bounds it. The disk-janitor release gate parses this table and
+/// fails when a row names a function that no longer exists — so a future
+/// feature that writes big artifacts must register its retention here or it
+/// cannot ship. Format: (what grows, the `fn` that reclaims it).
+pub(crate) const DISK_PRODUCERS: &[(&str, &str)] = &[
+    ("fleet worktree build caches (target, node_modules)", "reclaim_build_caches"),
+    ("release staging in fleet worktrees (.cache, dist/* except dist/modules)", "reclaim_staging"),
+    ("crashed team-run worktrees (owllm-fleet/*)", "fleet_cleanup_orphans"),
+    ("parked Code-page worktree caches at page open", "fleet_reclaim_page_caches"),
+    ("all fleet worktrees on a schedule, open or not", "janitor_sweep_all"),
+    ("WSL distro tool caches (uv/npm/pip)", "trim_impl"),
+    ("WSL linux-build workspace targets (~/owllm-build)", "trim_impl"),
+];
+
+/// The janitor's idle window for build caches. Deliberately LONGER than the
+/// page-open sweep's day: the janitor cannot know which pages are open in
+/// other app instances, so it only takes caches silent for a full week. A live
+/// dev server is additionally protected by the rename-first evict — on Windows
+/// a directory with open handles refuses the rename and is left untouched.
+const JANITOR_BUILD_IDLE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Let launch finish before the first pass; then repeat twice a day so a
+/// long-lived session is swept without ever being restarted.
+const JANITOR_STARTUP_DELAY_SECS: u64 = 120;
+const JANITOR_INTERVAL_SECS: u64 = 12 * 60 * 60;
+
+/// One janitor pass over every app-owned fleet worktree on this machine:
+/// `<fleet_root>/<repo>/<run>/<leaf>`. Reclaims build caches (week-idle) and
+/// release staging from each. Only leaf directories carrying a `.git` link are
+/// touched — anything else under the fleet root is left alone. Best-effort;
+/// returns (build caches, staging entries) removed.
+pub(crate) fn janitor_sweep_all() -> (u32, u32) {
+    let Some(root) = fleet_root() else {
+        return (0, 0);
+    };
+    let (mut caches, mut staging) = (0u32, 0u32);
+    let dirs = |p: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(p)
+            .map(|it| {
+                it.flatten()
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for repo in dirs(&root) {
+        for run in dirs(&repo) {
+            for leaf in dirs(&run) {
+                if !leaf.join(".git").exists() {
+                    continue; // not a worktree the app created
+                }
+                caches += reclaim_build_caches(&leaf, JANITOR_BUILD_IDLE_SECS);
+                staging += reclaim_staging(&leaf, STAGING_IDLE_SECS);
+            }
+        }
+    }
+    (caches, staging)
+}
+
+/// Spawn the janitor thread: first pass after a short startup delay, then one
+/// pass every interval. Each pass also runs the WSL housekeeping (tool caches +
+/// stale linux-build targets + fstrim) so the vhdx is bounded by the same
+/// clock. A panic in one pass is contained — the thread survives to the next.
+pub(crate) fn spawn_global_disk_janitor() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(JANITOR_STARTUP_DELAY_SECS));
+        loop {
+            let _ = std::panic::catch_unwind(|| {
+                let (caches, staging) = janitor_sweep_all();
+                if caches + staging > 0 {
+                    eprintln!("[owllm] disk janitor reclaimed {caches} build caches, {staging} staging entries");
+                }
+                crate::sandbox::auto_housekeep();
+            });
+            std::thread::sleep(std::time::Duration::from_secs(JANITOR_INTERVAL_SECS));
+        }
+    });
+}
+
+// ------------------------------------------------------------------
 // 6. READ-LAST-COMMIT-FILES — for the auto-doc trigger after merge
 // ------------------------------------------------------------------
 
@@ -1876,11 +2365,16 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 mod tests {
     use super::{
         fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
-        git_failure_message, git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc,
-        path_is_dir_native, porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome,
-        FinalizeOutcome, MergeOutcome,
+        fleet_worktree_refresh_blocking, fleet_worktree_remove, git_failure_message,
+        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native,
+        porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome, FinalizeOutcome,
+        MergeOutcome, RemoveArgs, WorktreeRefreshOutcome,
     };
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     fn git_ok(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -1894,6 +2388,58 @@ mod tests {
             args.join(" "),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn staging_reclaim_takes_ignored_stale_and_keeps_dist_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main"]);
+        fs::write(tmp.path().join(".gitignore"), ".cache/\ndist/\n").unwrap();
+        fs::create_dir_all(tmp.path().join(".cache/work")).unwrap();
+        fs::write(tmp.path().join(".cache/work/payload.bin"), b"x").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/modules")).unwrap();
+        fs::write(tmp.path().join("dist/modules/manifest.json"), b"{}").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/bundle")).unwrap();
+        fs::write(tmp.path().join("dist/bundle/app.bin"), b"x").unwrap();
+        fs::write(tmp.path().join("dist/OwLLM-setup.exe"), b"x").unwrap();
+
+        // Everything is younger than a huge idle window → live → untouched.
+        assert_eq!(super::reclaim_staging(tmp.path(), u64::MAX), 0);
+        assert!(tmp.path().join(".cache/work/payload.bin").exists());
+        assert!(tmp.path().join("dist/bundle").exists());
+
+        // Idle window zero → stale by definition → staging goes, modules stay.
+        let removed = super::reclaim_staging(tmp.path(), 0);
+        assert!(removed >= 3, "expected .cache + dist/bundle + installer, got {removed}");
+        assert!(!tmp.path().join(".cache").exists());
+        assert!(!tmp.path().join("dist/bundle").exists());
+        assert!(!tmp.path().join("dist/OwLLM-setup.exe").exists());
+        assert!(tmp.path().join("dist/modules/manifest.json").exists());
+        assert!(tmp.path().join("dist").exists());
+    }
+
+    #[test]
+    fn staging_reclaim_never_takes_unignored_paths() {
+        // No .gitignore: the same names now hold tracked-or-untracked USER data,
+        // and the walker must refuse them even when stale.
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main"]);
+        fs::create_dir_all(tmp.path().join(".cache")).unwrap();
+        fs::write(tmp.path().join(".cache/notes.txt"), b"mine").unwrap();
+        fs::create_dir_all(tmp.path().join("dist/bundle")).unwrap();
+        assert_eq!(super::reclaim_staging(tmp.path(), 0), 0);
+        assert!(tmp.path().join(".cache/notes.txt").exists());
+        assert!(tmp.path().join("dist/bundle").exists());
+    }
+
+    #[test]
+    fn disk_producers_registry_is_well_formed() {
+        // The release gate resolves each cleaner name against the sources; this
+        // test pins the registry itself: non-empty, no blank cells.
+        assert!(super::DISK_PRODUCERS.len() >= 6);
+        for (what, cleaner) in super::DISK_PRODUCERS {
+            assert!(!what.trim().is_empty() && !cleaner.trim().is_empty());
+        }
     }
 
     fn init_merge_repo() -> tempfile::TempDir {
@@ -1916,6 +2462,159 @@ mod tests {
         git_ok(tmp.path(), &["add", "-A"]);
         git_ok(tmp.path(), &["commit", "-m", "base"]);
         tmp
+    }
+
+    fn init_page_refresh_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let page = tmp.path().join("page");
+        fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-b", "main"]);
+        git_ok(&repo, &["config", "core.autocrlf", "false"]);
+        git_ok(&repo, &["config", "user.email", "page-refresh@owllm.local"]);
+        git_ok(&repo, &["config", "user.name", "OwLLM Page Refresh Test"]);
+        fs::write(repo.join("version.txt"), "base\n").unwrap();
+        git_ok(&repo, &["add", "version.txt"]);
+        git_ok(&repo, &["commit", "-m", "base"]);
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "owllm-page/test/code",
+                page.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        (tmp, repo, page)
+    }
+
+    fn advance_project(repo: &Path, value: &str) -> String {
+        fs::write(repo.join("version.txt"), format!("{value}\n")).unwrap();
+        git_ok(repo, &["commit", "-am", value]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn worktree_refresh_clean_stale_page_fast_forwards_to_the_project_head() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        let project_sha = advance_project(&repo, "new-gui");
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "base\n"
+        );
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        match outcome {
+            WorktreeRefreshOutcome::Refreshed {
+                project_sha: actual,
+                ..
+            } => {
+                assert_eq!(actual, project_sha);
+            }
+            other => panic!("expected refreshed page, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "new-gui\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_dirty_stale_page_is_preserved_and_blocked() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        let original_page_sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        advance_project(&repo, "new-gui");
+        fs::write(page.join("version.txt"), "pending page edit\n").unwrap();
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("pending edits"))
+        );
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "pending page edit\n"
+        );
+        let after = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&page)
+            .output()
+            .unwrap();
+        assert_eq!(after.stdout, original_page_sha.stdout);
+    }
+
+    #[test]
+    fn worktree_refresh_diverged_page_is_preserved_for_explicit_sync() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(page.join("page-only.txt"), "page\n").unwrap();
+        git_ok(&page, &["add", "page-only.txt"]);
+        git_ok(&page, &["commit", "-m", "page work"]);
+        advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("different commits"))
+        );
+        assert_eq!(
+            fs::read_to_string(page.join("page-only.txt")).unwrap(),
+            "page\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_current_page_keeps_pending_edits() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(page.join("version.txt"), "pending but current\n").unwrap();
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, WorktreeRefreshOutcome::Current { .. }));
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "pending but current\n"
+        );
+    }
+
+    #[test]
+    fn worktree_refresh_canonical_tracked_edits_block_a_page_run() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        fs::write(repo.join("version.txt"), "uncommitted canonical edit\n").unwrap();
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, WorktreeRefreshOutcome::Stale { ref details, .. }
+            if details.contains("project checkout has uncommitted tracked changes"))
+        );
     }
 
     #[test]
@@ -2075,6 +2774,196 @@ mod tests {
         git_ok(root, &["branch", "-D", &branch]);
     }
 
+    /// THE Website-Red-Hair loss (2026-08-13): a CLI agent committed its own
+    /// work in its worktree, finalize correctly reported noChanges (nothing
+    /// left to stage), the merge was skipped on that answer, and cleanup ran
+    /// `branch -D` — four site builds went dangling across four runs. Remove
+    /// must preserve a branch whose commits HEAD does not contain.
+    #[tokio::test]
+    async fn remove_preserves_a_self_committed_unmerged_branch() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "worker_a".to_string(),
+            "loss-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        // The agent builds AND commits its own work — exactly what a capable
+        // CLI agent does.
+        let wt = Path::new(&wt_path);
+        fs::write(wt.join("site.html"), "<h1>the red hair</h1>\n").unwrap();
+        git_ok(wt, &["add", "-A"]);
+        git_ok(wt, &["commit", "-m", "Scaffold the site"]);
+        let work_sha = head_sha(wt);
+        // Finalize finds nothing left to stage — correct, and NOT license to
+        // drop the branch.
+        let finalized = fleet_worktree_finalize(
+            wt_path.clone(),
+            "worker_a".to_string(),
+            "build the site".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(finalized, FinalizeOutcome::NoChanges));
+
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path.clone(),
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            outcome.branch_preserved,
+            "an unmerged branch must be preserved, not deleted"
+        );
+        assert!(
+            !path_is_dir_native(Path::new(&wt_path)).unwrap(),
+            "the worktree directory is still reclaimed"
+        );
+        // The work is still REACHABLE: the branch exists and holds the commit.
+        let tip = Command::new("git")
+            .args(["rev-parse", &branch])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(tip.status.success(), "branch must still exist");
+        assert_eq!(String::from_utf8_lossy(&tip.stdout).trim(), work_sha);
+        // And the preserved branch can be merged later — nothing was lost.
+        let merged = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            branch.clone(),
+        )
+        .unwrap();
+        assert!(matches!(merged, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("site.html")).unwrap(),
+            "<h1>the red hair</h1>\n"
+        );
+    }
+
+    /// A branch with nothing beyond HEAD is a true no-op: remove deletes it,
+    /// leaving no litter — the guard only bites when there is work to lose.
+    #[tokio::test]
+    async fn remove_deletes_a_branch_head_already_contains() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "worker_a".to_string(),
+            "noop-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path,
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: None,
+        })
+        .await
+        .unwrap();
+        assert!(!outcome.branch_preserved);
+        let tip = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(!tip.success(), "a fully-contained branch is deleted");
+    }
+
+    /// The Code page's close-page flow warns the user and then really discards:
+    /// the explicit flag still deletes an unmerged branch.
+    #[tokio::test]
+    async fn explicit_discard_still_deletes_an_unmerged_branch() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let created = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "code".to_string(),
+            "discard-run".to_string(),
+            Some("owllm-page".to_string()),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let (wt_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            other => panic!("worktree create failed: {other:?}"),
+        };
+        let wt = Path::new(&wt_path);
+        fs::write(wt.join("draft.txt"), "unmerged draft\n").unwrap();
+        git_ok(wt, &["add", "-A"]);
+        git_ok(wt, &["commit", "-m", "draft"]);
+        let outcome = fleet_worktree_remove(RemoveArgs {
+            project_cwd: root.to_string_lossy().to_string(),
+            worktree_path: wt_path,
+            branch: branch.clone(),
+            keep: false,
+            discard_unmerged: Some(true),
+        })
+        .await
+        .unwrap();
+        assert!(!outcome.branch_preserved);
+        let tip = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(!tip.success(), "a user-confirmed discard really discards");
+    }
+
+    /// NoChanges may only mean "HEAD already contains this branch". A branch
+    /// that carries commits must merge (or error) — never read as a no-op,
+    /// because callers treat no-op as safe-to-delete.
+    #[test]
+    fn merge_never_calls_a_branch_with_commits_a_noop() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-work"]);
+        fs::write(root.join("feature.txt"), "agent work\n").unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "agent work"]);
+        git_ok(root, &["checkout", "main"]);
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            "agent-work".into(),
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, MergeOutcome::Merged { .. }),
+            "a branch with commits must integrate, got {outcome:?}"
+        );
+        // AFTER the merge the branch is contained → the ancestor pre-check
+        // reports the true no-op.
+        let again = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "worker_a".into(),
+            "agent-work".into(),
+        )
+        .unwrap();
+        assert!(matches!(again, MergeOutcome::NoChanges));
+    }
+
     /// Opening a Code page also cuts a worktree. That is not a user-started run,
     /// so it must keep the dirty-tree stop rather than commit on their behalf.
     #[tokio::test]
@@ -2223,6 +3112,7 @@ mod tests {
             worktree_path: worktree_path.clone(),
             branch,
             keep: false,
+            discard_unmerged: None,
         })
         .await
         .unwrap();

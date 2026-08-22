@@ -12,7 +12,7 @@ import { Card, Row } from "./infoCards";
 
 type SandboxDisk = {
   vhdxBytes: number; vhdxPath: string | null;
-  cacheBytes: number; copiesBytes: number; available: boolean;
+  cacheBytes: number; copiesBytes: number; buildBytes: number; available: boolean;
   sparseConfig: boolean;
 };
 
@@ -29,7 +29,7 @@ export default function SandboxDiskCard() {
     catch {
       // Non-WSL platform or no distro → mark unavailable so the card hides
       // itself instead of showing perpetual "…" placeholders.
-      setDisk({ vhdxBytes: 0, vhdxPath: null, cacheBytes: 0, copiesBytes: 0, available: false, sparseConfig: false });
+      setDisk({ vhdxBytes: 0, vhdxPath: null, cacheBytes: 0, copiesBytes: 0, buildBytes: 0, available: false, sparseConfig: false });
     }
   };
   useEffect(() => { load(); }, []);
@@ -111,6 +111,7 @@ export default function SandboxDiskCard() {
       <Row label="WSL disk file"          value={<>{value(disk ? fmt(disk.vhdxBytes) : "…")}{hint(disk?.sparseConfig ? "sparse — freed space returns to Windows" : "grows over time; caches auto-trim, Reclaim to shrink")}</>} />
       <Row label="Reclaimable caches"     value={<>{value(disk ? fmt(disk.cacheBytes) : "…")}{hint("uv / npm / pip — auto-trimmed when large; safe to clear now")}</>} />
       <Row label="Project sandbox copies" value={<>{value(disk ? fmt(disk.copiesBytes) : "…")}{hint("freed automatically when you delete a project")}</>} />
+      <Row label="Linux build workspace"  value={<>{value(disk ? fmt(disk.buildBytes) : "…")}{hint("release-build output — stale targets pruned after a week idle")}</>} />
       <Row label="Sparse disk (advanced)" value={<>{value(disk ? (disk.sparseConfig ? "On" : "Off") : "…")}{hint(disk?.sparseConfig ? "auto-returns freed space (uses --allow-unsafe)" : "off — Microsoft flags a data-corruption risk")}</>} />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
         {actionBtn("🧹 Clear caches", clearCaches, "clear", true)}

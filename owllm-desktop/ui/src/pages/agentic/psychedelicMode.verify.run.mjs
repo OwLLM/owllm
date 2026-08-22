@@ -169,6 +169,24 @@ check("...and that halo really is CodePage's PSYCHEDELIC_AURA_HALO",
   readLF(path.join(SRC, "pages/agentic/CodePage.tsx"))
     .includes(`const PSYCHEDELIC_AURA_HALO = "${bootA.REDUCED_AURA_HALO}"`));
 check("the two modes are visibly different", full.boxShadow !== reduced.boxShadow);
+// The card fills are TRANSLUCENT, so a padding-box fill alone does not stop the
+// border-box conic from showing through the whole body — that bleed IS the full
+// treatment, and it made "reduced" look identical to "full" (user report:
+// "they are both fully psychedelic"). Reduced must back the fill with an opaque
+// layer so the rainbow survives on the frame only.
+check("the card fills really are translucent (why the opaque base is needed)",
+  /const tileFill = `linear-gradient\(180deg, rgba\(/.test(readLF(path.join(SRC, "pages/agentic/AgentsPage.tsx"))));
+check("reduced puts an OPAQUE base between the fill and the ring",
+  reduced.background === `${args.fill} padding-box, ${bootA.REDUCED_AURA_BASE}, ${bootA.PSYCHEDELIC_RING}`);
+// String(): on a tree without the fix the export is undefined — report that as
+// a failed check, not a TypeError that kills the run before the summary.
+check("...and that base is padding-box clipped, so it cannot cover the frame",
+  String(bootA.REDUCED_AURA_BASE).endsWith(" padding-box"));
+check("...and it is a gradient, not a bare colour (invalid in a layer list)",
+  String(bootA.REDUCED_AURA_BASE).startsWith("linear-gradient("));
+check("full keeps the body bleed (unchanged default treatment)",
+  full.background === `${args.fill} padding-box, ${bootA.PSYCHEDELIC_RING}`
+  && !full.background.includes(bootA.REDUCED_AURA_BASE));
 check("extra shadows (drop shadow) survive in both modes", (() => {
   const a = bootA.psychedelicActiveStyle({ mode: "full", ...args, extraShadow: "0 6px 22px rgba(0,0,0,0.6)" });
   const b = bootA.psychedelicActiveStyle({ mode: "reduced", ...args, extraShadow: "0 6px 22px rgba(0,0,0,0.6)" });

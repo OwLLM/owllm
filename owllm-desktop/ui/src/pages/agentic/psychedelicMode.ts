@@ -76,6 +76,17 @@ export const REDUCED_AURA_HALO = "0 0 12px rgba(176,124,255,.22), 0 0 20px rgba(
 
 export const PSYCHEDELIC_SPIN = "owllm-aura-spin 4s linear infinite";
 
+/** An OPAQUE padding-box layer that sits under the card's (translucent) fill.
+ *  The cards' own fill is semi-transparent — `rgba(accent,0.36)` over
+ *  `rgba(20,23,31,0.95)` — so with only that layer clipped to padding-box the
+ *  border-box conic ring shows straight THROUGH the card body and the whole
+ *  tile reads as a rainbow wash. That is the loud "full" look; "reduced" must
+ *  not have it, so reduced slips this opaque base between fill and ring and the
+ *  rainbow survives on the 2px frame only — exactly the Coding chatbox's
+ *  anatomy (see PSYCHEDELIC_AURA_FILL in CodePage.tsx: an OPAQUE colour, wrapped
+ *  in a gradient because a bare colour is not a valid multi-layer background). */
+export const REDUCED_AURA_BASE = "linear-gradient(var(--bg-card), var(--bg-card)) padding-box";
+
 /** Accessible copy for the 🍄 toggle, so the button and its tests agree. */
 export function psychedelicToggleLabel(mode: PsychedelicMode): string {
   return mode === "full"
@@ -104,16 +115,22 @@ export function psychedelicActiveStyle(opts: {
 }): { background: string; border: string; boxShadow: string; animation: string | undefined } {
   const { mode, fill, alphaA, alphaB, outerPx, extraShadow } = opts;
   const tail = extraShadow ? `, ${extraShadow}` : "";
-  // Both modes paint the SAME ring on the border-box with the fill clipped to
-  // padding-box — the frame is the psychedelic part in either case.
-  const background = `${fill} padding-box, ${PSYCHEDELIC_RING}`;
+  // Both modes paint the SAME ring on the border-box. They differ in what sits
+  // between it and the viewer: "full" lets the card's translucent fill let the
+  // rainbow bleed across the whole body; "reduced" backs that fill with an
+  // opaque layer so the ring is visible on the FRAME only.
   const border = "2px solid transparent";
   const animation = continuousUiAnimation(PSYCHEDELIC_SPIN);
   if (mode === "reduced") {
-    return { background, border, boxShadow: `${REDUCED_AURA_HALO}${tail}`, animation };
+    return {
+      background: `${fill} padding-box, ${REDUCED_AURA_BASE}, ${PSYCHEDELIC_RING}`,
+      border,
+      boxShadow: `${REDUCED_AURA_HALO}${tail}`,
+      animation,
+    };
   }
   return {
-    background,
+    background: `${fill} padding-box, ${PSYCHEDELIC_RING}`,
     border,
     boxShadow:
       `0 0 0 1px rgba(255,255,255,${0.18 * alphaA}),`

@@ -8,6 +8,7 @@
 // survive navigation; ModelsPage just subscribes via useSyncExternalStore and
 // re-reads the in-flight progress whenever it remounts.
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type DownloadProgress = {
   file: string;
@@ -50,7 +51,7 @@ const listeners = new Set<() => void>();
 
 function commit() {
   snapshot = { downloading, progress };
-  listeners.forEach((l) => l());
+  notifyListeners(listeners, "downloadStore");
 }
 
 export function subscribe(listener: () => void): () => void {

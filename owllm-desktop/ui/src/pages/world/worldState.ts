@@ -1,6 +1,7 @@
 // worldState — XP / unlocks / quest log for the 2.5D HQ (P0-1 Slice 4).
 // Module-level + localStorage (§0.8): OWLLM pages unmount on tab switch,
 // so progression must survive outside component state.
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type Quest = { at: string; xp: number; note: string };
 export type WorldProgress = {
@@ -31,7 +32,7 @@ function load(): WorldProgress {
 
 function save(): void {
   try { localStorage.setItem(KEY, JSON.stringify(cached)); } catch { /* ignore */ }
-  for (const l of listeners) l();
+  notifyListeners(listeners, "worldState");
 }
 
 export function getProgress(): WorldProgress {
@@ -43,7 +44,7 @@ export function getProgress(): WorldProgress {
 /// this the cache would keep serving the pre-sync XP until an app reload.
 export function invalidateProgress(): void {
   cached = null;
-  for (const l of listeners) l();
+  notifyListeners(listeners, "worldState");
 }
 
 export function subscribeProgress(cb: () => void): () => void {

@@ -23,6 +23,8 @@
 // and the chrome live in different subtrees and the fact outlives any page.
 
 /// Window event that mounts the Modules page. AppShell listens for it.
+import { notifyListeners } from "./listenerBus";
+
 export const OPEN_MODULES_EVENT = "owllm:modules:open";
 
 export type ModuleUpdate = {
@@ -40,9 +42,7 @@ let state: ModuleUpdate[] = [];
 const listeners = new Set<() => void>();
 
 function notify(): void {
-  for (const cb of Array.from(listeners)) {
-    try { cb(); } catch { /* a bad listener must never break the update check */ }
-  }
+  notifyListeners(listeners, "moduleUpdates");
 }
 
 export function getModuleUpdates(): ModuleUpdate[] {

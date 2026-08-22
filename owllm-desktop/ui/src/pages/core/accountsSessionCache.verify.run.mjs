@@ -56,6 +56,11 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
+const listenerBusJs = ts.transpileModule(
+  fs.readFileSync(path.join(HERE, "../../runtime/listenerBus.ts"), "utf8"),
+  { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } },
+).outputText;
+
 /// Load a FRESH copy of the store (module scope = session scope, so each case
 /// needs its own instance). `seed` pre-populates localStorage the way a
 /// previous launch would have.
@@ -79,7 +84,15 @@ async function loadStore(seed) {
     path.join(dir, "core.mjs"),
     `export const invoke = async () => { globalThis.__probe.calls++; return globalThis.__probe.reply; };\n`,
   );
-  fs.writeFileSync(path.join(dir, "store.mjs"), compiled.replace('"@tauri-apps/api/core"', '"./core.mjs"'));
+  // The store notifies through the shared watcher fan-out — the REAL module,
+  // so subscribe()/emit() stay covered end-to-end.
+  fs.writeFileSync(path.join(dir, "listenerBus.mjs"), listenerBusJs);
+  fs.writeFileSync(
+    path.join(dir, "store.mjs"),
+    compiled
+      .replace('"@tauri-apps/api/core"', '"./core.mjs"')
+      .replace('"../../runtime/listenerBus"', '"./listenerBus.mjs"'),
+  );
   globalThis.__probe = state;
   const mod = await import(pathToFileURL(path.join(dir, "store.mjs")).href);
   return { mod, state };

@@ -31,6 +31,7 @@
 
 import { useEffect, useState } from "react";
 import { hotBlobKeys, readHotBlob } from "../runtime/stateMirror";
+import { notifyListeners } from "../runtime/listenerBus";
 
 export type JsonValue =
   | string
@@ -128,9 +129,7 @@ export function setSettingsBackend(b: SettingsBackend): void {
 const listeners = new Set<() => void>();
 
 function emit(): void {
-  for (const l of listeners) {
-    try { l(); } catch { /* a bad listener must not wedge the others */ }
-  }
+  notifyListeners(listeners, "pageSettings");
   try {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT));
@@ -150,9 +149,7 @@ if (typeof window !== "undefined") {
   try {
     window.addEventListener("storage", (e: StorageEvent) => {
       if (e.key === SETTINGS_STORAGE_KEY) {
-        for (const l of listeners) {
-          try { l(); } catch { /* ignore */ }
-        }
+        notifyListeners(listeners, "pageSettings");
       }
     });
   } catch { /* non-browser */ }

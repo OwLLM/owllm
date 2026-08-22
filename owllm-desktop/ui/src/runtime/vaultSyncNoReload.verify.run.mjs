@@ -104,6 +104,12 @@ fs.writeFileSync(
     "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n" +
     "};\n",
 );
+// The shared watcher fan-out helper — cloudCatalogue/worldState notify
+// through it, so the REAL (dependency-free) module goes in.
+fs.writeFileSync(
+  path.join(runtimeDir, "listenerBus.js"),
+  toCjs(read(path.join(SRC, "runtime", "listenerBus.ts"))),
+);
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), toCjs(sync));
 
 function storage(seed = {}) {

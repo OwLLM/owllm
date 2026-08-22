@@ -15,6 +15,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { InstallEvent } from "./envProfiles";
 import { bumpActivity } from "../../support/activityStats";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type EnvInstallState = {
   installing: boolean;
@@ -30,7 +31,7 @@ const states = new Map<string, EnvInstallState>();
 const listeners = new Set<() => void>();
 
 function emit() {
-  for (const l of listeners) l();
+  notifyListeners(listeners, "envInstall");
 }
 
 export function subscribeEnvInstall(cb: () => void): () => void {

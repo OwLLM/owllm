@@ -136,6 +136,12 @@ fs.writeFileSync(
 // dependency-free, so it runs as-is rather than as a stub that could drift.
 const mergeSrc = read(path.join(HERE, "runtime", "notebookMerge.ts"));
 fs.writeFileSync(path.join(runtimeDir, "notebookMerge.js"), transpile(mergeSrc));
+// The shared watcher fan-out helper — cloudCatalogue/worldState notify
+// through it, so the REAL (dependency-free) module goes in.
+fs.writeFileSync(
+  path.join(runtimeDir, "listenerBus.js"),
+  transpile(read(path.join(HERE, "runtime", "listenerBus.ts"))),
+);
 const syncSrc = read(path.join(HERE, "runtime", "vaultSync.ts"));
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), transpile(syncSrc));
 

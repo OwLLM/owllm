@@ -12,6 +12,7 @@
 // Usage: call `notify("…")` from anywhere; <ToastHost/> is mounted once at the
 // app root and renders the stack.
 import React, { useEffect, useRef, useState } from "react";
+import { notifyListeners } from "../runtime/listenerBus";
 
 export type ToastKind = "info" | "error";
 export type Toast = { id: number; kind: ToastKind; text: string; sticky?: boolean };
@@ -28,7 +29,7 @@ let nextId = 1;
 
 function publish() {
   const snapshot = toasts;
-  listeners.forEach((fn) => fn(snapshot));
+  notifyListeners(listeners, "toast", snapshot);
 }
 
 export function dismissToast(id: number) {

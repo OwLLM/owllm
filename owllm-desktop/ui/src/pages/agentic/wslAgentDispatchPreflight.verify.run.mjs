@@ -119,4 +119,52 @@ check(
   );
 }
 
+// An interrupted dpkg wedges EVERY later apt-get with exit 100 --
+// `E: dpkg was interrupted, you must manually run 'dpkg --configure -a'` -- so
+// accounts_prepare_cli_for_cwd fails before the agent's CLI ever runs. Reported
+// live as `wsl exited 100: E: dpkg was interrupted ...`. Proven in an isolated
+// chroot: SIGKILL dpkg mid-transaction and the next `apt-get install` exits 100;
+// with the repair in front of it, the same command exits 0 and dpkg audits clean.
+// The gate does not run `cargo test`, so the contract is pinned here.
+{
+  const accounts = read("src-tauri/src/accounts.rs");
+  check(
+    accounts.includes("pub(crate) const DPKG_REPAIR_SNIPPET"),
+    "an interrupted dpkg has a named self-heal, like npm's ENOTEMPTY one",
+  );
+  const snippet = accounts.slice(
+    accounts.indexOf("pub(crate) const DPKG_REPAIR_SNIPPET"),
+    accounts.indexOf("/// Ensure the selected subscription CLI exists"),
+  );
+  check(
+    snippet.includes("dpkg --audit") && snippet.includes("/var/lib/dpkg/updates"),
+    "the repair tests BOTH of apt's own interrupted-dpkg triggers",
+  );
+  check(
+    snippet.includes("dpkg --configure -a")
+      && snippet.includes("apt-get install -f -y")
+      && snippet.includes("apt-get install --reinstall -y"),
+    "reinstall-required packages are reinstalled, not merely re-configured",
+  );
+  check(
+    snippet.includes("command -v dpkg") && snippet.trimEnd().endsWith('fi; true; ";'),
+    "the repair no-ops off dpkg systems and can never abort the install",
+  );
+  const provision = accounts.slice(
+    accounts.indexOf("pub async fn accounts_prepare_cli_for_cwd"),
+    accounts.indexOf("pub async fn codex_cli_upgrade_for_cwd"),
+  );
+  check(
+    provision.includes("repair = DPKG_REPAIR_SNIPPET,")
+      && provision.indexOf("{repair}") > -1
+      && provision.indexOf("{repair}") < provision.indexOf("{install}"),
+    "WSL CLI provisioning repairs dpkg BEFORE its apt-get install runs",
+  );
+  check(
+    sandbox.includes("{repair} {inst}")
+      && sandbox.includes("repair = crate::accounts::DPKG_REPAIR_SNIPPET,"),
+    "Linux host provisioning repairs dpkg before its apt-get too",
+  );
+}
+
 console.log(`wsl agent-dispatch preflight verification: ${passed}/${passed} passed`);

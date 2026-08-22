@@ -2517,14 +2517,16 @@ fn linux_provision() -> Result<String, String> {
     // Same npm ENOTEMPTY self-heal as the WSL paths (accounts::NPM_CLEAN_STALE_SNIPPET):
     // an interrupted global install leaves a hidden `.<pkg>-<rand>` staging dir that
     // makes every later `npm install -g` fail permanently. Clear it first — Linux hits
-    // this exactly like WSL does.
+    // this exactly like WSL does. DPKG_REPAIR_SNIPPET covers the apt twin: an
+    // interrupted dpkg makes the `apt-get install` below refuse with exit 100.
     let script = format!(
-        "set -e; {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
+        "set -e; {repair} {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
          (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
          {clean} \
          npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
          echo PROVISION_DONE",
         clean = crate::accounts::NPM_CLEAN_STALE_SNIPPET,
+        repair = crate::accounts::DPKG_REPAIR_SNIPPET,
     );
     if which("pkexec") {
         run_capture("pkexec", &["bash", "-lc", &script])

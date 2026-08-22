@@ -3099,6 +3099,36 @@ for _r in /usr/local/lib/node_modules /usr/lib/node_modules; do \
     ! -name '_cacache' ! -name '.package-lock.json' -exec rm -rf {} + 2>/dev/null; \
 done; true; ";
 
+/// Recover a dpkg database left mid-transaction by an interrupted install.
+///
+/// The apt twin of [`NPM_CLEAN_STALE_SNIPPET`]. When a provisioning run is
+/// killed, the disk fills, or WSL shuts down mid-`apt`, dpkg leaves a journal in
+/// `/var/lib/dpkg/updates` and packages half-configured. Every later
+/// `apt-get install` then refuses to do anything with
+///   `E: dpkg was interrupted, you must manually run 'dpkg --configure -a'`
+/// and exit 100 -- **permanently, for every backend**, until a human intervenes.
+/// Reported live as `wsl exited 100: E: dpkg was interrupted ...`, which failed
+/// `accounts_prepare_cli_for_cwd` and stopped an agentic run before the CLI ran.
+///
+/// Both of apt's own triggers are tested (a non-empty journal directory, and a
+/// package dpkg itself audits as broken), so this stays a no-op on a healthy
+/// distro and on non-dpkg systems. Packages flagged reinstall-required (`R` in
+/// dpkg's third status column) need more than `--configure`, so they are
+/// reinstalled -- that was the state observed on the reporting machine.
+/// Best-effort throughout: a repair that cannot run must never abort the install.
+pub(crate) const DPKG_REPAIR_SNIPPET: &str = "\
+if command -v dpkg >/dev/null 2>&1 && \
+   { [ -n \"$(dpkg --audit 2>/dev/null)\" ] \
+     || [ -n \"$(ls -A /var/lib/dpkg/updates 2>/dev/null)\" ]; }; then \
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true; \
+  DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true; \
+  _owllm_reinst=$(dpkg -l 2>/dev/null | awk '/^..R/ {print $2}'); \
+  if [ -n \"$_owllm_reinst\" ]; then \
+    DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y $_owllm_reinst \
+      >/dev/null 2>&1 || true; \
+  fi; \
+fi; true; ";
+
 /// Ensure the selected subscription CLI exists where a project will execute.
 ///
 /// A Windows Accounts card verifies the host binary, while an isolated project
@@ -3116,8 +3146,9 @@ pub async fn accounts_prepare_cli_for_cwd(
             return Ok(false);
         };
         let (binary, probe, install) = match backend.as_str() {
-            // NPM_CLEAN_STALE_SNIPPET runs first so a previously interrupted
-            // install can't wedge this one with ENOTEMPTY (see the const's docs).
+            // NPM_CLEAN_STALE_SNIPPET and DPKG_REPAIR_SNIPPET run first so a
+            // previously interrupted install can't wedge this one -- with npm's
+            // ENOTEMPTY or dpkg's exit-100 refusal (see the consts' docs).
             "claude_cli" => (
                 "claude",
                 "claude --version",
@@ -3168,11 +3199,13 @@ pub async fn accounts_prepare_cli_for_cwd(
                echo OWLLM_CLI_READY; exit 0; \
              fi; \
              {clean} \
+             {repair} \
              {install}; \
              command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
              {probe} >/dev/null 2>&1 || {{ echo '{binary} was installed but cannot start' >&2; exit 1; }}; \
              echo OWLLM_CLI_INSTALLED",
             clean = NPM_CLEAN_STALE_SNIPPET,
+            repair = DPKG_REPAIR_SNIPPET,
         );
         let out = tokio::task::spawn_blocking(move || {
             let _guard = wsl_cli_provision_lock()

@@ -153,16 +153,37 @@ pub struct WslToolchain {
 /// wsl.exe's OWN error messages (distro not found, distro failed to start,
 /// "command not found" from a busybox distro) are UTF-16LE — which, run
 /// through from_utf8_lossy, render as a wall of mojibake/□ boxes (the garbled
-/// "WSL check failed" the user saw). Stripping null bytes recovers the ASCII
-/// from UTF-16LE and is harmless for genuine UTF-8 (which has no interior
-/// nulls).
+/// "WSL check failed" the user saw). Stripping the interleaved nulls recovers
+/// the ASCII.
+///
+/// It must strip ONLY for that UTF-16LE shape. "Any null anywhere" also ate the
+/// separators of git's `-z` output, which is legitimately NUL-delimited UTF-8:
+/// `git diff --name-only -z` came back as one concatenated pseudo-path, so the
+/// merge collision classifier saw zero tracked collisions and every merge with
+/// local edits aborted with git's raw "your local changes would be
+/// overwritten" instead of adopting or naming them.
 pub(crate) fn decode_wsl(bytes: &[u8]) -> String {
-    if bytes.contains(&0) {
-        let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+    // The BOM must come off the DECODED bytes too, not just the sniffed ones —
+    // filtering nulls out of a BOM leaves a bare 0xFF, which renders as the
+    // replacement character in front of the message.
+    let body = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
+    if looks_like_utf16le(body) {
+        let stripped: Vec<u8> = body.iter().copied().filter(|&b| b != 0).collect();
         String::from_utf8_lossy(&stripped).into_owned()
     } else {
         String::from_utf8_lossy(bytes).into_owned()
     }
+}
+
+/// UTF-16LE ASCII puts a null in every ODD byte position and never in an even
+/// one. NUL-delimited UTF-8 (git `-z`) has nulls only at record boundaries, so
+/// it fails both halves of this test.
+fn looks_like_utf16le(body: &[u8]) -> bool {
+    // An odd-length buffer cannot be UTF-16.
+    if body.len() < 2 || body.len() % 2 != 0 {
+        return false;
+    }
+    body.chunks_exact(2).all(|pair| pair[1] == 0 && pair[0] != 0)
 }
 
 /// Parse a Windows path and, if it points inside a WSL distro, return
@@ -941,6 +962,60 @@ mod tests {
         let (d, p) = parse_wsl_unc("\\\\wsl.localhost\\Ubuntu\\home\\mc\\owllm\\proj").unwrap();
         assert_eq!(d, "Ubuntu");
         assert_eq!(p, "/home/mc/owllm/proj");
+    }
+
+    /// wsl.exe's own UTF-16LE errors must still decode to readable ASCII…
+    #[test]
+    fn decode_recovers_utf16le_wsl_errors() {
+        let utf16: Vec<u8> = "There is no distribution with the supplied name."
+            .bytes()
+            .flat_map(|b| [b, 0])
+            .collect();
+        assert_eq!(
+            decode_wsl(&utf16),
+            "There is no distribution with the supplied name."
+        );
+        let mut with_bom = vec![0xFF, 0xFE];
+        with_bom.extend_from_slice(&utf16);
+        assert_eq!(
+            decode_wsl(&with_bom),
+            "There is no distribution with the supplied name."
+        );
+    }
+
+    /// …but git's `-z` output is NUL-DELIMITED UTF-8, and eating those
+    /// separators made `git diff --name-only -z` decode as one concatenated
+    /// pseudo-path. The merge collision classifier then found no tracked
+    /// collisions, so a merge over local edits aborted with git's raw "your
+    /// local changes would be overwritten" instead of adopting identical ones
+    /// or naming the differing ones.
+    #[test]
+    fn decode_preserves_nul_separated_git_output() {
+        let z = b"owllm-desktop/src-tauri/src/release.rs\0owllm-desktop/ui/src/App.tsx\0";
+        let decoded = decode_wsl(z);
+        let paths: Vec<&str> = decoded.split('\0').filter(|p| !p.is_empty()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "owllm-desktop/src-tauri/src/release.rs",
+                "owllm-desktop/ui/src/App.tsx"
+            ]
+        );
+    }
+
+    #[test]
+    fn utf16_detection_rejects_plain_and_delimited_utf8() {
+        assert!(!looks_like_utf16le(b"plain ascii output\n"));
+        assert!(!looks_like_utf16le(b"src/main.rs\0ui/App.tsx\0"));
+        assert!(!looks_like_utf16le(b""));
+        assert!(!looks_like_utf16le(b"\0"));
+        // An odd-length buffer cannot be UTF-16.
+        assert!(!looks_like_utf16le(b"a\0b"));
+        assert!(looks_like_utf16le(b"a\0b\0c\0"));
+        // NOTE: a NUL-delimited list of SINGLE-character records is byte-identical
+        // to UTF-16LE and is read as UTF-16. Git never emits one — every `-z`
+        // caller here lists file paths — and resolving it the other way would
+        // re-break wsl.exe's short error messages.
     }
 
     #[test]

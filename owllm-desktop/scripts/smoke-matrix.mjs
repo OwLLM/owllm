@@ -163,10 +163,10 @@ const TRIPWIRES = [
   // every other git operation on the box through the shared credential lock.
   // Four independent guards; losing any one of them lets the runaway back.
   ["src-tauri/src/vault.rs", /"config", "core\.fsync", "all"/, "refs are fsynced, so a crash cannot zero a ref (prevention, all OS)"],
-  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,5000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
-  ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,1200}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
+  ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,1800}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
   // A per-git-COMMAND lock is not enough: each sync channel is a read-modify-write
   // (reset --hard → rewrite state/ → commit+push), so a concurrent channel's reset
   // reverted another's pending write to a TRACKED file and commit_push then found
@@ -186,12 +186,28 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,800}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
-  // The breaker's own doc says "any success clears it immediately", but the
-  // ladder's fallthrough arm returned Ok without ever calling note_repo_health —
-  // so only a successful POST-HEAL retry could reset it. Once armed, the backoff
-  // stayed pinned at its 1 h cap forever. Seen on a second device: one "owllm
-  // sync" commit per hour, on the hour, with no reset/merge in between.
-  ["src-tauri/src/vault.rs", /other => \{\s*note_repo_health\(&other\);/, "a successful git command clears the sync circuit breaker (v1.0.9)"],
+  // Breaker-clearing history, because this flipped TWICE and both directions
+  // had a real incident behind them. v1.0.9: the fallthrough arm never called
+  // note_repo_health, so once armed the backoff pinned at 1 h forever (a device
+  // synced exactly once per hour). The v1.0.9 fix — ANY success clears — then
+  // masked the opposite case on 2026-08-22: a zeroed refs/remotes/origin/main
+  // failed every fetch while config/commit succeeded around it, so the count
+  // was reset every tick, the breaker never engaged, and the full-repo
+  // re-download ran at timer rate for three days: 1,432 kept packs, 94.7 GB.
+  // Both devices' REAL disease was an unhealed broken ref; now that
+  // repair_broken_ref heals remote-tracking refs too, the recurring failure is
+  // fixed at the source, a post-heal retry's success clears the breaker, and a
+  // routine success no longer masks a corruption loop.
+  ["src-tauri/src/vault.rs", /other => \{[\s\S]{0,700}if other\.is_err\(\) \{\s*note_repo_health\(&other\);/, "a routine success cannot mask an unhealed corruption loop (2026-08-22)"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3500}refs"\)\.join\("remotes"\)/, "a zeroed remote-tracking ref is healed, so fetch stops re-downloading the world (2026-08-22)"],
+  ["src-tauri/src/vault.rs", /text\.lines\(\)\.rev\(\)\.find_map[\s\S]{0,300}is_ascii_hexdigit/, "the reflog heal skips the crash's NUL-corrupted tail line (2026-08-22)"],
+  ["src-tauri/src/vault.rs", /if let Err\(e\) = run_git\(&\["repack", "-ad", "--quiet"\][\s\S]{0,250}eprintln!/, "a failing repack is loud, so pack accumulation cannot stay invisible (2026-08-22)"],
+  // `git symbolic-ref HEAD` fails with "No such ref: HEAD" exactly when the
+  // pointed-at ref is broken (git 2.34 Windows and 2.43 Linux both verified) —
+  // so the heal must learn the branch by reading the HEAD file itself, or it
+  // silently bails on the primary corruption case it exists for.
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3000}read_to_string\(own\.join\("HEAD"\)\)/, "the heal reads HEAD itself — symbolic-ref fails on the very case being healed (2026-08-22)"],
+  ["src-tauri/src/vault.rs", /bad object refs\//, "fetch's modern-git spelling of a broken ref is recognized by the heal ladder (2026-08-22)"],
   // VAULT SYNC IS THE BACK-PRESSURE GATE ON THE WHOLE APP. 2026-08-12: the app
   // ran 14 hours doing NOTHING — 552 threads all in Wait, ~2% CPU, no
   // llama-server ever spawned, for any model, and restarting the prompt could

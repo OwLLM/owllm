@@ -500,6 +500,13 @@ pub(crate) fn is_broken_ref(err: &str) -> bool {
         || l.contains("branch appears to be broken")
         || l.contains("failed to resolve head")
         || l.contains("unable to resolve reference")
+        // git 2.43+ fetch reports a zeroed remote-tracking ref as
+        // "fatal: bad object refs/remotes/origin/<b>" — a REF path after
+        // "bad object" always means ref-file corruption, never a bad commit.
+        || l.contains("bad object refs/")
+        // …and symbolic-ref/rev-parse report the broken-ref case as a missing
+        // HEAD (verified on git 2.34 and 2.43).
+        || l.contains("no such ref: head")
 }
 
 /// Restore a zeroed branch ref from the best source available: the ref's own
@@ -606,11 +613,45 @@ pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
         }
     }
 
-    // 2. The branch ref HEAD points at.
-    let Ok(head) = run_git_once(&["symbolic-ref", "--quiet", "HEAD"], cwd) else {
-        return; // detached HEAD (or still unreadable) — nothing branch-shaped to fix
+    // 2. Zeroed remote-tracking refs. `git fetch` cannot heal these itself: it
+    //    refuses to lock a ref file it cannot parse ("cannot lock ref …
+    //    reference broken"), so every fetch DOWNLOADS the full pack, fails the
+    //    ref update, and KEEPS the pack — with auto-gc off (harden_repo) that
+    //    reached 1,432 identical packs / 94.7 GB before it was caught (observed
+    //    live 2026-08-22, three days after a disk-full crash zeroed the refs).
+    //    Deleting the zeroed file IS the repair: the ref falls back to
+    //    packed-refs, and the next fetch fast-forwards it normally.
+    let mut stack = vec![common.join("refs").join("remotes")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if file_is_zeroed(&p) {
+                let _ = std::fs::remove_file(p.with_extension("lock"));
+                if std::fs::remove_file(&p).is_ok() {
+                    eprintln!("vault: removed zeroed remote ref {}", p.display());
+                }
+            }
+        }
+    }
+
+    // 3. The branch ref HEAD points at. Read the HEAD file ourselves: `git
+    //    symbolic-ref HEAD` fails with "fatal: No such ref: HEAD" precisely
+    //    when the pointed-at ref is broken — verified on git 2.34 (Windows)
+    //    and 2.43 (Linux) — which made this whole repair silently bail on the
+    //    PRIMARY corruption case. That is why a zeroed refs/heads/main
+    //    survived three days on a machine whose build shipped this healer.
+    let Ok(head) = std::fs::read_to_string(own.join("HEAD")) else {
+        return;
     };
-    let refname = head.trim().to_string();
+    let refname = match head.trim().strip_prefix("ref:") {
+        Some(r) => r.trim().to_string(),
+        None => return, // detached HEAD — nothing branch-shaped to fix
+    };
     if !refname.starts_with("refs/heads/") {
         return;
     }
@@ -621,14 +662,17 @@ pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(text) = std::fs::read_to_string(common.join("logs").join(&refname)) {
         // Reflog line: "<old-sha> <new-sha> <who> <when>\t<message>" — field 2 is
-        // the value the ref last held.
-        if let Some(sha) = text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .last()
-            .and_then(|l| l.split_whitespace().nth(1))
-        {
-            candidates.push(sha.to_string());
+        // the value the ref last held. The crash that zeroes the ref usually
+        // zeroes the reflog's FINAL line the same way, and NUL bytes survive
+        // trim(), so "last non-empty line" picked the corrupt line and the heal
+        // came up empty (observed live 2026-08-22). Walk backwards to the newest
+        // line whose second field is a real SHA.
+        if let Some(sha) = text.lines().rev().find_map(|l| {
+            let sha = l.split_whitespace().nth(1)?;
+            (matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| sha.to_string())
+        }) {
+            candidates.push(sha);
         }
     }
     if let Some(branch) = refname.strip_prefix("refs/heads/") {
@@ -730,7 +774,14 @@ pub(crate) fn maintain_repo(dir: &std::path::Path) {
     // Keep 30 days of reflog as the recovery source repair_broken_ref reads from;
     // -ad folds every pack into one. All take the shared git lock via run_git.
     let _ = run_git(&["reflog", "expire", "--expire=30.days", "--all"], Some(dir));
-    let _ = run_git(&["repack", "-ad", "--quiet"], Some(dir));
+    // A SILENT repack failure is how the 1,432-pack runaway stayed invisible:
+    // broken refs made every repack fail while `let _ =` swallowed it, so the
+    // pack count only ever grew. run_git's heal ladder already repairs and
+    // retries; whatever still fails here must be said out loud.
+    if let Err(e) = run_git(&["repack", "-ad", "--quiet"], Some(dir)) {
+        eprintln!("vault: repack failed — packs will keep accumulating: {e}");
+        return; // prune would fail the same way; keep the noise to one line
+    }
     // repack -ad packs everything REACHABLE; unreachable loose objects (dropped
     // merge parents, expired reflog tips) survive it and are what actually pile
     // up here, so prune them too.
@@ -781,7 +832,9 @@ pub(crate) fn sync_cooldown_remaining() -> Option<u64> {
 /// CIRCUIT BREAKER. Four UI timers drive vault sync; when the repo was broken they
 /// each retried on schedule forever (~2 git processes/second for 38 hours). After
 /// three failures that survived a self-heal, back off exponentially (1 min → 1 h)
-/// instead of hammering. Any success clears it immediately.
+/// instead of hammering. A success clears it — but callers only report a success
+/// when it PROVES health (a repaired command's retry), never for routine commands
+/// that succeed while the repo is broken (see run_git's final arm).
 fn note_repo_health(r: &Result<String, String>) {
     use std::sync::atomic::Ordering::Relaxed;
     match r {
@@ -825,7 +878,15 @@ fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, Strin
             retried
         }
         other => {
-            note_repo_health(&other); // a lock too FRESH to clear still counts as a failure
+            // Failures still count (a lock too FRESH to clear is one), but a
+            // ROUTINE success must not reset the breaker: during the 2026-08-22
+            // runaway every tick mixed successful `config`/`rev-parse` calls in
+            // with the failing fetch, so reset-on-any-success pinned the fail
+            // count at zero and the breaker never engaged. Only a repaired-and-
+            // retried command (the arms above) proves health and clears it.
+            if other.is_err() {
+                note_repo_health(&other);
+            }
             other
         }
     }
@@ -2545,8 +2606,16 @@ mod tests {
         COOLDOWN_UNTIL.store(0, Relaxed);
     }
 
+    /// Tests that trip, clear, or assert the process-global breaker must not
+    /// interleave — cargo runs tests in parallel by default.
+    static BREAKER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn breaker_gate() -> std::sync::MutexGuard<'static, ()> {
+        BREAKER_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn an_orphaned_git_lock_self_heals_instead_of_freezing_sync_forever() {
+        let _gate = breaker_gate();
         clear_breaker();
         let (repo, lock) = repo_with_planted_lock("lock-stale", STALE_LOCK_SECS + 60);
 
@@ -2576,6 +2645,7 @@ mod tests {
 
     #[test]
     fn a_lock_young_enough_to_be_live_is_never_stolen() {
+        let _gate = breaker_gate();
         clear_breaker();
         // Age 0 — indistinguishable from a git process that is mid-write right
         // now. Deleting it would corrupt that writer's index, so we must not.
@@ -2603,5 +2673,155 @@ mod tests {
         assert!(lock_path_from_err("error: cannot open 'C:/v/state/local.json'").is_none());
         assert!(lock_path_from_err("fatal: could not read Username").is_none());
         assert!(!repair_stale_lock("fatal: no quoted path here: File exists"));
+    }
+
+    // ---- REGRESSION: 2026-08-22 — 1,432 packs / 94.7 GB from one zeroed ref ----
+    //
+    // A disk-full crash zeroed `refs/heads/main`, `refs/remotes/origin/main`,
+    // and the reflog's final line on a live vault. For three days every fetch
+    // then re-downloaded the FULL repo (~70 MB), failed to lock the broken
+    // remote ref, and kept the pack — auto-gc is off, so nothing ever cleaned
+    // up. The three tests below each pin one link of that chain.
+
+    /// A seeded origin plus a clone whose remote-tracking ref is zeroed exactly
+    /// like the crash leaves it, with origin one commit ahead so a fetch MUST
+    /// update the ref. Returns (root, clone, branch, sha_at_origin).
+    fn clone_with_zeroed_remote_ref(
+        tag: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, String, String) {
+        let root = std::env::temp_dir().join(format!("owllm-vault-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let origin = root.join("origin.git");
+        let a = root.join("a");
+        let b = root.join("b");
+        run_git(&["init", "--bare", &origin.to_string_lossy()], None).unwrap();
+        run_git(
+            &["clone", &origin.to_string_lossy(), &a.to_string_lossy()],
+            None,
+        )
+        .unwrap();
+        for (dir, file) in [(&a, "seed.txt"), (&b, "advance.txt")] {
+            if !dir.exists() {
+                run_git(
+                    &["clone", &origin.to_string_lossy(), &dir.to_string_lossy()],
+                    None,
+                )
+                .unwrap();
+            }
+            run_git(&["config", "user.email", "test@owllm.local"], Some(dir)).unwrap();
+            run_git(&["config", "user.name", "owllm test"], Some(dir)).unwrap();
+            std::fs::write(dir.join(file), file).unwrap();
+            run_git(&["add", "-A"], Some(dir)).unwrap();
+            run_git(&["commit", "-m", file], Some(dir)).unwrap();
+            let branch = current_branch(dir);
+            run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(dir)).unwrap();
+        }
+        let branch = current_branch(&a);
+        let ahead = run_git(&["rev-parse", "HEAD"], Some(&b)).unwrap().trim().to_string();
+        // Plant the corruption: a loose remote-tracking ref of 41 NUL bytes
+        // (loose shadows packed-refs, exactly as the crash leaves it).
+        let ref_file = a
+            .join(".git")
+            .join("refs")
+            .join("remotes")
+            .join("origin")
+            .join(&branch);
+        std::fs::create_dir_all(ref_file.parent().unwrap()).unwrap();
+        std::fs::write(&ref_file, [0u8; 41]).unwrap();
+        (root, a, branch, ahead)
+    }
+
+    #[test]
+    fn a_zeroed_remote_tracking_ref_heals_so_fetch_stops_redownloading_forever() {
+        let _gate = breaker_gate();
+        clear_breaker();
+        let (root, a, branch, ahead) = clone_with_zeroed_remote_ref("remote-ref");
+
+        // CONTROL — the wedge is real: raw git cannot update the broken ref, and
+        // the error is the shape the heal ladder keys on. This is the failure
+        // that ran every ~60s for three days.
+        let raw = run_git_once(&["fetch", "origin", &branch], Some(&a))
+            .expect_err("a zeroed remote-tracking ref must make a raw fetch fail");
+        assert!(is_broken_ref(&raw), "unexpected fetch error: {raw}");
+
+        // The healed path recovers in ONE call instead of looping forever.
+        run_git(&["fetch", "origin", &branch], Some(&a))
+            .expect("run_git must heal the zeroed remote ref and complete the fetch");
+        let got = run_git_once(
+            &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")],
+            Some(&a),
+        )
+        .expect("the remote-tracking ref must resolve after the heal");
+        assert_eq!(got.trim(), ahead, "the healed ref must land on origin's tip");
+
+        clear_breaker();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_nul_corrupted_reflog_tail_does_not_defeat_the_branch_ref_heal() {
+        // No remote at all: the reflog must be sufficient on its own, because
+        // in the live incident origin/main was zeroed too.
+        let root = std::env::temp_dir().join(format!("owllm-vault-reflog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&["init", &root.to_string_lossy()], None).unwrap();
+        run_git(&["config", "user.email", "test@owllm.local"], Some(&root)).unwrap();
+        run_git(&["config", "user.name", "owllm test"], Some(&root)).unwrap();
+        std::fs::write(root.join("one.txt"), "1").unwrap();
+        run_git(&["add", "-A"], Some(&root)).unwrap();
+        run_git(&["commit", "-m", "one"], Some(&root)).unwrap();
+        std::fs::write(root.join("two.txt"), "2").unwrap();
+        run_git(&["add", "-A"], Some(&root)).unwrap();
+        run_git(&["commit", "-m", "two"], Some(&root)).unwrap();
+        let branch = current_branch(&root);
+        let tip = run_git(&["rev-parse", "HEAD"], Some(&root)).unwrap().trim().to_string();
+
+        // The crash zeroes the ref AND appends a NUL line to its reflog. NULs
+        // are not whitespace, so "last non-empty line" used to select the
+        // corrupt line, find no SHA in it, and give up — deleting the ref
+        // without restoring it (the branch simply vanished).
+        let logp = root.join(".git").join("logs").join("refs").join("heads").join(&branch);
+        let mut log = std::fs::read(&logp).unwrap();
+        log.extend_from_slice(&[0u8; 82]);
+        std::fs::write(&logp, log).unwrap();
+        std::fs::write(
+            root.join(".git").join("refs").join("heads").join(&branch),
+            [0u8; 41],
+        )
+        .unwrap();
+
+        repair_broken_ref(Some(&root));
+
+        let got = run_git_once(&["rev-parse", "--verify", &format!("refs/heads/{branch}")], Some(&root))
+            .expect("the branch must survive a NUL-corrupted reflog tail");
+        assert_eq!(got.trim(), tip, "the heal must restore the newest VALID reflog entry");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_routine_success_does_not_reset_the_breaker_mid_outage() {
+        let _gate = breaker_gate();
+        clear_breaker();
+        // Three corruption-shaped failures: the breaker engages…
+        for _ in 0..3 {
+            note_repo_health(&Err("cannot lock ref: reference broken".to_string()));
+        }
+        assert!(
+            sync_cooldown_remaining().is_some(),
+            "three corruption failures must open the breaker"
+        );
+        // …and a git command that succeeds WITHOUT proving a heal (config,
+        // rev-parse, version — every tick is full of them) must not close it.
+        // Reset-on-any-success is how the breaker sat at zero for three days
+        // while the failing fetch downloaded 94.7 GB.
+        run_git(&["--version"], None).expect("git --version must succeed");
+        assert!(
+            sync_cooldown_remaining().is_some(),
+            "a routine success must NOT clear the breaker while the repo is still broken"
+        );
+        clear_breaker();
     }
 }

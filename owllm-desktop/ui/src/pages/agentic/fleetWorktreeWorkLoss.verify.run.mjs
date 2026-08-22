@@ -55,6 +55,18 @@ pin(
   "the probe no longer recognizes squash-merged work — every successfully merged branch would be preserved as litter, or worse",
 );
 pin(
+  /fn branch_work_contained_read_tree\(cwd: &Path, branch: &str\) -> bool/.test(fleet),
+  "the old-git (< 2.38) read-tree containment fallback is gone — on git 2.34 (Windows/Ubuntu 22.04) every squash-merged branch would be preserved as litter",
+);
+pin(
+  /\["read-tree", "-i", "-m", base, "HEAD", branch\]/.test(fleet),
+  "the fallback no longer replays the trivial three-way merge in a scratch index",
+);
+pin(
+  fleet.includes("read_tree_fallback_matches_containment_semantics"),
+  "fleet.rs unit coverage 'read_tree_fallback_matches_containment_semantics' is missing",
+);
+pin(
   /let unmerged = !branch_work_contained\(&cwd, &args\.branch\);/.test(fleet),
   "fleet_worktree_remove no longer asks whether HEAD contains the branch's work",
 );
@@ -199,7 +211,23 @@ try {
       const tree = g(repo, "merge-tree", "--write-tree", "--no-messages", "HEAD", branch).trim();
       const headTree = g(repo, "rev-parse", "HEAD^{tree}").trim();
       return tree !== "" && tree === headTree;
-    } catch { return false; }
+    } catch {
+      // git < 2.38 rejects `--write-tree` — mirror the Rust probe's fallback:
+      // trivial three-way read-tree in a throwaway no-checkout worktree.
+      const scratch = path.join(tmp, "containment-scratch");
+      try {
+        const base = g(repo, "merge-base", "HEAD", branch).trim();
+        g(repo, "worktree", "add", "--no-checkout", "--detach", scratch, "HEAD");
+        try {
+          g(scratch, "read-tree", "-i", "-m", base, "HEAD", branch);
+          const tree = g(scratch, "write-tree").trim();
+          const headTree = g(scratch, "rev-parse", "HEAD^{tree}").trim();
+          return tree !== "" && tree === headTree;
+        } finally {
+          try { g(repo, "worktree", "remove", "--force", scratch); } catch { /* scratch dir dies with tmp */ }
+        }
+      } catch { return false; }
+    }
   };
   const shaB = g(wtB, "rev-parse", "HEAD").trim();
   pin(!contained("owllm-fleet/run1/worker_b"), "the containment probe must report worker_b's unmerged work as NOT contained");

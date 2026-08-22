@@ -1697,8 +1697,11 @@ fn branch_work_contained(cwd: &Path, branch: &str) -> bool {
     {
         return true;
     }
-    // `merge-tree --write-tree` needs git >= 2.38; any failure (conflicts,
-    // older git) stays conservative.
+    // `merge-tree --write-tree` needs git >= 2.38. When the command itself
+    // fails (git 2.34 rejects the flag outright — Windows/Ubuntu 22.04 LTS
+    // installs — or the merge cannot be computed), fall back to the read-tree
+    // probe instead of answering NOT contained for every squash-merged branch,
+    // which preserved each successfully integrated branch as permanent litter.
     let Ok((ok, tree, _)) = git(
         cwd,
         &["merge-tree", "--write-tree", "--no-messages", "HEAD", branch],
@@ -1706,9 +1709,73 @@ fn branch_work_contained(cwd: &Path, branch: &str) -> bool {
         return false;
     };
     if !ok {
-        return false;
+        return branch_work_contained_read_tree(cwd, branch);
     }
     let Ok((head_ok, head_tree, _)) = git(cwd, &["rev-parse", "HEAD^{tree}"]) else {
+        return false;
+    };
+    head_ok && !tree.trim().is_empty() && tree.trim() == head_tree.trim()
+}
+
+/// Containment fallback for gits without `merge-tree --write-tree` (< 2.38):
+/// replay the trivial three-way merge with `read-tree -i -m` in a throwaway
+/// no-checkout worktree's private index and compare the written tree against
+/// HEAD's. Work HEAD already holds resolves trivially back to HEAD's own tree;
+/// work HEAD lacks yields a different tree or unmerged stages (`write-tree`
+/// fails), both of which answer NOT contained — the conservative direction.
+fn branch_work_contained_read_tree(cwd: &Path, branch: &str) -> bool {
+    let Ok((base_ok, base, _)) = git(cwd, &["merge-base", "HEAD", branch]) else {
+        return false;
+    };
+    let base = base.trim().to_string();
+    if !base_ok || base.is_empty() {
+        return false;
+    }
+    static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let scratch_name = format!(
+        "owllm-containment-{}-{}",
+        std::process::id(),
+        SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    // A WSL repo's scratch worktree must live inside the distro: the git
+    // helper runs the distro's own git there, which cannot resolve a Windows
+    // temp path (git_once only maps same-distro UNC arguments).
+    let scratch = if let Some((distro, _)) = crate::wsl::parse_wsl_unc(&cwd.to_string_lossy()) {
+        PathBuf::from(format!("\\\\wsl$\\{distro}\\tmp\\{scratch_name}"))
+    } else {
+        std::env::temp_dir().join(&scratch_name)
+    };
+    let scratch_text = scratch.to_string_lossy().to_string();
+    let added = git(
+        cwd,
+        &["worktree", "add", "--no-checkout", "--detach", &scratch_text, "HEAD"],
+    )
+    .map(|(ok, _, _)| ok)
+    .unwrap_or(false);
+    if !added {
+        return false;
+    }
+    let contained = scratch_index_matches_head(&scratch, &base, branch);
+    let _ = git(cwd, &["worktree", "remove", "--force", &scratch_text]);
+    contained
+}
+
+/// The scratch half of the fallback: trivially merge base/HEAD/branch into the
+/// scratch worktree's index and ask whether the result IS HEAD's tree.
+fn scratch_index_matches_head(scratch: &Path, base: &str, branch: &str) -> bool {
+    let merged = git(scratch, &["read-tree", "-i", "-m", base, "HEAD", branch])
+        .map(|(ok, _, _)| ok)
+        .unwrap_or(false);
+    if !merged {
+        return false;
+    }
+    let Ok((tree_ok, tree, _)) = git(scratch, &["write-tree"]) else {
+        return false;
+    };
+    if !tree_ok {
+        return false;
+    }
+    let Ok((head_ok, head_tree, _)) = git(scratch, &["rev-parse", "HEAD^{tree}"]) else {
         return false;
     };
     head_ok && !tree.trim().is_empty() && tree.trim() == head_tree.trim()
@@ -2364,11 +2431,12 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 #[cfg(test)]
 mod tests {
     use super::{
-        fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
-        fleet_worktree_refresh_blocking, fleet_worktree_remove, git_failure_message,
-        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native,
-        porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome, FinalizeOutcome,
-        MergeOutcome, RemoveArgs, WorktreeRefreshOutcome,
+        branch_work_contained_read_tree, fleet_worktree_create, fleet_worktree_finalize,
+        fleet_worktree_merge_blocking, fleet_worktree_refresh_blocking, fleet_worktree_remove,
+        git, git_failure_message, git_reported_path_for_host, is_app_scratch,
+        linux_path_to_wsl_unc, path_is_dir_native, porcelain_path, unstage_app_scratch,
+        user_conflict_files, CreateOutcome, FinalizeOutcome, MergeOutcome, RemoveArgs,
+        WorktreeRefreshOutcome,
     };
     use std::{
         fs,
@@ -2962,6 +3030,55 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(again, MergeOutcome::NoChanges));
+    }
+
+    /// The old-git fallback (git < 2.38 has no `merge-tree --write-tree`) must
+    /// give the modern probe's answers: squash-integrated work reads contained,
+    /// unintegrated work does not. Exercised directly so a modern-git test
+    /// machine still covers the 2.34 path (Windows + Ubuntu 22.04 installs).
+    #[test]
+    fn read_tree_fallback_matches_containment_semantics() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-work"]);
+        fs::write(root.join("feature.txt"), "agent work\n").unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "agent work"]);
+        git_ok(root, &["checkout", "main"]);
+        assert!(
+            !branch_work_contained_read_tree(root, "agent-work"),
+            "unintegrated work must NOT read as contained"
+        );
+        git_ok(root, &["merge", "--squash", "agent-work"]);
+        git_ok(root, &["commit", "-m", "integrate"]);
+        assert!(
+            !git(root, &["merge-base", "--is-ancestor", "agent-work", "HEAD"])
+                .unwrap()
+                .0,
+            "premise: a squash-merge creates no ancestry"
+        );
+        assert!(
+            branch_work_contained_read_tree(root, "agent-work"),
+            "squash-integrated work must read as contained"
+        );
+        // Diverged edits to the same file need a content-level merge, which
+        // the trivial probe must refuse — NOT contained keeps the branch.
+        git_ok(root, &["checkout", "-b", "diverged"]);
+        fs::write(root.join("feature.txt"), "branch version\n").unwrap();
+        git_ok(root, &["commit", "-am", "branch edit"]);
+        git_ok(root, &["checkout", "main"]);
+        fs::write(root.join("feature.txt"), "main version\n").unwrap();
+        git_ok(root, &["commit", "-am", "main edit"]);
+        assert!(
+            !branch_work_contained_read_tree(root, "diverged"),
+            "diverged work must NOT read as contained"
+        );
+        // The probe must clean up after itself.
+        let worktrees = git(root, &["worktree", "list", "--porcelain"]).unwrap().1;
+        assert!(
+            !worktrees.contains("owllm-containment-"),
+            "scratch worktrees must be removed: {worktrees}"
+        );
     }
 
     /// Opening a Code page also cuts a worktree. That is not a user-started run,

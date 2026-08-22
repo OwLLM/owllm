@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, "../../../..");
 const fleet = fs.readFileSync(path.join(APP, "src-tauri/src/fleet.rs"), "utf8");
+const wsl = fs.readFileSync(path.join(APP, "src-tauri/src/wsl.rs"), "utf8");
 
 function fail(message) {
   console.error(`FAIL fleet merge policy: ${message}`);
@@ -52,6 +53,19 @@ if (!fleet.includes("preserve_after_merge") ||
     !fleet.includes("backup.restore_preserved()") ||
     !fleet.includes("differing_untracked_app_state_is_preserved_and_does_not_block_merge")) {
   fail("differing app-owned state is not preserved across worktree merges");
+}
+// Both collision classifiers read `git diff --name-only -z`, so the decoder
+// that git output passes through must keep NUL separators. `decode_wsl` used to
+// strip every null byte (to recover wsl.exe's UTF-16LE error text): the two
+// paths arrived concatenated, `split('\0')` yielded one pseudo-path that
+// matched nothing, and BOTH classifiers saw zero collisions — so a merge over
+// local edits aborted with git's raw "your local changes would be overwritten"
+// instead of adopting identical ones or naming the differing ones.
+if (!wsl.includes("fn looks_like_utf16le") ||
+    !/if looks_like_utf16le\(body\)/.test(wsl) ||
+    !wsl.includes("decode_preserves_nul_separated_git_output") ||
+    !wsl.includes("decode_recovers_utf16le_wsl_errors")) {
+  fail("decode_wsl no longer distinguishes UTF-16LE from NUL-separated git output — `-z` separators would be eaten and every tracked/untracked collision would be missed");
 }
 if (!fleet.includes("fn prepare_identical_tracked_collisions") ||
     !fleet.includes("IdenticalTrackedBackup") ||

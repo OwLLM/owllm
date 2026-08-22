@@ -40,9 +40,20 @@ const distroBytes = spawnSync("wsl.exe", ["-l", "-q"], { encoding: "buffer" });
 const distroText = Buffer.from(distroBytes.stdout ?? [])
   .toString("utf16le")
   .replace(/\0/g, "");
-const distro = distroText.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+const distros = distroText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+// NOT simply the first entry: utility distros ship no bash (Docker Desktop
+// registers `docker-desktop`, which sorts first and answers
+// `/bin/sh: bash: not found`), and this gate then failed the whole matrix on
+// any machine with Docker installed. Pick the first distro that can actually
+// run the script this gate feeds it.
+const distro = distros.find(
+  (name) =>
+    spawnSync("wsl.exe", ["-d", name, "--", "bash", "-c", "exit 0"], { stdio: "ignore" })
+      .status === 0,
+);
 if (!distro) {
-  console.log("SKIP WSL worktree lifecycle: no WSL distro is installed.");
+  const detail = distros.length ? ` (no bash in: ${distros.join(", ")})` : "";
+  console.log(`SKIP WSL worktree lifecycle: no WSL distro with bash is installed.${detail}`);
   process.exit(0);
 }
 

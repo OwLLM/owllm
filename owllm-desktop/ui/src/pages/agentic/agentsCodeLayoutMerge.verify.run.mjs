@@ -163,7 +163,10 @@ check(leftRail.includes("<TreeDir path={publisherCwd}")
   && leftRail.includes("projectCwd={publisherCwd}"),
   "expanded left column = 🧠 memory + the shared file tree + the whole Producer CARD");
 check(leftRail.includes("onPickModel={(id) => onPickAgentModel(producerSpec.name, id)}")
-  && leftRail.includes("modelId={resolved}")
+  // The picker's VALUE is the Producer's explicit pick; the resolved model
+  // stays disclosed through modelDisplayLabel (one-model-every-surface fix).
+  && leftRail.includes("modelId={agentExplicitModelFor(producerSpec.name)}")
+  && leftRail.includes("modelDisplayLabel={labelForModel(resolved)}")
   && leftRail.includes("onOpenEditor={() => setEditingAgent(producerSpec.name)}")
   // and NOT the buttons-only panel it replaced — the whole card, or nothing.
   && !leftRail.includes("<PublisherTilePanel"),

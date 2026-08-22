@@ -229,6 +229,21 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   dock's Stop stays global. MCP-gateway tool results are capped at 60k chars
   with an explicit truncation notice, so OwLLM's own tools can't be what blows
   up an agent's context.
+- **Project Brainstorm** (`BrainstormPanel.tsx` + `brainstormModes.ts`): 🧠 on
+  the Agents page. The user picks the KIND of brainstorm first — 🎯 Auto (the
+  role's own STEP 0 decides), 🚀 New product, 🛠 Improve this app, 🔬 Research,
+  💬 Open — and that choice selects the TRACK the brainstormer follows
+  (`resources/agents/roles/brainstormer.yaml`, tracks A–D) instead of framing
+  every session as a product/market exercise. Only the tracks that call
+  `web_search` mention the Brave key. Co-founder chat → `BRIEF.md` → the
+  project's Notebook (seeded whether the team already existed or was assembled
+  here). The 📋 Board shows the Feature Priority table for a new-product brief
+  and the ordered `## Plan` for every other kind. The conversation is
+  checkpointed to `.owllm/brainstorm.json` + localStorage; the streamed
+  transcript is dropped from the checkpoint past a size budget (it is
+  rebuilt from the saved history) and disk writes are rate-limited, with
+  forced flushes on close, unmount and end of turn.
+  Guarded by `npm run test:brainstorm`.
 - **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane +
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue

@@ -584,7 +584,10 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
 /// Convert the ordered `## Plan` in BRIEF.md into feedable implementation
 /// steps. Brainstormer is required to write this section, but the fallback
 /// still gives the team one useful job instead of ending at a dead-end CTA.
-export function briefImplementationSteps(brief: string): string[] {
+/// Pass `{ fallback: false }` to get the real steps only — the brainstorm
+/// board needs to know when a brief genuinely has no plan yet, and must not
+/// display the placeholder step as if the agent had written it.
+export function briefImplementationSteps(brief: string, opts?: { fallback?: boolean }): string[] {
   const lines = brief.replace(/\r\n/g, "\n").split("\n");
   const steps: string[] = [];
   let inPlan = false;
@@ -601,9 +604,9 @@ export function briefImplementationSteps(brief: string): string[] {
     const text = (numbered?.[1] ?? task?.[1] ?? "").trim();
     if (text) steps.push(text);
   }
-  return steps.length
-    ? steps.slice(0, 12)
-    : ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
+  if (steps.length) return steps.slice(0, 12);
+  if (opts?.fallback === false) return [];
+  return ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
 }
 
 /// Finish an in-project brainstorm by preparing that SAME project's Notebook.

@@ -163,6 +163,40 @@ try {
     accounts.includes("let stdin_write_error = match child.stdin.take()")
       && accounts.includes("return Err(match stdin_write_error"));
 
+  // ---- One model, every surface (user bug 2026-08-22: "the chatbox shows
+  // another model, the team shows a different one") ----
+  // The chat dock must resolve the agent the dispatch actually runs: the solo
+  // coder in Solo mode (dispatchGoal uses effectiveModelFor(coder)), the
+  // orchestrator otherwise. Resolving the orchestrator unconditionally made
+  // the chatbox display a model the solo run never used.
+  check("Chat dock resolves the solo coder's model in Solo mode, the orchestrator's otherwise",
+    page.includes("const dispatchLeadName = !activeTeam")
+      && page.includes("soloRenderTeam?.agents[0]?.name ?? findOrchestratorSpec(activeTeam)?.name")
+      && page.includes("? modelFor(dispatchLeadName)"));
+  // Brainstorm / Notebook / Usage must show the SAME model the dock shows and
+  // the next send dispatches — not their own ad-hoc resolution layer.
+  check("Brainstorm panel receives the dock's dispatch model, not a team-override-first inversion",
+    page.includes("modelId={dockModelId}")
+      && !page.includes("modelId={(teamModelOverride || (activeTeam ? modelFor("));
+  check("Notebook and Usage panel derive from the dock's dispatch model",
+    page.includes("usageProvider={providerForShared(dockModelId || serverState.model_id ||")
+      && page.includes('modelId={dockModelId || (serverState.model_id ?? "local")}'));
+  // Tile pickers show only the agent-SPECIFIC pick as their value; inherited
+  // models are disclosed via the fallback label ("(auto · …)"), never claimed
+  // as an explicit per-agent selection.
+  check("Agent tile pickers bind the explicit pick and disclose inheritance in the fallback",
+    page.includes("modelId={explicitModelFor(a.name)}")
+      && page.includes("modelId={agentExplicitModelFor(producerSpec.name)}")
+      && page.includes("`(auto · ${modelDisplayLabel})`")
+      && page.includes("const agentExplicitModelFor = (agentName: string): string =>"));
+  // Clearing the LAST per-agent override must persist (write an explicitly
+  // empty agentModels map) instead of being skipped by the size===0 guard —
+  // otherwise the deleted pick resurrects from the DB on the next restart.
+  check("Clearing the last per-agent model override persists instead of resurrecting on restart",
+    page.includes("const agentModelsHadEntriesRef = useRef(false)")
+      && page.includes("if (allPickMapsEmpty && !agentModelsHadEntriesRef.current) return;")
+      && page.includes("agentModelsHadEntriesRef.current = perAgentModel.size > 0;"));
+
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`team model selection verification: ${checks.length}/${checks.length} passed`);
 } finally {

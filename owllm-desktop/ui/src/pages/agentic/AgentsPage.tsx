@@ -1627,7 +1627,7 @@ function resolveAgentSkillIds(
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, labelForModel, onPickAgentModel,
+  selectedAgent, onSelectAgent, onOpenEditor, onOpenSkills, modelFor, explicitModelFor, labelForModel, onPickAgentModel,
   models, accountsStatus, criticEnabled, onToggleCritic, agentTiming,
   perAgentSkills, labelOverrides,
 }: {
@@ -1652,6 +1652,10 @@ function AgentChatGrid({
   /// Resolve the model id shown on a tile's header chip (per-agent override >
   /// team default > server model). Same resolver the dispatch path uses.
   modelFor: (agentName: string) => string;
+  /// The agent-SPECIFIC pick only (per-agent override or template pin) — the
+  /// picker's value. Empty means "inherits"; the resolved model is disclosed
+  /// via the fallback label instead of being shown as an explicit selection.
+  explicitModelFor: (agentName: string) => string;
   /// Exact human-facing label from the shared ModelPicker catalogue.
   labelForModel: (modelId: string) => string;
   /// Reuse the shared model picker from the model-name trigger on every card.
@@ -1782,7 +1786,7 @@ function AgentChatGrid({
             isCritic={a.name === CRITIC_AGENT_NAME}
             criticEnabled={criticEnabled}
             onToggleCritic={onToggleCritic}
-            modelId={resolvedModel}
+            modelId={explicitModelFor(a.name)}
             modelDisplayLabel={labelForModel(resolvedModel)}
             ringPx={ringPx}
             outerPx={outerPx}
@@ -2492,7 +2496,10 @@ function AgentChatTile({
             onChange={onPickModel}
             models={models}
             status={accountsStatus}
-            fallbackLabel={SELECT_MODEL_LABEL}
+            // With no explicit pick the agent INHERITS (team default / server
+            // model) — disclose that instead of pretending the inherited model
+            // was selected on this agent (same invariant as the agent editor).
+            fallbackLabel={modelDisplayLabel ? `(auto · ${modelDisplayLabel})` : SELECT_MODEL_LABEL}
           />
         </div>
         {/* Per-agent working time — to the RIGHT of the name. Green while this
@@ -7407,6 +7414,12 @@ export function AgentsPage({
   /// dropdown. Empty string means "no override" (fall back to the team
   /// default → server model).
   const [perAgentModel, setPerAgentModel] = useState<Map<string, string>>(new Map());
+  /// True when the hydrated per-agent MODEL map had entries. Lets the
+  /// graph_json persist effect write an explicitly-empty agentModels map when
+  /// the user clears the LAST override (the old size===0 guard skipped that
+  /// write, so cleared picks came back from the DB on the next restart) while
+  /// still never writing an empty map before hydration has run.
+  const agentModelsHadEntriesRef = useRef(false);
   /// Per-agent voice picks (TTS). Same lifecycle as perAgentModel — keyed
   /// by agent name, cleared on project/team flip. Missing key means the
   /// agent uses DEFAULT_VOICE (disabled / Auto / default rate).
@@ -8803,7 +8816,9 @@ export function AgentsPage({
         // genuine project switch. chat_json changes after every streamed save;
         // treating those as project switches used to clear a freshly selected
         // team model in the middle of its own run.
-        setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
+        const hydratedModels = loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json);
+        agentModelsHadEntriesRef.current = hydratedModels.size > 0;
+        setPerAgentModel(hydratedModels);
         setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
         setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
         setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
@@ -8995,7 +9010,9 @@ export function AgentsPage({
     // look "random" after a restart. Reloading from localStorage is safe:
     // picks are keyed by agent name, and any name not in the new team's
     // roster is simply never looked up (harmless), while real picks survive.
-    setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
+    const reloadedModels = loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json);
+    agentModelsHadEntriesRef.current = reloadedModels.size > 0;
+    setPerAgentModel(reloadedModels);
     setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
     setPerAgentSkills(loadAgentSkillsForProject(selectedProject?.graph_json));
     setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject?.graph_json));
@@ -9063,7 +9080,13 @@ export function AgentsPage({
     if (!selectedProject) return;
     if (pickedTeamId !== null) return;            // template override → not the project's own roster
     if (!activeTeam) return;                       // team not computed yet → don't write empty edges/roster
-    if (perAgentModel.size === 0 && perAgentVoice.size === 0 && perAgentSkills.size === 0 && perAgentToolExtras.size === 0) return;
+    // Skip pure-empty writes ONLY while nothing was ever hydrated/persisted.
+    // Once the model map has held entries, an all-empty state is a deliberate
+    // clear and MUST be written — otherwise the DB's old agentModels resurrect
+    // the deleted pick on the next restart.
+    const allPickMapsEmpty =
+      perAgentModel.size === 0 && perAgentVoice.size === 0 && perAgentSkills.size === 0 && perAgentToolExtras.size === 0;
+    if (allPickMapsEmpty && !agentModelsHadEntriesRef.current) return;
     const id = window.setTimeout(async () => {
       try {
         await invoke("update_project", {
@@ -9078,6 +9101,7 @@ export function AgentsPage({
             }),
           },
         });
+        agentModelsHadEntriesRef.current = perAgentModel.size > 0;
       } catch (e) {
         console.error("persist agent picks failed", e);
       }
@@ -9917,6 +9941,12 @@ export function AgentsPage({
     perAgentModel.get(agentName)?.trim() ?? "";
   const agentTemplateModelFor = (agentName: string): string =>
     activeTeam?.agents.find(a => a.name === agentName)?.defaultModelId?.trim() ?? "";
+  // The agent-SPECIFIC selection only (override or template pin) — what a
+  // per-agent picker's VALUE must show. Inherited team/server models are
+  // disclosed through the picker's fallback label, never as the value
+  // (same invariant the agent editor's initialModel enforces).
+  const agentExplicitModelFor = (agentName: string): string =>
+    agentModelOverrideFor(agentName) || agentTemplateModelFor(agentName);
 
   // Resolve the model id we should send for a given agent. Priority:
   //   per-agent override > agent template default > team default >
@@ -10184,13 +10214,22 @@ export function AgentsPage({
   // ensureLocalServer triggered a temporal-dead-zone crash
   // ('Cannot access "sn" before initialization') when React rendered
   // the right column.
-  // Resolve the dock's model the SAME way onSupSend dispatches it —
-  // modelFor(orchestrator), which honours per-agent override > team
-  // default > server model. (Was effectiveTeamModel-first, which
-  // ignored a per-orchestrator override, so the Load button and the
+  // Resolve the dock's model the SAME way the dispatch path does —
+  // modelFor(<the agent that actually runs>), which honours per-agent
+  // override > team default > server model. (Was effectiveTeamModel-first,
+  // which ignored a per-orchestrator override, so the Load button and the
   // send could disagree on which model to use.)
+  // In SOLO mode the run goes to the solo coder (effectiveModelFor(coder)
+  // in dispatchGoal), NOT the orchestrator — resolving the orchestrator
+  // here made the chatbox display a different model than the one the send
+  // actually used whenever the two agents' picks differed.
+  const dispatchLeadName = !activeTeam
+    ? "orchestrator"
+    : soloMode
+      ? (soloRenderTeam?.agents[0]?.name ?? findOrchestratorSpec(activeTeam)?.name ?? "orchestrator")
+      : (findOrchestratorSpec(activeTeam)?.name ?? "orchestrator");
   const dockModelId = (activeTeam
-    ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "orchestrator")
+    ? modelFor(dispatchLeadName)
     : effectiveTeamModel
     || "").trim();
   const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
@@ -13362,11 +13401,11 @@ export function AgentsPage({
         onClose={() => { setBrainstormOpen(false); setBrainstormSeed(""); }}
         projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
-        // Use the team's default model. Fallback to the orchestrator's
-        // model, which respects per-agent overrides. Brainstormer is
-        // research-heavy; users should pick Opus 4.7 medium for best
-        // results but anything that handles tool calls works.
-        modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
+        // Same model the chat dock shows and the next send dispatches
+        // (per-agent override > template pin > team default > server).
+        // Was teamModelOverride-first, which inverted that priority and
+        // made Brainstorm show a different model than the chatbox.
+        modelId={dockModelId}
         port={serverState.port ?? 0}
         models={models}
         accountsStatus={accountsStatus}
@@ -13552,7 +13591,7 @@ export function AgentsPage({
                         isCritic={false}
                         criticEnabled={criticEnabled}
                         onToggleCritic={() => setCriticEnabled(v => !v)}
-                        modelId={resolved}
+                        modelId={agentExplicitModelFor(producerSpec.name)}
                         modelDisplayLabel={labelForModel(resolved)}
                         ringPx={0}
                         outerPx={0}
@@ -13645,6 +13684,7 @@ export function AgentsPage({
                 onOpenEditor={(name) => setEditingAgent(name)}
                 onOpenSkills={(name) => setSkillsAgent(name)}
                 modelFor={modelFor}
+                explicitModelFor={agentExplicitModelFor}
                 labelForModel={labelForModel}
                 onPickAgentModel={onPickAgentModel}
                 models={models}
@@ -13740,7 +13780,7 @@ export function AgentsPage({
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}
-            usageProvider={providerForShared(effectiveTeamModel || serverState.model_id || "", models)}
+            usageProvider={providerForShared(dockModelId || serverState.model_id || "", models)}
             browserOpen={browserPanelOpen}
             onToggleBrowser={() => { if (!browserPanelOpen) void openBrowserSplit(); setBrowserPanelOpen(v => !v); }}
             onCollapse={() => setSideOpen(false)}
@@ -13754,7 +13794,7 @@ export function AgentsPage({
                 active={isActive}
                 running={busy || supSendBusy}
                 onFeed={feedFromNotebook}
-                modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
+                modelId={dockModelId || (serverState.model_id ?? "local")}
                 port={serverState.port ?? 0}
                 models={models}
                 accountsStatus={accountsStatus}

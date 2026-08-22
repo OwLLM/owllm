@@ -67,6 +67,14 @@ jobs:
         working-directory: owllm-desktop
         run: npm run test:launchpad
 
+      - name: Verify Brainstorm regression checks
+        working-directory: owllm-desktop
+        run: npm run test:brainstorm
+
+      - name: Verify team-model selection regression checks
+        working-directory: owllm-desktop
+        run: npm run test:teammodel
+
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop
         run: npm run build
@@ -218,6 +226,14 @@ jobs:
       - name: Verify CreationLaunchpad regression checks
         working-directory: owllm-desktop
         run: npm run test:launchpad
+
+      - name: Verify Brainstorm regression checks
+        working-directory: owllm-desktop
+        run: npm run test:brainstorm
+
+      - name: Verify team-model selection regression checks
+        working-directory: owllm-desktop
+        run: npm run test:teammodel
 
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop

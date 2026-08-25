@@ -61,8 +61,10 @@ check(refresh.includes('["merge", "--ff-only", &project_sha]'),
   "a clean behind page advances with a history-preserving fast-forward");
 check(refresh.includes("refreshed_sha.trim() != project_sha"),
   "the backend verifies the page actually reached project HEAD before success");
-check(!refresh.includes('"reset", "--hard"') && !refresh.includes('"branch", "-D"'),
-  "the freshness transaction has no destructive reset or branch deletion path");
+check(!refresh.includes('"branch", "-D"') &&
+      /if page_dirty\.is_empty\(\) && branch_work_contained\([\s\S]{0,500}?\["reset", "--hard", &project_sha\]/.test(refresh) &&
+      refresh.includes("previous_page_sha: page_sha"),
+  "page realignment is limited to a clean branch whose work is already contained, and preserves its prior sha");
 const projectDirtyGuard = refresh.indexOf("if !project_dirty.is_empty()");
 const currentReturn = refresh.indexOf("WorktreeRefreshOutcome::Current");
 const pageDirtyGuard = refresh.indexOf("if !page_is_behind || !page_dirty.is_empty()");

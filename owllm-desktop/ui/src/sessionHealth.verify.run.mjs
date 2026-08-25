@@ -113,6 +113,17 @@ check(
   /new_this_launch/.test(health),
   "the notice is driven by a per-launch counter, not by the stored records",
 );
+// A reboot explains the process ending on its own. Counting it as a crash made
+// every restart of the machine greet the user with "OwLLM closed unexpectedly"
+// — the single most common false alarm this feature produced.
+check(
+  /alarming/.test(health) && /filter\(\|r\| r\.alarming\)/.test(health),
+  "an ordinary reboot is recorded but never raises the notice",
+);
+check(
+  /restarted[\s\S]{0,120}false,/.test(health),
+  "the reboot branch is explicitly classified as not-alarming",
+);
 check(
   !/session_health_dismiss/.test(shell),
   "showing the notice never deletes the evidence the support report needs",

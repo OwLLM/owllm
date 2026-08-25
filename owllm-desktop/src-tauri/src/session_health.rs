@@ -59,6 +59,15 @@ pub struct UncleanShutdown {
     pub detected_unix: u64,
     /// Why we concluded it died, in words the user can read.
     pub reason: String,
+    /// True when the app itself is the thing that needs explaining.
+    ///
+    /// A machine that restarted already explains why the process ended, so
+    /// saying "OwLLM closed unexpectedly" about it accuses the app of a crash
+    /// it did not have — and every ordinary reboot produced exactly that
+    /// alarm. Those records are still KEPT (a support report wants the whole
+    /// history) but they no longer raise the notice.
+    #[serde(default)]
+    pub alarming: bool,
 }
 
 fn sessions_dir() -> Option<std::path::PathBuf> {
@@ -120,8 +129,12 @@ pub fn begin(version: &str) -> usize {
     };
     write_marker(&marker);
     let _ = OWN_MARKER.set(marker);
-    NEW_THIS_LAUNCH.store(found.len(), std::sync::atomic::Ordering::SeqCst);
-    found.len()
+    // Only alarming deaths raise the notice. A reboot is recorded but never
+    // announced: it explains itself, and announcing it made every restart of
+    // the machine look like an OwLLM crash.
+    let alarming = found.iter().filter(|r| r.alarming).count();
+    NEW_THIS_LAUNCH.store(alarming, std::sync::atomic::Ordering::SeqCst);
+    alarming
 }
 
 fn write_marker(marker: &SessionMarker) {
@@ -203,7 +216,7 @@ fn harvest(dir: &std::path::Path) -> Vec<UncleanShutdown> {
         if marker.pid == std::process::id() {
             continue;
         }
-        let Some(reason) = death_reason(&marker, boot_time, &mut live) else {
+        let Some((reason, alarming)) = death_reason(&marker, boot_time, &mut live) else {
             // Owner is alive: another OwLLM instance. Leave its marker alone.
             continue;
         };
@@ -211,6 +224,7 @@ fn harvest(dir: &std::path::Path) -> Vec<UncleanShutdown> {
             marker,
             detected_unix: now_unix(),
             reason,
+            alarming,
         });
         let _ = std::fs::remove_file(&path);
     }
@@ -218,29 +232,37 @@ fn harvest(dir: &std::path::Path) -> Vec<UncleanShutdown> {
 }
 
 /// Why this marker's owner is gone — or `None` if it is still running.
-fn death_reason(marker: &SessionMarker, boot_time: u64, live: &mut LiveProcesses) -> Option<String> {
+fn death_reason(
+    marker: &SessionMarker,
+    boot_time: u64,
+    live: &mut LiveProcesses,
+) -> Option<(String, bool)> {
     // Boot times differ by a second or two between readings on some platforms,
     // so compare with slack rather than for equality — an exact test would
     // report every previous session as a reboot.
     if marker.boot_time.abs_diff(boot_time) > 5 {
-        return Some(
-            "the machine restarted before that session closed — a power loss, a hard reset, or a \
-             shutdown that did not let OwLLM finish"
+        // Not alarming: the restart accounts for the process ending. Reporting
+        // it as an unexpected close made every reboot look like a crash.
+        return Some((
+            "the machine restarted before that session closed, so it never ran its shutdown"
                 .to_string(),
-        );
+            false,
+        ));
     }
     match live.start_time(marker.pid) {
         Some(started) if started == marker.process_started => None,
-        Some(_) => Some(
+        Some(_) => Some((
             "that session's process is gone (its process id now belongs to something else) and it \
              never ran its shutdown"
                 .to_string(),
-        ),
-        None => Some(
+            true,
+        )),
+        None => Some((
             "that session's process disappeared without running its shutdown — killed outright, \
              out of memory, or a crash the app could not log"
                 .to_string(),
-        ),
+            true,
+        )),
     }
 }
 
@@ -395,7 +417,7 @@ mod tests {
     fn a_vanished_process_is_reported() {
         let mut live = live_with(&[]);
         let reason = death_reason(&marker(42, 100, 900), 900, &mut live);
-        assert!(reason.is_some_and(|r| r.contains("disappeared")));
+        assert!(reason.is_some_and(|r| r.0.contains("disappeared")));
     }
 
     /// …and a second OwLLM window, which is alive, is NOT — otherwise every
@@ -412,7 +434,7 @@ mod tests {
     fn a_recycled_pid_does_not_hide_a_death() {
         let mut live = live_with(&[(42, 555)]);
         let reason = death_reason(&marker(42, 100, 900), 900, &mut live);
-        assert!(reason.is_some_and(|r| r.contains("belongs to something else")));
+        assert!(reason.is_some_and(|r| r.0.contains("belongs to something else")));
     }
 
     /// A marker from before the current boot means the machine went down under
@@ -423,7 +445,10 @@ mod tests {
         // win, or a post-reboot pid collision would report the wrong cause.
         let mut live = live_with(&[(42, 100)]);
         let reason = death_reason(&marker(42, 100, 500), 900, &mut live);
-        assert!(reason.is_some_and(|r| r.contains("restarted")));
+        let reason = reason.expect("a previous-boot marker is still recorded");
+        assert!(reason.0.contains("restarted"));
+        // …but it must NOT raise the notice: an ordinary reboot is not a crash.
+        assert!(!reason.1, "a reboot must not be alarming");
     }
 
     /// Clock jitter between two boot-time readings must not masquerade as a
@@ -432,6 +457,26 @@ mod tests {
     fn boot_time_jitter_is_not_a_reboot() {
         let mut live = live_with(&[(42, 100)]);
         assert!(death_reason(&marker(42, 100, 898), 900, &mut live).is_none());
+    }
+
+    /// The recurring false alarm: an ordinary reboot left a marker behind, and
+    /// the next launch greeted the user with "OwLLM closed unexpectedly". The
+    /// machine restarting already explains why the process ended — accusing the
+    /// app of a crash it did not have is what made this notice feel like noise.
+    /// The record is still kept for support reports; it just must not alarm.
+    #[test]
+    fn a_reboot_is_recorded_but_never_raises_the_notice() {
+        let mut live = live_with(&[]);
+        let (reason, alarming) =
+            death_reason(&marker(42, 100, 500), 900, &mut live).expect("still recorded");
+        assert!(reason.contains("restarted"), "{reason}");
+        assert!(!alarming, "a reboot must not be reported as an unexpected close");
+
+        // A real disappearance in the SAME boot still alarms — the fix must not
+        // silence the deaths that matter.
+        let (_, alarming_kill) =
+            death_reason(&marker(42, 100, 900), 900, &mut live).expect("still recorded");
+        assert!(alarming_kill, "a killed session must still raise the notice");
     }
 
     /// A crash loop must not grow the report file without bound, and must keep
@@ -443,6 +488,7 @@ mod tests {
                 marker: marker(i as u32, 1, 1),
                 detected_unix: i as u64,
                 reason: "test".into(),
+                alarming: true,
             })
             .collect();
         let overflow = reports.len().saturating_sub(MAX_REPORTS);

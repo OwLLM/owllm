@@ -177,6 +177,16 @@ try {
     codePage.includes("expectedBranch:"));
   check("The Publisher-Sync advice is only shown when Sync can actually help",
     codePage.includes("worktreeStaleSyncAdvice"));
+
+  // Sync squash-merges, which leaves the page's commits with no ancestry to the
+  // result. Without a content-based containment test the page reads as
+  // "different commits" forever and keeps demanding a Sync with nothing to do.
+  check("A page whose work the project already contains realigns itself",
+    /branch_work_contained\(&project, page_branch\.trim\(\)\)/.test(fleet)
+      && /already contains/.test(fleet));
+  // …but only when it is clean, and never for work the project lacks.
+  check("Self-realign never runs on a dirty page or on genuinely unmerged work",
+    /page_dirty\.is_empty\(\) && branch_work_contained/.test(fleet));
     for (const [attrAndBody, name, body] of tagged) {
       if (attrAndBody.includes('rename_all_fields = "camelCase"')) continue;
       const lines = body.split("\n");

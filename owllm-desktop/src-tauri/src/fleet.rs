@@ -1554,6 +1554,39 @@ fn fleet_worktree_refresh_blocking(
         .collect::<Vec<_>>();
 
     if !page_is_behind || !page_dirty.is_empty() {
+        // A clean page can diverge on paper while holding nothing new: Sync
+        // squash-merges into the project, which leaves the page's commits with
+        // no ancestry to the result. Any later divergence (an interrupted Sync,
+        // a project reset, work integrated by another route) then reads as
+        // "different commits" forever, and the page keeps refusing runs and
+        // asking for a Sync that has nothing left to do.
+        //
+        // `branch_work_contained` is the same conservative test that licenses
+        // DELETING a branch elsewhere in this file — ancestry, or an in-memory
+        // merge whose tree equals the target's. Resetting is strictly less
+        // destructive than that, and the pre-reset sha is returned as
+        // `previous_page_sha`, so nothing becomes unreachable.
+        if page_dirty.is_empty() && branch_work_contained(&project, page_branch.trim()) {
+            let (reset_ok, reset_out, reset_err) =
+                git(&worktree, &["reset", "--hard", &project_sha])?;
+            if !reset_ok {
+                return Ok(WorktreeRefreshOutcome::Error {
+                    message: git_failure_message(
+                        "could not realign a page whose work the project already contains",
+                        &reset_out,
+                        &reset_err,
+                    ),
+                });
+            }
+            eprintln!(
+                "[fleet] page realigned to the project; its commits were already integrated"
+            );
+            return Ok(WorktreeRefreshOutcome::Refreshed {
+                project_sha,
+                previous_page_sha: page_sha,
+                healed_from,
+            });
+        }
         let reason = if !page_dirty.is_empty() {
             format!("the page has pending edits:\n{}", page_dirty.join("\n"))
         } else {
@@ -2796,6 +2829,50 @@ mod tests {
             "fix/elsewhere"
         );
         assert!(!git(&page, &["status", "--porcelain"]).unwrap().1.trim().is_empty());
+    }
+
+    /// The other half of self-healing: a page whose commits the project already
+    /// contains (the shape Sync leaves behind — squash-merged, so no ancestry)
+    /// must realign itself instead of refusing every run and demanding a Sync
+    /// that has nothing left to integrate.
+    #[test]
+    fn a_page_whose_work_is_already_integrated_realigns_itself() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        // Page does work and commits it.
+        fs::write(page.join("version.txt"), "page-work\n").unwrap();
+        git_ok(&page, &["commit", "-am", "page work"]);
+        let page_before = git(&page, &["rev-parse", "HEAD"]).unwrap().1.trim().to_string();
+        // The project gains the SAME content by another route (squash / manual
+        // apply), so ancestry differs but the work is present.
+        fs::write(repo.join("version.txt"), "page-work\n").unwrap();
+        let project_sha = {
+            git_ok(repo.as_path(), &["commit", "-am", "same work, integrated separately"]);
+            git(&repo, &["rev-parse", "HEAD"]).unwrap().1.trim().to_string()
+        };
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            WorktreeRefreshOutcome::Refreshed {
+                project_sha: actual,
+                previous_page_sha,
+                ..
+            } => {
+                assert_eq!(actual, project_sha);
+                // The pre-reset sha is reported, so the old tip stays reachable.
+                assert_eq!(previous_page_sha, page_before);
+            }
+            other => panic!("expected a self-realign, got {other:?}"),
+        }
+        assert_eq!(
+            git(&page, &["rev-parse", "HEAD"]).unwrap().1.trim(),
+            project_sha
+        );
     }
 
     #[test]

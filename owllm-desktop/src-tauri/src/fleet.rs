@@ -1096,12 +1096,18 @@ pub enum WorktreeRefreshOutcome {
     Current {
         #[serde(rename = "projectSha")]
         project_sha: String,
+        /// Set when the page had to be returned to its own branch first.
+        #[serde(rename = "healedFrom", skip_serializing_if = "Option::is_none")]
+        healed_from: Option<String>,
     },
     Refreshed {
         #[serde(rename = "projectSha")]
         project_sha: String,
         #[serde(rename = "previousPageSha")]
         previous_page_sha: String,
+        /// Set when the page had to be returned to its own branch first.
+        #[serde(rename = "healedFrom", skip_serializing_if = "Option::is_none")]
+        healed_from: Option<String>,
     },
     Stale {
         #[serde(rename = "projectSha")]
@@ -1269,6 +1275,130 @@ pub async fn fleet_worktree_create(
     })
 }
 
+/// Outcome of trying to put a page worktree back on its own branch.
+enum BranchHeal {
+    /// The worktree is now on `expected`; `from` is the branch it was parked on.
+    Healed { from: String },
+    /// Left exactly as found, with the reason the user needs.
+    Blocked { message: String },
+}
+
+/// Return a page worktree to its own branch when something else checked a
+/// foreign branch out inside it.
+///
+/// This state is reachable in ordinary use — an agent told to inspect a fix
+/// branch, a user running `git checkout` in the page's folder, a merge that
+/// finished somewhere unexpected — and until now it was a dead end. Refresh
+/// refused (correctly: the page cannot prove it is current), and Publisher
+/// Sync could not rescue it either, because Sync commits onto whatever HEAD it
+/// finds and then merges the branch the page THINKS it is on. On a foreign
+/// branch that is a silent wrong-branch merge, so the refusal was right and
+/// the advice ("use Publisher → Sync") was wrong.
+///
+/// Healing is only safe when it cannot hide work, so both must hold:
+///   * the worktree is clean — uncommitted edits belong to whoever made them
+///     and must never be carried onto another branch by a background refresh;
+///   * every commit on the foreign branch is already contained in the
+///     project's committed HEAD — otherwise switching away would make real
+///     work vanish from the page with no hint of where it went.
+///
+/// The foreign branch is never deleted or rewritten; switching away leaves its
+/// ref exactly where it was.
+fn heal_foreign_page_branch(
+    worktree: &Path,
+    current_branch: &str,
+    expected_branch: Option<&str>,
+    project_sha: &str,
+) -> Result<BranchHeal, String> {
+    let shown = if current_branch.is_empty() {
+        "a detached HEAD"
+    } else {
+        current_branch
+    };
+    let blocked = |detail: String| -> Result<BranchHeal, String> {
+        Ok(BranchHeal::Blocked {
+            message: format!(
+                "this page's workspace is on {shown}, not its own page branch. {detail}"
+            ),
+        })
+    };
+
+    let Some(expected) = expected_branch
+        .map(str::trim)
+        .filter(|b| b.starts_with("owllm-page/"))
+    else {
+        return blocked(
+            "OWLLM does not know which page branch it should be on, so it changed nothing.              Reopen the project to rebuild the page workspace."
+                .to_string(),
+        );
+    };
+
+    let (exists, _, _) = git(
+        worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{expected}"),
+        ],
+    )?;
+    if !exists {
+        return blocked(format!(
+            "its page branch {expected} no longer exists, so OWLLM changed nothing.              Reopen the project to rebuild the page workspace."
+        ));
+    }
+
+    let (status_ok, status, status_err) = git(worktree, &["status", "--porcelain"])?;
+    if !status_ok {
+        return blocked(git_failure_message(
+            "OWLLM could not inspect it and changed nothing",
+            &status,
+            &status_err,
+        ));
+    }
+    let dirty = status
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !is_app_scratch(porcelain_path(line)))
+        .take(20)
+        .collect::<Vec<_>>();
+    if !dirty.is_empty() {
+        return blocked(format!(
+            "it also has uncommitted edits, which OWLLM will not move to another branch.              Commit or discard them on {shown} first:
+{}",
+            dirty.join("
+")
+        ));
+    }
+
+    let (contained, _, _) = git(
+        worktree,
+        &["merge-base", "--is-ancestor", "HEAD", project_sha],
+    )?;
+    if !contained {
+        let (_, ahead, _) = git(
+            worktree,
+            &["rev-list", "--count", &format!("{project_sha}..HEAD")],
+        )?;
+        let count = ahead.trim();
+        return blocked(format!(
+            "{} commit(s) on {shown} are not in the project yet. They are safe on that branch              and OWLLM changed nothing — merge or publish {shown} first, then reopen the project.",
+            if count.is_empty() { "some" } else { count }
+        ));
+    }
+
+    let (co_ok, co_out, co_err) = git(worktree, &["checkout", expected])?;
+    if !co_ok {
+        return blocked(git_failure_message(
+            &format!("returning it to {expected} failed, so it was left as-is"),
+            &co_out,
+            &co_err,
+        ));
+    }
+    Ok(BranchHeal::Healed {
+        from: shown.to_string(),
+    })
+}
+
 /// Make a persistent Coding-page worktree current with the canonical project's
 /// committed HEAD before an agent is allowed to run.
 ///
@@ -1281,15 +1411,19 @@ pub async fn fleet_worktree_create(
 pub async fn fleet_worktree_refresh(
     worktree_path: String,
     project_cwd: String,
+    expected_branch: Option<String>,
 ) -> Result<WorktreeRefreshOutcome, String> {
-    tokio::task::spawn_blocking(move || fleet_worktree_refresh_blocking(worktree_path, project_cwd))
-        .await
-        .map_err(|e| format!("page worktree refresh task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        fleet_worktree_refresh_blocking(worktree_path, project_cwd, expected_branch)
+    })
+    .await
+    .map_err(|e| format!("page worktree refresh task failed: {e}"))?
 }
 
 fn fleet_worktree_refresh_blocking(
     worktree_path: String,
     project_cwd: String,
+    expected_branch: Option<String>,
 ) -> Result<WorktreeRefreshOutcome, String> {
     let project = PathBuf::from(&project_cwd);
     let worktree = PathBuf::from(&worktree_path);
@@ -1307,22 +1441,42 @@ fn fleet_worktree_refresh_blocking(
     let lock = repo_git_lock(&project);
     let _refresh_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
-    let (branch_ok, page_branch, branch_err) =
-        git(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
-    if !branch_ok || !page_branch.trim().starts_with("owllm-page/") {
+    // The project's committed HEAD is read first because deciding whether a
+    // foreign branch can be safely left behind needs it.
+    let (project_head_ok, project_head, project_head_err) = git(&project, &["rev-parse", "HEAD"])?;
+    if !project_head_ok {
         return Ok(WorktreeRefreshOutcome::Error {
-            message: format!(
-                "refusing to refresh a workspace that is not an OWLLM Coding-page branch: {}",
-                if branch_err.trim().is_empty() {
-                    page_branch.trim()
-                } else {
-                    branch_err.trim()
-                }
-            ),
+            message: format!("could not read the project HEAD: {}", project_head_err.trim()),
         });
+    }
+    let project_head = project_head.trim().to_string();
+
+    let (branch_ok, page_branch, _branch_err) =
+        git(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    // A page worktree parked on someone else's branch used to be a dead end:
+    // refuse the run, and point at a Sync that could not fix it either. Try to
+    // put it back on its own branch, and only refuse when that is genuinely
+    // unsafe (see `heal_foreign_page_branch`).
+    let mut healed_from: Option<String> = None;
+    if !branch_ok || !page_branch.trim().starts_with("owllm-page/") {
+        match heal_foreign_page_branch(
+            &worktree,
+            page_branch.trim(),
+            expected_branch.as_deref(),
+            &project_head,
+        )? {
+            BranchHeal::Healed { from } => {
+                eprintln!("[fleet] page workspace returned to its own branch from {from}");
+                healed_from = Some(from);
+            }
+            BranchHeal::Blocked { message } => {
+                return Ok(WorktreeRefreshOutcome::Error { message });
+            }
+        }
     }
 
     let (project_ok, project_sha, project_err) = git(&project, &["rev-parse", "HEAD"])?;
+    // Re-read AFTER any heal: the branch may have changed under us.
     let (page_ok, page_sha, page_err) = git(&worktree, &["rev-parse", "HEAD"])?;
     if !project_ok || !page_ok {
         return Ok(WorktreeRefreshOutcome::Error {
@@ -1372,7 +1526,10 @@ fn fleet_worktree_refresh_blocking(
         &["merge-base", "--is-ancestor", &project_sha, "HEAD"],
     )?;
     if contains_project {
-        return Ok(WorktreeRefreshOutcome::Current { project_sha });
+        return Ok(WorktreeRefreshOutcome::Current {
+            project_sha,
+            healed_from,
+        });
     }
 
     let (page_is_behind, _, _) = git(
@@ -1432,6 +1589,7 @@ fn fleet_worktree_refresh_blocking(
     Ok(WorktreeRefreshOutcome::Refreshed {
         project_sha,
         previous_page_sha: page_sha,
+        healed_from,
     })
 }
 
@@ -2004,6 +2162,33 @@ fn fleet_worktree_sync_blocking(
     // reconciliation, page refresh, and final verification.
     let lock = repo_git_lock(&project);
     let _sync_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Sync assumes the worktree is on the branch it was asked to integrate:
+    // `finalize` commits onto whatever HEAD it finds, and the merge below then
+    // pulls `branch`. If something checked a foreign branch out inside the page
+    // worktree, those are two DIFFERENT branches — the user's work would be
+    // committed to the foreign branch while a stale page branch got merged into
+    // the project, and Sync would report success. Refuse instead; Refresh knows
+    // how to put the workspace back on its own branch when that is safe.
+    let (head_ok, head_branch, _) = git(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    let head_branch = head_branch.trim().to_string();
+    if !head_ok || head_branch != branch.trim() {
+        let on = if head_branch.is_empty() {
+            "a detached HEAD".to_string()
+        } else {
+            head_branch
+        };
+        return Ok(WorktreeSyncOutcome::Error {
+            message: format!(
+                "this page's workspace is on {on}, not its own branch {}. Nothing was committed or \
+                 merged, because doing so would commit onto {on} while merging {} into the project. \
+                 Reopen the project so OWLLM can put the workspace back on its own branch.",
+                branch.trim(),
+                branch.trim()
+            ),
+        });
+    }
+
     let finalized = fleet_worktree_finalize_blocking(
         worktree_path,
         agent_name,
@@ -2433,10 +2618,10 @@ mod tests {
     use super::{
         branch_work_contained_read_tree, fleet_worktree_create, fleet_worktree_finalize,
         fleet_worktree_merge_blocking, fleet_worktree_refresh_blocking, fleet_worktree_remove,
-        git, git_failure_message, git_reported_path_for_host, is_app_scratch,
-        linux_path_to_wsl_unc, path_is_dir_native, porcelain_path, unstage_app_scratch,
-        user_conflict_files, CreateOutcome, FinalizeOutcome, MergeOutcome, RemoveArgs,
-        WorktreeRefreshOutcome,
+        fleet_worktree_sync_blocking, git, git_failure_message, git_reported_path_for_host,
+        is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native, porcelain_path,
+        unstage_app_scratch, user_conflict_files, CreateOutcome, FinalizeOutcome, MergeOutcome,
+        RemoveArgs, WorktreeRefreshOutcome, WorktreeSyncOutcome,
     };
     use std::{
         fs,
@@ -2532,6 +2717,10 @@ mod tests {
         tmp
     }
 
+    /// The branch every page-refresh fixture checks out, matching the real
+    /// `owllm-page/<page>/<agent>` shape the refresh guard requires.
+    const PAGE_BRANCH: &str = "owllm-page/test/code";
+
     fn init_page_refresh_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
@@ -2550,7 +2739,7 @@ mod tests {
                 "worktree",
                 "add",
                 "-b",
-                "owllm-page/test/code",
+                PAGE_BRANCH,
                 page.to_str().unwrap(),
                 "HEAD",
             ],
@@ -2570,6 +2759,171 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    /// The dead end reported on 2026-08-16: something checked a foreign branch
+    /// out inside the page's own worktree, so every model run was refused and
+    /// the advice ("use Publisher → Sync") could not work either — Sync commits
+    /// onto whatever HEAD it finds and merges the branch the page THINKS it is
+    /// on. A clean worktree whose foreign branch is already contained in the
+    /// project must simply be put back on its own branch.
+    /// Sync must never commit onto one branch while merging another. The page
+    /// worktree parked on a foreign branch made that reachable: `finalize`
+    /// commits to the current HEAD, then the merge pulls the branch the page
+    /// thinks it owns — a silent wrong-branch integration reported as success.
+    #[test]
+    fn sync_refuses_when_the_workspace_is_on_a_foreign_branch() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        git_ok(&page, &["checkout", "-b", "fix/elsewhere"]);
+        fs::write(page.join("version.txt"), "page edit\n").unwrap();
+
+        let outcome = fleet_worktree_sync_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            "code".to_string(),
+            PAGE_BRANCH.to_string(),
+        )
+        .unwrap();
+
+        match outcome {
+            WorktreeSyncOutcome::Error { message } => {
+                assert!(message.contains("fix/elsewhere"), "{message}");
+                assert!(message.contains("Nothing was committed"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // Untouched: still on the foreign branch, edit still uncommitted.
+        assert_eq!(
+            git(&page, &["symbolic-ref", "--short", "HEAD"]).unwrap().1.trim(),
+            "fix/elsewhere"
+        );
+        assert!(!git(&page, &["status", "--porcelain"]).unwrap().1.trim().is_empty());
+    }
+
+    #[test]
+    fn a_page_parked_on_a_foreign_branch_is_returned_to_its_own() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        // A branch that exists in the project's history: nothing to lose.
+        git_ok(&page, &["checkout", "-b", "fix/some-investigation"]);
+        let project_sha = advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            WorktreeRefreshOutcome::Refreshed {
+                project_sha: actual,
+                healed_from,
+                ..
+            } => {
+                assert_eq!(actual, project_sha);
+                assert_eq!(healed_from.as_deref(), Some("fix/some-investigation"));
+            }
+            other => panic!("expected a healed refresh, got {other:?}"),
+        }
+        // Back on its own branch, current with the project.
+        assert_eq!(
+            git(&page, &["symbolic-ref", "--short", "HEAD"]).unwrap().1.trim(),
+            PAGE_BRANCH
+        );
+        // The foreign branch is untouched, not deleted.
+        assert!(
+            git(&page, &["rev-parse", "--verify", "--quiet", "refs/heads/fix/some-investigation"])
+                .unwrap()
+                .0
+        );
+    }
+
+    /// The other half: a foreign branch carrying commits the project does not
+    /// have is somebody's work. Switching away would make it vanish from the
+    /// page with no hint where it went, so refuse and say what to do — and,
+    /// crucially, leave the branch exactly as found.
+    #[test]
+    fn a_foreign_branch_with_unmerged_commits_is_left_alone() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        git_ok(&page, &["checkout", "-b", "fix/unmerged"]);
+        fs::write(page.join("version.txt"), "work-in-progress
+").unwrap();
+        git_ok(&page, &["commit", "-am", "unmerged work"]);
+        advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            WorktreeRefreshOutcome::Error { message } => {
+                assert!(message.contains("fix/unmerged"), "{message}");
+                assert!(message.contains("not in the project yet"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            git(&page, &["symbolic-ref", "--short", "HEAD"]).unwrap().1.trim(),
+            "fix/unmerged"
+        );
+    }
+
+    /// Uncommitted edits belong to whoever made them: a background refresh must
+    /// never carry them onto another branch.
+    #[test]
+    fn a_dirty_foreign_branch_is_never_switched_underneath_the_user() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        git_ok(&page, &["checkout", "-b", "fix/dirty"]);
+        fs::write(page.join("version.txt"), "half-finished edit
+").unwrap();
+        advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            WorktreeRefreshOutcome::Error { message } => {
+                assert!(message.contains("uncommitted edits"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            git(&page, &["symbolic-ref", "--short", "HEAD"]).unwrap().1.trim(),
+            "fix/dirty"
+        );
+        assert_eq!(
+            fs::read_to_string(page.join("version.txt")).unwrap(),
+            "half-finished edit\n"
+        );
+    }
+
+    /// Without a known page branch there is nothing to heal TO. Guessing would
+    /// risk moving the workspace onto an unrelated branch, so it must refuse.
+    #[test]
+    fn an_unknown_page_branch_refuses_rather_than_guessing() {
+        let (_tmp, repo, page) = init_page_refresh_repo();
+        git_ok(&page, &["checkout", "-b", "fix/no-idea"]);
+        advance_project(&repo, "new-gui");
+
+        let outcome = fleet_worktree_refresh_blocking(
+            page.to_string_lossy().into_owned(),
+            repo.to_string_lossy().into_owned(),
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorktreeRefreshOutcome::Error { .. }));
+        assert_eq!(
+            git(&page, &["symbolic-ref", "--short", "HEAD"]).unwrap().1.trim(),
+            "fix/no-idea"
+        );
+    }
+
     #[test]
     fn worktree_refresh_clean_stale_page_fast_forwards_to_the_project_head() {
         let (_tmp, repo, page) = init_page_refresh_repo();
@@ -2582,6 +2936,7 @@ mod tests {
         let outcome = fleet_worktree_refresh_blocking(
             page.to_string_lossy().into_owned(),
             repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
         )
         .unwrap();
         match outcome {
@@ -2613,6 +2968,7 @@ mod tests {
         let outcome = fleet_worktree_refresh_blocking(
             page.to_string_lossy().into_owned(),
             repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
         )
         .unwrap();
         assert!(
@@ -2642,6 +2998,7 @@ mod tests {
         let outcome = fleet_worktree_refresh_blocking(
             page.to_string_lossy().into_owned(),
             repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
         )
         .unwrap();
         assert!(
@@ -2661,6 +3018,7 @@ mod tests {
         let outcome = fleet_worktree_refresh_blocking(
             page.to_string_lossy().into_owned(),
             repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
         )
         .unwrap();
         assert!(matches!(outcome, WorktreeRefreshOutcome::Current { .. }));
@@ -2677,6 +3035,7 @@ mod tests {
         let outcome = fleet_worktree_refresh_blocking(
             page.to_string_lossy().into_owned(),
             repo.to_string_lossy().into_owned(),
+            Some(PAGE_BRANCH.to_string()),
         )
         .unwrap();
         assert!(

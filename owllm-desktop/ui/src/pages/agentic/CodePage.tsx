@@ -237,8 +237,8 @@ type WtMerge =
   | { status: "conflict"; files: string[] }
   | { status: "error"; message: string };
 type WtRefresh =
-  | { status: "current"; projectSha: string }
-  | { status: "refreshed"; projectSha: string; previousPageSha: string }
+  | { status: "current"; projectSha: string; healedFrom?: string }
+  | { status: "refreshed"; projectSha: string; previousPageSha: string; healedFrom?: string }
   | { status: "stale"; projectSha: string; pageSha: string; details: string }
   | { status: "error"; message: string };
 
@@ -1031,6 +1031,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   // work; every run path also executes the native preflight immediately before
   // handing the cwd to a model.
   const [worktreeStaleNotice, setWorktreeStaleNotice] = useState("");
+  // Sync only helps a page that is genuinely stale (pending edits / diverged
+  // history). For a workspace on a foreign branch, a missing worktree link, or
+  // an inspection failure, Sync is wrong — those messages carry their own
+  // instructions and this suffix contradicted them.
+  const [worktreeStaleSyncAdvice, setWorktreeStaleSyncAdvice] = useState(false);
 
   // Project rows and Coding sessions are separate durable records. If another
   // surface moves this stable project id to a new local checkout, repair a
@@ -1219,12 +1224,21 @@ function CodeWorkspace({ pageId, onTitle }: {
       outcome = await invoke<WtRefresh>("fleet_worktree_refresh", {
         worktreePath: cwd,
         projectCwd: projectRoot,
+        // Without this the backend cannot tell which branch the page owns, so a
+        // workspace someone left on a foreign branch has nothing to be healed TO.
+        expectedBranch:
+          cwd === workspace ? branch
+          : cwd === stx.secondaryWorkspace ? stx.secondaryBranch
+          : undefined,
       });
     } catch (e: any) {
       outcome = { status: "error", message: String(e?.message ?? e) };
     }
     if (outcome.status === "current") {
       setWorktreeStaleNotice("");
+      if (outcome.healedFrom) {
+        notify(`This page's workspace was on ${outcome.healedFrom}; OWLLM put it back on its own branch. That branch is untouched.`);
+      }
       return true;
     }
     if (outcome.status === "refreshed") {
@@ -1235,13 +1249,17 @@ function CodeWorkspace({ pageId, onTitle }: {
           baseSha: outcome.projectSha,
         }));
       }
-      if (announceRefresh) {
-        notify(`Page workspace updated to the project's current commit (${outcome.projectSha.slice(0, 8)}).`);
+      if (announceRefresh || outcome.healedFrom) {
+        const healed = outcome.healedFrom
+          ? `Workspace was on ${outcome.healedFrom} and was put back on its own branch (that branch is untouched). `
+          : "";
+        notify(`${healed}Page workspace updated to the project's current commit (${outcome.projectSha.slice(0, 8)}).`);
       }
       return true;
     }
     const reason = outcome.status === "stale" ? outcome.details : outcome.message;
     const message = `This page is not current with the project, so no model was allowed to run. ${reason}`;
+    setWorktreeStaleSyncAdvice(outcome.status === "stale");
     setWorktreeStaleNotice(message);
     notify(message, "error");
     return false;
@@ -1261,6 +1279,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       .then((e) => {
         if (!e.some((x) => x.name === ".git")) {
           const message = "This page's private worktree link is missing. OWLLM left its branch untouched; close and reopen the project after preserving any recoverable branch work.";
+          setWorktreeStaleSyncAdvice(false);
           setWorktreeStaleNotice(message);
           notify(message, "error");
           return;
@@ -1269,6 +1288,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       })
       .catch((e) => {
         const message = `OWLLM could not inspect this page workspace, so it was left untouched and no model will run until access is restored: ${String(e)}`;
+        setWorktreeStaleSyncAdvice(false);
         setWorktreeStaleNotice(message);
         notify(message, "error");
       });
@@ -4064,7 +4084,10 @@ function CodeWorkspace({ pageId, onTitle }: {
           background: "rgba(255,183,77,.08)", color: "#ffd08a", padding: "8px 12px",
           fontSize: 12, lineHeight: 1.45,
         }}>
-          ⚠ {worktreeStaleNotice} Use <b>Publisher → Sync</b> to preserve and integrate the page changes, or discard them before reopening the project.
+          ⚠ {worktreeStaleNotice}
+          {worktreeStaleSyncAdvice && (
+            <> Use <b>Publisher → Sync</b> to preserve and integrate the page changes, or discard them before reopening the project.</>
+          )}
         </div>
       )}
 

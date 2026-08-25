@@ -865,9 +865,16 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   hot-pulled data layer (teams/roles/profiles from the public repo).
 - **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
   `ui/src/runtime/updateAvailability.ts` + `ui/src/runtime/updateSchedule.ts`):
-  the updater checks 2.5 s after launch, **then every 30 min**, and again as
-  soon as the machine comes back **online**. The next check is scheduled by the
-  one that just finished, never by a fixed `setInterval`, because a check that
+  the updater checks 2.5 s after launch, **then every 5 min**, and again as soon
+  as the machine comes back **online**, the window is **focused**, or the webview
+  becomes **visible** (floored at 60 s so alt-tabbing is not a storm). The short
+  period exists because a release is published as a *pre-release* and promoted to
+  Latest only once every platform is up: for that whole window
+  `releases/latest/download/latest.json` still resolves to the PREVIOUS release,
+  so the client is told — correctly — that it is up to date, resets its failure
+  count, and sleeps the full period. A 30-min period therefore hid v1.0.29 from
+  an already-running app for 22 min after the promote. The next check is
+  scheduled by the one that just finished, never by a fixed `setInterval`, because a check that
   lands inside a multi-OS publish window does not get "no update" — it gets
   `TargetNotFound` for whichever platforms `finish-multihost.sh` has not merged
   into `latest.json` yet (tauri-plugin-updater resolves the platform URL before

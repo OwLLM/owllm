@@ -18,7 +18,7 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "./utils/openWebUrl";
 import { OPEN_UPDATE_EVENT, setUpdateAvailable } from "./runtime/updateAvailability";
-import { RECHECK_MS, nextCheckDelayMs, shouldSurfaceCheckError } from "./runtime/updateSchedule";
+import { RECHECK_MS, mayRecheckNow, nextCheckDelayMs, shouldSurfaceCheckError } from "./runtime/updateSchedule";
 
 const ICONS = "/Page_icons";
 
@@ -159,20 +159,32 @@ export default function UpdateController() {
       }
     };
 
-    // A laptop that slept through its timer, or a machine that was offline
-    // when the release landed, must not wait out the rest of the period.
-    const onOnline = () => {
+    // A laptop that slept through its timer, a machine that was offline when
+    // the release landed, or a webview WebView2 throttled while the window sat
+    // minimised, must not wait out the rest of the period. Returning to the app
+    // is also the moment the answer matters most — someone who just watched a
+    // release go out is looking at this window — so focus and un-occlusion
+    // re-check too, floored by MIN_EVENT_RECHECK_MS so alt-tabbing is not a
+    // storm.
+    const recheckSoon = () => {
       if (disposed) return;
-      if (Date.now() - lastRunAt < nextCheckDelayMs(1)) return;
+      if (!mayRecheckNow(lastRunAt, Date.now())) return;
       schedule(0);
     };
-    window.addEventListener("online", onOnline);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") recheckSoon();
+    };
+    window.addEventListener("online", recheckSoon);
+    window.addEventListener("focus", recheckSoon);
+    document.addEventListener("visibilitychange", onVisible);
 
     schedule(2500);
     return () => {
       disposed = true;
       window.clearTimeout(timer);
-      window.removeEventListener("online", onOnline);
+      window.removeEventListener("online", recheckSoon);
+      window.removeEventListener("focus", recheckSoon);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 

@@ -17,9 +17,39 @@
 // Hence two cadences: a steady one for "a release appeared since I last
 // looked", and a fast backoff for "I asked and could not get an answer", which
 // is what a publish in progress looks like from the client.
+//
+// v1.0.29 showed the OTHER half of that story, and it is why the steady cadence
+// is minutes rather than half an hour. Releases are published as a PRE-release
+// and promoted to Latest only once every platform is uploaded (standing
+// policy). While a pre-release is in flight, the updater endpoint —
+// releases/LATEST/download/latest.json — still resolves to the PREVIOUS
+// release, whose manifest names the version the client already runs. So the
+// client does not get TargetNotFound at all: it gets a clean, correct "you are
+// up to date", resets its failure count, and sleeps a full steady period. A
+// promote landing one second later is therefore invisible for that whole
+// period. Measured on v1.0.29: the merged manifest went live at 11:40:11Z and
+// the hub's own running app still showed nothing at 12:02Z — not broken, just
+// asleep. The backoff above cannot help, because nothing failed.
+//
+// Two fixes, both here so they are executable by the gate: a steady period
+// short enough that "the release is online" and "the app said so" are minutes
+// apart, and an event-driven re-check (back online, or the user returning to
+// the window) floored so it cannot become a storm.
 
 /// Steady cadence once a check has answered — success or a clean "nothing new".
-export const RECHECK_MS = 30 * 60 * 1000;
+/// Costs one ~4 KB GET of a static CDN asset; a promote is never more than this
+/// far from being noticed.
+export const RECHECK_MS = 5 * 60 * 1000;
+
+/// Floor between two EVENT-driven checks (network back, window focused,
+/// webview un-occluded). Alt-tabbing must not re-check on every focus.
+export const MIN_EVENT_RECHECK_MS = 60 * 1000;
+
+/// Whether an event-driven re-check may run now, given when the last check ran.
+/// `lastRunAt === 0` means "never checked", which always may.
+export function mayRecheckNow(lastRunAt: number, now: number): boolean {
+  return now - lastRunAt >= MIN_EVENT_RECHECK_MS;
+}
 
 /// First retry after a check that could not answer.
 export const RETRY_BASE_MS = 60 * 1000;

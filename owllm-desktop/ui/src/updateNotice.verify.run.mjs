@@ -168,9 +168,26 @@ if (!ctl) {
     && /(^|\n)\s*checkErrorShown = false;/.test(okPath)
     && /setPhase\(\(p\) => \(p === "error" \? "hidden" : p\)\)/.test(okPath));
 
-  check("coming back online re-checks instead of waiting out the period",
-    /addEventListener\("online", onOnline\)/.test(ctl.code)
-    && /removeEventListener\("online", onOnline\)/.test(ctl.code));
+  // Not just "online": a promote lands while the app is already running, and
+  // the person who wants to know is the one turning back to the window. Every
+  // one of these must also be torn down, or a remounted controller stacks
+  // duplicate checks.
+  for (const [label, target, event, handler] of [
+    ["coming back online", "window", "online", "recheckSoon"],
+    ["returning to the window", "window", "focus", "recheckSoon"],
+    ["the webview becoming visible again", "document", "visibilitychange", "onVisible"],
+  ]) {
+    check(`${label} re-checks instead of waiting out the period`,
+      new RegExp(`${target}\\.addEventListener\\("${event}", ${handler}\\)`).test(ctl.code)
+      && new RegExp(`${target}\\.removeEventListener\\("${event}", ${handler}\\)`).test(ctl.code));
+  }
+
+  check("an event-driven re-check is floored by the shared policy, not an ad-hoc delay",
+    /if \(!mayRecheckNow\(lastRunAt, Date\.now\(\)\)\) return;/.test(ctl.code)
+    && !/Date\.now\(\) - lastRunAt < nextCheckDelayMs\(1\)/.test(ctl.code));
+
+  check("only a REAL visibility change re-checks (hiding the window must not)",
+    /document\.visibilityState === "visible"/.test(ctl.code));
 
   check("a found update is published to the store, not thrown at the user",
     /setUpdateAvailable\(String\(\(u as any\)\.version \?\? ""\)\)/.test(ctl.code));
@@ -179,7 +196,7 @@ if (!ctl) {
   // modal. Requiring both markers keeps the slice from collapsing to "" and
   // passing vacuously against a source that has no runCheck at all.
   const checkFrom = ctl.code.indexOf("const runCheck");
-  const checkTo = ctl.code.indexOf("const onOnline");
+  const checkTo = ctl.code.indexOf("const recheckSoon");
   check("finding an update does NOT open the modal by itself",
     checkFrom >= 0 && checkTo > checkFrom
     && !/setPhase\("prompt"\)/.test(ctl.code.slice(checkFrom, checkTo)));
@@ -324,8 +341,16 @@ if (!fs.existsSync(SCHEDULE)) {
   });
   const s = await import(`file://${bundle.replace(/\\/g, "/")}`);
 
-  check("a machine left running finds a release within the hour",
-    Number.isFinite(s.RECHECK_MS) && s.RECHECK_MS > 0 && s.RECHECK_MS <= 60 * 60 * 1000);
+  // THE SECOND REPRO (v1.0.29): a pre-release in flight makes the endpoint
+  // answer "you are up to date" — CORRECTLY, since /latest still resolves to
+  // the previous release. No failure, so no backoff; the client sleeps the
+  // whole steady period and the promote is invisible for that long. The
+  // manifest went live at 11:40:11Z and the hub's running app still showed
+  // nothing at 12:02Z. The steady period is the only lever that helps here, so
+  // it is pinned to minutes — an hour would pass the old bound and still be the
+  // bug the user reported.
+  check("a machine left running finds a promoted release within minutes",
+    Number.isFinite(s.RECHECK_MS) && s.RECHECK_MS > 0 && s.RECHECK_MS <= 5 * 60 * 1000);
 
   check("an answered check waits the steady period",
     s.nextCheckDelayMs(0) === s.RECHECK_MS && s.nextCheckDelayMs(-1) === s.RECHECK_MS);
@@ -366,6 +391,23 @@ if (!fs.existsSync(SCHEDULE)) {
   check("a release that stays broken IS reported",
     s.shouldSurfaceCheckError(s.FAILURES_BEFORE_SURFACING)
     && s.shouldSurfaceCheckError(s.FAILURES_BEFORE_SURFACING + 5));
+
+  // ---- event-driven re-check policy, EXECUTED --------------------------------
+
+  check("a never-checked controller may check on the first event",
+    s.mayRecheckNow(0, 1_000_000) === true);
+
+  check("an event right after a check is ignored (alt-tab is not a storm)",
+    s.mayRecheckNow(1_000_000, 1_000_000) === false
+    && s.mayRecheckNow(1_000_000, 1_000_000 + s.MIN_EVENT_RECHECK_MS - 1) === false);
+
+  check("once the floor has passed, returning to the window checks again",
+    s.mayRecheckNow(1_000_000, 1_000_000 + s.MIN_EVENT_RECHECK_MS) === true);
+
+  check("the floor is short enough to feel immediate, and never longer than the period",
+    s.MIN_EVENT_RECHECK_MS > 0
+    && s.MIN_EVENT_RECHECK_MS <= 60 * 1000
+    && s.MIN_EVENT_RECHECK_MS <= s.RECHECK_MS);
 
   fs.rmSync(tmp, { recursive: true, force: true });
 }

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.08.11",
-  "publishedAt": "2026-08-11T09:51:12Z",
+  "registryVersion": "2026.08.25",
+  "publishedAt": "2026-08-25T04:20:00Z",
   "channels": [
     "stable",
     "beta",
@@ -202,13 +202,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 155189248,
+          "sizeBytes": 137386050,
           "channels": {
             "stable": {
               "version": "v1.8.4-base",
-              "releasedAt": "2026-05-15T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-base-v1.8.4.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "releasedAt": "2026-08-25T04:20:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/audio-stt-whisper-base-v1.8.4-base.zip",
+              "sha256": "8d951979bbce0c5fb358a51704db0926242475a4c57790cc9957d240a84d5292",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -290,13 +290,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 157286400,
+          "sizeBytes": 11249022,
           "channels": {
             "stable": {
               "version": "3.11.9",
-              "releasedAt": "2026-04-02T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/python-3.11.9-embed-win-x64.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "releasedAt": "2026-08-25T04:20:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/python-3.11-embed-win-3.11.9.zip",
+              "sha256": "4562199d0a36dcfd745e452ddf10d46d30adb3925ef15281c7903548775812ad",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -427,6 +427,38 @@
       ]
     },
     {
+      "id": "nodejs-runtime",
+      "displayName": "Node.js runtime",
+      "description": "Node.js 20 LTS (node + npm + npx). Required to install and run the cloud CLI agents (Claude, Codex, Gemini, Kimi install via npm) and to spawn npx-based MCP servers. This is the module the CLI installer's 'Node.js runtime not installed' message points at.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": [
+        "cli-install"
+      ],
+      "dependsOn": [],
+      "variants": [
+        {
+          "id": "nodejs-runtime-win",
+          "displayName": "Node.js 20 LTS (Windows x64)",
+          "platform": "windows-x86_64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 30994654,
+          "channels": {
+            "stable": {
+              "version": "node20.18.0",
+              "releasedAt": "2026-08-25T04:20:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/nodejs-runtime-win-node20.18.0.zip",
+              "sha256": "b17979a666e01af48a55a1477a525bd32aa5e2445ca0ae11208296a8968bad3d",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": "mcp-toolchain",
       "displayName": "MCP Server Toolchain",
       "description": "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
@@ -448,13 +480,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 272629760,
+          "sizeBytes": 46588132,
           "channels": {
             "stable": {
               "version": "node20.18.0-uv0.5.4",
-              "releasedAt": "2026-05-10T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/mcp-toolchain-node20-uv0.5.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "releasedAt": "2026-08-25T04:20:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/mcp-toolchain-node-uv-node20.18.0-uv0.5.4.zip",
+              "sha256": "9326aad94f6deef745a43c529d86ee6de69eb7dcde3804d4aa8d64dbb1386d19",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -520,13 +552,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 41943040,
+          "sizeBytes": 7819542,
           "channels": {
             "stable": {
               "version": "0.1.0",
-              "releasedAt": "2026-05-15T00:00:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/tools-python-base-0.1.0.zip",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "releasedAt": "2026-08-25T04:20:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/tools-python-base-0.1.0.zip",
+              "sha256": "48550f73bad4b9ff1de0dc64e7f6092a477a70f5bf779c0dd32d20d5b04a1bdb",
               "minShellVersion": "0.1.0",
               "signature": null
             }

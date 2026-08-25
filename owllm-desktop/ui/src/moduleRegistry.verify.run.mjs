@@ -58,6 +58,51 @@ check(pinned.length > 0, "bootstrap-manifest and registry share at least one var
 const CONVENTION_TAG = "modules-2026.08.11";
 const tagOf = (url) => (url.match(/\/download\/([^/]+)\//) || [])[1] || "";
 
+// --- no registry URL may point at an asset that was never uploaded ----------
+// 2026-08-25: eight variants shipped for months with zero-hash placeholders
+// pointing at modules-2026.05.28 — a release that only ever received the three
+// local-inference zips. Every Windows user hit HTTP 404 on install ("Install
+// Claude CLI" → mcp-toolchain → python-runtime → 404). The grandfather clause
+// above hid them, so the ban below is unconditional: a variant either carries
+// a real hash + a published tag, or it is listed here WITH the reason it
+// cannot ship. Growing this list is a release decision, not a default.
+const KNOWN_UNPUBLISHED = new Map([
+  ["finetune-unsloth-cu124", "wheelhouse ~12 GiB exceeds GitHub's 2 GiB release-asset ceiling"],
+  ["finetune-unsloth-cu121", "wheelhouse ~12 GiB exceeds GitHub's 2 GiB release-asset ceiling"],
+  ["finetune-base-cu118", "wheelhouse ~19 GiB exceeds GitHub's 2 GiB release-asset ceiling"],
+  ["audio-stt-whisper-large", "ggml-large-v3 payload ~3.2 GiB exceeds GitHub's 2 GiB release-asset ceiling"],
+]);
+// The only assets modules-2026.05.28 ever received. Any OTHER URL naming that
+// tag points at a 404 by construction.
+const TAG_2026_05_28_REAL_ASSETS = new Set([
+  "local-inference-cpu-b3850.zip",
+  "local-inference-cuda-b3850.zip",
+  "local-inference-vulkan-b3850.zip",
+]);
+for (const mod of registry.modules) {
+  for (const v of mod.variants) {
+    for (const [channel, rel] of Object.entries(v.channels)) {
+      if (KNOWN_UNPUBLISHED.has(v.id)) {
+        console.log(`· ${v.id} [${channel}] known-unpublished: ${KNOWN_UNPUBLISHED.get(v.id)}`);
+        continue;
+      }
+      check(
+        /^[0-9a-f]{64}$/.test(rel.sha256) && !/^0+$/.test(rel.sha256),
+        `${v.id} [${channel}] carries a real sha256 (zero placeholder = asset was never built/uploaded)`,
+      );
+      const asset = rel.downloadUrl.split("/").pop();
+      check(
+        tagOf(rel.downloadUrl) !== "modules-2026.05.28" || TAG_2026_05_28_REAL_ASSETS.has(asset),
+        `${v.id} [${channel}] does not point at modules-2026.05.28, a tag that never received '${asset}'`,
+      );
+    }
+  }
+}
+// The exception list must not silently outlive its variants.
+for (const id of KNOWN_UNPUBLISHED.keys()) {
+  check(variants.has(id), `KNOWN_UNPUBLISHED entry '${id}' still names a real registry variant`);
+}
+
 for (const [id, cfg] of pinned) {
   const v = variants.get(id);
   for (const [channel, rel] of Object.entries(v.channels)) {

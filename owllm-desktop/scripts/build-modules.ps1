@@ -157,6 +157,19 @@ function Build-Simple {
         Expand-Strip -zip $cacheFile -dest $extractDir -strip $strip
     }
 
+    # postExtract "unblock-pip": the python.org embeddable distro ships a
+    # python3NN._pth whose "#import site" comment disables site-packages, so
+    # pip can never install into it. Uncomment it so the runtime is usable
+    # as a real interpreter (uv/pip installs work).
+    if ($cfg.postExtract -eq "unblock-pip") {
+        $pth = Get-ChildItem $extractDir -Filter "python*._pth" | Select-Object -First 1
+        if (-not $pth) { throw "$variantId declares unblock-pip but no python*._pth found" }
+        $content = Get-Content $pth.FullName -Raw
+        if ($content -notmatch "(?m)^#\s*import site") { throw "$variantId ._pth has no commented 'import site' line to unblock" }
+        Set-Content -Path $pth.FullName -Value ($content -replace "(?m)^#\s*import site", "import site") -NoNewline -Encoding Ascii
+        Write-Sub "unblock-pip: enabled 'import site' in $($pth.Name)"
+    }
+
     # Optional include filter -- drop everything not matching.
     if ($cfg.include) {
         $allFiles = Get-ChildItem -Recurse -File $extractDir
@@ -219,6 +232,12 @@ function Build-Wheelhouse {
     New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
     $args = @("-m", "pip", "download", "-r", $reqPath, "-d", $extractDir)
     if ($cfg.pipExtraIndexUrl) { $args += @("--extra-index-url", $cfg.pipExtraIndexUrl) }
+    # The wheelhouse targets the MODULE's pinned interpreter, not whatever
+    # python the build host has on PATH — without this, a 3.12/3.13 host
+    # downloads cp312+ wheels the embedded 3.11 runtime cannot import.
+    if ($cfg.pythonVersion) {
+        $args += @("--python-version", $cfg.pythonVersion, "--only-binary", ":all:")
+    }
     Write-Sub "pip download -> $extractDir"
     & python $args
     if ($LASTEXITCODE -ne 0) {

@@ -132,7 +132,21 @@
       "moduleVersion": "3.11.9",
       "upstreamUrl": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
       "extractStrip": 0,
-      "postExtract": "unblock-pip"
+      "postExtract": "unblock-pip",
+      "requireFiles": [
+        "python.exe"
+      ]
+    },
+    "nodejs-runtime-win": {
+      "moduleVersion": "node20.18.0",
+      "_comment": "Dedicated Node.js runtime — what the CLI installer's 'Node.js runtime not installed' message points at. module_node_exe() resolves the nodejs-runtime- family first, mcp-toolchain- as legacy fallback.",
+      "upstreamUrl": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
+      "extractStrip": 1,
+      "requireFiles": [
+        "node.exe",
+        "npm.cmd",
+        "npx.cmd"
+      ]
     },
     "mcp-toolchain-node-uv": {
       "moduleVersion": "node20.18.0-uv0.5.4",
@@ -149,6 +163,10 @@
           "extractStrip": 0,
           "destDir": "uv"
         }
+      ],
+      "requireFiles": [
+        "node.exe",
+        "uv.exe"
       ]
     },
     "finetune-unsloth-cu124": {

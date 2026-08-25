@@ -85,9 +85,29 @@ static LISTENER: Lazy<Mutex<ListenerState>> = Lazy::new(|| {
     })
 });
 
+/// A network transition (especially sleep/wake on macOS) can make tiny_http's
+/// receive loop exit. The thread used to disappear while `port` stayed set, so
+/// every later idempotent start concluded that the listener was healthy and the
+/// device remained unreachable until the whole app restarted.
+fn reap_finished_listener(state: &mut ListenerState) {
+    let finished = state
+        .thread
+        .as_ref()
+        .map(JoinHandle::is_finished)
+        .unwrap_or(false);
+    if finished {
+        if let Some(thread) = state.thread.take() {
+            let _ = thread.join();
+        }
+        state.port = None;
+    }
+}
+
 /// The port this device's listener is bound to, if running.
 pub fn current_port() -> Option<u16> {
-    LISTENER.lock().unwrap().port
+    let mut state = LISTENER.lock().unwrap();
+    reap_finished_listener(&mut state);
+    state.port
 }
 
 /// The PRIMARY ("ip:port") endpoint — the first (most WAN-reachable) candidate.
@@ -100,9 +120,10 @@ pub fn current_endpoint() -> Option<String> {
 /// ephemeral one if taken, and returns the primary "ip:port" endpoint.
 pub fn start(rt: tokio::runtime::Handle) -> Result<String, String> {
     {
-        let st = LISTENER.lock().unwrap();
-        if st.port.is_some() {
-            drop(st);
+        let mut state = LISTENER.lock().unwrap();
+        reap_finished_listener(&mut state);
+        if state.port.is_some() {
+            drop(state);
             return current_endpoint().ok_or_else(|| "listener up but no address".to_string());
         }
     }
@@ -315,4 +336,27 @@ pub fn status_json() -> serde_json::Value {
         "endpoint": current_endpoint(),
         "endpoints": candidate_endpoints(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exited_listener_is_reaped_before_health_is_reported() {
+        let thread = std::thread::spawn(|| {});
+        while !thread.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut state = ListenerState {
+            port: Some(DEFAULT_PORT),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: Some(thread),
+        };
+
+        reap_finished_listener(&mut state);
+
+        assert_eq!(state.port, None);
+        assert!(state.thread.is_none());
+    }
 }

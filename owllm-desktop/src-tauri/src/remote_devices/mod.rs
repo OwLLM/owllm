@@ -52,6 +52,12 @@ use protocol::{
 };
 use transport::{LanDirectTransport, LoopbackTransport, Transport};
 
+/// Transport health is native work, not WebView work. Thirty seconds keeps a
+/// sleep/wake failure short while the five-tick heartbeat retains the existing
+/// 150-second vault cadence.
+const DEVICE_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(30);
+const DEVICE_HEARTBEAT_EVERY_TICKS: u8 = 5;
+
 // ------------------------------------------------------------------
 // Shared small helpers
 // ------------------------------------------------------------------
@@ -953,16 +959,32 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
 /// the endpoints it advertises are whatever the listener exposes at that
 /// moment — starting lazily (first Devices-page visit) published endpoint-less
 /// records, which made every peer's "Pair" fail with "no known LAN endpoint".
+/// The native task continues supervising health every 30 seconds and publishes
+/// presence every 150 seconds, even while the WebView is suspended.
 pub fn init(app: &AppHandle) {
     store_app(app);
-    tauri::async_runtime::spawn(async {
-        ensure_listener_started(tokio::runtime::Handle::current());
-        // Publish our record (endpoints + p2p node id) and pull peers right at
-        // boot, so an auto-enabled machine becomes discoverable without anyone
-        // clicking Discover on it. Fire-and-forget — the git round-trip must
-        // not stall startup, and it's a no-op when the feature is off.
-        if feature_enabled() {
-            let _ = crate::vault::vault_sync_devices().await;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(DEVICE_HEALTHCHECK_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut heartbeat_tick = 0_u8;
+        loop {
+            // interval() fires its first tick immediately, so launch still
+            // starts listeners and publishes without waiting 30 seconds.
+            ticker.tick().await;
+            ensure_listener_started(tokio::runtime::Handle::current());
+            // Publish our record (endpoints + p2p node id) and pull peers. The
+            // native cadence is independent of window visibility/App Nap.
+            if feature_enabled() && heartbeat_tick == 0 {
+                match crate::vault::vault_sync_devices().await {
+                    Ok(true) => {
+                        let _ = app.emit("owllm:devices:refresh", ());
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("remote_devices: heartbeat sync failed: {e}"),
+                }
+            }
+            heartbeat_tick = (heartbeat_tick + 1) % DEVICE_HEARTBEAT_EVERY_TICKS;
         }
     });
 }

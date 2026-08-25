@@ -1981,11 +1981,12 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
         return Ok(false);
     }
     let (self_id, self_json) = crate::remote_devices::self_vault_record()?;
-    // Coalescing: a 150s liveness heartbeat. A skipped beat is re-sent on the
-    // next tick, well inside isDeviceOnline's 5-minute freshness window.
-    let Some(_gate) = vault_admit_now() else {
-        return Ok(false);
-    };
+    // Presence is a machine-level contract. This used to use try_acquire and
+    // silently drop the beat whenever projects/notebooks already owned the
+    // vault. On a busy app, repeated collisions made a running peer look
+    // offline. The native supervisor has one in-flight heartbeat, so waiting
+    // asynchronously here is bounded without consuming a blocking thread.
+    let _gate = vault_admit().await;
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let _txn = vault_txn();
         let branch = current_branch(&dir);

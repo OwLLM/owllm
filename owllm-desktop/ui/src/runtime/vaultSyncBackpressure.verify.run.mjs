@@ -267,13 +267,19 @@ const insideSpawn = admissions.filter((m) => {
 check(admissions.length >= 8 && insideSpawn.length === 0,
   `all ${admissions.length} admissions are taken BEFORE spawn_blocking, never inside it`);
 
-// The 5s poll and the two other periodic republishers must coalesce.
-const coalescing = ["vault_write_state", "vault_sync_projects", "vault_sync_devices"];
+// High-frequency derived-state pollers coalesce. Device presence is different:
+// one native supervisor owns it, so dropping the only heartbeat can mark a live
+// machine offline; it waits asynchronously without occupying a blocking thread.
+const coalescing = ["vault_write_state", "vault_sync_projects"];
 for (const name of coalescing) {
   const body = vaultRs.split(`pub async fn ${name}`)[1]?.split("\npub async fn ")[0] ?? "";
   check(/let Some\(_gate\) = vault_admit_now\(\)/.test(body),
     `${name} coalesces a tick that lands mid-sync instead of queueing behind it`);
 }
+const deviceSyncBody = vaultRs.split("pub async fn vault_sync_devices")[1]?.split("\npub async fn ")[0] ?? "";
+check(/let _gate = vault_admit\(\)\.await;/.test(deviceSyncBody)
+  && !/vault_admit_now\(\)/.test(deviceSyncBody),
+  "vault_sync_devices reliably waits as an async task instead of dropping machine presence");
 check(/pub async fn vault_write_state\(json: String\) -> Result<bool, String>/.test(vaultRs),
   "vault_write_state reports whether it actually wrote, so a skip can be retried");
 

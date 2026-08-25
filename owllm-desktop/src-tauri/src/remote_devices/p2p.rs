@@ -123,7 +123,12 @@ pub fn running() -> bool {
 pub async fn ensure_running() -> Result<Endpoint, String> {
     let mut g = ENDPOINT.lock().await;
     if let Some(ep) = g.as_ref() {
-        return Ok(ep.clone());
+        if RUNNING.load(Ordering::SeqCst) {
+            return Ok(ep.clone());
+        }
+        // The accept loop exited but its cleanup had not acquired this lock
+        // yet. Drop the dead handle now so this call can bind a fresh endpoint.
+        g.take();
     }
     let sk = load_or_create_secret()?;
     let ep = Endpoint::builder(presets::N0)
@@ -168,6 +173,7 @@ pub fn stop() {
 // ------------------------------------------------------------------
 
 async fn accept_loop(ep: Endpoint) {
+    let endpoint_id = ep.id();
     while let Some(incoming) = ep.accept().await {
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else { return };
@@ -183,6 +189,17 @@ async fn accept_loop(ep: Endpoint) {
                 let _ = send.finish();
             }
         });
+    }
+    // Sleep/wake or a network-stack reset can terminate accept without an
+    // explicit stop(). Clear only this generation: a concurrent restart may
+    // already have installed a newer endpoint under the same global lock.
+    RUNNING.store(false, Ordering::SeqCst);
+    let mut g = ENDPOINT.lock().await;
+    if g.as_ref()
+        .map(|held| held.id() == endpoint_id)
+        .unwrap_or(false)
+    {
+        g.take();
     }
 }
 

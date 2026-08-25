@@ -27,7 +27,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMirror";
 import { mergeSteps, unionTombstones } from "./notebookMerge";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
-import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
 // The three module-level caches that hold a SYNCABLE localStorage key and would
 // otherwise keep serving their pre-sync copy after an adoption. Every other
 // consumer re-reads storage on render (pageSettings.get() hits localStorage on
@@ -743,11 +742,6 @@ function wireListeners(): void {
     }, localQueueIsRunning() ? NOTEBOOK_ACTIVE_PULL_MS : NOTEBOOK_IDLE_PULL_MS);
   };
   scheduleNotebookPull();
-  // Fleet liveness heartbeat: republish OUR device record (fresh published_at)
-  // and ingest peers' heartbeats. Without this the record was published once at
-  // launch, so isDeviceOnline's 5-minute freshness window was unhittable for
-  // any idle machine and every fleet count went stale.
-  window.setInterval(() => { if (_enabled) void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS);
 }
 
 // githubDisconnect emits this after the native credential scrub completes.

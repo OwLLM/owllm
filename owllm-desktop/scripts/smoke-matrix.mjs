@@ -224,7 +224,7 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /fn vault_write_state\(json: String\) -> Result<bool, String>/, "vault_write_state reports a coalesced tick so the caller can retry it (v1.0.18)"],
   ["src-tauri/src/vault.rs", /fn vault_write_state[\s\S]{0,600}let Some\(_gate\) = vault_admit_now\(\)/, "the 5s state push coalesces instead of queueing behind the running sync (v1.0.18)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_projects[\s\S]{0,900}let Some\(_gate\) = vault_admit_now\(\)/, "the 60s project sync coalesces instead of queueing (v1.0.18)"],
-  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,600}let Some\(_gate\) = vault_admit_now\(\)/, "the 150s device heartbeat coalesces instead of queueing (v1.0.18)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,600}let _gate = vault_admit\(\)\.await;/, "the native device heartbeat waits asynchronously instead of silently disappearing behind another sync (v1.0.28)"],
   ["src-tauri/src/vault.rs", /fn loose_object_count\(common: &std::path::Path, cap: usize\) -> usize/, "loose objects are counted, so a 128k-object runaway is visible to maintenance (v1.0.18)"],
   ["src-tauri/src/vault.rs", /packs <= PACK_LIMIT && loose < LOOSE_LIMIT/, "consolidation is gated on loose objects too, not pack count alone (v1.0.18)"],
   ["src-tauri/src/vault.rs", /fn maintain_repo_if_due[\s\S]{0,700}maintain_repo\(dir\)/, "consolidation re-checks on an interval, not once per process (v1.0.18)"],

@@ -365,6 +365,18 @@ that keeps one large icon per feature the column holds — left 🧠 memory /
 Notebook and rules open the column straight onto their page; the 🌐 icon works
 **while shrunk** — it opens the browser on its welcome page and arranges OwLLM
 and the browser half/half, the same split the personal-assistant recipe uses.
+**Background-work continuity** (`cli_orphans.rs` + `orphanContinuation.ts`):
+a turn that ends while a process it started is still running (a build, a test
+matrix, a deploy) no longer loses that work. The backend samples every CLI
+child's descendants while it lives (all OSes, every CLI — claude/codex/kimi/
+gemini/grok), adopts the survivors when the turn exits naturally, announces
+them in the transcript ("still running — I'll continue when it finishes"), and
+when the last one exits the page auto-sends a continuation turn that tells the
+agent to verify the result from the process's own logs and finish what it
+promised. Stop and watchdog kills never arm a continuation (the tree died with
+the turn); the chain is capped at 3 automatic turns and the watch at 2 h.
+Finished events that land while the page is unmounted are held and delivered
+on the next mount.
 
 ## Isolation & sandboxing
 

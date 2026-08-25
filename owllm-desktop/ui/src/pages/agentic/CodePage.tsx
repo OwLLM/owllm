@@ -30,6 +30,7 @@ import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
+import { subscribeOrphanContinuation, orphanDetectedNotice, orphanContinuationPrompt, type OrphanEvent } from "./orphanContinuation";
 import CodeSidePanel, { selectCodeSidePanelTab, type CodeAgentMode } from "./CodeSidePanel";
 import { CodeProjectRailIcons, CodeUtilityRailIcons, RAIL_W } from "./CodeColumnRails";
 import { openWelcomeBrowserSplit } from "./projectEnvironment";
@@ -1108,6 +1109,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   // from looping forever (the user un-pauses by just sending a message).
   const autoFeedHopsRef = useRef(0);
   const AUTO_FEED_MAX_HOPS = 6;
+  // Consecutive AUTOMATIC background-work continuations (cli_orphans.rs).
+  // Capped for the same reason as auto-feed: a turn whose continuation itself
+  // leaves background work behind must not chain forever without a human.
+  const orphanHopsRef = useRef(0);
+  const ORPHAN_MAX_HOPS = 3;
   const sendSecondaryRef = useRef<((textOverride?: string) => Promise<void>) | null>(null);
   const termBoxRef = useRef<HTMLDivElement>(null);
   const termDragRef = useRef<{ dx: number; dy: number } | null>(null);
@@ -2594,7 +2600,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       setTasks([]);
       setPlanGoal(undefined);
     }
-    if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; orphanHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -2752,6 +2758,37 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
+  // Background-work continuity (cli_orphans.rs): a turn that ends while a
+  // process it started is still running gets a transcript notice, and the
+  // session auto-resumes with a continuation turn when that work finishes —
+  // instead of the promise dying with the turn ("I'll commit when the matrix
+  // finishes" used to end here, silently). Ref-dispatch hits the CURRENT send
+  // closure; a finished event that arrives while this page is unmounted is
+  // held by the module and delivered on the next mount. Stop never triggers
+  // this — the Rust kill path tree-kills the work and forgets it.
+  useEffect(() => {
+    if (!workspace) return;
+    const wire = (pane: "primary" | "secondary") => (ev: OrphanEvent) => {
+      const append = pane === "secondary" ? setSecondaryMessages : setMessages;
+      if (ev.kind === "detected") {
+        append((m) => [...m, { role: "assistant", content: orphanDetectedNotice(ev.group), ts: Date.now() }]);
+        return;
+      }
+      if (orphanHopsRef.current >= ORPHAN_MAX_HOPS) {
+        append((m) => [...m, { role: "assistant", content: `⏸ Background work finished, but auto-continuation is paused after ${ORPHAN_MAX_HOPS} automatic turns — send a message to continue.\n\n${orphanContinuationPrompt(ev.group)}`, ts: Date.now() }]);
+        return;
+      }
+      orphanHopsRef.current += 1;
+      // send()/sendSecondary() queue as a ⚡ steer when the pane is mid-turn,
+      // so a continuation can never clobber a run the user already started.
+      if (pane === "secondary") { void sendSecondaryRef.current?.(orphanContinuationPrompt(ev.group)); }
+      else { void sendRef.current?.(orphanContinuationPrompt(ev.group)); }
+    };
+    const unPrimary = subscribeOrphanContinuation(primaryCancelScope(workspace), wire("primary"));
+    const unSecondary = subscribeOrphanContinuation(secondaryCancelScope(workspace), wire("secondary"));
+    return () => { unPrimary(); unSecondary(); };
+  }, [workspace]);
+
   // Send from the second-agent pane. Runs independently of the primary chat,
   // shares the workspace/model, and keeps its own transcript + abort controller.
   // `textOverride` = an ⇄ auto-fed reply from the primary; composer sends pass
@@ -2775,7 +2812,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
     const secondaryRunCwd = await ensureSecondaryWorktree();
     if (!(await ensureWorktreeCurrent(secondaryRunCwd))) return;
-    if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; orphanHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
     setSecondaryBusy(true);

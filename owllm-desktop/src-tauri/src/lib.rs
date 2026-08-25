@@ -44,6 +44,7 @@ mod bridges;
 mod browser;
 mod browser_import;
 mod browser_vault;
+mod cli_orphans;
 mod code;
 mod crypt;
 mod data_layer;
@@ -490,6 +491,9 @@ pub fn run() {
             // launch-time vault sync publishes this device's record WITH its
             // dialable endpoints — lazy start left peers endpoint-less records.
             remote_devices::init(&app.handle());
+            // Background-work continuity: lets the orphan watcher emit
+            // cli-orphans-detected/-finished to the UI (see cli_orphans.rs).
+            cli_orphans::init(app.handle());
             // Launch-at-login: self-register on first run (idempotent, per-user,
             // honors a prior explicit opt-out) so OwLLM comes back after a reboot
             // without the user re-launching it. Failures are logged and swallowed.
@@ -579,6 +583,8 @@ pub fn run() {
             accounts::grok_cli_complete,
             accounts::cli_cancel_all,
             accounts::cli_cancel_scope,
+            cli_orphans::cli_orphans_snapshot,
+            cli_orphans::cli_orphans_ack,
             accounts::subscription_cli_login,
             accounts::subscription_cli_logout,
             accounts::cli_install,

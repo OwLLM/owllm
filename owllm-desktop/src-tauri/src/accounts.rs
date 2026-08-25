@@ -213,6 +213,10 @@ fn register_cli_child_scoped(child: &std::process::Child, scope: Option<&str>) -
                 .map(str::to_string),
         );
     }
+    // Sample this child's descendant tree while it lives, so background work
+    // it leaves behind at a NATURAL exit can be adopted and watched to
+    // completion (see cli_orphans.rs). Kill paths call forget() instead.
+    crate::cli_orphans::track(pid);
     pid
 }
 
@@ -220,6 +224,21 @@ fn unregister_cli_child(pid: u32) {
     if let Ok(mut s) = cli_children().lock() {
         s.remove(&pid);
     }
+}
+
+/// A CLI child ended on its own (not Stop, not timeout): hand its surviving
+/// descendants to the orphan watch under the child's cancel scope, THEN drop
+/// it from the kill registry. Every natural-exit site must go through here —
+/// a site that calls bare `unregister_cli_child` silently loses the turn's
+/// background work again.
+fn finish_cli_child_natural(pid: u32) {
+    let scope = cli_children()
+        .lock()
+        .ok()
+        .and_then(|s| s.get(&pid).cloned())
+        .flatten();
+    crate::cli_orphans::adopt(pid, scope.as_deref());
+    unregister_cli_child(pid);
 }
 
 /// Wait for a registered CLI child and drop it from the kill registry no
@@ -291,7 +310,7 @@ fn wait_cli_child(
             for t in readers {
                 let _ = t.join();
             }
-            unregister_cli_child(pid);
+            finish_cli_child_natural(pid);
             return Ok(std::process::Output {
                 status,
                 stdout: take(&stdout_buf),
@@ -307,6 +326,7 @@ fn wait_cli_child(
             for t in readers {
                 let _ = t.join();
             }
+            crate::cli_orphans::forget(pid);
             unregister_cli_child(pid);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -411,7 +431,7 @@ where
             while let Ok(line) = line_rx.try_recv() {
                 on_stdout_line(&line);
             }
-            unregister_cli_child(pid);
+            finish_cli_child_natural(pid);
             return Ok(std::process::Output {
                 status,
                 stdout: take(&stdout_buf),
@@ -427,6 +447,7 @@ where
             for t in readers {
                 let _ = t.join();
             }
+            crate::cli_orphans::forget(pid);
             unregister_cli_child(pid);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -501,6 +522,9 @@ fn kill_cli_children(scope: Option<&str>) -> Result<u32, String> {
         if ok {
             killed += 1;
         }
+        // Stop tree-kills the descendants with the CLI — a user who pressed
+        // Stop must never receive an automatic continuation for that turn.
+        crate::cli_orphans::forget(pid);
         unregister_cli_child(pid);
     }
     Ok(killed)
@@ -3986,7 +4010,12 @@ pub async fn claude_cli_stream(
         let wait_res = child.wait();
         stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = watchdog.join();
-        unregister_cli_child(child_pid);
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::cli_orphans::forget(child_pid);
+            unregister_cli_child(child_pid);
+        } else {
+            finish_cli_child_natural(child_pid);
+        }
         let status = wait_res.map_err(|e| format!("wait claude: {e}"))?;
         if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(format!(
@@ -4571,7 +4600,12 @@ pub async fn codex_cli_stream(
         stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = watchdog.join();
         let _ = stderr_reader.join();
-        unregister_cli_child(child_pid);
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::cli_orphans::forget(child_pid);
+            unregister_cli_child(child_pid);
+        } else {
+            finish_cli_child_natural(child_pid);
+        }
         let status = wait_res.map_err(|e| format!("wait codex: {e}"))?;
         let asm = assembled.trim().to_string();
         if timed_out.load(std::sync::atomic::Ordering::Relaxed) {

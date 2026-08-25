@@ -25,6 +25,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { firstCompleteAuthUrl } from "./authUrlCapture";
+import { authStateFromUrl, isStaleAuthCode } from "./authCodeGuard";
 import { unwrapTerminalLines, type TerminalRow } from "./unwrapTerminalLines";
 
 /// Rows of terminal scrollback searched for a login URL. A login banner plus a
@@ -83,6 +84,10 @@ export default function PtyTerminal({
   const pendingInputRef = useRef<string[]>([]);
   const inputErrorRef = useRef(false);
   const lastAuthCodeRef = useRef("");
+  /// `state` parameter of THIS session's authorize URL. Callback codes carry
+  /// the same value after `#`; a mismatch means the code belongs to an earlier
+  /// sign-in attempt (a stale tab) and would make the CLI exit on the spot.
+  const authStateRef = useRef("");
   const [pasteError, setPasteError] = useState("");
   const [authUrl, setAuthUrl] = useState("");
   const onExitRef = useRef(onExit);
@@ -227,6 +232,7 @@ export default function PtyTerminal({
       // convenience; without a manual way in, a single miss leaves sign-in with
       // no route at all.
       setAuthUrl(url);
+      authStateRef.current = authStateFromUrl(url);
       if (authUrlOpened) return;
       authUrlOpened = true;
       openAuthUrl(url);
@@ -277,6 +283,14 @@ export default function PtyTerminal({
       if (authProvider !== "claude_cli") return;
       const code = event.payload?.code?.trim();
       if (!code || code === lastAuthCodeRef.current) return;
+      // The CLI exits permanently on the FIRST rejected code, so a code minted
+      // by a stale sign-in tab must never be typed.
+      if (isStaleAuthCode(code, authStateRef.current)) {
+        term.write(
+          "\r\n\x1b[33m[sign-in] Ignored a code from an earlier sign-in attempt — finish the flow in the newest sign-in tab.\x1b[0m\r\n",
+        );
+        return;
+      }
       lastAuthCodeRef.current = code;
       ptyWrite(`${code}\r`);
       term.focus();

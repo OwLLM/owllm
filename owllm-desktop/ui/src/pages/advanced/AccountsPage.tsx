@@ -816,7 +816,7 @@ type ActiveTerminal = {
 };
 
 function RightRail({
-  stacked, activeTerm, tab, setTab, onCloseTerm, onTerminalOutput, onAuthTabOpened,
+  stacked, activeTerm, tab, setTab, onCloseTerm, onTerminalOutput, onAuthTabOpened, onTermExit,
 }: {
   stacked: boolean;
   activeTerm: ActiveTerminal | null;
@@ -825,6 +825,7 @@ function RightRail({
   onCloseTerm: () => void;
   onTerminalOutput: (backend: string, text: string) => void;
   onAuthTabOpened: (backend: string, tabId: number) => void;
+  onTermExit: (backend: string, code: number | null) => void;
 }) {
   // Auto-switch to the terminal tab whenever a new session opens, so
   // the user doesn't have to hunt for it. Switching back to log is up
@@ -890,6 +891,7 @@ function RightRail({
               visible={tab === "terminal"}
               onOutputText={(text) => onTerminalOutput(activeTerm.backend, text)}
               onAuthTabOpened={(tabId) => onAuthTabOpened(activeTerm.backend, tabId)}
+              onExit={(code) => onTermExit(activeTerm.backend, code)}
             />
           : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
@@ -1293,6 +1295,14 @@ export default function AccountsPage() {
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       completedLogins.current.delete(route.backend);
       terminalOutput.current[route.backend] = "";
+      // Close the previous attempt's sign-in tab, not just forget it: a stale
+      // tab left open can deliver a code minted for a dead CLI session, and
+      // the pile of look-alike tabs makes users finish the flow in the wrong
+      // one. The new session opens its own fresh tab.
+      const staleAuthTab = authTabs.current[route.backend];
+      if (typeof staleAuthTab === "number") {
+        invoke("browser_close_tab", { tabId: staleAuthTab }).catch(() => {});
+      }
       delete authTabs.current[route.backend];
       setActiveTerm({
         launchId: ++terminalLaunchId.current,
@@ -1366,6 +1376,15 @@ export default function AccountsPage() {
     if (route) {
       window.setTimeout(() => { void probeSubscriptionHealth(route, false); }, 700);
     }
+  }
+
+  function handleTermExit(backend: string, code: number | null) {
+    if (completedLogins.current.has(backend) || code === 0) return;
+    // The login CLIs end the whole run on one rejected code (Claude prints
+    // "Request failed with status code 400" and exits). Without this line the
+    // only trace is a gray exit marker, and users keep pasting into a
+    // terminal that no longer has a process behind it.
+    logInfo(backend, `✗ The sign-in CLI closed (code ${code ?? "?"}). Sign-in codes are single-use and expire quickly — click Connect to start a fresh sign-in.`);
   }
 
   function handleCloseTerm() {
@@ -1637,6 +1656,7 @@ export default function AccountsPage() {
           onCloseTerm={handleCloseTerm}
           onTerminalOutput={handleTerminalOutput}
           onAuthTabOpened={handleAuthTabOpened}
+          onTermExit={handleTermExit}
         />
       </div>
 

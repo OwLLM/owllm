@@ -1,4 +1,8 @@
 node_modules/
+# npm staged-install scratch (packages staged here, then renamed into
+# node_modules/). Untracked leftovers blocked Coding-page runs as "pending
+# edits" and were once accidentally committed by a Sync (a0936085).
+node_modules.partial/
 dist/
 ui/dist/
 target/

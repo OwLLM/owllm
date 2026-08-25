@@ -244,6 +244,12 @@ pub(crate) fn is_app_scratch(path: &str) -> bool {
         || p.starts_with(".owllm-inbox/")
         || p == ".owllm/brainstorm.json"
         || p == ".owllm/eval-traces.jsonl"
+        // npm staged-install scratch: external tooling stages packages in
+        // `node_modules.partial/` before renaming into `node_modules/`. A run
+        // caught mid-install left it behind as `??` and the refresh gate then
+        // refused every model run as "pending edits" (it even got committed
+        // once by a Sync — see a0936085). Never user work; also gitignored.
+        || p.split('/').any(|seg| seg == "node_modules.partial")
 }
 
 /// Extract the file path from one `git status --porcelain` line, resolving the
@@ -3130,6 +3136,14 @@ mod tests {
         assert!(is_app_scratch(".owllm/eval-traces.jsonl"));
         assert!(is_app_scratch("./.owllm-inbox/x.png"));
         assert!(is_app_scratch(".owllm-inbox\\image_1.png")); // porcelain can emit backslashes
+        // npm staged-install scratch left behind mid-install must never read as
+        // "pending edits" (regression: blocked all Coding-page runs, 2026-08-25).
+        assert!(is_app_scratch("owllm-desktop/node_modules.partial/"));
+        assert!(is_app_scratch(
+            "owllm-desktop/node_modules.partial/esbuild/package.json"
+        ));
+        assert!(is_app_scratch("node_modules.partial"));
+        assert!(!is_app_scratch("owllm-desktop/node_modules.partial.md")); // sibling file, not the dir
                                                               // Real source changes must STILL block (branch cuts from HEAD).
         assert!(!is_app_scratch("src/main.rs"));
         assert!(!is_app_scratch("owllm-desktop/ui/src/App.tsx"));

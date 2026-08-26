@@ -11,16 +11,16 @@
     <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=2" width="260" alt="Download OwLLM for Windows" />
   </a>
   &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/releases/latest">
+  <a href="https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md">
     <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg" width="260" alt="Download OwLLM for Linux" />
   </a>
   &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/releases/latest">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg" width="260" alt="Watch for macOS release" />
+  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg">
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg" width="260" alt="Download OwLLM for macOS" />
   </a>
 </div>
 
-<sub>**Linux:** the AppImage needs no install (`chmod +x` and run — WebKit bundled); the `.deb` pulls `libwebkit2gtk-4.1` + `libgtk-3` from your distro (`sudo apt install ./OwLLM.Desktop.deb`).</sub>
+<sub>**Linux:** [choose by distro and architecture, then follow the install steps](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md) — Ubuntu/Debian, Fedora/RHEL, or AppImage · x86-64 or ARM64.</sub>
 
 ---
 
@@ -36,7 +36,7 @@
 </p>
 
 > [!IMPORTANT]
-> **OwLLM Desktop ships for Windows 10/11 (x64) and Linux (x86_64)** (AppImage + Debian/Ubuntu `.deb`). macOS (Apple Silicon + Intel) is next via the already-configured cross-platform CI. Watch the repo for release notifications.
+> **OwLLM Desktop ships for Windows 10/11 (x64), Linux (x86-64 and ARM64), and macOS (universal Apple Silicon + Intel).** Linux packages include AppImage, Debian/Ubuntu `.deb`, and Fedora/RHEL `.rpm`.
 
 </div>
 
@@ -282,7 +282,7 @@ A palm-sized KVM device (HDMI in, USB-HID out) that gives an agent team **eyes a
 1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)** (~30 MB — one file, that's it)
 2. Run it. The installer **and** the app binary are **EV code-signed** (Certum EV certificate). If SmartScreen still shows a prompt while the certificate's reputation builds, click "More info" → "Run anyway" — the publisher name confirms the signature.
 
-**Linux (x86_64)** — [AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage) (`chmod +x` and run, nothing to install) or [`.deb`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb) (`sudo apt install ./OwLLM.Desktop.deb`). Then:
+**Linux (x86-64 or ARM64)** — [choose the package for your distro and follow the install steps](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md). Then:
 3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
    - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models
    - **Audio / Speech-to-Text** (~148 MB) — for voice messages, mic input

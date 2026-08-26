@@ -91,7 +91,7 @@ That's it — agents and chat now run locally and isolated, using the remote GPU
 
 ![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge)
 
-[![Download installer](https://img.shields.io/badge/⬇%20Download-installer-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+[![Download installer](https://img.shields.io/badge/⬇%20Download-installer-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
 
 Native CUDA GPU server · WSL2 sandbox · signed auto-updater
 
@@ -104,7 +104,7 @@ Native CUDA GPU server · WSL2 sandbox · signed auto-updater
 
 ![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge)
 
-[![Download AppImage or deb](https://img.shields.io/badge/⬇%20AppImage%20·%20.deb-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+[![Choose Linux package](https://img.shields.io/badge/⬇%20Choose%20package-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md)
 
 llama.cpp payloads · GPU probes (NVIDIA + AMD/Intel) · bubblewrap sandbox
 
@@ -117,7 +117,7 @@ llama.cpp payloads · GPU probes (NVIDIA + AMD/Intel) · bubblewrap sandbox
 
 ![beta](https://img.shields.io/badge/beta-d29922?style=for-the-badge)
 
-[![Download dmg](https://img.shields.io/badge/⬇%20Download-.dmg-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+[![Download dmg](https://img.shields.io/badge/⬇%20Download-.dmg-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg)
 
 Metal payload · unified-memory model sizing · Lima sandbox *(awaiting HW verification)*
 

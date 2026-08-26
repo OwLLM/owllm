@@ -52,19 +52,36 @@ wslcp "rpm/*-${VERSION}-1.x86_64.rpm"        "OwLLM.Desktop_${VERSION}_x86_64.rp
 #    OwLLM.Desktop.AppImage / .deb for this tag. v1.0.13 shipped without them.
 cp "$W/OwLLM.Desktop_${VERSION}_amd64.AppImage" "$W/OwLLM.Desktop.AppImage"
 cp "$W/OwLLM.Desktop_${VERSION}_amd64.deb"      "$W/OwLLM.Desktop.deb"
+cp "$W/OwLLM.Desktop_${VERSION}_x86_64.rpm"     "$W/OwLLM.Desktop.x86_64.rpm"
 say "uploading linux-x86_64"
 gh release upload "$TAG" --repo "$REPO" --clobber \
   "$W/OwLLM.Desktop_${VERSION}_amd64.AppImage" \
   "$W/OwLLM.Desktop_${VERSION}_amd64.deb" \
   "$W/OwLLM.Desktop_${VERSION}_x86_64.rpm" \
   "$W/OwLLM.Desktop.AppImage" \
-  "$W/OwLLM.Desktop.deb"
+  "$W/OwLLM.Desktop.deb" \
+  "$W/OwLLM.Desktop.x86_64.rpm"
 
 # 3. bring the foreign updater artifacts here so they can be signed
 say "downloading foreign updater artifacts"
-for pat in "OwLLM.Desktop_${VERSION}_aarch64.AppImage" "OwLLM.Desktop_universal.app.tar.gz"; do
+for pat in "OwLLM.Desktop_${VERSION}_aarch64.AppImage" \
+           "OwLLM.Desktop_${VERSION}_arm64.deb" \
+           "OwLLM.Desktop_${VERSION}_aarch64.rpm" \
+           "OwLLM.Desktop_universal.app.tar.gz"; do
   gh release download "$TAG" --repo "$REPO" --pattern "$pat" --dir "$W" --clobber
 done
+
+# Give ARM64 users the same stable, guided links as x86-64 users. These are
+# human-download aliases only; latest.json remains pinned to the versioned
+# AppImage and its signature.
+cp "$W/OwLLM.Desktop_${VERSION}_aarch64.AppImage" "$W/OwLLM.Desktop.aarch64.AppImage"
+cp "$W/OwLLM.Desktop_${VERSION}_arm64.deb"        "$W/OwLLM.Desktop.arm64.deb"
+cp "$W/OwLLM.Desktop_${VERSION}_aarch64.rpm"      "$W/OwLLM.Desktop.aarch64.rpm"
+say "uploading stable linux-aarch64 links"
+gh release upload "$TAG" --repo "$REPO" --clobber \
+  "$W/OwLLM.Desktop.aarch64.AppImage" \
+  "$W/OwLLM.Desktop.arm64.deb" \
+  "$W/OwLLM.Desktop.aarch64.rpm"
 
 # 4. sign every updater artifact that did not come from this host.
 #    Same invocation as publish-release.sh step 2/5: on Windows the tauri CLI is

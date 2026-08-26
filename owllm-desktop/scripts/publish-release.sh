@@ -511,6 +511,24 @@ case "$HOST_OS" in
       # updater path is the AppImage).
       cp -f "$BUNDLE"/deb/*.deb "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" 2>/dev/null || true
       cp -f "$BUNDLE"/rpm/*.rpm "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" 2>/dev/null || true
+
+      # Human-facing stable names. The versioned files remain the signed,
+      # tag-pinned updater artifacts; these aliases let the installation guide
+      # link one understandable package per distro/architecture without ever
+      # exposing GitHub's raw asset list.
+      if [ "$ARCH" = "aarch64" ]; then
+        cp -f "$INSTALLER" "dist/OwLLM.Desktop.aarch64.AppImage"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop.arm64.deb"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" "dist/OwLLM.Desktop.aarch64.rpm"
+      else
+        cp -f "$INSTALLER" "dist/OwLLM.Desktop.AppImage"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop.deb"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" "dist/OwLLM.Desktop.x86_64.rpm"
+      fi
     fi
     ;;
 esac
@@ -657,7 +675,14 @@ step "4/5 gh release ($TAG, $_chan)"
 LATEST_FLAG="--latest"; [ "$PRERELEASE" = 1 ] && LATEST_FLAG="--prerelease"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
 UPLOADS=("$INSTALLER" "$LATEST")
 [ "$UPDATER_ARTIFACT" = "$INSTALLER" ] || UPLOADS+=("$UPDATER_ARTIFACT")
-for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm"; do
+for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" \
+             "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" \
+             "dist/OwLLM.Desktop.AppImage" \
+             "dist/OwLLM.Desktop.deb" \
+             "dist/OwLLM.Desktop.x86_64.rpm" \
+             "dist/OwLLM.Desktop.aarch64.AppImage" \
+             "dist/OwLLM.Desktop.arm64.deb" \
+             "dist/OwLLM.Desktop.aarch64.rpm"; do
   [ -f "$extra" ] && UPLOADS+=("$extra")
 done
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -696,7 +721,7 @@ fi
 # names still to come, and this skips them.
 carry_forward_assets() {
   local repo="$1" tag="$2"
-  local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb"
+  local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb OwLLM.Desktop.x86_64.rpm OwLLM.Desktop.aarch64.AppImage OwLLM.Desktop.arm64.deb OwLLM.Desktop.aarch64.rpm"
   local have tmp src name
   have="$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
   tmp="$(mktemp -d)"

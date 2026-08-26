@@ -169,8 +169,8 @@ gh() {
   const none = run(carryProgram(""));
   const carriedAll = (none.stdout.match(/UPLOADED /g) || []).length;
   check(
-    "with nothing pending, every missing OS installer is still carried forward",
-    none.status === 0 && carriedAll === 4,
+    "with nothing pending, every missing OS/package installer is still carried forward",
+    none.status === 0 && carriedAll === 8,
     `carried ${carriedAll}: ${none.stdout.trim()}`,
   );
 

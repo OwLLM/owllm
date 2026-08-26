@@ -552,6 +552,27 @@ jobs:
             mv "$updater_source.sig" "$updater_signature"
           fi
 
+          # Stable human-download names used by INSTALL_LINUX.md. Keep the
+          # signed updater asset target-qualified; these copies exist only so
+          # a person can choose distro + architecture without opening the raw
+          # GitHub asset list or understanding versioned build filenames.
+          case '${{ matrix.rust_target }}' in
+            x86_64-unknown-linux-gnu)
+              cp "$updater_target" stage/OwLLM.Desktop.AppImage
+              deb=$(find stage -maxdepth 1 -type f -name '*.deb' -print -quit)
+              rpm=$(find stage -maxdepth 1 -type f -name '*.rpm' -print -quit)
+              [ -z "$deb" ] || cp "$deb" stage/OwLLM.Desktop.deb
+              [ -z "$rpm" ] || cp "$rpm" stage/OwLLM.Desktop.x86_64.rpm
+              ;;
+            aarch64-unknown-linux-gnu)
+              cp "$updater_target" stage/OwLLM.Desktop.aarch64.AppImage
+              deb=$(find stage -maxdepth 1 -type f -name '*.deb' -print -quit)
+              rpm=$(find stage -maxdepth 1 -type f -name '*.rpm' -print -quit)
+              [ -z "$deb" ] || cp "$deb" stage/OwLLM.Desktop.arm64.deb
+              [ -z "$rpm" ] || cp "$rpm" stage/OwLLM.Desktop.aarch64.rpm
+              ;;
+          esac
+
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           release_tag="$GITHUB_REF_NAME"
           if [[ "$GITHUB_REF" != refs/tags/v* ]]; then

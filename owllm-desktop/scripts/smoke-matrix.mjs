@@ -347,6 +347,11 @@ function runHarnesses() {
     // "this tab never loaded" and a fabricated "the dev server is unreachable"
     // — so it must run everywhere, deps installed or not.
     "browserHonestFailure.verify.run.mjs",
+    // Source assertions over host_guard.rs plus the shipped PowerShell decision
+    // functions executed through powershell.exe. It guards the one thing
+    // standing between a scheduled SYSTEM task and killing a load-bearing
+    // service, so it must run on every host, deps installed or not.
+    "hostGuard.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

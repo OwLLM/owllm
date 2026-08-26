@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { Card, Row } from "./infoCards";
 import SandboxDiskCard from "./SandboxDiskCard";
+import HostGuardCard from "./HostGuardCard";
 import { openWebUrl } from "../../utils/openWebUrl";
 import {
   getUpdateAvailability, requestUpdateInstall, subscribeUpdateAvailability,
@@ -305,6 +306,8 @@ export default function InfoPage() {
         </Card>
 
         <SandboxDiskCard />
+
+        <HostGuardCard />
 
         <Card title="🎮 GPU detail">
           {hw && hw.gpus.length > 0 ? (

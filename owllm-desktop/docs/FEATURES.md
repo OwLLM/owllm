@@ -412,6 +412,32 @@ on the next mount.
     **modern WSL disables sparse by default due to a potential data-corruption
     risk** — never auto-applied. One-click, clearly labelled advanced.
   - No-op on Linux/macOS (bwrap = host FS; Lima manages its own disk).
+- **Leaky host services card** (`host_guard.rs`, Windows only — hidden
+  elsewhere): the disk janitor bounds what OwLLM *writes*; this bounds memory a
+  Windows service leaks because of what OwLLM *does*. Measured 2026-08-26 on a
+  14-day session: `PcaSvc` (Program Compatibility Assistant, which grows with
+  the process-creation rate — a CLI per agent turn, plus cargo/rustc/npm/git by
+  the thousand) held **2,994 MB of private bytes backing 1 MB of data**;
+  restarting it returned it to 3.9 MB doing the same job.
+  - A normal user **cannot** stop it (`sc sdshow` grants Interactive Users
+    start, not stop), and a background sweep must never raise a UAC dialog — so
+    **Install guard** asks once and registers a SYSTEM scheduled task that
+    re-checks every 6 hours and after boot, unattended, forever. The task is
+    explicitly granted read to built-in Users (a default-DACL task is invisible
+    to the non-elevated app, which made every status read say "not installed").
+  - A reclaim is authorised by one function behind a **safety triad**: the
+    svchost must host that service *alone*, the process must not be
+    kernel-critical, and its failure action must not be REBOOT. Anything
+    unreadable counts against reclaiming. Graceful stop first, always; the
+    terminate exists only because a bloated service **wedges its own shutdown**
+    (measured: STOP_PENDING with a frozen checkpoint for 8 minutes), and the
+    service restarts on demand with a fresh heap.
+  - The janitor pass (`auto_note`) only reports. The card shows each service's
+    footprint against its threshold plus the task's own log, so "installed" can
+    be told apart from "has actually run".
+  - Gate: `hostGuard.verify.run.mjs` — runs the shipped verdict and
+    failure-action parsers against truth tables and the whole shipped script
+    against an unreachable threshold.
 - GitHub connect for clone/push from inside the sandbox.
 
 ## Browser control (`browser.rs`, `browser_vault.rs`, `browser_import.rs`)

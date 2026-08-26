@@ -2623,6 +2623,11 @@ pub(crate) fn spawn_global_disk_janitor() {
                     eprintln!("[owllm] disk janitor reclaimed {caches} build caches, {staging} staging entries");
                 }
                 crate::sandbox::auto_housekeep();
+                // Same clock, the other half of the footprint: host services
+                // that leak because of what this app DOES. Report only — the
+                // reclaim itself needs admin and lives in an installed task,
+                // because a background sweep must never raise a UAC dialog.
+                crate::host_guard::auto_note();
             });
             std::thread::sleep(std::time::Duration::from_secs(JANITOR_INTERVAL_SECS));
         }

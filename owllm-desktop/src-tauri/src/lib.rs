@@ -60,6 +60,7 @@ mod gguf;
 mod git;
 mod github;
 mod hardware;
+mod host_guard;
 mod huggingface;
 mod kvm;
 mod linux_updater;
@@ -943,6 +944,10 @@ pub fn run() {
             sandbox::sandbox_enable_sparse,
             sandbox::sandbox_raise_memory,
             sandbox::sandbox_trim,
+            host_guard::host_guard_status,
+            host_guard::host_guard_install,
+            host_guard::host_guard_remove,
+            host_guard::host_guard_reclaim_now,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,

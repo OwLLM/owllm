@@ -277,10 +277,7 @@ fn install_windows_webview_recovery(_app: &tauri::App) {}
 #[cfg(windows)]
 pub(crate) fn arm_windows_webview_recovery(webview: &tauri::WebviewWindow, label: &'static str) {
     if let Err(error) = webview.with_webview(move |platform| {
-        match unsafe { platform.controller().CoreWebView2() } {
-            Ok(core) => arm_webview2_process_failed(&core, label),
-            Err(error) => eprintln!("[owllm] could not reach the {label} WebView2 core: {error}"),
-        }
+        arm_windows_platform_webview(platform, label.to_string(), Webview2Recovery::Reload)
     }) {
         eprintln!("[owllm] could not install {label} WebView2 process recovery: {error}");
     }
@@ -288,6 +285,51 @@ pub(crate) fn arm_windows_webview_recovery(webview: &tauri::WebviewWindow, label
 
 #[cfg(not(windows))]
 pub(crate) fn arm_windows_webview_recovery(_webview: &tauri::WebviewWindow, _label: &'static str) {}
+
+/// What a view does once its render process is gone.
+///
+/// The app's own surfaces are trusted and should simply come back, so they
+/// reload. An agent-browser tab is showing an arbitrary internet page that may
+/// be killing its own renderer on load, so it gets one reload and then a local
+/// notice — the invariant the Linux tab path has always held
+/// (`browser.rs::linux_configure_browser_webview`): a page failure stays inside
+/// its tab and never becomes a reload loop.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+pub(crate) enum Webview2Recovery {
+    /// Reload, bounded by the short burst budget below.
+    Reload,
+    /// Reload once, then leave this HTML in the view instead of reloading again.
+    ReloadThenNotice { html: &'static str },
+}
+
+#[cfg(windows)]
+impl Webview2Recovery {
+    fn max_reloads(self) -> u32 {
+        match self {
+            Self::Reload => 3,
+            Self::ReloadThenNotice { .. } => 1,
+        }
+    }
+}
+
+/// Arm any already-resolved WebView2, whichever Tauri type owns it.
+///
+/// Browser tabs are not `WebviewWindow`s in the framed shape — they are child
+/// `Webview`s added to the browser window — so the entry point above cannot
+/// reach them. Both call `with_webview` and end up here with the same platform
+/// handle.
+#[cfg(windows)]
+pub(crate) fn arm_windows_platform_webview(
+    platform: tauri::webview::PlatformWebview,
+    label: String,
+    policy: Webview2Recovery,
+) {
+    match unsafe { platform.controller().CoreWebView2() } {
+        Ok(core) => arm_webview2_process_failed(&core, std::rc::Rc::from(label.as_str()), policy),
+        Err(error) => eprintln!("[owllm] could not reach the {label} WebView2 core: {error}"),
+    }
+}
 
 /// Subscribe to one `ProcessFailed` event, and re-subscribe from inside it.
 ///
@@ -305,7 +347,8 @@ pub(crate) fn arm_windows_webview_recovery(_webview: &tauri::WebviewWindow, _lab
 #[cfg(windows)]
 fn arm_webview2_process_failed(
     core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
-    label: &'static str,
+    label: std::rc::Rc<str>,
+    policy: Webview2Recovery,
 ) {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -319,6 +362,7 @@ fn arm_webview2_process_failed(
     let token = Rc::new(Cell::new(0i64));
     let handler = ProcessFailedEventHandler::create(Box::new({
         let token = Rc::clone(&token);
+        let label = Rc::clone(&label);
         move |sender, args| {
         let kind = args.as_ref().and_then(|args| {
             let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
@@ -347,7 +391,7 @@ fn arm_webview2_process_failed(
         unsafe {
             let _ = core.remove_ProcessFailed(token.get());
         }
-        arm_webview2_process_failed(&core, label);
+        arm_webview2_process_failed(&core, Rc::clone(&label), policy);
 
         let entry = format!(
             "[{}] {label} WebView2 process failed: kind={}{detail}\n",
@@ -357,11 +401,17 @@ fn arm_webview2_process_failed(
         append_native_webview_log("windows-webview2.log", &entry);
         eprint!("[owllm] {entry}");
 
-        if kind == Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED)
-            && webview2_recovery_allowed(label)
-        {
-            unsafe {
-                let _ = core.Reload();
+        if kind == Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
+            if webview2_recovery_allowed(&label, policy.max_reloads()) {
+                unsafe {
+                    let _ = core.Reload();
+                }
+            } else if let Webview2Recovery::ReloadThenNotice { html } = policy {
+                // A tab that keeps killing its renderer is left with a readable
+                // local page rather than a black rectangle with no explanation.
+                unsafe {
+                    let _ = core.NavigateToString(&windows::core::HSTRING::from(html));
+                }
             }
         }
         Ok(())
@@ -379,7 +429,9 @@ fn arm_webview2_process_failed(
 
 /// A reload storm is worse than one black window: a page that kills its own
 /// renderer while loading would be reloaded forever. Allow a short burst, then
-/// stop reloading and leave the failure legible in the log instead.
+/// stop reloading and leave the failure legible in the log instead. The ceiling
+/// comes from the caller's `Webview2Recovery` — app surfaces get a wider one
+/// than a tab showing an arbitrary site.
 ///
 /// The budget is **per webview**. A single shared counter looked right and was
 /// not: with the main view and the overlay frame both armed, one round of
@@ -387,27 +439,30 @@ fn arm_webview2_process_failed(
 /// every render process the app recovered 2, then 1, then 0 views — the app's
 /// own chrome went black while the budget was still nominally unspent.
 #[cfg(windows)]
-fn webview2_recovery_allowed(label: &'static str) -> bool {
+fn webview2_recovery_allowed(label: &str, max_per_window: u32) -> bool {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     const BURST_WINDOW: Duration = Duration::from_secs(60);
-    const MAX_PER_WINDOW: u32 = 3;
-    static BURSTS: Mutex<Option<HashMap<&'static str, (u32, Instant)>>> = Mutex::new(None);
+    static BURSTS: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
 
     let now = Instant::now();
     let mut guard = BURSTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let bursts = guard.get_or_insert_with(HashMap::new);
+    // Tab keys are per tab id, so without this the map would keep an entry for
+    // every tab that ever lost a renderer. Dropping expired entries is also how
+    // a view's budget refills: a tab that failed an hour ago starts clean.
+    bursts.retain(|_, (_, started)| now.duration_since(*started) < BURST_WINDOW);
     match bursts.get(label).copied() {
-        Some((count, started)) if now.duration_since(started) < BURST_WINDOW => {
-            if count >= MAX_PER_WINDOW {
+        Some((count, started)) => {
+            if count >= max_per_window {
                 return false;
             }
-            bursts.insert(label, (count + 1, started));
+            bursts.insert(label.to_string(), (count + 1, started));
         }
-        _ => {
-            bursts.insert(label, (1, now));
+        None => {
+            bursts.insert(label.to_string(), (1, now));
         }
     }
     true

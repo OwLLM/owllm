@@ -70,10 +70,12 @@ check(
   "the main WebView2 view is armed at startup",
 );
 const armWindow = body("arm_windows_webview_recovery");
+const armPlatform = body("arm_windows_platform_webview");
 check(
-  armWindow.includes("platform.controller().CoreWebView2()")
-    && armWindow.includes("arm_webview2_process_failed(&core, label)"),
-  "arming goes through the window's own WebView2 controller",
+  armWindow.includes("arm_windows_platform_webview(platform, label.to_string(), Webview2Recovery::Reload)")
+    && armPlatform.includes("platform.controller().CoreWebView2()")
+    && armPlatform.includes("arm_webview2_process_failed(&core,"),
+  "arming goes through the view's own WebView2 controller",
 );
 // The subscription is per ICoreWebView2, not per app: an unarmed webview stays
 // black even while its sibling recovers. Measured — killing both render
@@ -101,21 +103,22 @@ check(
 // callback from a FnOnce that its Invoke take()s out of the cell on first use.
 // One add_ProcessFailed recovers exactly one renderer death and is then dead —
 // the same permanent black window, one crash later.
+const REARM = "arm_webview2_process_failed(&core, Rc::clone(&label), policy);";
 check(
-  before(arm, "ProcessFailedEventHandler::create", "arm_webview2_process_failed(&core, label);")
-    && before(arm, "arm_webview2_process_failed(&core, label);", "core.Reload()"),
+  before(arm, "ProcessFailedEventHandler::create", REARM)
+    && before(arm, REARM, "core.Reload()"),
   "the handler re-arms itself before recovering, so recovery survives more than one failure",
 );
 // Leaving the spent subscription registered doubled the handler list on every
 // failure — measured as 1, 2, then 4 log lines per view across three kills.
 check(
-  before(arm, "core.remove_ProcessFailed(token.get())", "arm_webview2_process_failed(&core, label);")
+  before(arm, "core.remove_ProcessFailed(token.get())", REARM)
     && arm.includes("token.set(raw);")
     && arm.includes("Rc::clone(&token)"),
   "the spent subscription is removed by token before re-arming, so the handler list cannot grow",
 );
 check(
-  /if kind == Some\(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED\)\s*\n?\s*&& webview2_recovery_allowed\(label\)/.test(arm),
+  /if kind == Some\(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED\) \{\s*\n\s*if webview2_recovery_allowed\(&label, policy\.max_reloads\(\)\)/.test(arm),
   "only a render-process exit is reloaded, and only when this view's burst limit allows it",
 );
 check(
@@ -131,18 +134,71 @@ check(
 
 const burst = body("webview2_recovery_allowed");
 check(
-  burst.includes("const MAX_PER_WINDOW: u32")
+  burst.includes("max_per_window: u32")
     && burst.includes("const BURST_WINDOW: Duration")
+    && burst.includes("count >= max_per_window")
     && burst.includes("return false;"),
   "a page that kills its own renderer on load cannot drive an endless reload storm",
 );
 // Measured with a shared counter: killing every render process three times over
 // recovered 2 views, then 1, then 0 — one view's failures ate another's budget.
 check(
-  burst.includes("HashMap<&'static str, (u32, Instant)>")
+  burst.includes("HashMap<String, (u32, Instant)>")
     && burst.includes("bursts.get(label)")
-    && burst.includes("bursts.insert(label,"),
+    && burst.includes("bursts.insert(label.to_string(),"),
   "the burst budget is per webview, so one view's failures cannot starve another's recovery",
+);
+// Tab keys are per tab id, unlike the two fixed app-surface labels, so an
+// unpruned map would retain an entry for every tab that ever lost a renderer.
+check(
+  before(burst, "bursts.retain(|_, (_, started)| now.duration_since(*started) < BURST_WINDOW);", "bursts.get(label)"),
+  "expired burst entries are pruned before the lookup, so per-tab keys cannot accumulate",
+);
+
+// ---- Windows / agent-browser tabs ------------------------------------------
+// A tab is not the main window: the ProcessFailed subscription is per
+// ICoreWebView2, so arming "main" does nothing for a tab, and a tab that lost
+// its renderer stays black for the rest of the session.
+const browser = fs
+  .readFileSync(path.join(DESKTOP, "src-tauri/src/browser.rs"), "utf8")
+  .replace(/\r\n/g, "\n");
+const armTab = /crate::arm_windows_platform_webview\(\s*\n\s*platform,\s*\n\s*label,\s*\n\s*crate::Webview2Recovery::ReloadThenNotice \{\s*\n\s*html: TAB_PROCESS_STOPPED_HTML,/g;
+check(
+  (browser.match(armTab) || []).length === 2,
+  "BOTH Windows tab shapes are armed — the framed child webview and the decorated fallback window",
+);
+check(
+  before(browser, 'format!("page webview: {e}"))?;', "crate::arm_windows_platform_webview")
+    && before(browser, "let label = tab_label(id);", "crate::arm_windows_platform_webview"),
+  "each tab is armed with its own per-tab label, right after that tab's webview exists",
+);
+// Measured with the bar unarmed: killing every render process of the browser
+// window recovered the main view, the overlay frame and the tab, and left the
+// bar's renderer gone — a black strip instead of the tab strip and URL box.
+check(
+  before(browser, 'format!("chrome bar webview: {e}"))?;', '"browser chrome bar".to_string()')
+    && browser.includes("crate::Webview2Recovery::Reload,"),
+  "the browser's own chrome bar is armed too, as an app surface rather than a page",
+);
+// The Linux tab path has always held this: one retry, then a readable local
+// page. A tab reloading an endlessly-crashing site forever is worse than the
+// black window being fixed here, so Windows tabs inherit the same ceiling.
+const policy = body("max_reloads");
+check(
+  /Self::ReloadThenNotice \{ \.\. \} => 1,/.test(policy) && /Self::Reload => 3,/.test(policy),
+  "a browser tab gets ONE reload before the notice; app surfaces keep the wider burst",
+);
+check(
+  arm.includes("} else if let Webview2Recovery::ReloadThenNotice { html } = policy {")
+    && arm.includes("core.NavigateToString(&windows::core::HSTRING::from(html))"),
+  "a tab past its budget is left with the notice page, never a black rectangle",
+);
+// Both engines must render the same page, from one definition.
+check(
+  browser.includes("pub(crate) const TAB_PROCESS_STOPPED_HTML: &str =")
+    && browser.includes("webview.load_html(TAB_PROCESS_STOPPED_HTML, Some(\"about:blank\"))")
+    && browser.includes("This page’s browser process stopped"),
+  "WebKitGTK and WebView2 show the SAME notice, defined once",
 );
 
 // ---- Linux / WebKitGTK — unchanged behaviour, shared log helper ------------

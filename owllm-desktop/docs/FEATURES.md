@@ -903,7 +903,21 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   Measured on Windows: killing both render processes left the unpatched build
   with zero renderers and no `Chrome_RenderWidgetHostHWND` for 30 s, while the
   patched build had a fresh render process within 1 s.
+  **Every agent-browser view is armed too** (`browser.rs`): each tab in both
+  window shapes, plus the browser's own chrome bar. Tabs use
+  `Webview2Recovery::ReloadThenNotice` — one reload, then the shared
+  `TAB_PROCESS_STOPPED_HTML` notice via `NavigateToString`, the same
+  one-retry-then-local-page rule the Linux tab path has always had, because a
+  tab shows an arbitrary site that may kill its own renderer on load. The chrome
+  bar is app UI, so it reloads like `main`. Measured on an isolated instance
+  driven over WebView2 CDP: with the bar unarmed, killing all 4 render processes
+  of a browser window recovered 3 and left the bar's renderer gone; armed, all 4
+  came back, each logging its own label (`owllm-browser-page-1`, `browser chrome
+  bar`, …). A second kill inside the burst window left the tab on `about:blank`
+  showing the notice while the app surfaces reloaded again.
   Gate: `ui/src/webviewCrashRecovery.verify.run.mjs` (dependency-free).
+  Not covered: the Linux chrome bar has no `connect_web_process_terminated`
+  handler (Linux tabs and `main` do), and macOS has no recovery on any view.
 - **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
   the main window is transparent (`tauri.linux.conf.json`) and the see-through
   headroom band above the frame is click-through via GTK input-shape

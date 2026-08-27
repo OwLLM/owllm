@@ -69,6 +69,13 @@ const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
 const CHROME_EVENT_PATH: &str = "/__owllm_browser_event__";
 
+/// Shown in a tab whose page process keeps dying, on either engine. A tab that
+/// kills its own renderer on load must not be reloaded forever, and a webview
+/// left unreloaded paints solid black — so the last recovery step is a readable
+/// local page. WebKitGTK loads it with `load_html`, WebView2 with
+/// `NavigateToString` (see `crate::Webview2Recovery::ReloadThenNotice`).
+pub(crate) const TAB_PROCESS_STOPPED_HTML: &str = r#"<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>body{margin:0;background:#0e1117;color:#e7eaf0;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{max-width:40rem;padding:2rem}h1{font-size:1.2rem}p{color:#aeb6c5;line-height:1.5}</style><main><h1>This page’s browser process stopped</h1><p>OwLLM kept the app and your other work running. Reload the tab to try the page again.</p></main>"#;
+
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
 /// a 58px identity strip (30px taller than a plain tab bar) that carries the
 /// open site's real logo at a size the user recognises at a glance, over a
@@ -1449,10 +1456,7 @@ fn linux_configure_browser_webview(
             if attempts == 0 {
                 webview.reload();
             } else {
-                webview.load_html(
-                    r#"<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>body{margin:0;background:#0e1117;color:#e7eaf0;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{max-width:40rem;padding:2rem}h1{font-size:1.2rem}p{color:#aeb6c5;line-height:1.5}</style><main><h1>This page’s browser process stopped</h1><p>OwLLM kept the app and your other work running. Reload the tab to try the page again.</p></main>"#,
-                    Some("about:blank"),
-                );
+                webview.load_html(TAB_PROCESS_STOPPED_HTML, Some("about:blank"));
             }
         }
     });
@@ -2561,6 +2565,24 @@ fn attach_tab(
             ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
+    // WebView2 sheds render processes under host memory pressure, and a tab
+    // whose renderer is gone paints solid black for the rest of the session.
+    // The subscription is per view, so every tab needs its own — the main
+    // window being armed does nothing for these. Linux gets the same recovery
+    // from linux_configure_browser_webview.
+    #[cfg(windows)]
+    {
+        let label = tab_label(id);
+        let _ = _webview.with_webview(move |platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                label,
+                crate::Webview2Recovery::ReloadThenNotice {
+                    html: TAB_PROCESS_STOPPED_HTML,
+                },
+            )
+        });
+    }
     // GTK packs child webviews into the window's vbox, where set_position is a
     // no-op (see layout_children), so a tiled bar cannot park a tab offscreen —
     // inactive tabs are hidden instead and the vbox gives their space to the
@@ -3060,6 +3082,21 @@ fn build_framed(
             ),
         )
         .map_err(|e| format!("chrome bar webview: {e}"))?;
+    // The bar is the browser window's own UI, so it reloads like the app's other
+    // surfaces rather than showing the page-failure notice. Measured unarmed:
+    // killing every render process of the browser window brought back the main
+    // view, the overlay frame and the tab, and left the bar's renderer gone —
+    // a black strip where the tab strip and URL box should be.
+    #[cfg(windows)]
+    {
+        let _ = _chrome_webview.with_webview(|platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                "browser chrome bar".to_string(),
+                crate::Webview2Recovery::Reload,
+            )
+        });
+    }
     // GTK ignores the geometry above (see layout_children), so pin the bar's
     // height in the box itself — otherwise the box splits the window evenly
     // between the bar and the page.
@@ -3310,6 +3347,22 @@ fn attach_legacy_tab(
     let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    // Same per-view WebView2 recovery as the framed shape: this fallback is
+    // reachable on Windows whenever build_framed fails, so it cannot be left
+    // with tabs that go black permanently.
+    #[cfg(windows)]
+    {
+        let label = tab_label(id);
+        let _ = _ww.with_webview(move |platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                label,
+                crate::Webview2Recovery::ReloadThenNotice {
+                    html: TAB_PROCESS_STOPPED_HTML,
+                },
+            )
+        });
+    }
     #[cfg(windows)]
     if !private_session {
         let _ = _ww.with_webview(win_enable_web_credentials);

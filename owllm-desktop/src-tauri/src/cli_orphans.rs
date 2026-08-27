@@ -78,9 +78,19 @@ struct Adopted {
     announced: bool,
 }
 
+/// One tracked CLI root: its own start time, plus the descendants seen so far.
+/// The start time is what makes the parent links trustworthy — see
+/// `is_plausible_descendant`.
+struct RootWatch {
+    /// Root's start time (secs since epoch), filled by the first sample that
+    /// finds the root in the process table. `None` until then.
+    root_start: Option<u64>,
+    seen: HashMap<u32, OrphanProc>,
+}
+
 /// Descendants recorded per live CLI root, refreshed every sample.
-fn tracked() -> &'static Mutex<HashMap<u32, HashMap<u32, OrphanProc>>> {
-    static S: OnceLock<Mutex<HashMap<u32, HashMap<u32, OrphanProc>>>> = OnceLock::new();
+fn tracked() -> &'static Mutex<HashMap<u32, RootWatch>> {
+    static S: OnceLock<Mutex<HashMap<u32, RootWatch>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -107,7 +117,13 @@ pub fn init(app: &tauri::AppHandle) {
 /// Called from `register_cli_child_scoped` — i.e. every CLI on every OS.
 pub(crate) fn track(root_pid: u32) {
     if let Ok(mut t) = tracked().lock() {
-        t.insert(root_pid, HashMap::new());
+        t.insert(
+            root_pid,
+            RootWatch {
+                root_start: None,
+                seen: HashMap::new(),
+            },
+        );
     }
     ensure_sampler();
 }
@@ -120,6 +136,7 @@ pub(crate) fn adopt(root_pid: u32, scope: Option<&str>) {
         .lock()
         .ok()
         .and_then(|mut t| t.remove(&root_pid))
+        .map(|w| w.seen)
         .unwrap_or_default();
     let Some(scope) = scope.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
@@ -185,6 +202,22 @@ pub(crate) fn orphan_phase(announced: bool, alive: bool, age: Duration) -> Orpha
     }
 }
 
+/// Is `candidate` plausibly a descendant of a root started at `root_start`?
+///
+/// A process cannot predate its own ancestor, and that is the only defence
+/// against a recycled root PID. Windows never clears a dead parent's PID from
+/// its children, so when a CLI is spawned onto a PID some long-exited process
+/// once owned, the process table hands us that PID's original subtree. It has
+/// happened: session-1 `csrss`/`winlogon`/`dwm`/`fontdrvhost` — children of the
+/// session `smss` that exits by design seconds after boot — were reported as a
+/// turn's background work, arming a continuation over processes no agent
+/// started and that will never exit.
+///
+/// Pure — the release gate executes this directly.
+pub(crate) fn is_plausible_descendant(root_start: u64, candidate_start: u64) -> bool {
+    candidate_start >= root_start
+}
+
 fn ensure_sampler() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
@@ -232,18 +265,33 @@ fn sample_descendants(sys: &sysinfo::System) {
         }
     }
     let Ok(mut t) = tracked().lock() else { return };
-    for (root, seen) in t.iter_mut() {
+    for (root, watch) in t.iter_mut() {
+        if watch.root_start.is_none() {
+            watch.root_start = sys
+                .process(sysinfo::Pid::from_u32(*root))
+                .map(|p| p.start_time());
+        }
+        // Without the root's own start time its parent links can't be trusted,
+        // so record nothing rather than risk sweeping in a recycled PID's tree.
+        let Some(root_start) = watch.root_start else {
+            continue;
+        };
         let mut queue: Vec<u32> = children_of.get(root).cloned().unwrap_or_default();
         while let Some(pid) = queue.pop() {
-            if let Some(kids) = children_of.get(&pid) {
-                queue.extend(kids.iter().copied());
-            }
-            if seen.contains_key(&pid) {
-                continue;
-            }
             let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) else {
                 continue;
             };
+            // Rejected BEFORE descending: a stale child of a recycled PID would
+            // otherwise drag its own subtree in behind it.
+            if !is_plausible_descendant(root_start, p.start_time()) {
+                continue;
+            }
+            if let Some(kids) = children_of.get(&pid) {
+                queue.extend(kids.iter().copied());
+            }
+            if watch.seen.contains_key(&pid) {
+                continue;
+            }
             let cmdline = p
                 .cmd()
                 .iter()
@@ -256,7 +304,7 @@ fn sample_descendants(sys: &sysinfo::System) {
                 cmdline
             };
             cmdline.truncate(300);
-            seen.insert(
+            watch.seen.insert(
                 pid,
                 OrphanProc {
                     pid,

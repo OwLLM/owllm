@@ -376,7 +376,11 @@ agent to verify the result from the process's own logs and finish what it
 promised. Stop and watchdog kills never arm a continuation (the tree died with
 the turn); the chain is capped at 3 automatic turns and the watch at 2 h.
 Finished events that land while the page is unmounted are held and delivered
-on the next mount.
+on the next mount. The descendant walk validates every candidate against the
+root's own start time: an OS keeps a dead parent's PID on its children forever,
+so a CLI spawned onto a recycled PID would otherwise inherit that PID's original
+subtree — session-1 `csrss`/`winlogon`/`dwm` were once adopted as a turn's
+background work and, being unkillable OS processes, could never finish.
 
 ## Isolation & sandboxing
 
@@ -856,6 +860,29 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+  A report is sent with the *reporter's own* GitHub token (never an embedded
+  one), so it has **two destinations**: OwLLM team members land in the private
+  intake `OwLLM/bug-reports` (redacted bundle committed under `reports/<stamp>/`
+  + an `auto-report` issue); everyone else has no access to that repo at all —
+  GitHub masks it as 404 — so their report is filed as an issue on the public
+  `OwLLM/owllm` instead. That repo is public, so the payload is **sealed to the
+  OwLLM team's key** first (`support_seal.rs`): a fresh ephemeral X25519 key per
+  report, ECDH against the embedded team public key, `SHA-256(context ‖ shared ‖
+  eph_pub ‖ team_pub)` keying AES-256-GCM with the whole header bound in as AAD.
+  The issue carries a generic `Encrypted bug report — <stamp>` title and one
+  armored block; the description, paths, projects and machine details are not
+  readable by anyone but the team. **Only the public key ships** — it can seal a
+  report and cannot open one; the secret never enters the repo or a build, and
+  the team opens reports with `scripts/decrypt-report.mjs` (dependency-free
+  node:crypto). The screenshot is never uploaded on this route and the Watcher
+  keeps it locally rather than telling the user to publish it. The composer says
+  which destination applies *before* the send click. Only 401/403/404 trigger the
+  fallback — a 5xx must never turn a private report into a public issue.
+  Gate: `ui/src/pages/agentic/bugReportIntake.verify.run.mjs`, which pins the
+  wire format on both sides and *executes* the Node decryptor against a block
+  sealed by the shipped Rust (`src-tauri/seal-harness`, a standalone `cargo run`
+  binary that includes `support_seal.rs` via `#[path]` — lib tests cannot launch
+  in this dev environment).
 - **Crash / unclean-shutdown detection** (`session_health.rs`): every process
   writes a marker on startup and deletes it on the way out. Cleanup runs on
   `WindowEvent::CloseRequested` (the X), `RunEvent::ExitRequested`, and

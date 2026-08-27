@@ -148,6 +148,28 @@ check(
   "every aliveness check matches process start time — PID reuse can't fake a live orphan",
 );
 
+// PID reuse bites the descendant WALK too, not just aliveness. Windows keeps a
+// dead parent's PID on its children forever, so a CLI spawned onto a recycled
+// PID inherits the original's whole subtree — session-1 csrss/winlogon/dwm were
+// once adopted as a turn's background work and could never finish.
+{
+  const sampleFn = sliceRustFn(orphans, "fn sample_descendants(");
+  const guardAt = sampleFn === null ? -1 : sampleFn.indexOf("is_plausible_descendant");
+  const descendAt = sampleFn === null ? -1 : sampleFn.indexOf("queue.extend(");
+  check(
+    /pub\(crate\) fn is_plausible_descendant\(/.test(orphans) && guardAt >= 0,
+    "the descendant walk validates candidates against the root's start time",
+  );
+  check(
+    guardAt >= 0 && descendAt >= 0 && guardAt < descendAt,
+    "the check runs BEFORE the walk descends — a rejected node must not drag its own subtree in behind it",
+  );
+  check(
+    sampleFn !== null && /let Some\(root_start\) = watch\.root_start else \{/.test(sampleFn),
+    "a root whose own start time is unknown records nothing — unvalidatable parentage is never trusted",
+  );
+}
+
 // --- 3. The wire is camelCase on BOTH sides -------------------------------
 const wireStruct = orphans.slice(orphans.indexOf("pub struct OrphanWire") - 200, orphans.indexOf("pub struct OrphanWire"));
 const groupStruct = orphans.slice(orphans.indexOf("pub struct OrphanGroup") - 200, orphans.indexOf("pub struct OrphanGroup"));
@@ -254,7 +276,8 @@ check(
   const ceilingConst = (orphansRaw.match(/const WATCH_CEILING: Duration = [^;]+;/) ?? [])[0];
   const enumDecl = sliceRustFn(orphans, "pub(crate) enum OrphanPhase");
   const phaseFn = sliceRustFn(orphans, "pub(crate) fn orphan_phase(");
-  if (graceConst && ceilingConst && enumDecl && phaseFn) {
+  const plausibleFn = sliceRustFn(orphans, "pub(crate) fn is_plausible_descendant(");
+  if (graceConst && ceilingConst && enumDecl && phaseFn && plausibleFn) {
     const program = [
       "use std::time::Duration;",
       graceConst,
@@ -262,7 +285,17 @@ check(
       "#[derive(Debug, PartialEq, Eq)]",
       enumDecl,
       phaseFn,
+      plausibleFn,
       "fn main() {",
+      // Real numbers from the incident: session-1 csrss/winlogon/dwm start
+      // seconds after boot as children of an smss that then exits, so their
+      // parent PID is free for reuse. A CLI landing on it 30h later inherited
+      // all four and armed a continuation that could never complete.
+      "  let boot = 1_756_205_739u64;",
+      "  let cli = boot + 30 * 60 * 60;",
+      `  assert!(!is_plausible_descendant(cli, boot), "a process older than the root can never be its descendant — this is the csrss/winlogon/dwm false adoption");`,
+      `  assert!(is_plausible_descendant(cli, cli), "a child spawned inside the root's own start second is real");`,
+      `  assert!(is_plausible_descendant(cli, cli + 2), "a genuine descendant started after the root must still be kept");`,
       `  assert_eq!(orphan_phase(false, false, Duration::from_secs(3)), OrphanPhase::DropSilently, "a straggler dying inside the grace must be silent — every MCP-server shutdown would otherwise announce");`,
       `  assert_eq!(orphan_phase(false, true, Duration::from_secs(3)), OrphanPhase::KeepWatching, "no announcement before the grace elapses");`,
       `  assert_eq!(orphan_phase(false, true, ANNOUNCE_GRACE), OrphanPhase::Announce, "a survivor past the grace is announced");`,
@@ -281,7 +314,7 @@ check(
       execFileSync("rustc", ["--edition", "2021", "-A", "warnings", "-o", exe, src], { stdio: "pipe" });
       const out = execFileSync(exe, { encoding: "utf8" });
       check(out.includes("RUST_ORPHAN_PHASE_OK"),
-        "EXECUTED: the SHIPPED adoption state machine — silent stragglers, grace-gated announce, finish-on-exit, bounded watch");
+        "EXECUTED: the SHIPPED adoption state machine — silent stragglers, grace-gated announce, finish-on-exit, bounded watch, and no recycled-PID subtree");
     } catch (e) {
       const detail = String(e?.stderr ?? e?.message ?? e).split("\n").slice(0, 12).join("\n");
       check(false, `the shipped orphan_phase failed its behavioural check:\n${detail}`);
@@ -289,7 +322,7 @@ check(
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* temp dir */ }
     }
   } else {
-    check(false, "orphan_phase/constants could not be sliced from cli_orphans.rs");
+    check(false, "orphan_phase/is_plausible_descendant/constants could not be sliced from cli_orphans.rs");
   }
 }
 

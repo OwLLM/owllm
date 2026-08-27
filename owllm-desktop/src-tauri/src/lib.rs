@@ -89,6 +89,7 @@ mod skill_library;
 mod slack;
 mod state_mirror;
 mod support;
+mod support_seal;
 mod sync_core;
 mod telegram;
 mod vault;

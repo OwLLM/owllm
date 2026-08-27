@@ -356,6 +356,11 @@ function runHarnesses() {
     // dead page process into a reload instead of a permanently black window,
     // so it must run on every host, deps installed or not.
     "webviewCrashRecovery.verify.run.mjs",
+    // Source assertions over support.rs/WatcherDrawer.tsx. It guards the one
+    // path a user has to reach us at all — a report from someone outside the
+    // team silently died for months — so it must run on every host, deps
+    // installed or not.
+    "bugReportIntake.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

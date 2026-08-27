@@ -182,6 +182,27 @@ fn configure_linux_webkit_renderer() {
 #[cfg(not(target_os = "linux"))]
 fn configure_linux_webkit_renderer() {}
 
+/// Append a native webview failure to the durable user-data directory, falling
+/// back to TEMP when that directory cannot be resolved or written.
+fn append_native_webview_log(file_name: &str, entry: &str) {
+    let mut targets = paths::user_data_root()
+        .map(|root| vec![root.join(file_name)])
+        .unwrap_or_default();
+    targets.push(std::env::temp_dir().join(format!("owllm-{file_name}")));
+    for target in targets {
+        use std::io::Write;
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target)
+            .and_then(|mut file| file.write_all(entry.as_bytes()))
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
 /// WebKitGTK runs the page in a separate process. If that process is killed by
 /// the renderer or its memory limit, keeping the native Tauri process alive
 /// with a dead webview looks exactly like a random app crash. Record the native
@@ -203,22 +224,7 @@ fn install_linux_webview_recovery(app: &tauri::App) {
                     "[{}] main WebKit process terminated: {reason:?}; reloading\n",
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
                 );
-                let mut targets = paths::user_data_root()
-                    .map(|root| vec![root.join("linux-webkit.log")])
-                    .unwrap_or_default();
-                targets.push(std::env::temp_dir().join("owllm-linux-webkit.log"));
-                for target in targets {
-                    use std::io::Write;
-                    if std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&target)
-                        .and_then(|mut file| file.write_all(entry.as_bytes()))
-                        .is_ok()
-                    {
-                        break;
-                    }
-                }
+                append_native_webview_log("linux-webkit.log", &entry);
                 eprint!("[owllm] {entry}");
                 if matches!(
                     reason,
@@ -235,6 +241,177 @@ fn install_linux_webview_recovery(app: &tauri::App) {
 
 #[cfg(not(target_os = "linux"))]
 fn install_linux_webview_recovery(_app: &tauri::App) {}
+
+/// The Windows half of the same failure. WebView2 also runs the page in its own
+/// render process, and Chromium sheds that process under host memory pressure —
+/// but WRY listens for nothing, so the window keeps its host HWND with the
+/// entire Chromium widget tree (`Chrome_WidgetWin_*`,
+/// `Chrome_RenderWidgetHostHWND`) gone from underneath it. Nothing paints into
+/// it and it stays solid black until the app is restarted. Recover the way
+/// Linux already does: record the native failure and reload.
+///
+/// A render-process exit is the only kind reloaded. `Reload` cannot revive a
+/// dead *browser* process (that needs a new environment), and reloading an
+/// unresponsive-but-alive renderer would throw away a page that is merely busy.
+#[cfg(windows)]
+fn install_windows_webview_recovery(app: &tauri::App) {
+    use tauri::Manager;
+
+    match app.get_webview_window("main") {
+        Some(main) => arm_windows_webview_recovery(&main, "main"),
+        None => eprintln!("[owllm] main WebView2 is unavailable; crash recovery was not installed"),
+    }
+}
+
+#[cfg(not(windows))]
+fn install_windows_webview_recovery(_app: &tauri::App) {}
+
+/// Arm one window's WebView2 for render-process recovery.
+///
+/// Every webview needs this separately — the subscription is per `ICoreWebView2`,
+/// not per app. Measured: killing both render processes of a running instance
+/// brought back only the view that had been armed, and left the other window
+/// permanently without its `Chrome_RenderWidgetHostHWND`. The overlay frame is
+/// the app's own chrome, so an unarmed one is a black title bar for the rest of
+/// the session.
+#[cfg(windows)]
+pub(crate) fn arm_windows_webview_recovery(webview: &tauri::WebviewWindow, label: &'static str) {
+    if let Err(error) = webview.with_webview(move |platform| {
+        match unsafe { platform.controller().CoreWebView2() } {
+            Ok(core) => arm_webview2_process_failed(&core, label),
+            Err(error) => eprintln!("[owllm] could not reach the {label} WebView2 core: {error}"),
+        }
+    }) {
+        eprintln!("[owllm] could not install {label} WebView2 process recovery: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn arm_windows_webview_recovery(_webview: &tauri::WebviewWindow, _label: &'static str) {}
+
+/// Subscribe to one `ProcessFailed` event, and re-subscribe from inside it.
+///
+/// webview2-com builds every event callback from a `FnOnce` that its `Invoke`
+/// takes out of the cell on first use, so a single `add_ProcessFailed` recovers
+/// exactly one renderer death and is then silently dead — the same black window
+/// one crash later. Re-arming inside the handler is what makes the recovery
+/// durable rather than a one-shot.
+///
+/// The spent subscription must be REMOVED before its replacement is added.
+/// Leaving it registered looked harmless — a consumed `FnOnce` cannot run twice
+/// — but measured over three rounds of killing every render process, each view
+/// logged 1, then 2, then 4 failures: the handler list doubles on every
+/// failure. Removing by token keeps exactly one live subscription per view.
+#[cfg(windows)]
+fn arm_webview2_process_failed(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    label: &'static str,
+) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs2, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED, COREWEBVIEW2_PROCESS_FAILED_REASON,
+    };
+    use webview2_com::ProcessFailedEventHandler;
+    use windows::core::Interface;
+
+    let token = Rc::new(Cell::new(0i64));
+    let handler = ProcessFailedEventHandler::create(Box::new({
+        let token = Rc::clone(&token);
+        move |sender, args| {
+        let kind = args.as_ref().and_then(|args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            unsafe { args.ProcessFailedKind(&mut kind) }.ok().map(|()| kind)
+        });
+        // Reason/ExitCode need the newer args interface. They are what tells a
+        // support snapshot whether the renderer was killed for memory or died
+        // on its own, so read them when the installed runtime offers them.
+        let detail = args
+            .as_ref()
+            .and_then(|args| args.cast::<ICoreWebView2ProcessFailedEventArgs2>().ok())
+            .map(|args| {
+                let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON::default();
+                let mut exit_code = 0i32;
+                unsafe {
+                    let _ = args.Reason(&mut reason);
+                    let _ = args.ExitCode(&mut exit_code);
+                }
+                format!(" reason={} exit_code={exit_code}", reason.0)
+            })
+            .unwrap_or_default();
+
+        let Some(core) = sender else { return Ok(()) };
+        // Drop this spent subscription, then re-arm before recovering, so the
+        // next failure is caught as well without the list growing.
+        unsafe {
+            let _ = core.remove_ProcessFailed(token.get());
+        }
+        arm_webview2_process_failed(&core, label);
+
+        let entry = format!(
+            "[{}] {label} WebView2 process failed: kind={}{detail}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            kind.map(|kind| kind.0).unwrap_or(-1),
+        );
+        append_native_webview_log("windows-webview2.log", &entry);
+        eprint!("[owllm] {entry}");
+
+        if kind == Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED)
+            && webview2_recovery_allowed(label)
+        {
+            unsafe {
+                let _ = core.Reload();
+            }
+        }
+        Ok(())
+        }
+    }));
+    let mut raw = 0i64;
+    if let Err(error) = unsafe { core.add_ProcessFailed(&handler, &mut raw) } {
+        eprintln!("[owllm] could not subscribe to WebView2 ProcessFailed: {error}");
+        return;
+    }
+    // The handler removes itself by this token, so it has to be readable from
+    // inside the closure — which only runs after this point.
+    token.set(raw);
+}
+
+/// A reload storm is worse than one black window: a page that kills its own
+/// renderer while loading would be reloaded forever. Allow a short burst, then
+/// stop reloading and leave the failure legible in the log instead.
+///
+/// The budget is **per webview**. A single shared counter looked right and was
+/// not: with the main view and the overlay frame both armed, one round of
+/// failures spent two of three slots, so measured over three rounds of killing
+/// every render process the app recovered 2, then 1, then 0 views — the app's
+/// own chrome went black while the budget was still nominally unspent.
+#[cfg(windows)]
+fn webview2_recovery_allowed(label: &'static str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const BURST_WINDOW: Duration = Duration::from_secs(60);
+    const MAX_PER_WINDOW: u32 = 3;
+    static BURSTS: Mutex<Option<HashMap<&'static str, (u32, Instant)>>> = Mutex::new(None);
+
+    let now = Instant::now();
+    let mut guard = BURSTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let bursts = guard.get_or_insert_with(HashMap::new);
+    match bursts.get(label).copied() {
+        Some((count, started)) if now.duration_since(started) < BURST_WINDOW => {
+            if count >= MAX_PER_WINDOW {
+                return false;
+            }
+            bursts.insert(label, (count + 1, started));
+        }
+        _ => {
+            bursts.insert(label, (1, now));
+        }
+    }
+    true
+}
 
 /// WebKitGTK hides `navigator.mediaDevices` on an insecure origin unless
 /// `enable-media-stream` is set, and WRY leaves it off. The app's own scheme is
@@ -433,6 +610,11 @@ pub fn run() {
             // WebKit helpers are reaped instead of being orphaned onto an
             // AppImage mount that is about to disappear under them.
             webkit_children::install_shutdown_signals(app.handle());
+            // Same failure on Windows: a shed WebView2 render process leaves a
+            // black window that only a restart clears. Order-independent, and
+            // deliberately BELOW the signal install, which a matrix source
+            // check requires to stay close to the top of setup().
+            install_windows_webview_recovery(app);
             // WebKitGTK denies camera/microphone capture until the app answers
             // permission-request. Turn it on for the main view and allow
             // capture. Order-independent.

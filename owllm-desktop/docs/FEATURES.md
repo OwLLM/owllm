@@ -883,6 +883,27 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   naming whoever called `app.exit`) and `Exit` are all recorded to stderr and
   `owllm-crash.log`. Added because a normal Tauri shutdown used to log nothing,
   so a spurious quit and a crash were indistinguishable from outside.
+- **Native webview process recovery** (`lib.rs`, both engines): every platform
+  runs the page in a process the OS can take away — WebKitGTK kills its web
+  process, WebView2 sheds its render process under host memory pressure. The
+  native window survives with nothing painting into it, which reads as a solid
+  black window that only a restart clears. Linux listens on
+  `connect_web_process_terminated`; Windows subscribes to WebView2's
+  `ProcessFailed` and reloads on `RENDER_PROCESS_EXITED`. Both append the native
+  kind/reason to the user-data dir (`linux-webkit.log` / `windows-webview2.log`,
+  TEMP fallback) before recovering, and durable state is restored by main.tsx.
+  Three things the mechanism forces: the Windows handler **re-arms itself**
+  (webview2-com builds callbacks from a `FnOnce`, so one subscription would
+  recover exactly one death and then go silent); the subscription is **per
+  webview**, so the overlay frame is armed where it is built — an unarmed view
+  stays black while its sibling recovers; and a reload burst limit (3/60 s)
+  keeps a page that kills its own renderer on load from spinning forever. An
+  unresponsive-but-alive renderer is never reloaded, and a dead *browser*
+  process is logged but not reloadable — `Reload` cannot revive one.
+  Measured on Windows: killing both render processes left the unpatched build
+  with zero renderers and no `Chrome_RenderWidgetHostHWND` for 30 s, while the
+  patched build had a fresh render process within 1 s.
+  Gate: `ui/src/webviewCrashRecovery.verify.run.mjs` (dependency-free).
 - **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
   the main window is transparent (`tauri.linux.conf.json`) and the see-through
   headroom band above the frame is click-through via GTK input-shape

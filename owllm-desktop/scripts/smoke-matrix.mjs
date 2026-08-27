@@ -352,6 +352,10 @@ function runHarnesses() {
     // standing between a scheduled SYSTEM task and killing a load-bearing
     // service, so it must run on every host, deps installed or not.
     "hostGuard.verify.run.mjs",
+    // Source assertions over lib.rs only. It guards the handlers that turn a
+    // dead page process into a reload instead of a permanently black window,
+    // so it must run on every host, deps installed or not.
+    "webviewCrashRecovery.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

@@ -94,7 +94,11 @@ check(rust.includes("connect_web_process_terminated")
     && rust.includes("WebProcessTerminationReason::ExceededMemoryLimit")
     && rust.includes("webview.reload()"),
   "native Linux WebKit crashes and memory-limit terminations are logged and recovered");
-check(rust.includes('root.join("linux-webkit.log")'),
+// The append itself is shared with the WebView2 recovery (both engines lose
+// their page process the same way); webviewCrashRecovery.verify.run.mjs holds
+// the helper's own user-data-root-before-TEMP ordering.
+check(rust.includes('append_native_webview_log("linux-webkit.log", &entry)')
+    && rust.includes("root.join(file_name)"),
   "native WebKit termination reasons are written to the durable user-data directory");
 check(rust.includes("set_enable_media_stream(true)")
     && rust.includes("enable_linux_webview_media_capture(app)")

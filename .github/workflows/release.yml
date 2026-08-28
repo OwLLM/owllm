@@ -218,29 +218,9 @@ jobs:
         working-directory: owllm-desktop
         run: node scripts/generate-updater-manifest.verify.run.mjs
 
-      - name: Verify CreationLaunchpad regression checks
+      - name: Verify every regression harness in the repo
         working-directory: owllm-desktop
-        run: npm run test:launchpad
-
-      - name: Verify account sign-in regression checks
-        working-directory: owllm-desktop
-        run: npm run test:accountslogin
-
-      - name: Verify Brainstorm regression checks
-        working-directory: owllm-desktop
-        run: npm run test:brainstorm
-
-      - name: Verify team-model selection regression checks
-        working-directory: owllm-desktop
-        run: npm run test:teammodel
-
-      - name: Verify watcher/callback fan-out regression checks
-        working-directory: owllm-desktop
-        run: npm run test:watchers
-
-      - name: Verify psychedelic-effect preference regression checks
-        working-directory: owllm-desktop
-        run: npm run test:psychedelic
+        run: npm run test:all
 
       - name: Build the Vite UI
         working-directory: owllm-desktop

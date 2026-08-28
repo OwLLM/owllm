@@ -29,10 +29,18 @@ if (!suites.length) {
 }
 
 if (!fs.existsSync(path.join(SERVICE, "node_modules/miniflare"))) {
-  // Loud and actionable rather than a silent pass: a skipped behavioural gate
-  // reads as "covered" when it is not.
-  console.error("world presence service verification: miniflare is not installed — run `npm install` in services/world-presence");
-  process.exit(1);
+  // Never a silent skip — a skipped behavioural gate reads as "covered" when it
+  // is not. But telling the operator to go type `npm install` meant the gate was
+  // simply red on every fresh checkout and CI runner, so install it here from
+  // the committed lockfile and only fail if that install genuinely fails.
+  console.log("world presence service verification: installing service dependencies…");
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const install = spawnSync(npm, ["ci"], { cwd: SERVICE, encoding: "utf8", timeout: 600_000, shell: process.platform === "win32" });
+  if (install.status !== 0 || !fs.existsSync(path.join(SERVICE, "node_modules/miniflare"))) {
+    console.error(`${install.stdout || ""}${install.stderr || ""}`.trim().split(/\r?\n/).slice(-20).join("\n"));
+    console.error("world presence service verification: `npm ci` failed in services/world-presence");
+    process.exit(1);
+  }
 }
 
 const run = spawnSync(process.execPath, ["--test", ...suites], { cwd: SERVICE, encoding: "utf8", timeout: 240_000 });

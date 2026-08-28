@@ -67,6 +67,10 @@ jobs:
         working-directory: owllm-desktop
         run: npm run test:launchpad
 
+      - name: Verify account sign-in regression checks
+        working-directory: owllm-desktop
+        run: npm run test:accountslogin
+
       - name: Verify Brainstorm regression checks
         working-directory: owllm-desktop
         run: npm run test:brainstorm
@@ -234,6 +238,10 @@ jobs:
       - name: Verify CreationLaunchpad regression checks
         working-directory: owllm-desktop
         run: npm run test:launchpad
+
+      - name: Verify account sign-in regression checks
+        working-directory: owllm-desktop
+        run: npm run test:accountslogin
 
       - name: Verify Brainstorm regression checks
         working-directory: owllm-desktop

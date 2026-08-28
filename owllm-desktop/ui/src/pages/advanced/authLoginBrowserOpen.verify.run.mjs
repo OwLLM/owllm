@@ -53,7 +53,9 @@ check("terminal rebuilds logical lines from the buffer's wrap flag",
     && terminal.includes("isWrapped: line.isWrapped")
     && terminal.includes("unwrapTerminalLines(rows)"));
 check("the auth-URL scan reads the unwrapped buffer, not the raw byte stream",
-  terminal.includes("const url = firstCompleteAuthUrl(bufferedText());"));
+  terminal.includes("const buffered = bufferedText();")
+    && terminal.includes("firstCompleteAuthUrl(buffered)")
+    && terminal.includes("firstDeviceCode(buffered)"));
 check("buffer scan is bounded",
   terminal.includes("MAX_SCANNED_ROWS"));
 check("auto-open stays opt-in",
@@ -86,13 +88,15 @@ const load = async (name) => {
   return import(pathToFileURL(file).href);
 };
 
-const { firstCompleteAuthUrl } = await load("authUrlCapture");
+const { firstCompleteAuthUrl, firstDeviceCode } = await load("authUrlCapture");
 const { unwrapTerminalLines } = await load("unwrapTerminalLines");
 
-if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !== "function") {
+if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !== "function"
+  || typeof firstDeviceCode !== "function") {
   // Report as failures rather than crashing: a gate that dies on a missing
   // export looks like a broken gate instead of a broken product.
   check("authUrlCapture exports firstCompleteAuthUrl", typeof firstCompleteAuthUrl === "function");
+  check("authUrlCapture exports firstDeviceCode", typeof firstDeviceCode === "function");
   check("unwrapTerminalLines module exists and exports its function",
     typeof unwrapTerminalLines === "function");
   check("no truncated login URL is ever offered (skipped: modules missing)", false);
@@ -166,6 +170,36 @@ if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !==
 
   check("promotional links never consume the automatic open",
     firstCompleteAuthUrl("Learn more: https://support.claude.com/en/articles/promotion \n") === null);
+
+  // ---- a NEW connection, against output captured from the real CLIs -------
+  // Recorded by running each login in a PTY with an empty HOME (a genuinely
+  // fresh sign-in, not a reconnect), so these are the exact bytes the embedded
+  // terminal receives today — not a hand-written approximation.
+  const CODEX_DEVICE_OUTPUT = [
+    "Welcome to Codex [v\x1b[90m0.144.5\x1b[0m]",
+    "",
+    "Follow these steps to sign in with ChatGPT using device code authorization:",
+    "",
+    "1. Open this link in your browser and sign in to your account",
+    "   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m",
+    "",
+    "2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m",
+    "   \x1b[94mGSB2-L7879\x1b[0m",
+    "",
+  ].join("\n");
+  check("a fresh codex device sign-in opens the real device page",
+    firstCompleteAuthUrl(CODEX_DEVICE_OUTPUT) === "https://auth.openai.com/codex/device");
+  check("the codex one-time code is captured so it can be copied, not retyped",
+    firstDeviceCode(CODEX_DEVICE_OUTPUT) === "GSB2-L7879");
+  check("a fresh claude sign-in has no device code to offer",
+    firstDeviceCode(`${PREFIX}${LOGIN_URL}${SUFFIX}`) === null);
+  check("an ANSI-coloured code is not offered with its escape bytes attached",
+    !String(firstDeviceCode(CODEX_DEVICE_OUTPUT)).includes("\x1b"));
+  check("code-shaped text without an 'enter this code' cue is never offered",
+    firstDeviceCode("commit ABCD-1234 landed\n") === null);
+  check("kimi's in-URL user_code is offered for copying",
+    firstDeviceCode("visit: https://www.kimi.com/code/authorize_device?user_code=WXYZ-7788 \n")
+      === "WXYZ-7788");
 
   check("unwrapping joins only rows flagged as continuations",
     unwrapTerminalLines([

@@ -24,7 +24,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { firstCompleteAuthUrl } from "./authUrlCapture";
+import { firstCompleteAuthUrl, firstDeviceCode } from "./authUrlCapture";
 import { authStateFromUrl, isStaleAuthCode } from "./authCodeGuard";
 import { unwrapTerminalLines, type TerminalRow } from "./unwrapTerminalLines";
 
@@ -88,8 +88,13 @@ export default function PtyTerminal({
   /// the same value after `#`; a mismatch means the code belongs to an earlier
   /// sign-in attempt (a stale tab) and would make the CLI exit on the spot.
   const authStateRef = useRef("");
-  const [pasteError, setPasteError] = useState("");
+  const [toolbarError, setToolbarError] = useState("");
   const [authUrl, setAuthUrl] = useState("");
+  /// One-time code a device-auth CLI (codex, grok, kimi) is waiting for the
+  /// user to type into the sign-in page. Shown as a copy button because an
+  /// xterm selection does not reach the clipboard.
+  const [deviceCode, setDeviceCode] = useState("");
+  const [codeCopied, setCodeCopied] = useState(false);
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
   const autoSendRef = useRef(autoSend);
@@ -126,19 +131,34 @@ export default function PtyTerminal({
     // Command-V to the WebView edit menu without xterm emitting onData.
     event.preventDefault();
     event.stopPropagation();
-    setPasteError("");
+    setToolbarError("");
     ptyWrite(text);
+  };
+
+  /// Device-auth codes only ever exist in the terminal, and an xterm selection
+  /// does not reach the clipboard. Without this the user has to re-type the
+  /// code into the sign-in page by hand.
+  const copyDeviceCode = async () => {
+    try {
+      await navigator.clipboard.writeText(deviceCode);
+      setToolbarError("");
+      setCodeCopied(true);
+      window.setTimeout(() => setCodeCopied(false), 2000);
+    } catch (error) {
+      setCodeCopied(false);
+      setToolbarError(`Couldn't copy the code: ${String((error as { message?: string })?.message ?? error)} Select it in the terminal and copy manually.`);
+    }
   };
 
   const pasteClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
       if (!text) throw new Error("The clipboard has no text.");
-      setPasteError("");
+      setToolbarError("");
       ptyWrite(text);
       termRef.current?.focus();
     } catch (error) {
-      setPasteError(`Couldn't read the clipboard: ${String((error as { message?: string })?.message ?? error)} Press ⌘V inside the terminal instead.`);
+      setToolbarError(`Couldn't read the clipboard: ${String((error as { message?: string })?.message ?? error)} Press ⌘V inside the terminal instead.`);
     }
   };
 
@@ -183,6 +203,9 @@ export default function PtyTerminal({
     fitRef.current = fit;
     pendingInputRef.current = [];
     inputErrorRef.current = false;
+    // A fresh Connect must never offer the previous session's expired code.
+    setDeviceCode("");
+    setCodeCopied(false);
 
     const dim = fit.proposeDimensions() ?? { cols: 100, rows: 28 };
 
@@ -225,7 +248,14 @@ export default function PtyTerminal({
     const noteAuthUrlFrom = (decoded: string) => {
       if (!autoOpenAuthUrls) return;
       outputText = (outputText + decoded).slice(-16_384);
-      const url = firstCompleteAuthUrl(bufferedText());
+      const buffered = bufferedText();
+      // Scanned independently of the URL: codex prints its one-time code AFTER
+      // the link, so a scan that gave up when no URL was pending never saw it.
+      const code = firstDeviceCode(buffered);
+      if (code) {
+        setDeviceCode((current) => (current === code ? current : code));
+      }
+      const url = firstCompleteAuthUrl(buffered);
       if (!url) return;
       // Keep the URL reachable from the header even once it has scrolled away,
       // and whether or not opening it succeeded. Automatic opening is a
@@ -374,7 +404,15 @@ export default function PtyTerminal({
   return (
     <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", background: "#0c0f14" }}>
       <div style={{ minHeight: 30, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "3px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-        {pasteError && <span role="alert" style={{ flex: 1, color: "#ffb0b0", fontSize: 10 }}>{pasteError}</span>}
+        {toolbarError && <span role="alert" style={{ flex: 1, color: "#ffb0b0", fontSize: 10 }}>{toolbarError}</span>}
+        {deviceCode && (
+          <button
+            type="button"
+            onClick={() => { void copyDeviceCode(); }}
+            title="Copy the one-time code, then paste it into the sign-in page"
+            style={{ border: "1px solid rgba(255,226,138,0.45)", borderRadius: 5, background: "rgba(255,226,138,0.12)", color: "#ffe28a", fontSize: 11, padding: "3px 9px", cursor: "pointer", fontFamily: "ui-monospace, Menlo, Consolas, monospace" }}
+          >{codeCopied ? "✓ Copied" : `⧉ Copy code ${deviceCode}`}</button>
+        )}
         {authUrl && (
           <button
             type="button"

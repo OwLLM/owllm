@@ -15,6 +15,7 @@
     "test:teammodel": "node ui/src/pages/agentic/teamModelSelection.verify.run.mjs",
     "test:watchers": "node ui/src/runtime/listenerBus.verify.run.mjs",
     "test:psychedelic": "node ui/src/pages/agentic/psychedelicMode.verify.run.mjs",
+    "test:accountslogin": "node ui/src/pages/advanced/authLoginBrowserOpen.verify.run.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

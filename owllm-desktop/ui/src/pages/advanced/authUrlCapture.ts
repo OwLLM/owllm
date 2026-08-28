@@ -123,6 +123,47 @@ function wrappedCandidates(tail: string): string[] {
   return candidates;
 }
 
+// Device-code sign-ins (codex, grok) print a one-time code the user must type
+// into the browser page we just opened for them. It is only ever shown in the
+// terminal, and xterm does not put a selection on the clipboard, so without a
+// copy affordance the code has to be re-typed by hand — the step that made a
+// FRESH OpenAI connection painful even when the URL opened correctly.
+const DEVICE_CODE = /^[A-Z0-9]{3,8}(?:-[A-Z0-9]{3,8})+$/;
+
+/// The one-time code a device-auth CLI is waiting for, or null. Anchored on the
+/// CLI's own "enter this code" wording rather than scanning for anything
+/// code-shaped, so a hash or an id printed elsewhere is never offered as a
+/// sign-in code.
+export function firstDeviceCode(output: string): string | null {
+  const plain = stripAnsi(output);
+  // Kimi carries the code in the authorization URL itself.
+  const url = firstCompleteAuthUrl(output);
+  if (url) {
+    try {
+      const code = new URL(url).searchParams.get("user_code")?.trim();
+      if (code) return code;
+    } catch { /* firstCompleteAuthUrl already validated it; ignore */ }
+  }
+  const lines = plain.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/\bcode\b/i.test(lines[i])) continue;
+    if (!/one-?time|enter this|verification|user[ _-]?code/i.test(lines[i])) continue;
+    // The code is on the same line or the next non-blank one.
+    for (const candidate of [lines[i], lines[i + 1] ?? "", lines[i + 2] ?? ""]) {
+      for (const token of candidate.trim().split(/\s+/)) {
+        if (DEVICE_CODE.test(token)) return token;
+      }
+    }
+  }
+  return null;
+}
+
+function stripAnsi(output: string): string {
+  return output
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
 // Login CLIs write authorization URLs through a PTY, so a single URL can be
 // split across arbitrary byte chunks or hard-wrapped by the PTY. Only return a
 // URL after its terminating delimiter has arrived, and validate provider-
@@ -132,9 +173,7 @@ export function firstCompleteAuthUrl(output: string): string | null {
   // URL as an OSC-8 hyperlink. Stopping the payload only at BEL let a greedy
   // match swallow everything up to the last ST in the buffer — the visible URL
   // included — so an ST-terminated hyperlink erased the very URL we look for.
-  const plain = output
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const plain = stripAnsi(output);
   // Start at the scheme, not at `://`: a narrow terminal wraps mid-scheme
   // (`https:` / `//claude.com/...`), and requiring the slashes meant the scan
   // never began. Candidates that are not real URLs are rejected downstream.

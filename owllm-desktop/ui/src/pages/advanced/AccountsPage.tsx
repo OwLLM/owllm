@@ -38,9 +38,21 @@ import {
 } from "../core/accountsStore";
 import {
   classifySubscriptionFailure,
+  cliPrepAction,
   isKimiLoginSuccess,
   type AccountRemediation,
 } from "./accountHealth";
+
+/// Which accounts_status flag says "this CLI's binary exists on this machine".
+/// Connect reads it fresh before signing in, so a first run installs the CLI
+/// instead of spawning a login that can only print "not found on PATH".
+const CLI_INSTALLED_FIELD: Record<string, keyof AccountsStatusFull> = {
+  claude_cli: "claude_cli_installed",
+  codex_cli: "codex_cli_installed",
+  kimi_cli: "kimi_cli_installed",
+  gemini_cli: "gemini_cli_installed",
+  grok_cli: "grok_cli_installed",
+};
 
 const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 
@@ -595,7 +607,7 @@ function RouteRow({
     ? (isSub ? "CLI logged in" : "API key saved")
     : (isSub ? (route.webOnly
         ? "Web-only · sign up to subscribe"
-        : state.installed ? "CLI installed · sign in required" : "CLI not installed · install it first")
+        : state.installed ? "CLI installed · sign in required" : "CLI not installed · Connect installs it for you")
              : "No API key saved");
 
   // Subscription routes with a CLI get TWO buttons when disconnected:
@@ -603,8 +615,12 @@ function RouteRow({
   // [Open subscription]. API routes get [Set key].
   const cliBackedSub = isSub && !route.webOnly;
 
+  // Connect installs/updates the CLI itself before signing in, so while that
+  // is running the button must say so instead of looking clickable-but-dead.
+  const primaryBusy = cliBackedSub && state.installing;
   const primaryLabel =
-    state.reauthRequired || state.remediation === "reauth" ? "Reconnect"
+    primaryBusy ? (state.installed ? "Updating CLI…" : "Installing CLI…")
+    : state.reauthRequired || state.remediation === "reauth" ? "Reconnect"
     : connected ? "Disconnect"
     : isSub ? (route.webOnly ? "Open subscription" : "Connect")
     : "Set key";
@@ -701,12 +717,13 @@ function RouteRow({
         )}
         <button
           onClick={handlePrimary}
+          disabled={primaryBusy}
           style={{
             flex: 1, minHeight: 30, padding: "0 14px",
-            background: connected ? "rgba(255,110,110,0.12)" : provider.accent,
-            color: connected ? "#ff8c8c" : "#fff",
+            background: primaryBusy ? "rgba(255,255,255,0.06)" : connected ? "rgba(255,110,110,0.12)" : provider.accent,
+            color: primaryBusy ? "#aaa" : connected ? "#ff8c8c" : "#fff",
             border: "none", borderRadius: 6,
-            fontSize: 11, fontWeight: 600, cursor: "pointer",
+            fontSize: 11, fontWeight: 600, cursor: primaryBusy ? "default" : "pointer",
           }}
         >{primaryLabel}</button>
         <button
@@ -1292,6 +1309,9 @@ export default function AccountsPage() {
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
         grok_cli:   "the xAI device page opens in OwLLM's browser; confirm the code shown here.",
       };
+      // One button does the whole job: install/upgrade the CLI if this machine
+      // needs it, and only then start the sign-in.
+      if (!(await ensureCliReady(route, provider))) return;
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       completedLogins.current.delete(route.backend);
       terminalOutput.current[route.backend] = "";
@@ -1399,69 +1419,124 @@ export default function AccountsPage() {
     void invalidateAccounts();
   }
 
-  function handleInstall(route: RouteSpec, provider: ProviderSpec) {
-    if (route.kind !== "subscription" || route.webOnly) return;
-    if ((cards[route.key]?.installing)) return;
+  /// Run the CLI installer/upgrader and resolve with whether it succeeded, so
+  /// Connect can wait for it and then sign in without a second click.
+  /// `verb` is "install" or "update" — the npm/pip/uv command is the same one
+  /// either way (it always fetches the latest), only the wording differs.
+  function runCliInstall(
+    route: RouteSpec,
+    provider: ProviderSpec,
+    verb: "install" | "update" = "install",
+  ): Promise<boolean> {
+    if (route.kind !== "subscription" || route.webOnly) return Promise.resolve(false);
+    if ((cards[route.key]?.installing)) return Promise.resolve(false);
     setCardState(route.key, { installing: true });
-    logInfo(route.backend, `Installing ${provider.name} CLI…`);
+    const gerund = verb === "install" ? "Installing" : "Updating";
+    logInfo(route.backend, `${gerund} ${provider.name} CLI…`);
 
-    const channel = new Channel<{ kind: string; stream?: string; text?: string; code?: number | null }>();
-    channel.onmessage = (evt) => {
-      if (evt.kind === "line") {
-        LOG_HUB.push({
-          ts: Date.now(),
-          stream: (evt.stream === "stderr" ? "stderr" : "stdout"),
-          text: evt.text ?? "",
-          backend: route.backend,
-        });
-      } else if (evt.kind === "done") {
-        const ok = evt.code === 0;
-        logInfo(route.backend, ok
-          ? `✓ install finished — click Connect on the same row to log in.`
-          : `✗ install failed (exit ${evt.code ?? "?"}); see lines above.`);
-        setCardState(route.key, {
-          installing: false,
-          ...(ok ? { remediation: null } : { remediation: "retry" as const }),
-        });
-        if (ok) {
-          window.setTimeout(() => { void probeSubscriptionHealth(route, false); }, 500);
+    return new Promise<boolean>((resolve) => {
+      const channel = new Channel<{ kind: string; stream?: string; text?: string; code?: number | null }>();
+      channel.onmessage = (evt) => {
+        if (evt.kind === "line") {
+          LOG_HUB.push({
+            ts: Date.now(),
+            stream: (evt.stream === "stderr" ? "stderr" : "stdout"),
+            text: evt.text ?? "",
+            backend: route.backend,
+          });
+        } else if (evt.kind === "done") {
+          const ok = evt.code === 0;
+          logInfo(route.backend, ok
+            ? `✓ ${verb} finished.`
+            : `✗ ${verb} failed (exit ${evt.code ?? "?"}); see lines above.`);
+          setCardState(route.key, {
+            installing: false,
+            ...(ok ? { remediation: null } : { remediation: "retry" as const }),
+          });
+          if (ok) {
+            window.setTimeout(() => { void probeSubscriptionHealth(route, false); }, 500);
+          }
+          resolve(ok);
         }
-      }
-    };
-    invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch(async (e) => {
-      const msg = String(e);
-      // Auto-recover from the most common first-run failure: Node.js
-      // not installed. The bundled MCP Server Toolchain module ships
-      // node 20 + uv, so we offer to install it inline and retry the
-      // CLI install without making the user navigate to the Modules
-      // tab manually.
-      const nodeMissing = /node\.?js/i.test(msg) && /not installed|not found/i.test(msg);
-      if (nodeMissing) {
+      };
+      invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch(async (e) => {
+        const msg = String(e);
+        // Auto-recover from the most common first-run failure: Node.js
+        // not installed. The bundled MCP Server Toolchain module ships
+        // node 20 + uv, so we offer to install it inline and retry the
+        // CLI install without making the user navigate to the Modules
+        // tab manually.
+        const nodeMissing = /node\.?js/i.test(msg) && /not installed|not found/i.test(msg);
+        if (nodeMissing) {
+          logInfo(route.backend, `[error] ${msg}`);
+          setCardState(route.key, { installing: false });
+          try {
+            const { ask } = await import("@tauri-apps/plugin-dialog");
+            const proceed = await ask(
+              translateUiText(`${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`),
+              { title: translateUiText("Install Node.js toolchain?"), kind: "info" },
+            );
+            if (!proceed) { resolve(false); return; }
+            logInfo(route.backend, `Installing MCP Server Toolchain (Node.js 20 + uv)…`);
+            setCardState(route.key, { installing: true });
+            await invoke("module_install", { id: "mcp-toolchain" });
+            logInfo(route.backend, `✓ MCP Server Toolchain installed. Retrying ${provider.name} CLI ${verb}…`);
+            // Retry — the new module_node_dir() lookup will find the
+            // bundled npm.cmd on this attempt.
+            setCardState(route.key, { installing: false });
+            resolve(await runCliInstall(route, provider, verb));
+          } catch (e2) {
+            logInfo(route.backend, `[error] toolchain install failed: ${String(e2)}`);
+            setCardState(route.key, { installing: false });
+            resolve(false);
+          }
+          return;
+        }
         logInfo(route.backend, `[error] ${msg}`);
         setCardState(route.key, { installing: false });
-        try {
-          const { ask } = await import("@tauri-apps/plugin-dialog");
-          const proceed = await ask(
-            translateUiText(`${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`),
-            { title: translateUiText("Install Node.js toolchain?"), kind: "info" },
-          );
-          if (!proceed) return;
-          logInfo(route.backend, `Installing MCP Server Toolchain (Node.js 20 + uv)…`);
-          setCardState(route.key, { installing: true });
-          await invoke("module_install", { id: "mcp-toolchain" });
-          logInfo(route.backend, `✓ MCP Server Toolchain installed. Retrying ${provider.name} CLI install…`);
-          // Retry — the new module_node_dir() lookup will find the
-          // bundled npm.cmd on this attempt.
-          handleInstall(route, provider);
-        } catch (e2) {
-          logInfo(route.backend, `[error] toolchain install failed: ${String(e2)}`);
-          setCardState(route.key, { installing: false });
-        }
-        return;
-      }
-      logInfo(route.backend, `[error] ${msg}`);
-      setCardState(route.key, { installing: false });
+        resolve(false);
+      });
     });
+  }
+
+  function handleInstall(route: RouteSpec, provider: ProviderSpec) {
+    void runCliInstall(route, provider, cards[route.key]?.installed ? "update" : "install");
+  }
+
+  /// Connect prepares the CLI itself. A brand-new PC has no CLI at all, and
+  /// spawning the sign-in there only printed `'codex' not found on PATH` while
+  /// the fix sat behind a separate button the user had to find. Probe the real
+  /// install state (never the possibly-stale card), install what's missing,
+  /// upgrade what the last probe said is too old, then let sign-in continue.
+  /// Returns false only when there is genuinely nothing to sign in with.
+  async function ensureCliReady(route: RouteSpec, provider: ProviderSpec): Promise<boolean> {
+    const field = CLI_INSTALLED_FIELD[route.backend];
+    if (!field) return true;
+    const card = cards[route.key];
+    if (card?.installing) {
+      logInfo(route.backend, `The ${provider.name} CLI is still installing — click Connect again once it finishes.`);
+      return false;
+    }
+    let installed = card?.installed ?? false;
+    try {
+      const fresh = await invalidateAccounts();
+      if (fresh) installed = Boolean(fresh[field]);
+    } catch { /* backend probe unavailable — fall back to the card's last known state */ }
+
+    const action = cliPrepAction(installed, card?.remediation ?? null);
+    if (action === "none") return true;
+    logInfo(route.backend, action === "install"
+      ? `${provider.name} CLI isn't installed on this machine — installing it first, then signing in automatically.`
+      : `${provider.name} CLI needs an update — updating it first, then signing in automatically.`);
+    const ok = await runCliInstall(route, provider, action);
+    if (ok) return true;
+    if (action === "update") {
+      logInfo(route.backend, `The update didn't finish — continuing the sign-in with the ${provider.name} CLI already installed.`);
+      return true;
+    }
+    logInfo(route.backend, `✗ The ${provider.name} CLI couldn't be installed, so there is nothing to sign in with yet. Fix the error above (or use this card's API key route) and click Connect again.`);
+    setRailTab("log");
+    return false;
   }
 
   async function handleDisconnect(route: RouteSpec, provider: ProviderSpec) {

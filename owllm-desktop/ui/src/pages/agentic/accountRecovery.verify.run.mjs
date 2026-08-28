@@ -60,7 +60,11 @@ check(
 );
 check(
   "subscription cards expose precise recovery actions",
-  accounts.includes("CLI not installed · install it first")
+  // The card must still name "CLI not installed" as the state. It used to end
+  // that line with "install it first"; Connect now installs the CLI itself,
+  // so assert the state is reported — not the sentence that sent the user off
+  // to press a different button.
+  /CLI not installed · \S/.test(accounts)
     && accounts.includes("CLI installed · sign in required")
     && accounts.includes("CLI outdated or incompatible · update required")
     && accounts.includes('data-cli-repair={route.backend}')

@@ -140,8 +140,19 @@ if (typeof cliPrepAction !== "function") {
     cliPrepAction(true, null) === "none");
   check("an outdated CLI is updated before sign-in",
     cliPrepAction(true, "update") === "update");
-  check("a CLI that failed its live check is refreshed before sign-in",
-    cliPrepAction(true, "retry") === "update");
+  // The reported break: an abandoned OpenAI sign-in leaves the catch-all
+  // "retry" on the card, the page re-probes it back on every restart, and
+  // routing that to an update meant Connect ran a silent 30-90 s npm install
+  // instead of opening the sign-in page. An unclassified failure is a reason
+  // to sign in again, never a reason to reinstall.
+  check("an unclassified failure signs in again instead of reinstalling",
+    cliPrepAction(true, "retry") === "none");
+  check("a failed install does not make every later Connect reinstall",
+    // runCliInstall sets remediation "retry" when an install fails; if that
+    // fed back into "update" the delay would repeat on every click forever.
+    cliPrepAction(true, "retry") !== "update");
+  check("a plain network/timeout failure never triggers an install",
+    cliPrepAction(true, classifySubscriptionFailure("error sending request: connection timed out")) === "none");
   check("an expired session is NOT a reason to reinstall — just sign in again",
     cliPrepAction(true, "reauth") === "none");
   check("a billing/quota problem is never treated as a broken install",

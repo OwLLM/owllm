@@ -121,11 +121,11 @@ try {
   // extractor", and pinning the literal source text made unrelated edits (an
   // added named import, a hoisted local) fail a rule they never broke.
   check("PTY terminal takes its authorization URL from the complete-URL extractor",
-    /import\s*\{[^}]*\bfirstCompleteAuthUrl\b[^}]*\}\s*from\s*"\.\/authUrlCapture"/.test(terminal)
-      && /\bconst\s+url\s*=\s*firstCompleteAuthUrl\(/.test(terminal)
+    /import\s*\{[^}]*\bfirstCompleteAuthUrlFromTerminal\b[^}]*\}\s*from\s*"\.\/authUrlCapture"/.test(terminal)
+      && /\bconst\s+url\s*=\s*firstCompleteAuthUrlFromTerminal\(/.test(terminal)
       && terminal.includes("openAuthUrl(url)"));
   check("PTY terminal has no second authorization-URL extractor",
-    (terminal.match(/firstCompleteAuthUrl\(/g) || []).length === 1
+    (terminal.match(/firstCompleteAuthUrlFromTerminal\(/g) || []).length === 1
       && !/firstAuthUrl\(|extractAuthUrl\(|matchAuthUrl\(/.test(terminal));
   check("Claude reconnect never deletes the last credential before OAuth succeeds",
     accounts.includes('if (route.backend === "kimi_cli")')

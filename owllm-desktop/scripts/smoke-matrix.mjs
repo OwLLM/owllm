@@ -361,6 +361,11 @@ function runHarnesses() {
     // team silently died for months — so it must run on every host, deps
     // installed or not.
     "bugReportIntake.verify.run.mjs",
+    // Source assertions over sandbox.rs/CodePage.tsx. It guards whether an
+    // agent running inside WSL can use the user's own SSH keys at all, and
+    // whether the bwrap jail still withholds them, so it must run on every
+    // host regardless of whether the UI deps are installed.
+    "wslSshMirror.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

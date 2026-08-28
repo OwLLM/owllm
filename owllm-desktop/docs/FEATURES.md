@@ -391,6 +391,17 @@ background work and, being unkillable OS processes, could never finish.
   three OSes since the 2026-08-16 isolation audit — it was Windows-only before,
   so Linux/macOS users could not opt out at all), write-jail +
   dangerous-command guard when not isolated.
+- **SSH keys reach WSL agents** (`sandbox::sync_logins_impl`, gate
+  `wslSshMirror.verify.run.mjs`): the login mirror also copies `~/.ssh` from the
+  Windows home into the distro home — keys at 600 in a 700 dir, `config` with CR
+  stripped (a CRLF config makes ssh misparse Host blocks under Linux), and
+  `known_hosts` MERGED so host keys accepted inside the distro survive a
+  re-sync. Before this, `ssh <host>` worked from a host project (cmd.exe
+  inherits `USERPROFILE`) but failed inside WSL with "Could not resolve
+  hostname" — the distro home had no key and no config. The bwrap jail is
+  deliberately NOT given `~/.ssh`: keeping the agent away from the rest of the
+  home is the jail's purpose, so the supported route to an SSH-capable agent is
+  marking that project **Full-access**, which runs it outside the jail.
 - The jail also binds a fleet worktree's git common dir (a worktree's `.git` is
   a pointer into the main repo), so `git` works inside the sandbox without
   exposing the main checkout — only `.git` is visible, not its working files.

@@ -31,6 +31,22 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::ipc::Channel;
 
+/// `BROWSER` value handed to every login CLI OwLLM spawns. Login URLs are
+/// captured from the CLI's output and opened in an isolated OwLLM auth tab, so
+/// a CLI must never hand the flow to the user's external default browser.
+/// This value makes the CLI's "open the browser" step a successful no-op.
+/// `%s` is essential on Windows: without it Python's `webbrowser` treats the
+/// whole spaced value as an executable name, fails to spawn it, then falls
+/// through to the external default browser.
+///
+/// Shared with `accounts::subscription_cli_login` so the two spawn paths can
+/// never drift apart on this rule.
+pub(crate) const NO_EXTERNAL_BROWSER: &str = if cfg!(windows) {
+    "cmd.exe /c exit 0 %s"
+} else {
+    "/usr/bin/true %s"
+};
+
 /// Resolve a bare CLI name ("kimi", "claude", …) to (exe, args) ready
 /// for portable-pty's CommandBuilder. Two Windows-specific gotchas
 /// the bare-spawn path falls over on:
@@ -173,14 +189,8 @@ pub fn pty_spawn(
         cmd.env_remove(key);
     }
     // The UI captures login URLs from PTY output and opens them in an isolated
-    // OwLLM auth tab. Give Python's webbrowser module (Kimi) a real
-    // successful no-op. `%s` is essential on Windows: without it Python treats
-    // the whole spaced value as an executable name, fails to spawn it, then
-    // falls through to the user's external default browser.
-    #[cfg(windows)]
-    cmd.env("BROWSER", "cmd.exe /c exit 0 %s");
-    #[cfg(not(windows))]
-    cmd.env("BROWSER", "/usr/bin/true %s");
+    // OwLLM auth tab.
+    cmd.env("BROWSER", NO_EXTERNAL_BROWSER);
 
     let mut child = pair
         .slave

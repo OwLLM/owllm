@@ -5277,24 +5277,32 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
 ///
 /// Once the CLI writes its credentials file, the AccountsPage 3-s
 /// poll flips the card to green. Returns immediately after spawn.
-#[tauri::command]
-pub fn subscription_cli_login(backend: String) -> Result<(), String> {
-    // Resolve which CLI to launch + the login command. Two flavours:
-    //   * codex login          — real subcommand, runs OAuth and exits
-    //   * gemini (no args)     — REPL prompts for auth; the embedded
-    //                            terminal auto-sends /auth
-    //   * claude (no args)     — REPL auto-prompts /login on first run
-    //                            because there are no credentials yet
-    //   * kimi (no args)       — same: kimi REPL auto-prompts for login
-    //                            when ~/.kimi/config.toml is missing
-    //
-    // We avoid passing `/login` as a positional argv because slash
-    // commands only work INSIDE the REPL — every CLI we tested
-    // (claude, kimi) errors out with "unknown argument /login" if
-    // they receive it on the command line.
-    let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
-        "claude_cli" => (find_claude_cli, &[]),
-        "codex_cli" => (find_codex_cli, &["login"]),
+/// Which CLI to launch + the argv that starts its login. Two flavours:
+///   * codex login --device-auth — real subcommand, prints a URL + code
+///   * gemini (no args)     — REPL prompts for auth; the embedded
+///                            terminal auto-sends /auth
+///   * claude (no args)     — REPL auto-prompts /login on first run
+///                            because there are no credentials yet
+///   * kimi (no args)       — same: kimi REPL auto-prompts for login
+///                            when ~/.kimi/config.toml is missing
+///
+/// We avoid passing `/login` as a positional argv because slash
+/// commands only work INSIDE the REPL — every CLI we tested
+/// (claude, kimi) errors out with "unknown argument /login" if
+/// they receive it on the command line.
+///
+/// Codex MUST get `--device-auth`. Plain `codex login` starts a
+/// localhost:1455 OAuth callback and immediately launches the user's
+/// external default browser at auth.openai.com — the login then happens
+/// outside OwLLM entirely. The device-code variant only prints a URL and a
+/// one-time code, which the caller opens in OwLLM's own auth tab.
+/// Split out from the command so that rule is regression-testable.
+fn subscription_login_recipe(
+    backend: &str,
+) -> Result<(fn() -> Option<PathBuf>, &'static [&'static str]), String> {
+    Ok(match backend {
+        "claude_cli" => (find_claude_cli as fn() -> Option<PathBuf>, &[] as &[&str]),
+        "codex_cli" => (find_codex_cli, &["login", "--device-auth"]),
         "kimi_cli" => (find_kimi_cli, &[]),
         "gemini_cli" => (find_gemini_cli, &[]),
         // Grok Build (xAI): first interactive run opens the browser
@@ -5302,7 +5310,12 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         // as claude/kimi/gemini.
         "grok_cli" => (find_grok_cli, &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
-    };
+    })
+}
+
+#[tauri::command]
+pub fn subscription_cli_login(backend: String) -> Result<(), String> {
+    let (find_fn, login_args) = subscription_login_recipe(&backend)?;
     let exe = find_fn()
         .ok_or_else(|| format!("CLI not found on PATH for {backend} — install it first"))?;
 
@@ -5324,6 +5337,9 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         cmd.raw_arg("cmd.exe");
         cmd.raw_arg("/k");
         cmd.raw_arg(inner);
+        // Inherited by the inner cmd and the CLI: no login OwLLM starts may
+        // escape into the user's external default browser.
+        cmd.env("BROWSER", crate::pty::NO_EXTERNAL_BROWSER);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -5338,6 +5354,8 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     {
         let mut cmd = Command::new(&exe);
         cmd.args(login_args);
+        // No login OwLLM starts may escape into the user's default browser.
+        cmd.env("BROWSER", crate::pty::NO_EXTERNAL_BROWSER);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -6529,8 +6547,35 @@ mod tests {
         codex_should_grant_browser, is_browser_role_allowlist, is_unrestricted_tool_allowlist,
         kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
         kimi_output_llm_unset, kimi_output_mcp_failed, parse_kimi_stream_line,
-        sanitize_appimage_env, ClaudeStreamEvent,
+        sanitize_appimage_env, subscription_login_recipe, ClaudeStreamEvent,
     };
+
+    // Plain `codex login` runs a localhost OAuth callback and launches the
+    // user's EXTERNAL default browser at auth.openai.com, taking the sign-in
+    // out of OwLLM. Every backend here must stay on a flow that only prints
+    // its URL, so the caller can open it in OwLLM's own auth tab.
+    #[test]
+    fn subscription_login_never_uses_a_browser_launching_flow() {
+        assert_eq!(
+            subscription_login_recipe("codex_cli").unwrap().1,
+            ["login", "--device-auth"]
+        );
+        for backend in ["claude_cli", "codex_cli", "kimi_cli", "gemini_cli", "grok_cli"] {
+            let args = subscription_login_recipe(backend).unwrap().1;
+            assert!(
+                !(args == ["login"]),
+                "{backend}: bare `login` opens the external system browser"
+            );
+        }
+        assert!(subscription_login_recipe("nope_cli").is_err());
+    }
+
+    #[test]
+    fn login_browser_env_is_a_no_op_shared_with_the_pty_terminal() {
+        // A bare executable name without `%s` makes Python's webbrowser fall
+        // through to the external default browser (see pty.rs).
+        assert!(crate::pty::NO_EXTERNAL_BROWSER.ends_with(" %s"));
+    }
 
     #[test]
     fn claude_auth_status_reads_only_the_logged_in_boolean() {

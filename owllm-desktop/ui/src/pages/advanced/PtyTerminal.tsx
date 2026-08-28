@@ -24,7 +24,10 @@ import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { firstCompleteAuthUrl, firstDeviceCode } from "./authUrlCapture";
+import {
+  firstCompleteAuthUrlFromTerminal,
+  firstDeviceCodeFromTerminal,
+} from "./authUrlCapture";
 import { authStateFromUrl, isStaleAuthCode } from "./authCodeGuard";
 import { unwrapTerminalLines, type TerminalRow } from "./unwrapTerminalLines";
 
@@ -249,13 +252,17 @@ export default function PtyTerminal({
       if (!autoOpenAuthUrls) return;
       outputText = (outputText + decoded).slice(-16_384);
       const buffered = bufferedText();
+      // term.write() updates xterm's buffer asynchronously. A CLI may emit its
+      // complete login prompt in this one PTY event, leaving `buffered` stale
+      // with no later event to retry. Scan the accumulated bytes first, then
+      // use the wrap-aware terminal buffer as the fallback for hard wraps.
       // Scanned independently of the URL: codex prints its one-time code AFTER
       // the link, so a scan that gave up when no URL was pending never saw it.
-      const code = firstDeviceCode(buffered);
+      const code = firstDeviceCodeFromTerminal(outputText, buffered);
       if (code) {
         setDeviceCode((current) => (current === code ? current : code));
       }
-      const url = firstCompleteAuthUrl(buffered);
+      const url = firstCompleteAuthUrlFromTerminal(outputText, buffered);
       if (!url) return;
       // Keep the URL reachable from the header even once it has scrolled away,
       // and whether or not opening it succeeded. Automatic opening is a

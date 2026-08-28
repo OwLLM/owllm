@@ -52,10 +52,9 @@ check("terminal rebuilds logical lines from the buffer's wrap flag",
   terminal.includes('from "./unwrapTerminalLines"')
     && terminal.includes("isWrapped: line.isWrapped")
     && terminal.includes("unwrapTerminalLines(rows)"));
-check("the auth-URL scan reads the unwrapped buffer, not the raw byte stream",
-  terminal.includes("const buffered = bufferedText();")
-    && terminal.includes("firstCompleteAuthUrl(buffered)")
-    && terminal.includes("firstDeviceCode(buffered)"));
+check("the auth scan checks accumulated PTY bytes before xterm's asynchronously updated buffer",
+  terminal.includes("firstCompleteAuthUrlFromTerminal(outputText, buffered)")
+    && terminal.includes("firstDeviceCodeFromTerminal(outputText, buffered)"));
 check("buffer scan is bounded",
   terminal.includes("MAX_SCANNED_ROWS"));
 check("auto-open stays opt-in",
@@ -88,7 +87,12 @@ const load = async (name) => {
   return import(pathToFileURL(file).href);
 };
 
-const { firstCompleteAuthUrl, firstDeviceCode } = await load("authUrlCapture");
+const {
+  firstCompleteAuthUrl,
+  firstCompleteAuthUrlFromTerminal,
+  firstDeviceCode,
+  firstDeviceCodeFromTerminal,
+} = await load("authUrlCapture");
 const { unwrapTerminalLines } = await load("unwrapTerminalLines");
 
 if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !== "function"
@@ -96,7 +100,11 @@ if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !==
   // Report as failures rather than crashing: a gate that dies on a missing
   // export looks like a broken gate instead of a broken product.
   check("authUrlCapture exports firstCompleteAuthUrl", typeof firstCompleteAuthUrl === "function");
+  check("authUrlCapture exports firstCompleteAuthUrlFromTerminal",
+    typeof firstCompleteAuthUrlFromTerminal === "function");
   check("authUrlCapture exports firstDeviceCode", typeof firstDeviceCode === "function");
+  check("authUrlCapture exports firstDeviceCodeFromTerminal",
+    typeof firstDeviceCodeFromTerminal === "function");
   check("unwrapTerminalLines module exists and exports its function",
     typeof unwrapTerminalLines === "function");
   check("no truncated login URL is ever offered (skipped: modules missing)", false);
@@ -191,6 +199,17 @@ if (typeof firstCompleteAuthUrl !== "function" || typeof unwrapTerminalLines !==
     firstCompleteAuthUrl(CODEX_DEVICE_OUTPUT) === "https://auth.openai.com/codex/device");
   check("the codex one-time code is captured so it can be copied, not retyped",
     firstDeviceCode(CODEX_DEVICE_OUTPUT) === "GSB2-L7879");
+  // xterm applies term.write() asynchronously. Thor reproduced the whole
+  // Codex prompt arriving in one PTY event while the terminal buffer still
+  // held its previous empty row; without scanning the accumulated event bytes
+  // there is no later event that can retry the URL or code detection.
+  check("a one-event Codex prompt opens even while xterm's buffer is still stale",
+    typeof firstCompleteAuthUrlFromTerminal === "function"
+      && firstCompleteAuthUrlFromTerminal(CODEX_DEVICE_OUTPUT, "")
+        === "https://auth.openai.com/codex/device");
+  check("a one-event Codex prompt exposes its code while xterm's buffer is still stale",
+    typeof firstDeviceCodeFromTerminal === "function"
+      && firstDeviceCodeFromTerminal(CODEX_DEVICE_OUTPUT, "") === "GSB2-L7879");
   check("a fresh claude sign-in has no device code to offer",
     firstDeviceCode(`${PREFIX}${LOGIN_URL}${SUFFIX}`) === null);
   check("an ANSI-coloured code is not offered with its escape bytes attached",

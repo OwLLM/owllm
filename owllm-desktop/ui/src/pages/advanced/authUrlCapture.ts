@@ -190,3 +190,23 @@ export function firstCompleteAuthUrl(output: string): string | null {
   }
   return null;
 }
+
+/// xterm applies `term.write()` asynchronously. When a login CLI emits its
+/// whole prompt in one PTY event, the raw accumulator already has the URL and
+/// code while xterm's readable buffer still contains the previous frame. Scan
+/// the accumulator first so that one event is sufficient; retain the buffer as
+/// a fallback because its per-row wrap metadata is the best representation of
+/// long provider URLs.
+export function firstCompleteAuthUrlFromTerminal(
+  rawOutput: string,
+  bufferedOutput: string,
+): string | null {
+  return firstCompleteAuthUrl(rawOutput) ?? firstCompleteAuthUrl(bufferedOutput);
+}
+
+export function firstDeviceCodeFromTerminal(
+  rawOutput: string,
+  bufferedOutput: string,
+): string | null {
+  return firstDeviceCode(rawOutput) ?? firstDeviceCode(bufferedOutput);
+}

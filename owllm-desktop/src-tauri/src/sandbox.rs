@@ -2663,7 +2663,7 @@ pub struct SyncResult {
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MirrorStatus {
-    /// codex | claude | gemini | kimi | keys
+    /// codex | claude | gemini | kimi | keys | ssh
     pub provider: String,
     pub on_host: bool,
     pub in_sandbox: bool,
@@ -2675,19 +2675,28 @@ pub struct MirrorStatus {
 /// per provider. Unit-tested; shared wording for every sync surface.
 #[cfg_attr(not(windows), allow(dead_code))] // sync is WSL/Windows-only today
 fn build_mirror_report(found_on_host: &[String], synced: &[String]) -> Vec<MirrorStatus> {
-    const PROVIDERS: [&str; 5] = ["codex", "claude", "gemini", "kimi", "keys"];
+    const PROVIDERS: [&str; 6] = ["codex", "claude", "gemini", "kimi", "keys", "ssh"];
     PROVIDERS
         .iter()
         .map(|p| {
             let on_host = found_on_host.iter().any(|s| s == p);
             let in_sandbox = synced.iter().any(|s| s == p);
-            let what = if *p == "keys" { "API keys" } else { "login" };
+            let what = match *p {
+                "keys" => "API keys",
+                "ssh" => "SSH keys",
+                _ => "login",
+            };
             let detail = match (on_host, in_sandbox) {
                 (true, true) => "mirrored into the sandbox".to_string(),
                 (true, false) => format!(
                     "{what} found on Windows but did NOT land in the sandbox — check the WSL distro (Set up WSL on Home), then Sync logins again"
                 ),
                 (false, true) => "present in the sandbox (no Windows copy — synced earlier or logged in inside the distro)".to_string(),
+                // SSH keys are not a "login" you can perform elsewhere, so the
+                // generic wording would be misleading here.
+                (false, false) if *p == "ssh" => {
+                    "no SSH keys in the Windows ~/.ssh — nothing to mirror".to_string()
+                }
                 (false, false) => format!("no {what} on Windows — log in there first, then sync"),
             };
             MirrorStatus { provider: p.to_string(), on_host, in_sandbox, detail }
@@ -2749,16 +2758,22 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     // Windows to sync" are now distinguishable instead of a silent no-op.
     let script = format!(
         "WH={wh}; \
-         mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
+         mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm ~/.ssh; \
+         chmod 700 ~/.ssh 2>/dev/null; \
          found=''; \
          [ -f \"$WH/.codex/auth.json\" ] && found=\"$found codex\"; \
          [ -f \"$WH/.claude/.credentials.json\" ] && found=\"$found claude\"; \
          {{ [ -s \"$WH/.gemini/oauth_creds.json\" ] || [ -s \"$WH/.gemini/credentials.json\" ]; }} && found=\"$found gemini\"; \
          {{ [ -f \"$WH/.kimi/credentials/kimi-code.json\" ] || [ -f \"$WH/.kimi/config.toml\" ]; }} && found=\"$found kimi\"; \
+         ls \"$WH\"/.ssh/id_* >/dev/null 2>&1 && found=\"$found ssh\"; \
          cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
          cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \
          cp -rf \"$WH/.gemini/.\" ~/.gemini/ 2>/dev/null; \
          cp -rf \"$WH/.kimi/.\" ~/.kimi/ 2>/dev/null; \
+         for k in \"$WH\"/.ssh/id_*; do [ -f \"$k\" ] && cp -f \"$k\" ~/.ssh/ 2>/dev/null; done; \
+         [ -f \"$WH/.ssh/config\" ] && sed 's/\\r$//' \"$WH/.ssh/config\" > ~/.ssh/config 2>/dev/null; \
+         cat \"$WH/.ssh/known_hosts\" ~/.ssh/known_hosts 2>/dev/null | tr -d '\\r' | sort -u > ~/.ssh/known_hosts.merged 2>/dev/null && mv ~/.ssh/known_hosts.merged ~/.ssh/known_hosts 2>/dev/null; \
+         chmod 600 ~/.ssh/config ~/.ssh/known_hosts 2>/dev/null; chmod 600 ~/.ssh/id_* 2>/dev/null; chmod 644 ~/.ssh/*.pub 2>/dev/null; \
          printf '%s' {env_quoted} > ~/.owllm/agent_env.sh; chmod 600 ~/.owllm/agent_env.sh 2>/dev/null; \
          chmod 600 ~/.codex/auth.json ~/.claude/.credentials.json ~/.kimi/config.toml ~/.kimi/credentials/kimi-code.json 2>/dev/null; \
          syn=''; \
@@ -2767,6 +2782,7 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
          {{ [ -s ~/.gemini/oauth_creds.json ] || [ -s ~/.gemini/credentials.json ]; }} && syn=\"$syn gemini\"; \
          {{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }} && syn=\"$syn kimi\"; \
          [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
+         ls ~/.ssh/id_* >/dev/null 2>&1 && syn=\"$syn ssh\"; \
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
          echo \"FOUND:$found\"; echo \"SYNCED:$syn\""
     );
@@ -3130,7 +3146,7 @@ mod tests {
             "keys".to_string(),
         ];
         let r = build_mirror_report(&found, &synced);
-        assert_eq!(r.len(), 5, "one row per provider");
+        assert_eq!(r.len(), 6, "one row per provider");
         let get = |p: &str| r.iter().find(|m| m.provider == p).unwrap();
         // found + synced → mirrored
         assert!(get("claude").detail.contains("mirrored"));
@@ -3147,6 +3163,12 @@ mod tests {
             "{}",
             get("kimi").detail
         );
+        // SSH keys are not a login — the "log in there first" wording would be
+        // nonsense, so that row gets its own message.
+        let ssh = get("ssh");
+        assert!(!ssh.on_host && !ssh.in_sandbox);
+        assert!(!ssh.detail.contains("log in"), "{}", ssh.detail);
+        assert!(ssh.detail.contains("nothing to mirror"), "{}", ssh.detail);
     }
 
     /// Live probe (real WSL + whatever logins exist on this machine):

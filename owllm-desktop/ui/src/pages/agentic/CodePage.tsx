@@ -1837,8 +1837,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     }
   };
 
-  // Mirror host CLI logins (codex/claude/gemini) into the sandbox so isolated
-  // cloud agents are authenticated — no separate in-WSL login needed.
+  // Mirror host CLI logins (codex/claude/gemini) and ~/.ssh into the sandbox so
+  // isolated cloud agents are authenticated and can reach the user's own SSH
+  // hosts — no separate in-WSL login or key copy needed.
   const syncLogins = async () => {
     notify("Mirroring your Windows logins into the sandbox…");
     try {
@@ -3949,7 +3950,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         {isolatedNow && (
           <button
             onClick={syncLogins}
-            title="Sync your cloud logins (codex/claude/gemini/kimi + API keys) from Windows into the sandbox. Runs automatically too — use this to re-sync after logging in to a new provider."
+            title="Sync your cloud logins (codex/claude/gemini/kimi + API keys) and your SSH keys from Windows into the sandbox. Runs automatically too — use this to re-sync after logging in to a new provider."
             style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
           >
             🔑 Sync logins

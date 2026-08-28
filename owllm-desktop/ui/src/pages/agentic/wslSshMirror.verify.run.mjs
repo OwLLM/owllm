@@ -127,8 +127,20 @@ if (process.argv.includes("--live")) {
   const from = sandboxRs.indexOf('"WH={wh};');
   const end = sandboxRs.indexOf("\n    );", from);
   const literal = from >= 0 && end > from ? sandboxRs.slice(from, end).trim() : "";
-  check("the shipped login-sync script literal was located",
-    literal.startsWith('"WH={wh};') && literal.endsWith('"') && literal.includes("SYNCED:"));
+  const located = literal.startsWith('"WH={wh};') && literal.endsWith('"') && literal.includes("SYNCED:");
+  check("the shipped login-sync script literal was located", located);
+  // Refuse to EXECUTE anything we did not positively identify. An earlier
+  // revision anchored on `let script = format!(`, which also matches the
+  // sandbox-runner installer; it extracted that instead, ran it, and
+  // overwrote ~/.owllm/run-sandboxed.sh with an unsubstituted
+  // "{SANDBOX_RUNNER}" placeholder, breaking every jailed agent until the
+  // runner was reinstalled.
+  if (!located) {
+    console.error("  FAIL refusing to run an unidentified script in WSL");
+    failures += 1;
+    console.log(`\nwslSshMirror: ${failures} FAILED`);
+    process.exit(1);
+  }
 
   const shQuote = (s) => `'${s.split("'").join(`'\\''`)}'`;
   // Windows home as WSL sees it. Derived, not hardcoded.

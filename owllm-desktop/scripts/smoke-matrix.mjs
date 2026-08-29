@@ -256,6 +256,7 @@ const TRIPWIRES = [
   ["../.github/workflows/release.yml", /label: 'Linux ARM64'[\s\S]{0,240}ubuntu-24\.04-arm[\s\S]{0,240}aarch64-unknown-linux-gnu/, "official release matrix builds and signs Linux ARM64 on a native hosted runner"],
   ["../.github/workflows/release.yml", /timeout-minutes: 90/, "optimized Linux release builds are not cancelled at the old 45-minute cap"],
   ["../.github/workflows/release.yml", /requiredPlatforms[\s\S]{0,300}"linux-x86_64"[\s\S]{0,120}"linux-aarch64"/, "public updater manifest requires both Linux architectures"],
+  ["scripts/publish-release.sh", /updater target:[\s\S]{0,500}BROKEN_PLATFORM_URLS[\s\S]{0,300}one or more public updater URLs are broken/, "publisher probes every merged updater URL before reporting PUBLISH_OK (v1.0.30 Windows 404 fix)"],
   ["../.github/workflows/mac-release-repair.yml", /gh release view "\$TAG"[\s\S]{0,240}gh release create "\$TAG"/, "macOS-only release path creates a missing public release instead of requiring another platform first"],
   ["../.github/workflows/mac-release-repair.yml", /const manifest = \{[\s\S]{0,240}version: process\.env\.VERSION[\s\S]{0,400}"darwin-aarch64"/, "macOS-only release path generates its updater manifest without a pre-existing cross-platform manifest"],
   ["../.github/workflows/mac-release-repair.yml", /macos-arm64:[\s\S]{0,80}runs-on: macos-latest/, "macOS-only releases use an available hosted Apple Silicon runner"],

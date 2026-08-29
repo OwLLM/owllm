@@ -787,4 +787,26 @@ if [ "$SERVED" != "$VERSION" ]; then
   fail "updater serves '$SERVED', expected '$VERSION' (after ~6min; API Latest is '$API_TAG')"
 fi
 [ "$HTTP" = "200" ] || fail "installer HTTP $HTTP (expected 200)"
+
+# A coordinated publish merges entries produced on several hosts. Checking only
+# this host's $URL allowed a stale Windows entry with a space-containing filename
+# to ship in v1.0.30 even though GitHub uploaded the dotted stable asset name.
+# Probe every URL the public manifest actually advertises before reporting OK.
+MANIFEST="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")" \
+  || fail "could not download the public updater manifest for link verification"
+BROKEN_PLATFORM_URLS=0
+while IFS=$'\t' read -r platform url; do
+  [ -n "$platform" ] && [ -n "$url" ] || continue
+  status="$(curl -s -o /dev/null -w "%{http_code}" -L "$url")"
+  echo "  updater target: $platform HTTP $status"
+  if [ "$status" != "200" ]; then
+    echo "  broken updater target: $platform -> $url" >&2
+    BROKEN_PLATFORM_URLS=1
+  fi
+done < <(MANIFEST="$MANIFEST" node -e '
+  const manifest=JSON.parse(process.env.MANIFEST);
+  for(const [platform,entry] of Object.entries(manifest.platforms||{})) {
+    process.stdout.write(`${platform}\t${entry.url||""}\n`);
+  }')
+[ "$BROKEN_PLATFORM_URLS" = 0 ] || fail "one or more public updater URLs are broken"
 echo "PUBLISH_OK: $TAG live — updater serves $VERSION, installer 200."

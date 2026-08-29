@@ -124,13 +124,15 @@ fn frame_t() -> f64 {
 const PARK_X: f64 = -20000.0;
 
 /// Open tabs of the framed browser window, strip order + the active id.
-/// Each tab is its own content webview. Ordinary tabs share the persistent
-/// profile; provider-auth tab ids are tracked separately and stay private.
+/// Each tab is its own content webview. Ordinary tabs share one persistent
+/// profile; provider-auth tabs use persistent provider-isolated profiles and
+/// are excluded from ordinary browser restore/history.
 struct Tabs {
     order: Vec<u64>,
     active: u64,
     titles: HashMap<u64, String>,
-    /// OAuth tabs must not inherit or persist ordinary browser credentials.
+    /// OAuth tabs must not inherit ordinary browser credentials or be restored
+    /// as ordinary browsing tabs. Their own provider session remains durable.
     private_tabs: HashSet<u64>,
 }
 
@@ -1305,11 +1307,49 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
+/// Stable bucket for one provider's authorization cookies. Keep providers
+/// separate from each other and from ordinary agent-browser state without
+/// throwing the selected provider's login away after every Connect.
+fn provider_auth_profile_key(url: &tauri::Url) -> String {
+    let host = url.host_str().unwrap_or("provider").to_ascii_lowercase();
+    let is = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    if is("claude.ai") || is("claude.com") || is("anthropic.com") {
+        return "anthropic".to_string();
+    }
+    if is("openai.com") {
+        return "openai".to_string();
+    }
+    if is("google.com") || is("googleapis.com") {
+        return "google".to_string();
+    }
+    if is("kimi.com") || is("moonshot.cn") {
+        return "kimi".to_string();
+    }
+    host.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
+        .collect()
+}
+
 #[cfg(any(windows, target_os = "linux"))]
-fn private_auth_data_dir(id: u64) -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("owllm-provider-auth")
-        .join(format!("{}-{id}", std::process::id()))
+fn provider_auth_data_dir(url: &tauri::Url) -> Option<std::path::PathBuf> {
+    browser_data_dir().map(|root| {
+        root.join("provider-auth")
+            .join(provider_auth_profile_key(url))
+    })
+}
+
+/// WKWebView has no data-directory API. macOS 14+ instead accepts a stable
+/// data-store identifier; older macOS falls back to WebKit's persistent
+/// per-app store, which still remembers the login across restarts.
+#[cfg(target_os = "macos")]
+fn provider_auth_store_identifier(url: &tauri::Url) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(
+        format!("owllm-provider-auth:{}", provider_auth_profile_key(url)).as_bytes(),
+    );
+    let mut identifier = [0_u8; 16];
+    identifier.copy_from_slice(&digest[..16]);
+    identifier
 }
 
 /// Enable WebView2 password autosave + general autofill on an agent-browser
@@ -1404,7 +1444,7 @@ fn linux_expand_page(pw: tauri::webview::PlatformWebview) {
 fn linux_configure_browser_webview(
     pw: tauri::webview::PlatformWebview,
     requested_url: String,
-    private_session: bool,
+    _private_session: bool,
 ) {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -1419,9 +1459,7 @@ fn linux_configure_browser_webview(
         #[allow(deprecated)]
         context.set_process_model(webkit2gtk::ProcessModel::MultipleSecondaryProcesses);
     }
-    if !private_session {
-        linux_enable_web_credentials(&pw);
-    }
+    linux_enable_web_credentials(&pw);
 
     // A browser-page failure is recoverable and must remain local to that tab.
     // Retry once for a transient WebKit/network-process failure; if the same
@@ -2440,7 +2478,8 @@ fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
 
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
 /// under the chrome bar; inactive ones are parked offscreen. Ordinary tabs
-/// share the persistent profile; provider-auth tabs get a private profile.
+/// share the persistent profile; provider-auth tabs get a separate persistent
+/// profile per provider.
 fn attach_tab(
     app: &tauri::AppHandle,
     win: &Window,
@@ -2452,6 +2491,9 @@ fn attach_tab(
     let dev = current_device();
     let new_window_app = app.clone();
     let download_app = app.clone();
+    let auth_profile_url = url.clone();
+    #[cfg(target_os = "macos")]
+    let auth_store_identifier = provider_auth_store_identifier(&auth_profile_url);
     #[allow(unused_mut)]
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
@@ -2528,8 +2570,9 @@ fn attach_tab(
                 }
             }
         });
+    #[cfg(target_os = "macos")]
     if private_session {
-        content = content.incognito(true);
+        content = content.data_store_identifier(auth_store_identifier);
     }
     if let Some(ua) = device_user_agent(dev) {
         content = content.user_agent(&ua);
@@ -2540,9 +2583,10 @@ fn attach_tab(
     #[cfg(any(windows, target_os = "linux"))]
     {
         if private_session {
-            let dir = private_auth_data_dir(id);
-            let _ = std::fs::create_dir_all(&dir);
-            content = content.data_directory(dir);
+            if let Some(dir) = provider_auth_data_dir(&auth_profile_url) {
+                let _ = std::fs::create_dir_all(&dir);
+                content = content.data_directory(dir);
+            }
         } else if let Some(dir) = browser_data_dir() {
             let _ = std::fs::create_dir_all(&dir);
             content = content.data_directory(dir);
@@ -2595,13 +2639,9 @@ fn attach_tab(
         let _ = _webview.hide();
     }
     #[cfg(windows)]
-    if !private_session {
-        let _ = _webview.with_webview(win_enable_web_credentials);
-    }
+    let _ = _webview.with_webview(win_enable_web_credentials);
     #[cfg(target_os = "linux")]
-    if !private_session {
-        let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
-    }
+    let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
     Ok(())
 }
 
@@ -3242,6 +3282,9 @@ fn attach_legacy_tab(
     let dev = current_device();
     let new_window_app = app.clone();
     let download_app = app.clone();
+    let auth_profile_url = url.clone();
+    #[cfg(target_os = "macos")]
+    let auth_store_identifier = provider_auth_store_identifier(&auth_profile_url);
     #[cfg(target_os = "linux")]
     let requested_url = url.to_string();
     #[cfg(target_os = "linux")]
@@ -3321,8 +3364,9 @@ fn attach_legacy_tab(
         .decorations(true)
         .resizable(true)
         .visible(active);
+    #[cfg(target_os = "macos")]
     if private_session {
-        builder = builder.incognito(true);
+        builder = builder.data_store_identifier(auth_store_identifier);
     }
     if let Some(ua) = device_user_agent(dev) {
         builder = builder.user_agent(&ua);
@@ -3336,9 +3380,10 @@ fn attach_legacy_tab(
     #[cfg(any(windows, target_os = "linux"))]
     {
         if private_session {
-            let dir = private_auth_data_dir(id);
-            let _ = std::fs::create_dir_all(&dir);
-            builder = builder.data_directory(dir);
+            if let Some(dir) = provider_auth_data_dir(&auth_profile_url) {
+                let _ = std::fs::create_dir_all(&dir);
+                builder = builder.data_directory(dir);
+            }
         } else if let Some(dir) = browser_data_dir() {
             let _ = std::fs::create_dir_all(&dir);
             builder = builder.data_directory(dir);
@@ -3364,9 +3409,7 @@ fn attach_legacy_tab(
         });
     }
     #[cfg(windows)]
-    if !private_session {
-        let _ = _ww.with_webview(win_enable_web_credentials);
-    }
+    let _ = _ww.with_webview(win_enable_web_credentials);
     #[cfg(target_os = "linux")]
     {
         let _ = _ww.with_webview(move |platform| {
@@ -3752,12 +3795,12 @@ pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
     .to_string())
 }
 
-/// Open a provider authorization page without the persistent browser profile.
+/// Open a provider authorization page in that provider's persistent profile.
 ///
-/// Subscription OAuth must never inherit the account used by Gmail, Calendar,
-/// Claude Web, or another ordinary browser tab. The user may explicitly select
-/// one identity from the encrypted local vault, but no ordinary browser cookie
-/// or implicit first-account autofill is allowed into this flow.
+/// Subscription OAuth never inherits the account used by ordinary browser
+/// tabs, nor another provider's cookies. It does keep this provider's own
+/// session across Connect attempts and app restarts, while explicit encrypted-
+/// vault account selection remains available.
 #[tauri::command(async)]
 pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let _operation = lock_browser_operation();
@@ -3782,7 +3825,7 @@ pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<Strin
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
-    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true }).to_string())
+    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true, "persistent": true }).to_string())
 }
 
 #[tauri::command(async)]
@@ -5216,6 +5259,25 @@ mod tests {
                 "{complete} is a complete provider authorization URL"
             );
         }
+    }
+
+    #[test]
+    fn provider_authorization_profiles_are_stable_and_isolated() {
+        let key = |url: &str| provider_auth_profile_key(&tauri::Url::parse(url).unwrap());
+        assert_eq!(key("https://claude.ai/oauth/authorize"), "anthropic");
+        assert_eq!(
+            key("https://platform.claude.com/oauth/code/callback"),
+            "anthropic"
+        );
+        assert_eq!(key("https://auth.openai.com/codex/device"), "openai");
+        assert_eq!(key("https://accounts.google.com/o/oauth2/auth"), "google");
+        assert_eq!(key("https://www.kimi.com/code/authorize_device"), "kimi");
+        assert_ne!(
+            key("https://claude.ai/oauth/authorize"),
+            key("https://auth.openai.com/codex/device")
+        );
+        // A lookalike suffix must never join a trusted provider's cookie jar.
+        assert_eq!(key("https://evilclaude.ai/login"), "evilclaude_ai");
     }
 
     #[test]

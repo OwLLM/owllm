@@ -593,6 +593,19 @@ pub(crate) fn repair_broken_ref(cwd: Option<&std::path::Path>) {
         return;
     };
 
+    // ORIG_HEAD is a per-worktree pseudo-ref rewritten before merge/reset. A
+    // crash can leave its 41-byte SHA slot full of NULs just like a branch ref;
+    // then every merge fails before it can replace the value. It carries only
+    // rollback convenience (the real commits remain in refs/reflogs), so remove
+    // only the proven-zeroed file and let the retried Git command recreate it.
+    let orig_head = own.join("ORIG_HEAD");
+    if file_is_zeroed(&orig_head) {
+        let _ = std::fs::remove_file(orig_head.with_extension("lock"));
+        if std::fs::remove_file(&orig_head).is_ok() {
+            eprintln!("vault: cleared a zeroed ORIG_HEAD pseudo-ref");
+        }
+    }
+
     // 1. HEAD is written the same way and can be zeroed too. Without this the
     //    branch repair below cannot even learn which ref to fix.
     let head_path = own.join("HEAD");
@@ -873,14 +886,22 @@ fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, Strin
             note_repo_health(&retried);
             retried
         }
-        Err(e) if is_lock_contention(&e) && repair_stale_lock(&e) => {
-            let retried = run_git_once(args, cwd); // retry once, now with the lock gone
-            note_repo_health(&retried);
-            retried
+        Err(e) if is_lock_contention(&e) => {
+            if repair_stale_lock(&e) {
+                let retried = run_git_once(args, cwd); // retry once, now with the lock gone
+                note_repo_health(&retried);
+                retried
+            } else {
+                // A fresh lock belongs to a live writer. Surface the collision
+                // so this tick retries later, but do not call a healthy repo
+                // corrupt merely because several periodic channels met it.
+                Err(e)
+            }
         }
         other => {
-            // Failures still count (a lock too FRESH to clear is one), but a
-            // ROUTINE success must not reset the breaker: during the 2026-08-22
+            // Offer remaining failures to the health classifier (network/auth
+            // errors are ignored there), but a ROUTINE success must not reset
+            // the breaker: during the 2026-08-22
             // runaway every tick mixed successful `config`/`rev-parse` calls in
             // with the failing fetch, so reset-on-any-success pinned the fail
             // count at zero and the breaker never engaged. Only a repaired-and-
@@ -2653,12 +2674,21 @@ mod tests {
         // now. Deleting it would corrupt that writer's index, so we must not.
         let (repo, lock) = repo_with_planted_lock("lock-fresh", 0);
 
-        let err = run_git(&["add", "-A"], Some(&repo))
-            .expect_err("a live lock must still surface as a failure");
-        assert!(is_lock_contention(&err), "unexpected git error: {err}");
+        // Several periodic channels can meet the same legitimate writer while
+        // its fresh lock exists. Those transient collisions must keep surfacing
+        // to their callers, but they are not evidence that the repo is broken.
+        for _ in 0..3 {
+            let err = run_git(&["add", "-A"], Some(&repo))
+                .expect_err("a live lock must still surface as a failure");
+            assert!(is_lock_contention(&err), "unexpected git error: {err}");
+        }
         assert!(
             lock.exists(),
             "a lock young enough to belong to a live git process must survive"
+        );
+        assert!(
+            sync_cooldown_remaining().is_none(),
+            "normal contention with a live git writer must not open the corruption breaker"
         );
 
         clear_breaker();
@@ -2732,6 +2762,66 @@ mod tests {
         std::fs::create_dir_all(ref_file.parent().unwrap()).unwrap();
         std::fs::write(&ref_file, [0u8; 41]).unwrap();
         (root, a, branch, ahead)
+    }
+
+    #[test]
+    fn a_zeroed_orig_head_heals_so_merge_can_integrate_remote_work() {
+        let _gate = breaker_gate();
+        clear_breaker();
+        let root =
+            std::env::temp_dir().join(format!("owllm-vault-orig-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&["init", &root.to_string_lossy()], None).unwrap();
+        run_git(&["config", "user.email", "test@owllm.local"], Some(&root)).unwrap();
+        run_git(&["config", "user.name", "owllm test"], Some(&root)).unwrap();
+        std::fs::write(root.join("base.txt"), "base").unwrap();
+        run_git(&["add", "-A"], Some(&root)).unwrap();
+        run_git(&["commit", "-m", "base"], Some(&root)).unwrap();
+        let branch = current_branch(&root);
+
+        run_git(&["checkout", "-b", "peer"], Some(&root)).unwrap();
+        std::fs::write(root.join("peer.txt"), "peer").unwrap();
+        run_git(&["add", "-A"], Some(&root)).unwrap();
+        run_git(&["commit", "-m", "peer"], Some(&root)).unwrap();
+        let peer = run_git(&["rev-parse", "HEAD"], Some(&root))
+            .unwrap()
+            .trim()
+            .to_string();
+        run_git(&["checkout", &branch], Some(&root)).unwrap();
+
+        // Exact live crash shape: a 41-byte pseudo-ref whose SHA never flushed.
+        // `git fsck` and `show-ref` both say the repo is healthy, but every merge
+        // fails while ORIG_HEAD shadows the value Git is trying to write.
+        let orig_head = root.join(".git").join("ORIG_HEAD");
+        std::fs::write(&orig_head, [0u8; 41]).unwrap();
+        let raw = run_git_once(&["merge", "--ff-only", "peer"], Some(&root))
+            .expect_err("a zeroed ORIG_HEAD must block merge");
+        assert!(raw.contains("ORIG_HEAD"), "unexpected merge error: {raw}");
+        assert!(
+            is_broken_ref(&raw),
+            "the heal ladder must claim this error: {raw}"
+        );
+
+        run_git(&["merge", "--ff-only", "peer"], Some(&root))
+            .expect("run_git must heal ORIG_HEAD and retry the merge");
+        let got = run_git(&["rev-parse", "HEAD"], Some(&root)).unwrap();
+        assert_eq!(
+            got.trim(),
+            peer,
+            "the remote work must actually be integrated"
+        );
+        assert!(
+            !file_is_zeroed(&orig_head),
+            "the retried merge must replace the zeroed pseudo-ref"
+        );
+        assert!(
+            sync_cooldown_remaining().is_none(),
+            "a successful pseudo-ref heal must leave the breaker closed"
+        );
+
+        clear_breaker();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

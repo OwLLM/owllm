@@ -163,7 +163,9 @@ const TRIPWIRES = [
   // every other git operation on the box through the shared credential lock.
   // Four independent guards; losing any one of them lets the runaway back.
   ["src-tauri/src/vault.rs", /"config", "core\.fsync", "all"/, "refs are fsynced, so a crash cannot zero a ref (prevention, all OS)"],
-  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,5000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,7000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,900}ORIG_HEAD[\s\S]{0,500}file_is_zeroed[\s\S]{0,300}remove_file/, "a zeroed ORIG_HEAD cannot block every vault merge and trip the corruption breaker"],
+  ["src-tauri/src/vault.rs", /fn a_zeroed_orig_head_heals_so_merge_can_integrate_remote_work[\s\S]{0,2400}sync_cooldown_remaining\(\)\.is_none\(\)/, "the zeroed-ORIG_HEAD regression proves merge recovery and a closed breaker"],
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
   ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,1800}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
@@ -173,7 +175,7 @@ const TRIPWIRES = [
   // nothing to commit. Signing metadata silently stopped reaching the vault.
   ["src-tauri/src/vault.rs", /static VAULT_TXN_LOCK[\s\S]{0,400}fn vault_txn/, "whole vault sync transactions are serialized, not just single git commands (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_signing[\s\S]{0,400}let _txn = vault_txn\(\);/, "signing sync holds the transaction lock across its reset→write→commit (v1.0.8)"],
-  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,700}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
+  ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,1000}let _txn = vault_txn\(\);/, "device sync cannot reset away a peer channel's pending write (v1.0.8)"],
   ["src-tauri/src/vault.rs", /fn vault_align[\s\S]{0,400}let _txn = vault_txn\(\);/, "vault_align's reset --hard cannot land mid-transaction (v1.0.8)"],
   // A THIRD corruption shape, and the one that actually bit: an orphaned
   // `.git/index.lock` (app killed mid-write). Git then refuses add/commit/reset
@@ -182,7 +184,7 @@ const TRIPWIRES = [
   // still looked healthy because its `reset --hard` was best-effort: it kept
   // re-ingesting an eleven-day-old state/devices/ and reporting "no change".
   ["src-tauri/src/vault.rs", /fn is_lock_contention[\s\S]{0,300}file exists/, "an orphaned git lock is recognized, not mistaken for a healthy repo (v1.0.9)"],
-  ["src-tauri/src/vault.rs", /is_lock_contention\(&e\) && repair_stale_lock\(&e\)/, "run_git's self-heal ladder clears an orphaned lock and retries (v1.0.9)"],
+  ["src-tauri/src/vault.rs", /Err\(e\) if is_lock_contention\(&e\) => \{[\s\S]{0,300}if repair_stale_lock\(&e\)[\s\S]{0,300}run_git_once\(args, cwd\)/, "run_git's self-heal ladder clears an orphaned lock and retries (v1.0.9)"],
   ["src-tauri/src/vault.rs", /STALE_LOCK_SECS[\s\S]{0,600}>= STALE_LOCK_SECS/, "only a lock too old to belong to a live git process is removed (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn reset_to_origin[\s\S]{0,900}run_git\(&\["reset", "--hard", &remote\], Some\(dir\)\)[\s\S]{0,60}\.map_err/, "a failed reset stops the sync instead of publishing a stale snapshot (v1.0.9)"],
   ["src-tauri/src/vault.rs", /fn vault_sync_devices[\s\S]{0,800}reset_to_origin\(&dir, &branch\)\?;/, "device sync reads peers from origin's tip or reports why it cannot (v1.0.9)"],
@@ -206,7 +208,7 @@ const TRIPWIRES = [
   // pointed-at ref is broken (git 2.34 Windows and 2.43 Linux both verified) —
   // so the heal must learn the branch by reading the HEAD file itself, or it
   // silently bails on the primary corruption case it exists for.
-  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,3000}read_to_string\(own\.join\("HEAD"\)\)/, "the heal reads HEAD itself — symbolic-ref fails on the very case being healed (2026-08-22)"],
+  ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,4200}read_to_string\(own\.join\("HEAD"\)\)/, "the heal reads HEAD itself — symbolic-ref fails on the very case being healed (2026-08-22)"],
   ["src-tauri/src/vault.rs", /bad object refs\//, "fetch's modern-git spelling of a broken ref is recognized by the heal ladder (2026-08-22)"],
   // VAULT SYNC IS THE BACK-PRESSURE GATE ON THE WHOLE APP. 2026-08-12: the app
   // ran 14 hours doing NOTHING — 552 threads all in Wait, ~2% CPU, no
@@ -367,6 +369,10 @@ function runHarnesses() {
     // whether the bwrap jail still withholds them, so it must run on every
     // host regardless of whether the UI deps are installed.
     "wslSshMirror.verify.run.mjs",
+    // Source assertions over vault.rs. A healthy repo must not be quarantined
+    // merely because periodic sync channels met another live Git writer's
+    // fresh lock, so this protection must run on every release host.
+    "vaultFreshLockBreaker.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

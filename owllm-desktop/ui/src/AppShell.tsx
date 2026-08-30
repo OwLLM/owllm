@@ -1684,7 +1684,14 @@ function SubTabs({
     return (
       <div
         key={p.key}
+        role="button"
+        tabIndex={0}
         onClick={() => onChange(p.key)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onChange(p.key);
+        }}
         title={working ? `${p.label} — working…` : done ? `${p.label} — finished (unseen)` : undefined}
         style={{
           display: "flex", alignItems: "center", gap: 6,

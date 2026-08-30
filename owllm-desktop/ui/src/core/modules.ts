@@ -27,6 +27,7 @@ import ChatPage from "../pages/finetuning/ChatPage";
 import CodePage from "../pages/agentic/CodePage";
 import AgentsPage from "../pages/agentic/AgentsPage";
 import StudioPage from "../pages/agentic/StudioPage";
+import DigitalTwinRoute from "../pages/agentic/DigitalTwinRoute";
 import BridgesPage from "../pages/agentic/BridgesPage";
 import AssetsPage from "../pages/agentic/AssetsPage";
 
@@ -107,8 +108,9 @@ export const FINETUNING: ModuleDef = {
   firstTab: "models",  // Qt _GROUP_FIRST_TAB["finetuning"] = "models"
 };
 
-/** Agentic Team — Code + Agents + Studio + Assets + Bridges.
- *  Qt: `_NAVBAR_GROUPS["agentic"] = ("code_btn", "agents_btn", "studio_btn", "assets_btn", "bridges_btn")`. */
+/** Agentic Team — Code + Agents + Studio + Digital Twin/3D + Assets + Bridges.
+ *  Digital Twin/3D is a lazy, frontend-only module so its Three.js loaders do
+ *  not add startup work or state coupling to the existing agent workflows. */
 export const AGENTIC: ModuleDef = {
   id: "agentic",
   toggleLabel: "🎭\nAgentic Team",
@@ -117,6 +119,7 @@ export const AGENTIC: ModuleDef = {
     { key: "code",    label: "💻 Coding",  component: CodePage    },
     { key: "agents",  label: "🤖 Agents",  component: AgentsPage  },
     { key: "studio",  label: "🎭 Studio",  component: StudioPage  },
+    { key: "digital-twin", label: "Digital Twin/3D", component: DigitalTwinRoute },
     { key: "assets",  label: "🖼 Assets",  component: AssetsPage  },
     { key: "bridges", label: "📱 Bridges", component: BridgesPage },
   ],

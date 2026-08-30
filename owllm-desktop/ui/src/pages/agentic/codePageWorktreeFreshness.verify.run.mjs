@@ -102,7 +102,7 @@ const removeStart = fleet.indexOf("pub async fn fleet_worktree_remove");
 const removeEnd = fleet.indexOf("/// Sweep leftover fleet worktrees", removeStart);
 const remove = removeStart >= 0 && removeEnd > removeStart ? fleet.slice(removeStart, removeEnd) : "";
 check(create.includes('let persistent_page = prefix == "owllm-page"') &&
-      create.includes('"worktree",\n                "lock"') &&
+      /"worktree",\r?\n\s+"lock"/.test(create) &&
       create.includes('"OWLLM persistent Coding page"'),
   "persistent Coding-page worktrees are locked against cross-host Git pruning");
 check(remove.includes('args.branch.starts_with("owllm-page/")') &&

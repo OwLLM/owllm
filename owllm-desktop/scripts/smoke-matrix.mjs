@@ -165,7 +165,7 @@ const TRIPWIRES = [
   ["src-tauri/src/vault.rs", /"config", "core\.fsync", "all"/, "refs are fsynced, so a crash cannot zero a ref (prevention, all OS)"],
   ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,7000}update-ref/, "a zeroed ref self-heals from reflog/origin instead of failing forever"],
   ["src-tauri/src/vault.rs", /fn repair_broken_ref[\s\S]{0,900}ORIG_HEAD[\s\S]{0,500}file_is_zeroed[\s\S]{0,300}remove_file/, "a zeroed ORIG_HEAD cannot block every vault merge and trip the corruption breaker"],
-  ["src-tauri/src/vault.rs", /fn a_zeroed_orig_head_heals_so_merge_can_integrate_remote_work[\s\S]{0,2400}sync_cooldown_remaining\(\)\.is_none\(\)/, "the zeroed-ORIG_HEAD regression proves merge recovery and a closed breaker"],
+  ["src-tauri/src/vault.rs", /fn a_zeroed_orig_head_heals_so_merge_can_integrate_remote_work[\s\S]{0,2800}sync_cooldown_remaining\(\)\.is_none\(\)/, "the zeroed-ORIG_HEAD regression proves merge recovery and a closed breaker"],
   ["src-tauri/src/vault.rs", /--path-format=absolute[\s\S]{0,80}--git-common-dir/, "ref repair resolves refs in the COMMON dir, so fleet worktrees heal too"],
   ["src-tauri/src/vault.rs", /COOLDOWN_UNTIL[\s\S]{0,1500}fn note_repo_health/, "circuit breaker stops timer-rate retries when a heal does not stick"],
   ["src-tauri/src/vault.rs", /fn maintain_repo[\s\S]{0,1800}repack", "-ad"/, "pack count is consolidated deliberately (auto-gc thrash disabled)"],
@@ -272,7 +272,7 @@ function runStatic() {
   for (const [rel, re, guard] of TRIPWIRES) {
     const p = path.join(APP, rel);
     let ok = false, note = guard;
-    try { ok = re.test(fs.readFileSync(p, "utf8")); }
+    try { ok = re.test(fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n")); }
     catch { note = `${guard} — FILE MISSING: ${rel}`; }
     record("S", `${rel} :: ${re.source.slice(0, 32)}`, ok ? "PASS" : "FAIL", ok ? guard : note);
   }

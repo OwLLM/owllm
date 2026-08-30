@@ -10,12 +10,15 @@ const ROOT = path.resolve(HERE, "../../../../..");
 const ASSETS = path.join(ROOT, "profile-assets");
 const LINUX_GUIDE_URL =
   "https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md";
-const PROFILE = process.argv.includes("--stdin")
+// Windows Git checkouts commonly use CRLF. Normalize before checking the
+// profile's adjacent HTML lines so the release gate validates content rather
+// than the host's configured line-ending convention.
+const PROFILE = (process.argv.includes("--stdin")
   ? fs.readFileSync(0, "utf8")
   : fs.readFileSync(
       path.join(ROOT, "owllm-dotgithub-profile-README.md"),
       "utf8",
-    );
+    )).replace(/\r\n/g, "\n");
 const ROOT_README = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
 const LINUX_GUIDE_PATH = path.join(ROOT, "INSTALL_LINUX.md");
 const LINUX_GUIDE = fs.existsSync(LINUX_GUIDE_PATH)

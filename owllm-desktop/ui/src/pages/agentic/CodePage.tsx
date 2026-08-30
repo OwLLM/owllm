@@ -1218,9 +1218,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     };
     window.addEventListener("owllm:llama:loading", onLoading as EventListener);
     let unlistenReady: (() => void) | null = null;
-    listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
-      setLlamaLoading(null);
-    }).then((u) => { unlistenReady = u; });
+    if (isTauri) {
+      listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
+        setLlamaLoading(null);
+      }).then((u) => { unlistenReady = u; });
+    }
     return () => {
       window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
       unlistenReady?.();

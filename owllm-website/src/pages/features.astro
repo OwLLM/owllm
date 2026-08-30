@@ -2,6 +2,7 @@
 import { Image } from "astro:assets";
 import Layout from "../layouts/Layout.astro";
 import Button from "../components/Button.astro";
+import DifferenceShowcase from "../components/DifferenceShowcase.astro";
 // Real screenshots of the shipping interface (scripts/capture-app-shots.mjs).
 import appModels from "../assets/app/models.png";
 import appAgents from "../assets/app/agents.png";
@@ -59,13 +60,21 @@ const groups: FeatureGroup[] = [
     emoji: "🤖",
     title: "Agentic teams",
     intro:
-      "One proven six-slot team, specialized by profiles — with verification, steering, memory, and rules built in.",
+      "A visible, steerable workforce with verification, memory, project rules, and a Critical Thinker that can make routine decisions for you.",
     image: appAgents,
     imageAlt: "The real OWLLM Agents page — the agentic creation launchpad",
     points: [
       {
         title: "One standard team, many profiles",
-        body: "Every template — Dev Squad, Chief of Staff, Research — is a profile over the same roster: an orchestrator that plans, a read-only scout, two parallel workers, an advisory critic, and a producer that only delivers review-approved work. Solo mode collapses to one coder with critic and producer.",
+        body: "Every template — Dev Squad, Chief of Staff, Research — is a profile over the same roster: an orchestrator that plans, a read-only scout, two parallel workers, an advisory critic, and a producer that only delivers review-approved work. Solo-Loop collapses to one coder with critic and producer.",
+      },
+      {
+        title: "Workflow ↔ Solo-Loop · Graph ↔ Chat",
+        body: "The Agentic header switches the execution shape and the visual perspective independently. Use the editable graph to inspect routing, then replace it with one live transcript per agent without interrupting the run or flattening the team into one synthetic chat.",
+      },
+      {
+        title: "Project environments that arrange themselves",
+        body: "Project kinds persist a workspace recipe, not only a team name. Web and research work open the shared browser beside OWLLM; responsive work uses a phone viewport; assistants open the exact mail, messaging, calendar, document, social, and custom sites you choose.",
       },
       {
         title: "The Verification Gate",
@@ -76,16 +85,24 @@ const groups: FeatureGroup[] = [
         body: "Type while a run is going and your message queues as a ⚡ steer, injected at the next agent boundary — or between tool calls on local models. Never dropped.",
       },
       {
-        title: "Memory that stays useful",
-        body: "Per-agent episodic history plus shared team memory: durable, vault-synced FACTS and auto-captured WORKLOG, retrieved with scoped BM25-lite and framed as a current-task context pack. A post-run curator saves at most two novel facts, so memory never silently bloats.",
+        title: "A live psychedelic activity signal",
+        body: "While work is running, the active chat, agent card, page tab, and module button use the same rotating rainbow aura. Switch pages freely: OWLLM still shows exactly where work is active and marks finished pages you have not reopened yet.",
       },
       {
-        title: "Rules and skills per project",
-        body: "Must / prefer / avoid directives are auto-seeded with native best practices and injected into every agent's prompt. Skill packs auto-equip by role, and the goal text auto-selects the one or two most relevant skills before the first token.",
+        title: "Memory that stays useful",
+        body: "Per-agent episodic history plus shared project memory: durable facts and auto-captured worklog are retrieved by scoped BM25-style relevance and prepended as a fenced MEMORY CURATOR CONTEXT PACK. A post-run curator saves at most two novel facts, so memory never becomes a transcript dump.",
+      },
+      {
+        title: "Skills Library + Auto Skills + default rules",
+        body: "Install and preview compatible SKILL.md packs from curated or custom Git sources, then equip them per role. Every project is seeded with production-minded must / prefer / avoid rules, while the goal automatically selects up to two additional relevant installed skills before the first token.",
       },
       {
         title: "Run Notebook",
-        body: "A per-project brainstorm pane with a NEXT-STEPS queue and a 🪄 digest agent that turns raw notes into implementable steps. Auto-feed walks the queue at each clean run end — and the notebook syncs across your machines.",
+        body: "A per-project scratchpad, plan, and NEXT-STEPS queue with a 🪄 digest agent that turns raw notes into implementable cards. Auto-feed advances only after a clean run, so a healthy queue can keep the project moving for hours without becoming an unbounded loop.",
+      },
+      {
+        title: "Brainstorm + Director mode",
+        body: "Brainstorm develops an idea through co-founder-style conversation, research, and a reusable brief before the build starts. When “critic = super user” is enabled, the Critical Thinker can make routine decisions in your place while every project rule remains in force.",
       },
     ],
   },
@@ -94,7 +111,7 @@ const groups: FeatureGroup[] = [
     emoji: "💻",
     title: "Coding",
     intro:
-      "A private AI workspace per folder — multi-page, multi-branch, persistent.",
+      "A persistent private workspace with two independent agents, selectable feedback loops, usage visibility, and three levels of autonomy.",
     image: appCode,
     imageAlt: "The real OWLLM Coding page — private AI workspace launchpad",
     points: [
@@ -103,12 +120,24 @@ const groups: FeatureGroup[] = [
         body: "Each Coding page is its own chat, plan board, and private git worktree on its own branch — close OWLLM and everything returns when you reopen the project. Merge back from the header when ready.",
       },
       {
-        title: "Plan / Act phases with live diffs",
-        body: "Watch edits as diffs, open files in an editable viewer, paste images into the conversation, and optionally run a second agent pane with its own transcript and model.",
+        title: "Two agents that can review each other",
+        body: "Open a second coding agent beside the first. It has its own model picker, transcript, composer, tools, and stop control. Feed the first reply to the second for review, send the second response back to the first, or enable both directions for a bounded six-exchange feedback loop.",
+      },
+      {
+        title: "Different models, different opinions",
+        body: "The second agent can inherit the first model or use a completely different local, API, or subscription model. That makes review a real second perspective instead of another pass through identical weights and context.",
+      },
+      {
+        title: "Plan / Auto / Chat",
+        body: "Plan breaks a goal into ordered Kanban work and executes it step by step. Auto reads, edits, creates, and runs directly. Chat is deliberately read-only for discussion and review. Watch live diffs, open and edit files, use the terminal, or paste images and documents.",
       },
       {
         title: "Super User column",
-        body: "Project rules (shared with the team when the folder is a team project) and the Notebook with auto-feed sit beside the chat. Mid-run messages become steers.",
+        body: "Project rules and the Notebook sit beside the chat and are shared with Agentic Team when the folder belongs to the same project. The panel also shows provider quota windows, balances when exposed, and OWLLM-recorded turns and estimated tokens for every model route.",
+      },
+      {
+        title: "Project Memory in both panes",
+        body: "Before either coding agent starts, it retrieves relevant project facts and worklogs and shows the memory_context card in that agent's transcript. Both agents write their completed work back to the same project scope.",
       },
     ],
   },
@@ -173,7 +202,7 @@ const groups: FeatureGroup[] = [
       },
       {
         title: "Remote devices, no SSH",
-        body: "Pair your machines over an end-to-end encrypted channel (Ed25519-signed, X25519-sealed). Run commands, see screens, or let your laptop borrow the gaming PC's GPU.",
+        body: "Pair your machines over an end-to-end encrypted channel (Ed25519-signed, X25519-sealed). Run permitted commands, see screens, install software, or select and start a local model on your gaming PC directly from the laptop's model picker.",
       },
       {
         title: "MCP with a safety gate",
@@ -181,17 +210,29 @@ const groups: FeatureGroup[] = [
       },
       {
         title: "In-app agent browser",
-        body: "A real browser agents can drive — open pages, read them, click and fill — with role-gated access and an approval boundary for consequential actions like sending or deleting.",
+        body: "A real visible browser agents can drive with stable tabs: open and navigate, snapshot interactive elements, read, click, fill, select, scroll histories, press keys, upload files, switch mobile device profiles, and capture screenshots. Use it for email, messengers, social sites, SaaS applications, local web apps, and forms across languages, with role-gated consequential actions.",
       },
     ],
   },
   {
     id: "platform",
     emoji: "⚙️",
-    title: "Platform & updates",
+    title: "Personalization, platform & updates",
     intro:
-      "Cross-platform by commitment, honest about hardware, and updatable without waiting for an installer.",
+      "An operator-grade workspace should adapt to your eyes, your language, your hardware, and your operating system.",
     points: [
+      {
+        title: "Dark/light skins + independent colors",
+        body: "Switch dark or light mode, choose the GUI accent, and choose the text color independently. OWLLM contrast-corrects text against every themed surface instead of letting a custom palette make the interface unreadable.",
+      },
+      {
+        title: "10–22 px chat text zoom",
+        body: "Persist the text size from Settings or hold Ctrl and use the mouse wheel directly over chat, Notebook, Brainstorm, Code, or agent inputs. The rest of the interface stays at the same scale.",
+      },
+      {
+        title: "Eight interface languages",
+        body: "The application interface includes English, Chinese, Korean, Japanese, Arabic, Italian, Hindi, and Portuguese localization, while browser and agent workflows can reason over whatever languages the selected model supports.",
+      },
       {
         title: "Windows, Linux, macOS — and ARM",
         body: "Per-platform engine variants: CUDA/Vulkan/CPU on Windows x64, Vulkan/CPU on Linux x64, CUDA on Jetson-class Linux ARM64, Metal on Apple Silicon (one universal bundle). Unsupported combos degrade honestly instead of offering a foreign binary.",
@@ -211,20 +252,23 @@ const groups: FeatureGroup[] = [
 
 <Layout
   title="Features"
-  description="The full OWLLM feature map: local models with VRAM-aware browsing, agentic teams with a verification gate, sandboxed coding, fine-tuning, bridges, remote devices, and MCP."
+  description="Explore OWLLM's Orchestrated Workflow, Solo-Loop, agent Graph and Chat views, Skills Library, adaptive project environments, Memory Curator RAG, browser automation, P2P devices, coding loops, and local models."
 >
   <section class="page-header" aria-labelledby="features-title">
     <div class="container">
-      <h1 id="features-title">Features</h1>
+      <p class="eyebrow">Orchestrated Workflow for Large Language Models</p>
+      <h1 id="features-title">The complete OWLLM workstation.</h1>
       <p class="subtitle">
-        The full map of what OWLLM does — organized the way the app is: models, agents, coding,
-        safety, fine-tuning, connectivity, and platform. Every screenshot is the real interface.
+        Code with a second opinion. Run a team. Let memory bring back the right decisions. Queue
+        hours of verified work. Operate the browser and the rest of your compute fleet—all from one app.
       </p>
       <nav class="group-nav" aria-label="Feature groups">
         {groups.map((g) => <a href={`#${g.id}`}>{g.emoji} {g.title}</a>)}
       </nav>
     </div>
   </section>
+
+  <DifferenceShowcase />
 
   <section class="section" aria-label="Feature groups">
     <div class="container">
@@ -287,14 +331,29 @@ const groups: FeatureGroup[] = [
   }
 
   .page-header {
-    padding: 4rem 0 2rem;
-    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    padding: 5rem 0 2.75rem;
+    background:
+      radial-gradient(circle at 50% 0%, rgba(var(--accent-rgb), 0.22), transparent 50%),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
     text-align: center;
   }
 
   .page-header h1 {
-    font-size: clamp(2rem, 5vw, 3rem);
+    max-width: 920px;
+    margin-inline: auto;
+    font-size: clamp(2.5rem, 6vw, 4.75rem);
+    line-height: 1;
+    letter-spacing: -0.045em;
     margin-bottom: 0.75rem;
+  }
+
+  .eyebrow {
+    margin-bottom: 0.7rem;
+    color: var(--accent-ink);
+    font-size: 0.76rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
   }
 
   .subtitle {

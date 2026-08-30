@@ -181,6 +181,8 @@ import {
 import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
 import { historyBudgetFor } from "./contextBudget";
 
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
@@ -8910,9 +8912,11 @@ export function AgentsPage({
     // from 503 → 200. Clear the cold-load banner so the user has a
     // ground-truth signal that VRAM load finished.
     let unlistenReady: (() => void) | null = null;
-    listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
-      setLlamaLoading(null);
-    }).then(u => { unlistenReady = u; });
+    if (isTauri) {
+      listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
+        setLlamaLoading(null);
+      }).then(u => { unlistenReady = u; });
+    }
     return () => {
       window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
       unlistenReady?.();

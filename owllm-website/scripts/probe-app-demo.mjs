@@ -66,6 +66,9 @@ const strayEdges = await page.locator('[data-ui="WindowAccentEdge"]').count();
 console.log(`${strayEdges === 0 ? "OK " : "FAIL"} no OS-window accent edge in the demo (${strayEdges})`);
 if (strayEdges !== 0) failed++;
 
-if (errors.length) console.log("\nConsole page errors:\n" + errors.join("\n"));
+if (errors.length) {
+  console.log("\nConsole page errors:\n" + errors.join("\n"));
+  failed += errors.length;
+}
 await browser.close();
 process.exit(failed ? 1 : 0);

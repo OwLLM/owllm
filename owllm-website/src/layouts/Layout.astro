@@ -22,7 +22,7 @@ const {
 const site = Astro.site?.toString().replace(/\/$/, "") || "https://owllm.com";
 const canonical = new URL(Astro.url.pathname, site);
 const ogImage = image.startsWith("http") ? image : new URL(image, site).toString();
-const fullTitle = title === "OwLLM" ? title : `${title} | OwLLM`;
+const fullTitle = /^(OWLLM|OwLLM)(?:\b|\s|—)/.test(title) ? title : `${title} | OWLLM`;
 
 const jsonLd = {
   "@context": "https://schema.org",
@@ -47,7 +47,7 @@ const jsonLd = {
     <link rel="sitemap" href={`${site}/sitemap-index.xml`} type="application/xml" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#667eea" />
+    <meta name="theme-color" content="#5cf0ff" />
 
     <meta property="og:title" content={fullTitle} />
     <meta property="og:description" content={description} />
@@ -77,10 +77,14 @@ const jsonLd = {
             if (accent && /^#([0-9a-f]{6})$/i.test(accent)) {
               document.documentElement.style.setProperty('--accent', accent);
               const hex = accent.replace('#', '');
-              document.documentElement.style.setProperty('--accent-rgb',
-                parseInt(hex.slice(0, 2), 16) + ', ' +
-                parseInt(hex.slice(2, 4), 16) + ', ' +
-                parseInt(hex.slice(4, 6), 16));
+              const r = parseInt(hex.slice(0, 2), 16);
+              const g = parseInt(hex.slice(2, 4), 16);
+              const b = parseInt(hex.slice(4, 6), 16);
+              document.documentElement.style.setProperty('--accent-rgb', r + ', ' + g + ', ' + b);
+              document.documentElement.style.setProperty('--accent-soft', 'rgba(' + r + ', ' + g + ', ' + b + ', 0.18)');
+              document.documentElement.style.setProperty('--accent-strong', 'rgba(' + r + ', ' + g + ', ' + b + ', 0.55)');
+              document.documentElement.style.setProperty('--accent-glow-soft', 'rgba(' + r + ', ' + g + ', ' + b + ', 0.35)');
+              document.documentElement.style.setProperty('--accent-glow-strong', 'rgba(' + r + ', ' + g + ', ' + b + ', 0.65)');
             }
           } catch (e) {
             document.documentElement.setAttribute('data-theme', 'dark');

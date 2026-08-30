@@ -2,9 +2,7 @@
 import { Image } from "astro:assets";
 import Layout from "../layouts/Layout.astro";
 import Button from "../components/Button.astro";
-import Card from "../components/Card.astro";
-import heroOwl from "../assets/hero-owl.png";
-import featureAgents from "../assets/feature-agents.png";
+import DifferenceShowcase from "../components/DifferenceShowcase.astro";
 // Real screenshots of the actual app UI, captured by
 // scripts/capture-app-shots.mjs — never stock imagery.
 import appHome from "../assets/app/home.png";
@@ -12,49 +10,7 @@ import appModels from "../assets/app/models.png";
 import appChat from "../assets/app/chat.png";
 import appAgents from "../assets/app/agents.png";
 import appCode from "../assets/app/code.png";
-
-const features = [
-  {
-    title: "Local & private models",
-    description:
-      "Run GGUF models on your own GPU or CPU. Your prompts, files, and agent history stay on hardware you control.",
-  },
-  {
-    title: "Shared memory & RAG",
-    description:
-      "Per-agent episodic memory plus shared project memory in SQLite, retrieved with BM25-lite and injected as task-focused context.",
-  },
-  {
-    title: "Personal agent teams",
-    description:
-      "Build teams of specialist agents. Each specialist works in its own git worktree for safe, concurrent execution.",
-  },
-  {
-    title: "Browser & tool workflows",
-    description:
-      "Native GGUF tool-calling through the model's own chat template, plus MCP servers with a master switch and per-tool toggles.",
-  },
-  {
-    title: "Coding assistance",
-    description:
-      "A dedicated Code page where the model edits files in a folder, with per-project conversation, plan, and model persistence.",
-  },
-  {
-    title: "Configurable skills",
-    description:
-      "Add skills and MCP tools per agent. Toggle exactly what each specialist can use so capability matches responsibility.",
-  },
-  {
-    title: "Background execution",
-    description:
-      "Split inference across machines: keep the GPU server on your workstation and run agents on a Linux box or sandbox.",
-  },
-  {
-    title: "Cross-platform sandbox",
-    description:
-      "Execute tools inside a real Linux sandbox via WSL2, Lima, or bubblewrap — keeping your host files untouched.",
-  },
-];
+import orchestratedWorkflow from "../assets/app/orchestrated-workflow.png";
 
 // Every image below is a real screenshot of the shipping interface,
 // captured from the browser build by scripts/capture-app-shots.mjs.
@@ -91,51 +47,42 @@ const demos = [
 
 const comparisons = [
   {
-    aspect: "Model execution",
-    owllm:
-      "Local GGUF inference on your own GPU/CPU; optional network-served inference with API-key auth.",
-    typical: "Typically routes every request to a vendor API.",
+    aspect: "Parallel and background work",
+    owllm: "A visible role graph, one live transcript per agent, two isolated Worker lanes, persistent pages, and mid-run steering.",
   },
   {
-    aspect: "Data privacy",
-    owllm:
-      "Prompts, files, and memory stay local by default. Cloud peers are opt-in first-class models.",
-    typical: "Conversations and files are processed on remote infrastructure by default.",
+    aspect: "Skills and custom instructions",
+    owllm: "A real Skills Library, per-role equipment, automatic 1–2 skill selection, and default project rules shared across every model path.",
   },
   {
-    aspect: "Tool execution",
-    owllm:
-      "Native GGUF tool-calling via the model's own chat template; tools run inside an OS-level Linux sandbox.",
-    typical: "Tool-calling is often cloud-mediated or runs on the host without isolation.",
+    aspect: "Persistent memory",
+    owllm: "Durable facts and capped worklogs, scoped retrieval, a fenced context pack, a bounded Curator, vault sync, and a 3D graph view.",
   },
   {
-    aspect: "Agent memory",
-    owllm: "Per-agent episodic memory plus shared project memory with scoped BM25-lite retrieval.",
-    typical: "Usually session-scoped; long-term memory depends on external integrations.",
+    aspect: "Browser and app preview",
+    owllm: "Project recipes open the shared agent browser beside OWLLM, choose desktop or mobile viewports, and preserve authenticated tabs locally.",
   },
   {
-    aspect: "Agent concurrency",
-    owllm: "Each specialist runs in an isolated git worktree with safe merge/conflict handling.",
-    typical: "Single-threaded or shared-context execution is common.",
+    aspect: "Long-running autonomy",
+    owllm: "Notebook auto-feed advances one implementable card at a time only after a clean run; stopped and failed work pauses the queue.",
   },
   {
-    aspect: "Skills & MCP",
-    owllm: "Per-agent skill toggles and MCP servers with schema-safety gate and per-tool controls.",
-    typical: "Tool access is often global or hard-coded per conversation.",
+    aspect: "Model and machine freedom",
+    owllm: "Assign local GGUF, API, or subscription-CLI models per role, then reach encrypted peer devices and their local models without SSH.",
   },
 ];
 
 const socialProof = [
-  { label: "Local-first", value: "GGUF" },
-  { label: "Tool-calling", value: "Native" },
-  { label: "Sandbox", value: "WSL2 / Lima / bubblewrap" },
-  { label: "Cloud peers", value: "Claude, GPT, Gemini, DeepSeek, Groq" },
+  { label: "Agentic modes", value: "Workflow ↔ Solo-Loop" },
+  { label: "Team visibility", value: "Graph ↔ live Chat" },
+  { label: "Model routing", value: "Per role · any provider" },
+  { label: "Completion", value: "Verification Gate" },
 ];
 ---
 
 <Layout
-  title="OwLLM"
-  description="A local-first AI workstation: run LLMs on your own hardware, orchestrate multi-agent teams, and keep the dangerous parts sandboxed."
+  title="OWLLM — Orchestrated Workflow for Large Language Models"
+  description="A local-first AI workstation for visible agent teams, Solo-Loops, mixed-model orchestration, project memory, skills, browser automation, and verified long-running work."
 >
   <section class="hero" aria-labelledby="hero-heading">
     {/* App-native backdrop: the same light-grid + aurora-orb treatment the
@@ -148,18 +95,18 @@ const socialProof = [
     </div>
     <div class="hero-content container">
       <div class="hero-text">
-        <div class="hero-badge">Local-first AI workstation</div>
+        <div class="hero-badge"><span aria-hidden="true"></span> Orchestrated Workflow for Large Language Models</div>
         <h1 id="hero-heading">
-          Run AI on <span class="accent-text">your hardware</span>, under your control.
+          Orchestrate the work. <span class="accent-text">Not just the prompt.</span>
         </h1>
         <p class="hero-tagline">
-          Orchestrate multi-agent teams, execute native GGUF tool-calling, and keep the dangerous
-          parts sandboxed — with an architectural advantage: split the model server and the agents
-          across machines.
+          Watch a visible team plan, scout, execute in parallel, review, and publish—or collapse it
+          to a lean Solo-Loop. Give every role the model, skills, memory, tools, browser, and project
+          rules it needs, then let real verification decide when the work is done.
         </p>
         <div class="hero-actions">
           <Button href="/download" size="lg">Download OwLLM</Button>
-          <Button href="/features" variant="outline" size="lg">Explore features</Button>
+          <Button href="/how-to-use" variant="outline" size="lg">Try the real app</Button>
         </div>
         <div class="hero-social-proof" aria-label="Key highlights">
           {
@@ -173,50 +120,24 @@ const socialProof = [
         </div>
       </div>
       <div class="hero-media">
-        <Image
-          src={heroOwl}
-          alt="OwLLM mascot owl"
-          widths={[320, 640, 960]}
-          sizes="(max-width: 768px) 100vw, 480px"
-          loading="eager"
-          decoding="async"
-          priority
-          class="hero-image"
-        />
+        <figure class="hero-app">
+          <Image
+            src={orchestratedWorkflow}
+            alt="The real OWLLM Orchestrated Workflow graph"
+            widths={[640, 960, 1440]}
+            sizes="(max-width: 900px) 100vw, 52vw"
+            loading="eager"
+            decoding="async"
+            priority
+            class="hero-image"
+          />
+          <figcaption><span aria-hidden="true"></span> Real app · Orchestrated Workflow view</figcaption>
+        </figure>
       </div>
     </div>
   </section>
 
-  <section class="section features-section" aria-labelledby="features-heading">
-    <div class="container">
-      <h2 id="features-heading" class="section-title">Why OwLLM is different</h2>
-      <p class="section-subtitle">
-        Built for users who want the power of modern AI without giving up control of their data,
-        models, or tools.
-      </p>
-      <div class="feature-grid">
-        {
-          features.map((feature) => (
-            <Card as="article" class="feature-card">
-              <h3>{feature.title}</h3>
-              <p>{feature.description}</p>
-            </Card>
-          ))
-        }
-      </div>
-      <div class="feature-teaser">
-        <Image
-          src={featureAgents}
-          alt="OwLLM agentic team interface preview"
-          widths={[320, 640, 800]}
-          sizes="(max-width: 768px) 100vw, 720px"
-          loading="lazy"
-          decoding="async"
-          class="feature-image"
-        />
-      </div>
-    </div>
-  </section>
+  <DifferenceShowcase />
 
   <section class="section demos-section" aria-labelledby="demos-heading">
     <div class="container">
@@ -279,10 +200,10 @@ const socialProof = [
 
   <section class="section comparison-section" aria-labelledby="comparison-heading">
     <div class="container">
-      <h2 id="comparison-heading" class="section-title">Built for control, not lock-in</h2>
+      <h2 id="comparison-heading" class="section-title">What the category asks for—inside one system</h2>
       <p class="section-subtitle">
-        A fact-based look at how OwLLM's design differs from a typical cloud-only assistant. We
-        don't name competitors — we state what OwLLM actually does.
+        Current agent products are converging on background work, memory, rules, skills, custom
+        agents, and browsers. OWLLM connects those expectations to one visible, local-first runtime.
       </p>
       <div
         class="comparison-table-wrapper"
@@ -292,13 +213,12 @@ const socialProof = [
       >
         <table class="comparison-table">
           <caption class="sr-only">
-            Comparison of OwLLM capabilities versus a typical cloud-only assistant
+            Current agent-product expectations and OWLLM's implementation
           </caption>
           <thead>
             <tr>
               <th scope="col">Capability</th>
-              <th scope="col">OwLLM</th>
-              <th scope="col">Typical cloud-only assistant</th>
+              <th scope="col">How OWLLM implements it</th>
             </tr>
           </thead>
           <tbody>
@@ -307,7 +227,6 @@ const socialProof = [
                 <tr>
                   <th scope="row">{row.aspect}</th>
                   <td>{row.owllm}</td>
-                  <td>{row.typical}</td>
                 </tr>
               ))
             }
@@ -315,9 +234,17 @@ const socialProof = [
         </table>
       </div>
       <p class="comparison-note">
-        Cloud models are first-class peers in OwLLM — you can mix Claude, GPT, Gemini, DeepSeek,
-        Groq, and subscription CLIs alongside local models. The comparison above is about where your
-        data and tools live by default, not about rejecting the cloud.
+        OWLLM does not reject the cloud. Claude, GPT, Gemini, Kimi, DeepSeek, Groq, and subscription
+        CLIs can work beside local models; you decide the model per role and where each workload runs.
+      </p>
+      <p class="comparison-sources">
+        Competitive signal—not a popularity ranking: current official product documentation repeatedly
+        invests in <a href="https://docs.cursor.com/background-agent" target="_blank" rel="noreferrer">background agents</a>,
+        <a href="https://docs.github.com/en/copilot/concepts/agents/about-agent-skills" target="_blank" rel="noreferrer">skills</a>,
+        <a href="https://docs.github.com/en/enterprise-cloud@latest/copilot/concepts/agents/copilot-memory" target="_blank" rel="noreferrer">memory</a>,
+        <a href="https://code.claude.com/docs/en/sub-agents" target="_blank" rel="noreferrer">subagents</a>,
+        <a href="https://docs.devin.ai/work-with-devin/devin-session-tools" target="_blank" rel="noreferrer">browser tools</a>, and
+        <a href="https://docs.replit.com/core-concepts/agent/task-system" target="_blank" rel="noreferrer">parallel task boards</a>.
       </p>
     </div>
   </section>
@@ -429,7 +356,7 @@ const socialProof = [
     position: relative;
     z-index: 1;
     display: grid;
-    grid-template-columns: 1.2fr 0.8fr;
+    grid-template-columns: 1.05fr 0.95fr;
     gap: 3rem;
     align-items: center;
   }
@@ -448,9 +375,23 @@ const socialProof = [
     width: fit-content;
   }
 
+  .hero-badge > span {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, #3cf26b, #ffd93c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b);
+    box-shadow: 0 0 12px rgba(176, 124, 255, 0.7);
+    animation: hero-signal 2.6s linear infinite;
+  }
+
+  @keyframes hero-signal {
+    to { transform: rotate(360deg); }
+  }
+
   .hero-text h1 {
-    font-size: clamp(2.25rem, 5.5vw, 4rem);
-    line-height: 1.1;
+    font-size: clamp(2.5rem, 5.8vw, 4.85rem);
+    line-height: 0.98;
+    letter-spacing: -0.05em;
     margin-bottom: 1.25rem;
   }
 
@@ -459,7 +400,7 @@ const socialProof = [
   }
 
   .hero-tagline {
-    font-size: 1.125rem;
+    font-size: clamp(1.03rem, 1.7vw, 1.2rem);
     color: var(--fg-muted);
     margin-bottom: 1.75rem;
     max-width: 55ch;
@@ -482,7 +423,7 @@ const socialProof = [
     display: flex;
     flex-direction: column;
     padding: 0.625rem 1rem;
-    border-radius: 12px;
+    border-radius: 8px;
     background-color: var(--bg-surface);
     border: 1px solid var(--border);
     min-width: 120px;
@@ -491,7 +432,7 @@ const socialProof = [
   .proof-value {
     font-weight: 700;
     color: var(--accent-ink);
-    font-size: 0.95rem;
+    font-size: 0.86rem;
   }
 
   .proof-label {
@@ -504,12 +445,44 @@ const socialProof = [
     justify-content: center;
   }
 
+  .hero-app {
+    width: min(100%, 650px);
+    margin: 0;
+  }
+
   .hero-image {
-    border-radius: 24px;
-    box-shadow: var(--shadow-lg);
-    max-height: 420px;
-    width: auto;
-    object-fit: contain;
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .hero-app figcaption {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.65rem;
+    color: var(--fg-subtle);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .hero-app figcaption span {
+    width: 0.5rem;
+    height: 0.5rem;
+    background: conic-gradient(from 0deg, #3cf26b, #ffd93c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b);
+    box-shadow: 0 0 12px rgba(176, 124, 255, 0.72);
+    animation: hero-signal 2.6s linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero-badge > span,
+    .hero-app figcaption span { animation: none; }
   }
 
   /* Sections */
@@ -529,42 +502,6 @@ const socialProof = [
     font-size: 1.125rem;
     max-width: 65ch;
     margin: 0 auto 2.5rem;
-  }
-
-  .features-section {
-    background-color: var(--bg-panel);
-  }
-
-  .feature-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 1.5rem;
-    margin-bottom: 3rem;
-  }
-
-  .feature-card h3 {
-    color: var(--accent-ink);
-    margin-bottom: 0.5rem;
-    font-size: 1.125rem;
-  }
-
-  .feature-card p {
-    color: var(--fg-muted);
-    margin: 0;
-    font-size: 0.975rem;
-  }
-
-  .feature-teaser {
-    display: flex;
-    justify-content: center;
-  }
-
-  .feature-image {
-    border-radius: 20px;
-    box-shadow: var(--shadow-md);
-    max-height: 420px;
-    width: auto;
-    object-fit: contain;
   }
 
   /* Demos */
@@ -673,6 +610,18 @@ const socialProof = [
     font-size: 0.95rem;
   }
 
+  .comparison-sources {
+    max-width: 88ch;
+    margin: 1rem auto 0;
+    color: var(--fg-subtle);
+    font-size: 0.78rem;
+    text-align: center;
+  }
+
+  .comparison-sources a {
+    color: var(--accent-ink);
+  }
+
   /* Privacy */
   .privacy-section {
     background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
@@ -754,9 +703,7 @@ const socialProof = [
       justify-content: center;
     }
 
-    .hero-image {
-      max-height: 300px;
-    }
+    .hero-app { margin-top: 1.5rem; }
 
     .demo-row,
     .demo-row.reversed {
@@ -843,8 +790,6 @@ const socialProof = [
       font-size: 0.9rem;
     }
 
-    .feature-image,
-    .hero-image,
     .demo-image,
     .privacy-image {
       max-height: 300px;

@@ -1,0 +1,960 @@
+---
+import { Image } from "astro:assets";
+import orchestratedWorkflow from "../assets/app/orchestrated-workflow.png";
+import soloLoop from "../assets/app/solo-loop.png";
+import agentChatGrid from "../assets/app/agent-chat-grid.png";
+import adaptiveWorkspace from "../assets/app/adaptive-workspace.png";
+import skillsLibrary from "../assets/app/skills-library.png";
+import MemoryRagShowcase from "./MemoryRagShowcase.astro";
+
+// Every visual in this component is captured from the shipping React app by
+// scripts/capture-app-shots.mjs. This page deliberately does not redraw OWLLM.
+const workflowViews = [
+  {
+    id: "orchestrated",
+    label: "Orchestrated Workflow",
+    image: orchestratedWorkflow,
+    alt: "The real OWLLM Orchestrated Workflow graph with the Orchestrator, Scout, two Worker lanes, Critical Thinker, and Producer",
+    kicker: "For work worth a team",
+    title: "Plan centrally. Explore and execute in parallel. Verify before delivery.",
+    body: "The Orchestrator owns the plan and routes bounded slices. A read-only Scout gathers evidence while two interchangeable Worker lanes can execute independent work. The Critical Thinker reviews substantive results; the rule-based Producer delivers only approved work.",
+    facts: [
+      "One visible graph—not hidden subagents you cannot inspect",
+      "Independent models can be assigned per agent or across the team",
+      "Mid-run messages become queued steers instead of disappearing",
+      "A real command exit code—not model confidence—decides whether code is done",
+    ],
+  },
+  {
+    id: "solo",
+    label: "Solo-Loop",
+    image: soloLoop,
+    alt: "The real OWLLM Solo-Loop graph with a Solo Generalist, Critical Thinker, and Producer",
+    kicker: "For tightly coupled work",
+    title: "The same engine, collapsed to the smallest safe loop.",
+    body: "Solo-Loop removes team ceremony when parallelism would add noise. One full-capability worker edits, runs, verifies, and fixes; a Critical Thinker checks the grounded result; the Producer handles the deterministic finishing step.",
+    facts: [
+      "The same project rules, memory, tools, sandbox, and Verification Gate",
+      "A leaner context profile for solo and small-team runs",
+      "No opinion-only debate loop: measured checks remain the source of truth",
+      "Switch modes from the real Agentic header without changing projects",
+    ],
+  },
+  {
+    id: "chat",
+    label: "Agent Chat Grid",
+    image: agentChatGrid,
+    alt: "The real OWLLM Agent Chat Grid with one live transcript for every team member",
+    kicker: "The graph becomes live conversation",
+    title: "See every agent think, use tools, and hand work forward.",
+    body: "Graph and Chat are two views of the same running team. The Chat grid replaces the canvas with one live transcript per agent, including its model, tools, status, and controls. The rotating psychedelic aura follows whichever agent, tab, or page is active.",
+    facts: [
+      "One transcript per agent instead of a flattened synthetic summary",
+      "Per-agent model pickers make mixed-model teams visible and controllable",
+      "The Producer card exposes commit, merge, and publish as explicit gates",
+      "Switch back to Graph at any time without interrupting the run",
+    ],
+  },
+];
+
+const capabilities = [
+  {
+    icon: "⇄",
+    title: "Two-agent Coding",
+    body: "Open a second coder with its own model, transcript, tools, and composer. Feed feedback in either direction—or both—for a bounded six-exchange review loop.",
+  },
+  {
+    icon: "🧠",
+    title: "Memory Curator + RAG",
+    body: "Project facts and capped worklogs are relevance-ranked into a fenced context pack. A bounded post-run Curator saves at most two novel durable facts; the same memory also has a 3D graph view.",
+  },
+  {
+    icon: "📓",
+    title: "Notebook auto-feed",
+    body: "Brainstorm, digest raw notes into implementable cards, then feed the next step only after the current run ends cleanly. Failed or stopped work pauses instead of blindly advancing.",
+  },
+  {
+    icon: "⚡",
+    title: "Super User decisions",
+    body: "Optional Director mode lets the Critical Thinker decide routine questions while the project's must / prefer / avoid rules remain binding for every agent path.",
+  },
+  {
+    icon: "🌐",
+    title: "Visible agent browser",
+    body: "A real shared browser can open, read, click, fill, scroll, upload, switch device profiles, and capture proof across webmail, messaging, social, SaaS, local apps, and multilingual forms.",
+  },
+  {
+    icon: "◉",
+    title: "Encrypted device fleet",
+    body: "Pair your own machines over an Ed25519-signed, X25519-sealed channel. Use permitted shells and screens—or run a local model on the GPU PC from another OWLLM device's model picker.",
+  },
+  {
+    icon: "▣",
+    title: "Models without lock-in",
+    body: "Mix local GGUF models, API providers, and Claude Code, Codex, Gemini, or Kimi subscription CLIs. Model selection is explicit; provider quota windows and estimated usage stay visible.",
+  },
+  {
+    icon: "🛡",
+    title: "Real isolation + rules",
+    body: "Agents work in folder-sealed Linux sandboxes through WSL2, Lima, or bwrap. Every new project starts with native safety and engineering rules that you can edit.",
+  },
+  {
+    icon: "🎯",
+    title: "Private model lab",
+    body: "Find VRAM-fit Hugging Face models, resume downloads, build datasets from PDFs, DOCX, and web pages, run LoRA training, quantize to GGUF, abliterate, and test in Chat.",
+  },
+  {
+    icon: "🔌",
+    title: "MCP + messaging bridges",
+    body: "Install MCP packs behind per-tool controls and a schema safety gate. Telegram and WhatsApp messages can become team runs with results streamed back.",
+  },
+  {
+    icon: "◐",
+    title: "A workstation that fits you",
+    body: "Dark/light skins, independent accent and text colors, contrast correction, 10–22px chat zoom, eight interface languages, and persistent multi-page workspaces.",
+  },
+  {
+    icon: "🛒",
+    title: "Teams, agents, skills, marketplace",
+    body: "Build reusable personal agents and rule cards, edit team delegation graphs, equip skills by role, and install reviewed team, skill, MCP, and project packs.",
+  },
+];
+
+const capabilitySignals = [
+  "bounded review loop",
+  "scoped retrieval",
+  "verified auto-feed",
+  "decision routing",
+  "visible operation",
+  "encrypted peer",
+  "per-role routing",
+  "folder sealed",
+  "local model lab",
+  "permission gated",
+  "live personalization",
+  "reusable system",
+];
+
+const research = [
+  {
+    title: "Simple, composable agent patterns",
+    note: "Use workflows when the path is known; use agents when flexibility earns the extra cost.",
+    href: "https://www.anthropic.com/engineering/building-effective-agents",
+    source: "Building effective agents",
+  },
+  {
+    title: "Parallelism where it really helps",
+    note: "Orchestrator-worker systems are strongest on separable, breadth-first work—not every task.",
+    href: "https://www.anthropic.com/engineering/multi-agent-research-system",
+    source: "Multi-agent research system",
+  },
+  {
+    title: "Design for coordination failures",
+    note: "Scoped roles, explicit handoffs, and visible traces answer empirically observed multi-agent failure modes.",
+    href: "https://arxiv.org/abs/2503.13657",
+    source: "MAST",
+  },
+  {
+    title: "Measure completion in the environment",
+    note: "A model saying “done” is not evidence; OWLLM's Verification Gate relies on captured checks.",
+    href: "https://arxiv.org/abs/2606.09863",
+    source: "False Success",
+  },
+  {
+    title: "Curate context instead of stuffing it",
+    note: "Relevant, labeled memory beats repeatedly injecting an undifferentiated transcript.",
+    href: "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents",
+    source: "Context engineering",
+  },
+];
+---
+
+<section class="real-product" data-owllm-workflows aria-labelledby="real-product-title">
+  <div class="app-grid" aria-hidden="true"></div>
+  <div class="container">
+    <header class="section-head">
+      <p class="eyebrow">OWLLM · Orchestrated Workflow for Large Language Models</p>
+      <h2 id="real-product-title">The app is the graphic.</h2>
+      <p>
+        No invented flowchart. These are the actual Agentic views that ship in OWLLM: a visual
+        orchestration graph, a lean Solo-Loop, and a live transcript for every agent.
+      </p>
+    </header>
+
+    <div class="workflow-switcher" role="tablist" aria-label="OWLLM Agentic views">
+      {
+        workflowViews.map((view, index) => (
+          <button
+            type="button"
+            role="tab"
+            id={`workflow-tab-${view.id}`}
+            aria-controls={`workflow-panel-${view.id}`}
+            aria-selected={index === 0 ? "true" : "false"}
+            tabindex={index === 0 ? 0 : -1}
+            data-workflow-tab={view.id}
+          >
+            {view.label}
+          </button>
+        ))
+      }
+    </div>
+
+    <div class="workflow-panels">
+      {
+        workflowViews.map((view, index) => (
+          <article
+            class="workflow-panel"
+            id={`workflow-panel-${view.id}`}
+            role="tabpanel"
+            aria-labelledby={`workflow-tab-${view.id}`}
+            data-workflow-panel={view.id}
+            hidden={index !== 0}
+          >
+            <div class="workflow-media">
+              <Image
+                src={view.image}
+                alt={view.alt}
+                widths={[720, 1080, 1440]}
+                sizes="(max-width: 960px) 100vw, 62vw"
+                loading={index === 0 ? "eager" : "lazy"}
+                decoding="async"
+                class="app-capture"
+              />
+            </div>
+            <div class="workflow-copy">
+              <p class="panel-kicker">{view.kicker}</p>
+              <h3>{view.title}</h3>
+              <p>{view.body}</p>
+              <ul>
+                {view.facts.map((fact) => (
+                  <li>{fact}</li>
+                ))}
+              </ul>
+            </div>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<section class="adaptive-section" aria-labelledby="adaptive-title">
+  <div class="container">
+    <header class="section-head section-head--left">
+      <p class="eyebrow">Skills + workspace intelligence</p>
+      <h2 id="adaptive-title">It prepares the environment before the first agent token.</h2>
+      <p>
+        OWLLM does not make you assemble the same setup for every project. A project kind persists
+        the right team, surfaces, browser layout, device profile, rules, and starting workflow.
+      </p>
+    </header>
+
+    <article class="native-feature">
+      <div class="native-copy">
+        <span class="feature-number">01</span>
+        <p class="panel-kicker">The real Studio · Skills view</p>
+        <h3>A library of capabilities, loaded only when the work needs them.</h3>
+        <p>
+          Browse OWLLM's bundled skills, install compatible <code>SKILL.md</code> packs from {
+            "Anthropic, obra/superpowers, or any Git repository"
+          }, preview their instructions, and equip them per agent or role.
+        </p>
+        <ul>
+          <li>
+            PDF, Word, PowerPoint, Excel, engineering, research, writing, and custom workflows
+          </li>
+          <li>
+            Auto Skills matches the goal and loads the best 1–2 installed skills before the first
+            model token
+          </li>
+          <li>Every model path can self-load the same on-disk skill library</li>
+          <li>
+            Skills stay separate from agent identity, tools, MCP connectors, rules, and memory
+          </li>
+        </ul>
+      </div>
+      <div class="native-media">
+        <Image
+          src={skillsLibrary}
+          alt="The real OWLLM Studio Skills view with bundled SKILL.md capability packs and the Skill Library installer"
+          widths={[720, 1080, 1440]}
+          sizes="(max-width: 900px) 100vw, 58vw"
+          loading="lazy"
+          decoding="async"
+          class="app-capture"
+        />
+      </div>
+    </article>
+
+    <article class="native-feature native-feature--reverse">
+      <div class="native-copy">
+        <span class="feature-number">02</span>
+        <p class="panel-kicker">The real Project Environment designer</p>
+        <h3>Code on one side. The work surface on the other.</h3>
+        <p>
+          A Web project prepares code, terminal, live preview, and device checks, then arranges the
+          OWLLM browser beside the app. Responsive projects open a phone viewport. Research and
+          product work open evidence tabs. Personal assistants open only the mail, messaging,
+          calendar, document, social, and custom web apps you select.
+        </p>
+        <ul>
+          <li>Web and research recipes arrange a right-half browser automatically</li>
+          <li>
+            Responsive work switches the real browser to iPhone, Android, or tablet dimensions
+          </li>
+          <li>
+            Document jobs combine project files with PDF/DOCX/XLSX/PPTX skills instead of pretending
+            every task is code
+          </li>
+          <li>
+            Recipes store labels and URLs only; cookies, passwords, and tokens remain device-local
+          </li>
+        </ul>
+      </div>
+      <div class="native-media">
+        <Image
+          src={adaptiveWorkspace}
+          alt="The real OWLLM Web project setup showing the Live web studio and browser-beside-app environment"
+          widths={[720, 1080, 1440]}
+          sizes="(max-width: 900px) 100vw, 58vw"
+          loading="lazy"
+          decoding="async"
+          class="app-capture"
+        />
+      </div>
+    </article>
+  </div>
+</section>
+
+<MemoryRagShowcase />
+
+<section class="capability-section" aria-labelledby="capability-title">
+  <div class="container">
+    <header class="section-head">
+      <p class="eyebrow">One system, not twelve disconnected demos</p>
+      <h2 id="capability-title">The rest of the workstation connects to the same projects.</h2>
+      <p>
+        These are shipping surfaces and mechanisms found in the current application source—not a
+        wish list copied from competitors.
+      </p>
+    </header>
+    <div class="capability-grid" data-capability-grid>
+      {
+        capabilities.map((capability, index) => (
+          <article class="capability-card" data-capability-card>
+            <div class="capability-topline">
+              <span class="capability-icon" aria-hidden="true">
+                {capability.icon}
+              </span>
+              <span class="capability-mechanism">
+                <i aria-hidden="true" />
+                {capabilitySignals[index]}
+              </span>
+            </div>
+            <h3>{capability.title}</h3>
+            <p>{capability.body}</p>
+            <span class="capability-scan" aria-hidden="true" />
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<section class="research-section" aria-labelledby="research-title">
+  <div class="container research-inner">
+    <header class="research-head">
+      <p class="eyebrow">Research-informed · product-grounded</p>
+      <h2 id="research-title">
+        Papers shape the architecture. Runtime evidence decides what ships.
+      </h2>
+      <p>
+        OWLLM follows current findings without turning paper diagrams into unsupported marketing.
+        Multi-agent coordination is used where work can separate; Solo-Loop stays available where it
+        cannot; verification and curated context answer known failure modes.
+      </p>
+    </header>
+    <div class="research-list">
+      {
+        research.map((item) => (
+          <a href={item.href} target="_blank" rel="noreferrer">
+            <span>{item.title}</span>
+            <p>{item.note}</p>
+            <small>{item.source} ↗</small>
+          </a>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<script>
+  function initWorkflowShowcase(root: Element) {
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-workflow-tab]"));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>("[data-workflow-panel]"));
+
+    const select = (id: string, focus = false) => {
+      tabs.forEach((tab) => {
+        const active = tab.dataset.workflowTab === id;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        if (active && focus) tab.focus();
+      });
+      panels.forEach((panel) => {
+        panel.hidden = panel.dataset.workflowPanel !== id;
+      });
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => select(tab.dataset.workflowTab || ""));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next =
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? tabs.length - 1
+              : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        select(tabs[next]?.dataset.workflowTab || "", true);
+      });
+    });
+  }
+
+  document.querySelectorAll("[data-owllm-workflows]").forEach(initWorkflowShowcase);
+
+  function initCapabilityGlow(grid: Element) {
+    const cards = Array.from(grid.querySelectorAll<HTMLElement>("[data-capability-card]"));
+    if (cards.length === 0) return;
+    let active = 1;
+    let paused = false;
+
+    const select = (index: number) => {
+      active = (index + cards.length) % cards.length;
+      cards.forEach((card, cardIndex) => card.classList.toggle("is-active", cardIndex === active));
+    };
+
+    cards.forEach((card, index) => {
+      card.addEventListener("pointerenter", () => {
+        paused = true;
+        select(index);
+      });
+      card.addEventListener("pointerleave", () => {
+        paused = false;
+      });
+    });
+    select(active);
+
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      window.setInterval(() => {
+        if (!paused && !document.hidden) select(active + 1);
+      }, 2800);
+    }
+  }
+
+  document.querySelectorAll("[data-capability-grid]").forEach(initCapabilityGlow);
+</script>
+
+<style>
+  .container {
+    width: min(1220px, calc(100% - 2rem));
+    margin-inline: auto;
+  }
+
+  .real-product,
+  .adaptive-section,
+  .capability-section,
+  .research-section {
+    position: relative;
+    padding: clamp(4.5rem, 8vw, 7rem) 0;
+  }
+
+  .real-product {
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 14% 10%, rgba(var(--accent-rgb), 0.2), transparent 30%),
+      linear-gradient(180deg, var(--bg-panel), var(--bg));
+    border-block: 1px solid var(--border);
+  }
+
+  .app-grid {
+    position: absolute;
+    inset: 0;
+    opacity: 0.16;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(var(--accent-rgb), 0.25) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(var(--accent-rgb), 0.25) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: linear-gradient(to bottom, #000, transparent 70%);
+  }
+
+  .section-head {
+    position: relative;
+    max-width: 850px;
+    margin: 0 auto clamp(2rem, 5vw, 3.5rem);
+    text-align: center;
+  }
+
+  .section-head--left {
+    margin-left: 0;
+    text-align: left;
+  }
+
+  .eyebrow,
+  .panel-kicker {
+    margin: 0 0 0.65rem;
+    color: var(--accent-ink);
+    font-size: 0.74rem;
+    font-weight: 850;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .section-head h2,
+  .research-head h2 {
+    margin: 0 0 0.9rem;
+    color: var(--fg-strong);
+    font-size: clamp(2rem, 5vw, 4rem);
+    line-height: 1;
+    letter-spacing: -0.045em;
+  }
+
+  .section-head > p:last-child,
+  .research-head > p:last-child {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: clamp(1rem, 1.5vw, 1.12rem);
+  }
+
+  .workflow-switcher {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 760px;
+    margin: 0 auto 1.25rem;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface);
+  }
+
+  .workflow-switcher button {
+    min-height: 46px;
+    padding: 0.7rem 1rem;
+    border: 0;
+    border-right: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 750;
+    cursor: pointer;
+  }
+
+  .workflow-switcher button:last-child {
+    border-right: 0;
+  }
+
+  .workflow-switcher button[aria-selected="true"] {
+    background: rgba(var(--accent-rgb), 0.2);
+    color: var(--accent-ink);
+    box-shadow: inset 0 -2px var(--accent);
+  }
+
+  .workflow-switcher button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .workflow-panel {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.85fr);
+    align-items: center;
+    gap: clamp(1.5rem, 4vw, 3.5rem);
+  }
+
+  .workflow-panel[hidden] {
+    display: none;
+  }
+
+  .workflow-media,
+  .native-media {
+    min-width: 0;
+    background: transparent;
+  }
+
+  :global(.app-capture) {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .workflow-copy h3,
+  .native-copy h3 {
+    margin: 0 0 0.9rem;
+    color: var(--fg-strong);
+    font-size: clamp(1.45rem, 2.5vw, 2.25rem);
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+  }
+
+  .workflow-copy > p:not(.panel-kicker),
+  .native-copy > p:not(.panel-kicker) {
+    color: var(--fg-muted);
+  }
+
+  .workflow-copy ul,
+  .native-copy ul {
+    display: grid;
+    gap: 0.7rem;
+    margin: 1.25rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .workflow-copy li,
+  .native-copy li {
+    position: relative;
+    padding-left: 1.25rem;
+    color: var(--fg);
+    font-size: 0.9rem;
+  }
+
+  .workflow-copy li::before,
+  .native-copy li::before {
+    content: "";
+    position: absolute;
+    top: 0.48em;
+    left: 0;
+    width: 0.45rem;
+    height: 0.45rem;
+    background: var(--accent);
+    box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.75);
+  }
+
+  .adaptive-section {
+    background: var(--bg);
+  }
+
+  .native-feature {
+    display: grid;
+    grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.42fr);
+    gap: clamp(2rem, 5vw, 4.5rem);
+    align-items: center;
+    padding: clamp(2.5rem, 6vw, 5rem) 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .native-feature--reverse {
+    grid-template-columns: minmax(0, 1.42fr) minmax(300px, 0.78fr);
+  }
+
+  .native-feature--reverse .native-copy {
+    order: 2;
+  }
+
+  .feature-number {
+    display: inline-block;
+    margin-bottom: 1.1rem;
+    color: rgba(var(--accent-rgb), 0.42);
+    font-size: 3.5rem;
+    font-weight: 900;
+    line-height: 0.8;
+  }
+
+  code {
+    color: var(--accent-ink);
+    font-size: 0.9em;
+  }
+
+  .capability-section {
+    background: var(--bg-panel);
+    border-block: 1px solid var(--border);
+  }
+
+  .capability-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+  }
+
+  .capability-card {
+    --capability-angle: 0deg;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    min-height: 235px;
+    padding: 1.45rem;
+    border: 1px solid transparent;
+    border-top: 0;
+    border-left: 0;
+    background:
+      linear-gradient(
+          color-mix(in srgb, var(--bg-card) 78%, transparent),
+          color-mix(in srgb, var(--bg-card) 78%, transparent)
+        )
+        padding-box,
+      linear-gradient(var(--border), var(--border)) border-box;
+    transition:
+      transform 240ms ease,
+      box-shadow 240ms ease;
+  }
+
+  .capability-card.is-active {
+    z-index: 2;
+    border-color: transparent;
+    background:
+      linear-gradient(
+          color-mix(in srgb, var(--bg-card) 92%, #06080d),
+          color-mix(in srgb, var(--bg-card) 92%, #06080d)
+        )
+        padding-box,
+      conic-gradient(
+          from var(--capability-angle),
+          var(--accent),
+          #ffd93c,
+          #ff9a3c,
+          #ff5c8a,
+          #b07cff,
+          #7fd4ff,
+          var(--accent)
+        )
+        border-box;
+    box-shadow:
+      0 0 30px rgba(var(--accent-rgb), 0.18),
+      inset 0 0 34px rgba(var(--accent-rgb), 0.035);
+    transform: translateY(-3px);
+    animation: capability-aura-spin 4s linear infinite;
+  }
+
+  .capability-topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.7rem;
+    margin-bottom: 1rem;
+  }
+
+  .capability-icon {
+    display: block;
+    color: var(--accent-ink);
+    font-size: 1.7rem;
+  }
+
+  .capability-mechanism {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--fg-subtle);
+    font-size: 0.55rem;
+    font-weight: 820;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .capability-mechanism i {
+    width: 0.38rem;
+    height: 0.38rem;
+    border-radius: 50%;
+    background: var(--fg-dim);
+    transition:
+      background 200ms ease,
+      box-shadow 200ms ease;
+  }
+
+  .capability-card.is-active .capability-mechanism {
+    color: var(--accent-ink);
+  }
+  .capability-card.is-active .capability-mechanism i {
+    background: conic-gradient(from 0deg, #3cf26b, #ffd93c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b);
+    box-shadow: 0 0 11px #b07cff;
+    animation: capability-working 1.4s ease-in-out infinite;
+  }
+
+  .capability-card h3 {
+    margin: 0 0 0.6rem;
+    color: var(--fg-strong);
+    font-size: 1.05rem;
+  }
+
+  .capability-card p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.88rem;
+  }
+
+  .capability-scan {
+    position: absolute;
+    z-index: -1;
+    inset: 0 auto 0 -35%;
+    width: 28%;
+    opacity: 0;
+    transform: skewX(-16deg);
+    background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.12), transparent);
+    pointer-events: none;
+  }
+
+  .capability-card.is-active .capability-scan {
+    opacity: 1;
+    animation: capability-scan 2.4s ease-in-out infinite;
+  }
+
+  @property --capability-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }
+  @keyframes capability-aura-spin {
+    to {
+      --capability-angle: 360deg;
+    }
+  }
+  @keyframes capability-working {
+    50% {
+      transform: scale(1.35);
+      box-shadow:
+        0 0 18px #b07cff,
+        0 0 26px #7fd4ff;
+    }
+  }
+  @keyframes capability-scan {
+    0% {
+      left: -35%;
+    }
+    65%,
+    100% {
+      left: 120%;
+    }
+  }
+
+  .research-section {
+    background:
+      radial-gradient(circle at 90% 15%, rgba(var(--accent-rgb), 0.2), transparent 30%), var(--bg);
+  }
+
+  .research-inner {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+    gap: clamp(2rem, 6vw, 5rem);
+    align-items: start;
+  }
+
+  .research-head h2 {
+    font-size: clamp(2rem, 4vw, 3.35rem);
+  }
+
+  .research-list {
+    border-top: 1px solid var(--border);
+  }
+
+  .research-list a {
+    display: grid;
+    grid-template-columns: minmax(155px, 0.65fr) minmax(220px, 1fr) auto;
+    gap: 1rem;
+    align-items: baseline;
+    padding: 1.1rem 0;
+    border-bottom: 1px solid var(--border);
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .research-list a:hover span,
+  .research-list a:hover small {
+    color: var(--accent-ink);
+  }
+
+  .research-list span {
+    color: var(--fg-strong);
+    font-size: 0.92rem;
+    font-weight: 750;
+  }
+
+  .research-list p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.84rem;
+  }
+
+  .research-list small {
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+
+  @media (max-width: 1050px) {
+    .capability-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .research-inner {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .workflow-panel,
+    .native-feature,
+    .native-feature--reverse,
+    .research-inner {
+      grid-template-columns: 1fr;
+    }
+
+    .native-feature--reverse .native-copy {
+      order: 0;
+    }
+
+    .workflow-copy,
+    .native-copy {
+      max-width: 720px;
+    }
+
+    .capability-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .container {
+      width: min(100% - 1.25rem, 1220px);
+    }
+
+    .workflow-switcher {
+      grid-template-columns: 1fr;
+    }
+
+    .workflow-switcher button {
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .workflow-switcher button:last-child {
+      border-bottom: 0;
+    }
+
+    .capability-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .capability-card {
+      min-height: 0;
+    }
+
+    .research-list a {
+      grid-template-columns: 1fr;
+      gap: 0.35rem;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .capability-card.is-active,
+    .capability-card.is-active .capability-mechanism i,
+    .capability-card.is-active .capability-scan {
+      animation: none;
+    }
+  }
+</style>

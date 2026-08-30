@@ -7,14 +7,14 @@
  */
 
 :root {
-  /* Default accent: indigo. Overwritten at runtime by theme.ts. */
-  --accent: #667eea;
-  --accent-rgb: 102, 126, 234;
+  /* Default accent matches the shipping app. Overwritten by theme.ts. */
+  --accent: #5cf0ff;
+  --accent-rgb: 92, 240, 255;
   --accent-fg: #06080d;
-  --accent-soft: rgba(102, 126, 234, 0.18);
-  --accent-strong: rgba(102, 126, 234, 0.55);
-  --accent-glow-soft: rgba(102, 126, 234, 0.35);
-  --accent-glow-strong: rgba(102, 126, 234, 0.65);
+  --accent-soft: rgba(92, 240, 255, 0.18);
+  --accent-strong: rgba(92, 240, 255, 0.55);
+  --accent-glow-soft: rgba(92, 240, 255, 0.35);
+  --accent-glow-strong: rgba(92, 240, 255, 0.65);
 
   /* Adaptive accent ink for text/icons on app surfaces. */
   --accent-ink: var(--accent-ink-dark, var(--accent));

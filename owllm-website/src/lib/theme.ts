@@ -1,6 +1,6 @@
 export type Mode = "dark" | "light";
 
-export type AccentKey = "indigo" | "amber" | "red" | "blue" | "emerald" | "slate";
+export type AccentKey = "cyan" | "indigo" | "amber" | "red" | "blue" | "emerald" | "slate";
 
 export type AccentSelection = AccentKey | `#${string}`;
 
@@ -11,6 +11,7 @@ export interface AccentDef {
 }
 
 export const ACCENTS: AccentDef[] = [
+  { key: "cyan", label: "OWLLM cyan", color: "#5cf0ff" },
   { key: "indigo", label: "Indigo", color: "#667eea" },
   { key: "amber", label: "Amber", color: "#fbbf24" },
   { key: "red", label: "Red", color: "#ef4444" },
@@ -22,7 +23,7 @@ export const ACCENTS: AccentDef[] = [
 export const THEME_MODE_KEY = "owllm:site:theme:mode";
 export const THEME_ACCENT_KEY = "owllm:site:theme:accent";
 export const DEFAULT_MODE: Mode = "dark";
-export const DEFAULT_ACCENT: AccentSelection = "indigo";
+export const DEFAULT_ACCENT: AccentSelection = "cyan";
 
 export function isHexColor(value: string): value is `#${string}` {
   return /^#[0-9a-f]{6}$/i.test(value);
@@ -50,6 +51,10 @@ export function applyAccentToDocument(selection: AccentSelection, doc: Document 
   if (rgb) {
     root.style.setProperty("--accent", color);
     root.style.setProperty("--accent-rgb", `${rgb.r}, ${rgb.g}, ${rgb.b}`);
+    root.style.setProperty("--accent-soft", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.18)`);
+    root.style.setProperty("--accent-strong", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.55)`);
+    root.style.setProperty("--accent-glow-soft", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35)`);
+    root.style.setProperty("--accent-glow-strong", `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.65)`);
   }
 }
 

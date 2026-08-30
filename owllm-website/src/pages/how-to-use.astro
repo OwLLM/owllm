@@ -36,11 +36,12 @@ const steps: GuideStep[] = [
   },
   {
     emoji: "💬",
-    title: "Chat with it",
+    title: "Chat with it — and follow the glow",
     demoHint: "In the demo: 🛠 Fine Tuning → 💬 Chat tab.",
     body: [
       "Open Chat, pick your model from the picker, and type. That's the whole setup: the local model server (llama.cpp) starts itself on your first message, sizes its context window to your VRAM, and is shared across every OWLLM window.",
       "Vision models just work — OWLLM auto-downloads the matching image projector. And no page ever auto-selects a model for you: until you explicitly choose one, the picker reads “Select model” and Send stays blocked, so nothing can silently run (or bill) weights you never chose.",
+      "While a response is running, the chat and its page controls carry OWLLM's rotating psychedelic aura. You can switch pages and still see where work is active. To make long answers easier to read, use Settings → Chat text size or hold Ctrl and move the mouse wheel over any chat, Notebook, Brainstorm, Coding, or agent input.",
     ],
   },
   {
@@ -49,18 +50,44 @@ const steps: GuideStep[] = [
     demoHint: "In the demo: click 🎭 Agentic Team — it opens on the 🤖 Agents tab, on the real project launchpad.",
     body: [
       "Open Agentic Team → Agents, create a project, and give it a goal in plain language. A standard six-slot team goes to work: an orchestrator plans, a scout does read-only recon, two workers execute in parallel, a critic reviews, and a producer commits or publishes only work that passed review. Team templates like “Dev Squad” or “Chief of Staff” are profiles over that same roster — different skills, connectors, and rules, same proven machinery.",
-      "You stay in the loop the whole time. Type while the run is going and your message queues as a ⚡ steer, injected at the next agent boundary — never dropped. Prefer something lighter? Flip the header toggle to Solo and one coder works in an edit → verify → fix loop with just the critic and producer.",
+      "The title in the Agentic header is the execution switch: Orchestrated Workflow ↔ Solo-Loop. The view control is separate: Graph shows the routing and role cards; Chat replaces the canvas with one live transcript per agent. Switch either control without interrupting the project or hiding where work is running.",
+      "You stay in the loop the whole time. Type while the run is going and your message queues as a ⚡ steer, injected at the next agent boundary — never dropped. Prefer something lighter? Solo-Loop keeps one coder in an edit → verify → fix loop with just the critic and producer.",
+      "Before the run starts, Auto Skills reads the goal and can add up to two relevant installed skills. Each agent also receives the project's default must / prefer / avoid rules and a scoped MEMORY CURATOR CONTEXT PACK containing only facts and worklog entries relevant to its assignment.",
     ],
     callout: "“Done” is never the model's opinion. The Verification Gate runs a real command — your test suite, your build — and only exit code 0 counts.",
   },
   {
-    emoji: "💻",
-    title: "Let it code — safely",
+    emoji: "📚",
+    title: "Let OWLLM prepare the workspace and skills",
+    demoHint: "In the demo: Agentic Team → Studio → 📚 Skills. In Agents, start a new project and choose Website / Web app to see its Project Environment.",
+    body: [
+      "Open Studio → Skills to browse the installed library. The bundled packs cover planning, engineering, debugging, research, review, writing, releases, and web messaging. Open the Skill Library to install compatible SKILL.md packs from Anthropic, obra/superpowers, or any Git repository, preview the instructions, and equip them on a team or individual agent.",
+      "When you create a project, the kind is a real environment recipe—not a decorative category. Website and research projects arrange OWLLM with its shared browser on the right; responsive projects select a phone viewport; writing and data work get different planning surfaces; personal assistants open only the mail, messaging, calendar, document, social, and custom web applications you select.",
+      "Document work does not need a fake coding workflow. PDF, DOCX, XLSX, and PPTX capability packs can be equipped like any other skill, while cookies, passwords, API keys, and account sessions stay in the device-local vault rather than the project recipe.",
+    ],
+    callout: "Auto Skills then matches each goal against the installed library and injects only the best one or two packs before the first model token.",
+  },
+  {
+    emoji: "⇄",
+    title: "Make two coding agents challenge each other",
     demoHint: "In the demo: 🎭 Agentic Team → 💻 Coding tab.",
     body: [
-      "The Coding page points a model directly at a project folder. The conversation, plan, and chosen model persist per project, so you can close OWLLM and pick up exactly where you left off.",
+      "The Coding page points a model directly at a project folder. Choose Plan for ordered Kanban execution, Auto for direct action, or read-only Chat for discussion. The conversation, plan, project rules, Notebook, and chosen model persist, so you can close OWLLM and pick up exactly where you left off.",
+      "Open the second-agent pane and choose its model. Leave it on “Same as 1st agent,” or choose different local or cloud weights for an independent opinion. Enable 1st → 2nd to send completed work for review; enable 2nd → 1st to send the critique back. With both enabled, the agents can exchange up to six automatic turns before OWLLM pauses the loop for you.",
       "Autonomous agents that edit files and run shell commands are powerful and risky — so tool execution runs inside a real Linux sandbox: WSL2 on Windows, Lima on macOS, bubblewrap on Linux. Your real drive and home directory stay untouched unless you explicitly grant a project full access.",
     ],
+    callout: "The second agent has its own transcript, composer, model, tools, and Stop control. Both agents share the project and the same scoped memory—not each other's hidden context.",
+  },
+  {
+    emoji: "📓",
+    title: "Brainstorm, digest, then let the Notebook keep going",
+    demoHint: "In the real app: open a Coding project or Agent project, then choose the 📓 Notebook in the right column or toolbar.",
+    body: [
+      "Use Brainstorm before a run when the idea still needs work. OWLLM holds a co-founder-style conversation, can research the problem, and prepares a reusable brief instead of forcing a vague prompt directly into implementation.",
+      "Write rough notes in the per-project Notebook and ask the Digest agent to turn them into an ordered plan plus self-contained next-step cards. Turn on Auto-feed and OWLLM dispatches the next pending card after each clean run. A stopped, failed, or recoverable preflight does not blindly advance the queue, so a healthy project can continue for hours while a problem pauses where you can see it.",
+      "For routine decisions, the Super User panel can enable “critic = super user (decides for me).” The Critical Thinker then stands in for you within the project's existing rules; it does not remove the verification gate or safety boundaries.",
+    ],
+    callout: "Every new project starts with OWLLM's production-minded best-practice rules. Add your own once and they reach every coder, orchestrator, specialist, and critic in that project.",
   },
   {
     emoji: "🎯",
@@ -70,15 +97,35 @@ const steps: GuideStep[] = [
       "The Dataset Builder turns documents you already have — PDFs, DOCX, web pages — into instruction/output training pairs. Review the generated pairs, export, and move to the Train tab.",
       "Training runs LoRA fine-tuning on your own GPU with a live loss curve. When it finishes, export to GGUF and your custom model appears in the same picker as everything else — chat with it, serve it, or hand it to an agent team.",
     ],
-    callout: "Try the Train tab in the mock too — the whole pipeline is Models → Dataset → Train → Chat, left to right.",
+    callout: "Try the Train tab in the real browser demo too — the whole pipeline is Models → Dataset → Train → Chat, left to right.",
   },
   {
-    emoji: "📱",
-    title: "Drive it from anywhere",
+    emoji: "🌐",
+    title: "Let the browser agent handle the web",
     demoHint: "In the demo: 🎭 Agentic Team → 📱 Bridges tab; Devices lives behind the ⚙ button.",
     body: [
-      "Bridges connect messaging apps to your agent teams: text your own computer from WhatsApp or Telegram and the message becomes a team run, with results streaming back to the chat.",
-      "Under Advanced, MCP servers add new tools your agents can call (with per-tool toggles and a schema-safety gate), and Devices pairs your other machines over an end-to-end encrypted channel — your laptop can borrow the gaming PC's GPU, no SSH required.",
+      "The Agent Browser is a real visible browser window shared with you. An agent can open and preserve tabs, snapshot a page, read it, click, fill and submit forms, choose options, scroll long mail or message histories, upload local files, switch mobile profiles, and capture screenshots as proof.",
+      "That makes complete workflows possible across webmail, social networks, messengers, SaaS applications, dashboards, and forms. The interface is localized in eight languages, and browser work can follow whatever languages the selected model understands. Saved logins remain in the local encrypted browser vault; consequential actions remain subject to OWLLM's permission boundaries.",
+      "Bridges add another route: message your own workstation from Telegram, WhatsApp, Discord, Slack, email, or LINE and dispatch work without sitting at the desk.",
+    ],
+  },
+  {
+    emoji: "◎",
+    title: "Connect your machines into one private fleet",
+    demoHint: "In the demo: open ⚙ Advanced, then Devices or Server to inspect the real paired-device controls.",
+    body: [
+      "Pair two OWLLM installations over an Ed25519-signed, X25519-sealed channel. Connections use P2P when possible and a relay when needed—no SSH keys. Each target decides whether a controller may read diagnostics, run shell commands, switch models, or request more sensitive operations.",
+      "Once permitted, the laptop can list models stored on the gaming PC, start one there, and choose it as the inference source. Agents can also run approved shell work on another machine for development, software installation, or support while admin actions still require approval on the target.",
+    ],
+    callout: "Model weights stay on the machine that owns them. Only the encrypted inference request and response cross the device channel.",
+  },
+  {
+    emoji: "🎨",
+    title: "Personalize the workstation and watch usage",
+    demoHint: "In the demo: open the appearance menu in the top header; provider usage lives in a Coding project's right utility column.",
+    body: [
+      "Choose a dark or light skin, set the GUI accent and text color independently, and scale chat text from 10 to 22 px. OWLLM automatically corrects custom text colors that would fall below readable contrast on a themed surface.",
+      "The Coding utility column shows provider quota windows and reset times when a connected account exposes them, prepaid balance when available, and OWLLM's own recorded turns and estimated tokens for every provider—including local, API, and subscription routes.",
     ],
   },
   {
@@ -95,7 +142,7 @@ const steps: GuideStep[] = [
 
 <Layout
   title="How to use OWLLM"
-  description="A step-by-step guide to OWLLM: install, get a model, chat, run agent teams, fine-tune, and connect bridges — with the real app interface embedded and clickable."
+  description="A step-by-step guide to OWLLM's Orchestrated Workflow, Solo-Loop, Graph and Chat views, Skills Library, adaptive project environments, coding review, memory, browser automation, devices, and local models—with the real app embedded."
 >
   <section class="page-header" aria-labelledby="howto-title">
     <div class="container">

@@ -27,6 +27,7 @@ const STARTED_KEYS: Record<Platform, string> = {
   whatsapp: "owllm:whatsapp:started",
   line: "owllm:line:started",
 };
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 function flag(p: Platform): boolean {
   try { return sessionStorage.getItem(STARTED_KEYS[p]) === "1"; } catch { return false; }
 }
@@ -103,6 +104,7 @@ export default function WebhookBridgeRunner() {
 
   // Inbound listener (Rust → here).
   useEffect(() => {
+    if (!isTauri) return;
     const un = listen<Inbound>("owllm:webhook:inbound", (e) => {
       const { platform, from, text } = e.payload;
       if (!startedRef.current[platform]) return;

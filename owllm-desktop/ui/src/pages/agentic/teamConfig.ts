@@ -65,23 +65,37 @@ export function roleCanWrite(role: RoleData | undefined): boolean {
   return unrestricted || tools.some((s) => WRITE_SKILL.test(s));
 }
 
-/// Every team has the same deterministic SOLO runtime agent. It is synthetic:
-/// the authored team stays domain-specific in orchestrated mode, while Solo
-/// never inherits a narrow specialist prompt/tool allowlist by accident.
+/// Build the SOLO runtime view of the team's lead. The lead keeps its stable
+/// name/model/profile/memory identity across Workflow <-> Solo, but its runtime
+/// base becomes the unrestricted solo_generalist role and its team-only prompt
+/// additions are removed. Solo prompt construction separately omits every
+/// roster/delegation instruction.
 ///
 /// The backing `solo_generalist` role is unrestricted, so every connected tool
 /// is available (execution-time auth, sandbox and approval gates still apply).
 /// Skill instructions remain progressive/on-demand.
 export const SOLO_GENERALIST_BASE = "solo_generalist";
 export const SOLO_GENERALIST_NAME = "solo_generalist";
-export function soloGeneralistForTeam(team: Pick<Team, "agents">): AgentSpec {
-  const explicit = team.agents.find((agent) => agent.base === SOLO_GENERALIST_BASE);
-  if (explicit) return explicit;
-  const names = new Set(team.agents.map((agent) => agent.name));
-  let name = SOLO_GENERALIST_NAME;
-  for (let suffix = 2; names.has(name); suffix++) name = `${SOLO_GENERALIST_NAME}_${suffix}`;
+export function soloGeneralistForTeam(
+  team: Pick<Team, "agents">,
+  selectedLead?: AgentSpec,
+): AgentSpec {
+  const lead = selectedLead
+    ?? team.agents.find((agent) => agent.base === "orchestrator")
+    ?? team.agents.find((agent) => agent.role === "leader")
+    ?? team.agents[0];
+  if (lead) {
+    return {
+      ...lead,
+      base: SOLO_GENERALIST_BASE,
+      role: "agent",
+      description: "Solo generalist with every connected tool available; loads task-specific skills on demand.",
+      extraPrompt: undefined,
+      extraSkills: undefined,
+    };
+  }
   return {
-    name,
+    name: SOLO_GENERALIST_NAME,
     base: SOLO_GENERALIST_BASE,
     icon: "owl:owl_operator",
     description: "Solo generalist with every connected tool available; loads task-specific skills on demand.",

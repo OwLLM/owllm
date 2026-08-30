@@ -7,8 +7,8 @@
 //   orchestrator + scout[researcher] + worker_a/worker_b[solo_generalist]
 //   + critical_thinker[critic] + producer[publisher]
 // Same faces on every team; what differs per template is DATA (required_mcp /
-// mcp_pack, worker skill seeds, domain prompt hints). Solo mode collapses to
-// worker_a + critic + the rule-based producer. The full hierarchical Product
+// mcp_pack, worker skill seeds, domain prompt hints). Solo mode elevates the
+// same orchestrator identity to generalist power, plus critic/rule-based producer. The full hierarchical Product
 // Studio survives as `product_studio_classic` (category Custom) and is the one
 // deliberate exemption from the standard shape. This gate protects:
 //   1. the standard six-slot roster + its parallel-lane edges,
@@ -231,14 +231,14 @@ for (const [name, t] of teams) {
   };
   const report = normalizeTeam(team, roles);
   check(`${name}: normalizeTeam clean (no auto-fixes, no warnings)`, report.changes.length === 0 && report.warnings.length === 0);
-  // Solo mode must adopt the team's OWN first worker lane (so profile skill
-  // seeds and prompt hints apply in Solo too), not synthesize a bare one.
+  // Solo mode keeps the Workflow lead's identity but swaps its runtime base to
+  // solo_generalist. This preserves one conversation/model/memory identity.
   const solo = soloGeneralistForTeam(team);
-  if (STANDARD_EXEMPT.has(name)) {
-    check(`${name}: Solo mode still resolves a solo_generalist`, solo.base === "solo_generalist");
-  } else {
-    check(`${name}: Solo mode adopts worker lane A`, solo.name === "worker_a" && solo.base === "solo_generalist");
-  }
+  const lead = team.agents.find((agent) => agent.base === "orchestrator")
+    ?? team.agents.find((agent) => agent.role === "leader")
+    ?? team.agents[0];
+  check(`${name}: Solo mode keeps lead identity with generalist power`,
+    solo.name === lead?.name && solo.base === "solo_generalist" && solo.role === "agent");
 }
 
 console.log(`\nteamProfiles.verify: ${passed} passed, ${failed} failed`);

@@ -119,9 +119,8 @@ for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   console.log(`  ${codeOk ? "✓" : "✗"} ${(data.name || tf).padEnd(16)} code→@${codePick?.name ?? "(none)"} (${codePick ? agentDomain(codePick) : "-"})   design→@${designPick?.name ?? "(none)"}`);
 }
 
-// Solo must never inherit whichever narrow specialist happened to score first.
-// Every bundled/custom team gets the same unrestricted runtime generalist,
-// while an explicitly authored solo_generalist remains selectable as-is.
+// Solo must preserve the Workflow lead's stable identity while replacing its
+// read-only/delegating role with the unrestricted generalist capability.
 section("2a) Solo generalist (all tools, every team)");
 check("solo_generalist role is installed", roleByBase.has(SOLO_GENERALIST_BASE));
 check("solo_generalist role is unrestricted", roleByBase.get(SOLO_GENERALIST_BASE)?.toolAllowlist?.includes("all") === true);
@@ -151,13 +150,27 @@ check(
 for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   const data = JSON.parse(fs.readFileSync(path.join(teamsDir, tf), "utf8"));
   const solo = soloGeneralistForTeam({ agents: data.agents || [] });
-  check(`[${data.name}] solo→generalist`, solo.base === SOLO_GENERALIST_BASE);
+  const lead = (data.agents || []).find((agent) => agent.base === "orchestrator")
+    ?? (data.agents || []).find((agent) => agent.role === "leader")
+    ?? data.agents?.[0];
+  check(`[${data.name}] solo→lead identity + generalist power`,
+    solo.base === SOLO_GENERALIST_BASE && solo.name === lead?.name && solo.role === "agent");
 }
-const explicitSolo = { name: "my_solo", base: SOLO_GENERALIST_BASE };
-check("explicit team solo generalist is preserved", soloGeneralistForTeam({ agents: [explicitSolo] }) === explicitSolo);
+const explicitLead = {
+  name: "my_lead", base: "orchestrator", role: "leader",
+  profileRef: { id: "profile-1", revision: 4 }, defaultModelId: "sub/gpt-5",
+  extraPrompt: "dispatch workers", extraSkills: ["parallel-dispatch"],
+};
+const soloLead = soloGeneralistForTeam({ agents: [explicitLead] }, explicitLead);
 check(
-  "synthetic solo name avoids a custom-team collision",
-  soloGeneralistForTeam({ agents: [{ name: "solo_generalist", base: "documentation" }] }).name === "solo_generalist_2",
+  "Solo preserves lead identity/model/profile but strips team-only behavior",
+  soloLead.name === explicitLead.name
+    && soloLead.defaultModelId === explicitLead.defaultModelId
+    && soloLead.profileRef === explicitLead.profileRef
+    && soloLead.base === SOLO_GENERALIST_BASE
+    && soloLead.role === "agent"
+    && soloLead.extraPrompt === undefined
+    && soloLead.extraSkills === undefined,
 );
 const agentsPageSource = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
 check("Solo canvas identifies the selected agent as Solo Generalist", /coder\s*\?\s*\{\s*\[coder\.name\]:\s*"Solo Generalist"\s*\}/.test(agentsPageSource));

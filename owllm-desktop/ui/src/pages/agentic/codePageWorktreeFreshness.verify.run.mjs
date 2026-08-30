@@ -10,10 +10,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const APP = path.resolve(HERE, "../../../..");
+const APP = process.env.OWLLM_VERIFY_APP
+  ? path.resolve(process.env.OWLLM_VERIFY_APP)
+  : path.resolve(HERE, "../../../..");
 const fleet = fs.readFileSync(path.join(APP, "src-tauri/src/fleet.rs"), "utf8");
+const syncCore = fs.readFileSync(path.join(APP, "src-tauri/src/sync_core.rs"), "utf8");
 const lib = fs.readFileSync(path.join(APP, "src-tauri/src/lib.rs"), "utf8");
-const page = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+const page = fs.readFileSync(path.join(APP, "ui/src/pages/agentic/CodePage.tsx"), "utf8");
 const matrix = fs.readFileSync(path.join(APP, "scripts/smoke-matrix.mjs"), "utf8");
 
 let passed = 0;
@@ -92,6 +95,23 @@ check(page.includes('data-ui="CodeWorktreeStaleGuard"') &&
       page.includes("so no model was allowed to run"),
   "a blocked stale page stays visibly explained instead of silently dropping the task");
 
+const createStart = fleet.indexOf("pub async fn fleet_worktree_create");
+const createEnd = fleet.indexOf("/// Outcome of trying to put a page worktree", createStart);
+const create = createStart >= 0 && createEnd > createStart ? fleet.slice(createStart, createEnd) : "";
+const removeStart = fleet.indexOf("pub async fn fleet_worktree_remove");
+const removeEnd = fleet.indexOf("/// Sweep leftover fleet worktrees", removeStart);
+const remove = removeStart >= 0 && removeEnd > removeStart ? fleet.slice(removeStart, removeEnd) : "";
+check(create.includes('let persistent_page = prefix == "owllm-page"') &&
+      create.includes('"worktree",\n                "lock"') &&
+      create.includes('"OWLLM persistent Coding page"'),
+  "persistent Coding-page worktrees are locked against cross-host Git pruning");
+check(remove.includes('args.branch.starts_with("owllm-page/")') &&
+      remove.indexOf('"worktree", "unlock"') < remove.indexOf('"worktree", "remove"'),
+  "explicit page removal unlocks before removing the worktree");
+check(!fleet.includes('&["worktree", "prune"]') &&
+      !syncCore.includes('&["worktree", "prune"]'),
+  "OwLLM never runs repository-wide prune across mixed Windows/WSL registrations");
+
 // Controlled Git proof of the original mechanism and the two safe outcomes.
 // A valid .git file says only that the linked worktree exists; it says nothing
 // about whether its commit contains the canonical project's current HEAD.
@@ -107,6 +127,8 @@ const git = (cwd, ...args) => {
 let staleWithValidGit = false;
 let cleanFastForwarded = false;
 let dirtyWasPreserved = false;
+let unlockedForeignRegistrationWasPruned = false;
+let lockedForeignRegistrationSurvived = false;
 try {
   git(repo, "init", "-b", "main");
   git(repo, "config", "user.name", "OWLLM freshness gate");
@@ -138,6 +160,25 @@ try {
     dirtyWasPreserved = git(worktree, "rev-parse", "HEAD") === pageBefore &&
       fs.readFileSync(path.join(worktree, "gui.txt"), "utf8") === "pending page styling\n";
   }
+
+  // Reproduce the actual Windows/WSL failure without needing both OSes. The
+  // administrative `gitdir` contains an absolute path in the creating host's
+  // syntax. Replacing it with an unreachable foreign-host path makes this Git
+  // process see the registration exactly as WSL sees `C:\\Users\\...`.
+  const adminPath = fs.readFileSync(path.join(worktree, ".git"), "utf8")
+    .trim().replace(/^gitdir:\s*/, "");
+  git(repo, "worktree", "lock", "--reason", "OWLLM persistent Coding page", worktree);
+  fs.writeFileSync(path.join(adminPath, "gitdir"), "C:/Users/example/foreign-page/.git\n");
+  git(repo, "worktree", "prune");
+  lockedForeignRegistrationSurvived = fs.existsSync(adminPath) &&
+    fs.existsSync(path.join(adminPath, "locked"));
+
+  // The identical registration without the lock is destroyed by prune. This
+  // validates the instrument: the test can distinguish the old app mechanism
+  // from the protected one rather than merely observing a no-op prune.
+  fs.rmSync(path.join(adminPath, "locked"));
+  git(repo, "worktree", "prune");
+  unlockedForeignRegistrationWasPruned = !fs.existsSync(adminPath);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
@@ -147,9 +188,13 @@ check(cleanFastForwarded,
   "controlled experiment proves a clean stale page can fast-forward to the newer GUI");
 check(dirtyWasPreserved,
   "controlled experiment proves the dirty stale path leaves both HEAD and pending bytes untouched");
+check(unlockedForeignRegistrationWasPruned,
+  "controlled experiment reproduces foreign-host prune deleting an unlocked page registration");
+check(lockedForeignRegistrationSurvived,
+  "controlled experiment proves Git's worktree lock preserves the same foreign-host registration");
 
 if (process.exitCode) {
-  console.error(`\n${passed}/21 page worktree freshness checks passed.`);
+  console.error(`\n${passed}/26 page worktree freshness checks passed.`);
   process.exit(process.exitCode);
 }
-console.log(`\n${passed}/21 page worktree freshness checks passed.`);
+console.log(`\n${passed}/26 page worktree freshness checks passed.`);

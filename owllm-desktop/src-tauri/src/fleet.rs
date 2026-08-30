@@ -1211,19 +1211,26 @@ pub async fn fleet_worktree_create(
             return Ok(CreateOutcome::Error { message: e });
         }
     }
+    let prefix = branch_prefix
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("owllm-fleet");
+    let persistent_page = prefix == "owllm-page";
+
     // Belt-and-braces: if a previous run crashed mid-flight and left a
     // stale worktree at this exact path, prune it before re-creating
     // so the `git worktree add` doesn't fail with "already exists".
+    // Persistent page worktrees are locked against cross-host prune below, so
+    // release that lock before an explicit same-page replacement.
+    if persistent_page {
+        let _ = git(&cwd, &["worktree", "unlock", &dest.to_string_lossy()]);
+    }
     let _ = git(
         &cwd,
         &["worktree", "remove", "--force", &dest.to_string_lossy()],
     );
     let _ = remove_dir_all_native(&dest);
 
-    let prefix = branch_prefix
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("owllm-fleet");
     let branch = format!("{}/{}/{}", prefix, safe_seg(&run_id), safe_seg(&agent_name));
     // If the branch somehow already exists (interrupted run), delete it
     // first so we can re-create cleanly.
@@ -1235,6 +1242,37 @@ pub async fn fleet_worktree_create(
         return Ok(CreateOutcome::Error {
             message: format!("git worktree add failed: {}", err.trim()),
         });
+    }
+    // A repository can be shared by Windows and WSL. Git records linked
+    // worktrees with host-native absolute paths, so an unscoped `worktree
+    // prune` on the other host sees every persistent page as missing and
+    // deletes its administrative entry while leaving the user's files behind.
+    // Git's own worktree lock is specifically designed to prevent that. Team
+    // worktrees are transient; Coding-page worktrees survive navigation and
+    // stay locked until the explicit page-close path below removes them.
+    if persistent_page {
+        let (locked, lock_out, lock_err) = git(
+            &cwd,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "OWLLM persistent Coding page",
+                &dest_str,
+            ],
+        )?;
+        if !locked {
+            let _ = git(&cwd, &["worktree", "remove", "--force", &dest_str]);
+            let _ = git(&cwd, &["branch", "-D", &branch]);
+            let _ = remove_dir_all_native(&dest);
+            return Ok(CreateOutcome::Error {
+                message: git_failure_message(
+                    "created the page worktree but could not protect it from cross-host pruning",
+                    &lock_out,
+                    &lock_err,
+                ),
+            });
+        }
     }
     let (checkpoint_sha, checkpoint_files) = match checkpoint {
         Some(saved) => (Some(saved.sha), saved.files),
@@ -2359,6 +2397,9 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<RemoveOutcome, St
     // Best-effort: remove worktree, then delete the branch. Don't
     // fail the dispatch on cleanup failure — the worktree on disk is
     // recoverable, the run completed.
+    if args.branch.starts_with("owllm-page/") {
+        let _ = git(&cwd, &["worktree", "unlock", &args.worktree_path]);
+    }
     let _ = git(
         &cwd,
         &["worktree", "remove", "--force", &args.worktree_path],
@@ -2392,7 +2433,6 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
     if !is_git_repo(&cwd)? {
         return Ok(0);
     }
-    let _ = git(&cwd, &["worktree", "prune"]); // drop registry entries for already-deleted dirs
     let mut removed = 0u32;
     // Reclaim TEAM-run worktrees only (owllm-fleet/*). Code-page worktrees
     // (owllm-page/*) hold the user's unmerged edits and are NEVER touched here.
@@ -2431,7 +2471,6 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
             }
         }
     }
-    let _ = git(&cwd, &["worktree", "prune"]);
     Ok(removed)
 }
 

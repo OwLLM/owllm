@@ -15,6 +15,8 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 const ACCEPTED_EXTENSIONS = new Set(["glb", "gltf", "obj", "stl"]);
 const IMPORT_ACCEPT = ".glb,.gltf,.obj,.stl,.bin,.png,.jpg,.jpeg,.webp";
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
+const MAX_TOTAL_IMPORT_BYTES = 250 * 1024 * 1024;
+const BLOCKED_ASSET_URL = "data:application/octet-stream;base64,";
 
 type Vector3Tuple = [number, number, number];
 
@@ -53,6 +55,12 @@ function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? path.toLowerCase();
 }
 
+function linkedAssetName(url: string): string {
+  let decoded = url;
+  try { decoded = decodeURIComponent(url); } catch { /* Keep the original URL for the error message. */ }
+  return basename(decoded.split(/[?#]/, 1)[0]);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -61,6 +69,10 @@ function formatBytes(bytes: number): string {
 
 function uniqueId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function disposeObject(root: any) {
@@ -120,17 +132,35 @@ function loadModel(file: File, companions: File[]): Promise<any> {
     const urls = new Map<string, string>();
     const related = [file, ...companions.filter((candidate) => candidate !== file)];
     for (const asset of related) urls.set(basename(asset.name), URL.createObjectURL(asset));
+    const missingAssets = new Set<string>();
     const manager = new THREE.LoadingManager();
-    manager.setURLModifier((url: string) => urls.get(basename(decodeURIComponent(url))) ?? url);
+    manager.setURLModifier((url: string) => {
+      if (/^(data|blob):/i.test(url)) return url;
+      const assetName = linkedAssetName(url);
+      const localUrl = urls.get(assetName);
+      if (localUrl) return localUrl;
+      missingAssets.add(assetName || url);
+      return BLOCKED_ASSET_URL;
+    });
     const release = () => urls.forEach((url) => URL.revokeObjectURL(url));
+    const missingAssetError = () => missingAssets.size
+      ? `Missing linked asset${missingAssets.size === 1 ? "" : "s"}: ${Array.from(missingAssets).join(", ")}. Select the GLTF, its .bin file, and all referenced textures together, then retry.`
+      : null;
     const loader = new GLTFLoader(manager);
     file.arrayBuffer().then((buffer) => {
       loader.parse(buffer, "", (result: any) => {
         release();
-        resolve(result.scene ?? result.scenes?.[0]);
+        const scene = result.scene ?? result.scenes?.[0];
+        const missingError = missingAssetError();
+        if (missingError) {
+          disposeObject(scene);
+          fail(missingError);
+          return;
+        }
+        resolve(scene);
       }, (error: unknown) => {
         release();
-        fail(error);
+        fail(missingAssetError() ?? error);
       });
     }, (error) => {
       release();
@@ -451,6 +481,11 @@ export default function DigitalTwinPage() {
       setError(`${oversized.name} is larger than the 100 MB interactive import limit. Reduce or split the model before importing so the UI remains responsive.`);
       return;
     }
+    const totalImportBytes = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalImportBytes > MAX_TOTAL_IMPORT_BYTES) {
+      setError(`The selected files total ${formatBytes(totalImportBytes)}, above the 250 MB aggregate import limit. Choose a smaller set or import the assembly in batches so the UI remains responsive.`);
+      return;
+    }
 
     const importRun = ++importRunRef.current;
     importingRef.current = true;
@@ -466,8 +501,9 @@ export default function DigitalTwinPage() {
       }
       try {
         // Yield between files so a multi-part assembly never turns into one
-        // uninterrupted main-thread task. Individual files are capped above.
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        // uninterrupted main-thread task. Timers still run when the window is
+        // occluded, unlike requestAnimationFrame, and cancellation is checked next.
+        await yieldToMainThread();
         const object = await loadModel(file, files);
         if (importRun !== importRunRef.current) {
           disposeObject(object);
@@ -516,6 +552,10 @@ export default function DigitalTwinPage() {
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
+    if (importingRef.current) {
+      setError("An import is already in progress. Wait for it to finish or clear the assembly to cancel it, then drop these files again.");
+      return;
+    }
     void importFiles(Array.from(event.dataTransfer.files));
   };
 

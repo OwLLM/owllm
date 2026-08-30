@@ -123,7 +123,7 @@ import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, goalRequiresPublish,
-  normalizeRoleToolAllowlist, soloGeneralistForTeam } from "./teamConfig";
+  normalizeRoleToolAllowlist, soloGeneralistForTeam, SOLO_GENERALIST_BASE } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -1106,12 +1106,13 @@ function FlowHeader({
   viewMode, onSetView,
   teamLabel, onOpenWorkbench,
   runStartedAt, runEndedAt,
-  soloMode, onToggleSolo,
+  soloMode, onToggleSolo, modeSwitchLocked,
 }: {
   /// Solo-loop vs full-team toggle, shown right in the canvas header. Solo = one
   /// agent edit→verify→fix + rule-based publish, no orchestration.
   soloMode?: boolean;
   onToggleSolo?: () => void;
+  modeSwitchLocked?: boolean;
   viewMode: "diagram" | "graph" | "chat";
   /// Three-state segmented switch — caller passes the target mode the
   /// user clicked. Replaces the binary toggle the page had before the
@@ -1177,14 +1178,15 @@ function FlowHeader({
             <button
               data-ui={m.target ? "FlowModeSolo" : "FlowModeOrch"}
               onClick={() => { if (!!soloMode !== m.target) onToggleSolo?.(); }}
+              disabled={modeSwitchLocked}
               aria-pressed={m.active}
-              title={m.title}
+              title={modeSwitchLocked ? "Stop the active run before changing execution mode" : m.title}
               style={{
-                appearance:"none", border:0, cursor:"pointer", fontFamily:"inherit",
+                appearance:"none", border:0, cursor:modeSwitchLocked ? "not-allowed" : "pointer", fontFamily:"inherit",
                 fontSize:13, fontWeight:800, letterSpacing:0.3, lineHeight:1, whiteSpace:"nowrap",
                 padding:"7px 13px", borderRadius:9,
                 transition:"color .2s, text-shadow .2s, background .2s, box-shadow .2s",
-                color: m.active ? "#ffd97a" : "#6b758a",
+                color: m.active ? "#ffd97a" : "#6b758a", opacity: modeSwitchLocked ? 0.62 : 1,
                 textShadow: m.active ? "0 0 18px rgba(255,217,122,0.6)" : "none",
                 background: m.active ? "rgba(255,217,122,0.20)" : "transparent",
                 boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.55), 0 0 16px rgba(255,217,122,0.12)" : "none",
@@ -7271,6 +7273,50 @@ function buildSpecialistPrompt(
   return layers.join("\n");
 }
 
+/// Solo deliberately does NOT reuse buildOrchestratorPrompt or
+/// buildSpecialistPrompt: both contain a team roster/dispatch contract. Keeping
+/// the same lead identity while injecting either prompt would tell one model
+/// both "delegate" and "there is no team" in the same system message.
+function buildSoloExecutorPrompt(
+  spec: AgentSpec,
+  roleByName: Map<string, RoleData>,
+  directives?: Directive[],
+  skillBlock?: string,
+  projectCwd?: string | null,
+  projectEnvironment?: ProjectEnvironment | null,
+): string {
+  const personal = spec.runtimePersonal;
+  const role = roleByName.get(SOLO_GENERALIST_BASE);
+  const identity = personal
+    ? `You are ${personal.effective.identity.name}. Your stable runtime identity is ${spec.name}.`
+    : `You are ${displayLabel(spec.name)}, operating as the Solo Generalist.`;
+  const soloContract = [
+    "--- SOLO EXECUTION CONTRACT (binding for this run) ---",
+    "You are the only execution agent. There is no team roster and no agent available to receive a handoff.",
+    "Use your tools directly and complete the whole task across every required layer yourself.",
+    "Never emit @agent dispatch lines, delegate, ask an orchestrator/worker/specialist to act, or wait for a teammate.",
+    "A later host-controlled review or publish stage is not a teammate and cannot receive work from you.",
+    "Only stop for a choice only the user can make; prefix that single concise question with NEEDS USER:.",
+    "Otherwise choose the safe obvious option, verify the result, and finish the complete task.",
+    "--- END SOLO EXECUTION CONTRACT ---",
+  ].join("\n");
+  return [
+    identity,
+    "",
+    soloContract,
+    "",
+    role?.systemPrompt ?? role?.description ?? "Own the user's complete task using every relevant connected tool.",
+    (skillBlock && skillBlock.trim()) ? `\n${skillBlock.trim()}` : "",
+    formatDirectivesBlock(directives),
+    personal?.rulesBlock ?? "",
+    environmentPromptBlock(projectEnvironment),
+    projectWorkspaceBlock(projectCwd),
+    (!personal || personal.memoryScope !== "none") ? TEAM_MEMORY_HINT_LEAN : "",
+    personal ? personal.memorySnapshot : getTeamMemorySnapshot(),
+    getBrowserStateLine(),
+  ].filter(Boolean).join("\n");
+}
+
 type Dispatch = { agentName: string; instruction: string };
 
 // The dispatch parser is SHARED with dispatch.ts (parseDispatchesDetailed) —
@@ -8186,6 +8232,18 @@ export function AgentsPage({
     catch { setSoloModeState(false); }
   }, [selectedProjectId]);
   const setSoloMode = (v: boolean) => {
+    // A run captures one execution graph. Switching underneath it would make
+    // the canvas, selected log and next turn disagree about who is running.
+    if (busy || backgroundRunning) {
+      setRunError("Stop the active run before changing between Workflow and Solo mode.");
+      return;
+    }
+    // Agent logs are private drill-downs; the project transcript is supChat.
+    // Always return to that canonical thread when the execution mode changes.
+    setSelectedNode(null);
+    setSelectedEdgeIdx(null);
+    setEditingAgent(null);
+    setSkillsAgent(null);
     setSoloModeState(v);
     if (!selectedProjectId) return;
     try { localStorage.setItem(soloKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
@@ -9314,7 +9372,7 @@ export function AgentsPage({
   const soloRenderTeam: Team | null = useMemo(() => {
     if (!renderTeam) return null;
     const agents = renderTeam.agents;
-    const coder = soloGeneralistForTeam(renderTeam);
+    const coder = soloGeneralistForTeam(renderTeam, findOrchestratorSpec(renderTeam));
     const critic = agents.find(a => a.name === CRITIC_AGENT_NAME)
       ?? ({ name: CRITIC_AGENT_NAME, base: "critic", icon: null } as AgentSpec);
     const publisher = agents.find(a => isPublisherAgent(a, roleByName))
@@ -10914,7 +10972,7 @@ export function AgentsPage({
         // not reuse a lane specialist here: changing its prompt did not change
         // its runtime tool allowlist, so browser/ops tasks could be routed to a
         // "do everything" frontend agent that was still denied the needed tool.
-        const coder = soloGeneralistForTeam(runTeam);
+        const coder = soloGeneralistForTeam(runTeam, findOrchestratorSpec(runTeam));
         if (!requiresAgentWorktree(projectCwd)) {
           throw new Error(
             "Solo mode needs a Git project directory so OWLLM can isolate its filesystem access. Select or initialize a Git project, then retry.",
@@ -10971,24 +11029,9 @@ export function AgentsPage({
             text: `📦 Auto-loaded skill(s): ${sAutoLoaded.join(", ")}`,
           });
         }
-        // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
-        // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
-        // Alone, that lock is fatal — it does its slice and hands the rest to agents
-        // that don't exist. Suspend the lane and make it own the WHOLE task.
-        const SOLO_OVERRIDE = [
-          "",
-          "⚡ SOLO-LOOP MODE — YOU ARE THE ONLY AGENT.",
-          "There is NO team, NO orchestrator, NO backend/frontend split, NO handoff. Any",
-          "\"LAYER OWNERSHIP\" / lane rule above is SUSPENDED for this run: do the COMPLETE",
-          "task end-to-end across ALL layers yourself — UI AND backend/Rust, client AND",
-          "server, tests AND docs. NEVER flag a dependency \"for another agent\", NEVER emit",
-          "\"@<name>:\" dispatch lines (nothing executes them here), NEVER wait for a critic.",
-          "Finish the ENTIRE task; a Critical Thinker reviews your work ONCE afterward.",
-          "Only if you hit a choice ONLY the user can make (a missing asset, an irreversible",
-          "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
-          "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
-        ].join("\n");
-        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true, runEnvironment) + "\n" + SOLO_OVERRIDE;
+        // This prompt is structurally solo: unlike the specialist/orchestrator
+        // builders it contains no team roster, routing hint or dispatch format.
+        const sPrompt = buildSoloExecutorPrompt(coder, roleByName, directives, sBlock, soloCwd, runEnvironment);
         const sAllowed = effectiveToolsFor(coder);
         const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
         const sMem = soloMemKey
@@ -13700,6 +13743,7 @@ export function AgentsPage({
             runStartedAt={runStartedAt}
             runEndedAt={runEndedAt}
             soloMode={soloMode}
+            modeSwitchLocked={busy || backgroundRunning}
             onToggleSolo={() => setSoloMode(!soloMode)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>

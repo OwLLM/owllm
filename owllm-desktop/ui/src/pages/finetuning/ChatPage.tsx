@@ -55,11 +55,13 @@ import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, abortable, isAbortError, sleepAbortable, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { requiresManagedLocalServer } from "../agentic/peerCatalogue";
+import { startupFailureReason } from "../agentic/localServerFailure";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { notify } from "../../components/Toast";
 import { useChatSession } from "../../runtime/useChatSession";
-import { makeGenMeter } from "../../utils/genStats";
+import { makeGenMeter, timingTokensPerSecond } from "../../utils/genStats";
 import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../core/accountsStore";
 
 // Session id for a column's chat stream in the ChatRuntime store. The
 // store lives above the router, so an in-flight stream survives this
@@ -295,7 +297,7 @@ export default function ChatPage() {
   const [activePanel, setActivePanel] = useState<"A" | "B" | "C">("A");
   const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(() => getCachedAccounts());
   // Rule-based popup raised by Send when no column picked a model.
   const [modelRequired, setModelRequired] = useState(false);
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -445,15 +447,20 @@ export default function ChatPage() {
         .catch(() => { /* leave empty */ });
     };
     reloadModels();
-    invoke<AccountsStatusLite>("accounts_status")
-      .then((s) => { if (!dead) setAccountsStatus(s); })
-      .catch(() => { /* leave null */ });
+    // Informational only (picker enabled/dimmed state) — served from the
+    // shared session cache so re-entering chat neither re-scans for CLIs nor
+    // repaints the picker after first frame.
+    const unsubscribeAccounts = subscribeAccounts(() => {
+      if (!dead) setAccountsStatus(getCachedAccounts());
+    });
+    void fetchAccounts();
     const onFocus = () => reloadModels();
     const onRefresh = () => reloadModels();
     window.addEventListener("focus", onFocus);
     window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
     return () => {
       dead = true;
+      unsubscribeAccounts();
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
     };
@@ -942,6 +949,14 @@ export default function ChatPage() {
             if (recoverLocalInference(String(e?.message ?? e))) {
               continue;
             }
+            // The engine may already be DEAD — llama-server exits in ~1 s on an
+            // unsupported GGUF architecture. server_status reaps the child and
+            // classifies its stderr, so ask it before burning the remaining
+            // ~3 minutes retrying a socket nobody is listening on.
+            const dead = await invoke<ServerStatus>("server_status")
+              .then((s) => startupFailureReason(s, wantedModelId))
+              .catch(() => null);
+            if (dead) throw new Error(dead);
             const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
             updateCol(col.id, {
               error: `⏳ Waiting for llama-server to respond (no reply in ${attemptTimeoutMs / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,
@@ -993,6 +1008,7 @@ export default function ChatPage() {
         // (This chat has its OWN SSE loop, separate from the agentic
         // streamLocalChat, so it has to drive the meter itself.)
         const genTick = makeGenMeter();
+        let exactToksPerSec: number | undefined;
         let turnReply = "";
         let turnThinking = "";
         let buffer = "";
@@ -1083,6 +1099,8 @@ export default function ChatPage() {
             if (!body || body === "[DONE]") continue;
             try {
               const j = JSON.parse(body);
+              const predictedPerSecond = timingTokensPerSecond(j);
+              if (predictedPerSecond !== undefined) exactToksPerSec = predictedPerSecond;
               if (j?.error) {
                 serverError = typeof j.error === "string"
                   ? j.error
@@ -1178,7 +1196,7 @@ export default function ChatPage() {
           if (loopAborted) break;
         }
         } finally {
-          genTick.stop();
+          genTick.stop(exactToksPerSec);
         }
         controls.onReader(null);
         if (serverError) {
@@ -1308,6 +1326,7 @@ export default function ChatPage() {
             const freader = fresp.body.getReader();
             controls.onReader(freader);
             const finalGenTick = makeGenMeter();
+            let exactToksPerSec: number | undefined;
             const fdec = new TextDecoder();
             let fbuf = "";
             let fInThink = false;
@@ -1326,6 +1345,8 @@ export default function ChatPage() {
                 if (!fbody || fbody === "[DONE]") continue;
                 try {
                   const fj = JSON.parse(fbody);
+                  const predictedPerSecond = timingTokensPerSecond(fj);
+                  if (predictedPerSecond !== undefined) exactToksPerSec = predictedPerSecond;
                   const fd = fj?.choices?.[0]?.delta;
                   const frc: string | undefined = fd?.reasoning_content ?? fd?.reasoning;
                   if (typeof frc === "string" && frc) {
@@ -1357,7 +1378,7 @@ export default function ChatPage() {
               }
             }
             } finally {
-              finalGenTick.stop();
+              finalGenTick.stop(exactToksPerSec);
             }
             controls.onReader(null);
           }

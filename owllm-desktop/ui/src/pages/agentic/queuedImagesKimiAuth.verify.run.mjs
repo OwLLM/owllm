@@ -116,9 +116,17 @@ try {
     firstCompleteAuthUrl('\x1b]8;;https://example.com/auth?code=ok\x07https://example.com/auth?code=ok\x1b]8;;\x07\r\n')
       === "https://example.com/auth?code=ok");
 
-  check("PTY terminal uses only the complete-URL extractor",
-    terminal.includes('import { firstCompleteAuthUrl } from "./authUrlCapture"')
-      && terminal.includes("const url = firstCompleteAuthUrl(outputText);"));
+  // Asserted on the extractor's role, not on an exact import or call line: the
+  // invariant is "the URL handed to the browser comes from the complete-URL
+  // extractor", and pinning the literal source text made unrelated edits (an
+  // added named import, a hoisted local) fail a rule they never broke.
+  check("PTY terminal takes its authorization URL from the complete-URL extractor",
+    /import\s*\{[^}]*\bfirstCompleteAuthUrlFromTerminal\b[^}]*\}\s*from\s*"\.\/authUrlCapture"/.test(terminal)
+      && /\bconst\s+url\s*=\s*firstCompleteAuthUrlFromTerminal\(/.test(terminal)
+      && terminal.includes("openAuthUrl(url)"));
+  check("PTY terminal has no second authorization-URL extractor",
+    (terminal.match(/firstCompleteAuthUrlFromTerminal\(/g) || []).length === 1
+      && !/firstAuthUrl\(|extractAuthUrl\(|matchAuthUrl\(/.test(terminal));
   check("Claude reconnect never deletes the last credential before OAuth succeeds",
     accounts.includes('if (route.backend === "kimi_cli")')
       && accounts.includes("Keeping the existing ${provider.name} credential until the replacement sign-in succeeds."));
@@ -148,11 +156,21 @@ try {
     nativeOpenRoute.includes("validate_provider_auth_url(&parsed)?")
       && nativeNavigationRoute.includes("validate_provider_auth_url(&parsed)?")
       && nativeTabRoute.includes("validate_provider_auth_url(&parsed)?"));
-  check("Windows Kimi browser suppression is a valid Python webbrowser template",
-    pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0 %s")')
-      && !pty.includes('cmd.env("BROWSER", "cmd.exe /c exit 0");'));
-  check("Unix Kimi browser suppression is explicit and cross-platform",
-    pty.includes('cmd.env("BROWSER", "/usr/bin/true %s")'));
+  // The literal env values moved into the shared `NO_EXTERNAL_BROWSER`
+  // constant so the pty and accounts spawn paths cannot drift. Assert the rule
+  // (a no-op browser carrying the `%s` URL placeholder on both platforms)
+  // rather than the old inline `cmd.env(...)` string.
+  const noExternalBrowser = pty.slice(
+    pty.indexOf("pub(crate) const NO_EXTERNAL_BROWSER"),
+    pty.indexOf("pub(crate) const NO_EXTERNAL_BROWSER") + 400,
+  );
+  check("Windows browser suppression is a valid Python webbrowser template",
+    /\bcfg!\(windows\)\s*\{\s*\n\s*"cmd\.exe \/c exit 0 %s"/.test(noExternalBrowser));
+  check("Unix browser suppression is explicit and cross-platform",
+    noExternalBrowser.includes('"/usr/bin/true %s"'));
+  check("every spawned login CLI gets the shared no-op BROWSER value",
+    /cmd\.env\("BROWSER",\s*NO_EXTERNAL_BROWSER\)/.test(pty)
+      && !/cmd\.env\("BROWSER",\s*"/.test(pty));
 
   check("mid-run steer queue retains attachment payloads",
     agents.includes("type QueuedSteer = { text: string; attachments: Attachment[] }")

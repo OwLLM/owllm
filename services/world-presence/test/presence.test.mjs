@@ -21,6 +21,9 @@ async function withService(run) {
   const mf = new Miniflare({
     modules: true,
     scriptPath: new URL("../src/index.js", import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (match) => match.slice(1)),
+    // index.js imports ./chat.js; without this rule miniflare loads the
+    // sibling as CommonJS and every test fails on its export statements.
+    modulesRules: [{ type: "ESModule", include: ["**/*.js"] }],
     compatibilityDate: "2026-07-21",
     durableObjects: { WORLD_PRESENCE: { className: "WorldPresence", useSQLite: true } },
   });
@@ -28,10 +31,11 @@ async function withService(run) {
   finally { await mf.dispose(); }
 }
 
-async function connect(mf, role, cf = {}, id = "", os = "") {
+async function connect(mf, role, cf = {}, id = "", os = "", appVersion = "") {
   const params = new URLSearchParams({ role });
   if (id) params.set("id", id);
   if (os) params.set("os", os);
+  if (appVersion) params.set("v", appVersion);
   const query = `?${params.toString()}`;
   const response = await mf.dispatchFetch(`https://presence.example/v1/presence/connect${query}`, {
     headers: { Upgrade: "websocket" },
@@ -80,7 +84,7 @@ test("snapshots expose only anonymous public fields, mark online, and count them
   const snapshot = buildSnapshot(rows, new Set(["good"]), Date.parse("2026-07-21T12:00:00Z"));
   assert.equal(snapshot.type, "snapshot");
   assert.equal(snapshot.nodes.length, 2);
-  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["appVersion", "firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
   assert.equal(snapshot.nodes.find((node) => node.id === "good").os, "Windows");
   assert.equal(snapshot.nodes.find((node) => node.id === "good").online, true);
   assert.equal(snapshot.nodes.find((node) => node.id === "ghost").online, false);
@@ -89,7 +93,7 @@ test("snapshots expose only anonymous public fields, mark online, and count them
 
 test("public node shape carries no leaked fields", () => {
   const node = publicNode({ id: "n", region: "EU", os: "Linux", latitude: 48, longitude: 9, first_seen: "a", last_seen: "b", github_login: "leak" }, true);
-  assert.deepEqual(Object.keys(node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.deepEqual(Object.keys(node).sort(), ["appVersion", "firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
   assert.equal(node.os, "Linux");
 });
 
@@ -129,7 +133,7 @@ test("first sighting records the node and broadcasts an online upsert with count
     assert.equal(change.node.region, "KR · Seoul");
     assert.equal(change.node.online, true);
     assert.notEqual(change.node.latitude, 37.5665);
-    assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+    assert.deepEqual(Object.keys(change.node).sort(), ["appVersion", "firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
     assert.deepEqual(change.counts, { total: 1, online: 1 });
     presence.close(1000, "invisible");
     viewer.close(1000, "done");
@@ -284,4 +288,50 @@ test("service keeps privacy invariants while intentionally retaining anonymous n
   // and the v2 migration purged the per-connection random-id duplicates.
   assert.match(source, /const ephemeral = !stableId/);
   assert.match(source, /schema_version', '3'/);
+  // The release column must be added WITHOUT bumping schema_version, which
+  // deletes every recorded node.
+  assert.match(source, /ALTER TABLE nodes ADD COLUMN app_version TEXT NOT NULL DEFAULT ''/);
+  assert.doesNotMatch(source, /schema_version', '[4-9]'/);
+});
+
+test("the app release is recorded, broadcast, and refreshed on reconnect", async () => {
+  await withService(async (mf) => {
+    const viewer = await connect(mf, "viewer");
+    await nextMessage(viewer);
+
+    const upsert = nextMessage(viewer);
+    const first = await connect(mf, "presence", KR, "release-node", "Linux", "1.0.5");
+    assert.equal((await upsert).node.appVersion, "1.0.5");
+
+    const ghost = nextMessage(viewer);
+    first.close();
+    assert.equal((await ghost).node.online, false, "sign-off is the socket close, not a timeout");
+
+    // Reconnecting after an update refreshes the release on the SAME node.
+    const updated = nextMessage(viewer);
+    const second = await connect(mf, "presence", KR, "release-node", "Linux", "1.0.6");
+    assert.equal((await updated).node.appVersion, "1.0.6");
+
+    const snapshot = await (async () => {
+      const observer = await connect(mf, "viewer");
+      return nextMessage(observer);
+    })();
+    const nodes = snapshot.nodes.filter((node) => node.id === "release-node");
+    assert.equal(nodes.length, 1, "one install stays one recorded node across releases");
+    assert.equal(nodes[0].appVersion, "1.0.6");
+    second.close();
+    viewer.close();
+  });
+});
+
+test("a hostile version string cannot smuggle anything onto the map", async () => {
+  await withService(async (mf) => {
+    const viewer = await connect(mf, "viewer");
+    await nextMessage(viewer);
+    const upsert = nextMessage(viewer);
+    const socket = await connect(mf, "presence", IT, "hostile-node", "Windows", "<script>1.0.6</script>");
+    assert.equal((await upsert).node.appVersion, "script1.0.6script");
+    socket.close();
+    viewer.close();
+  });
 });

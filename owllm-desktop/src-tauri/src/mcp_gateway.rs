@@ -566,7 +566,7 @@ fn dispatch_rpc(app: &AppHandle, req: &Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match call_tool(app, name, &args) {
-                Ok(text) => reply(id, tool_content(&text, false)),
+                Ok(text) => reply(id, tool_content(&cap_tool_output(name, &text), false)),
                 Err(e) => reply(id, tool_content(&format!("error: {e}"), true)),
             }
         }
@@ -586,6 +586,31 @@ fn dispatch_rpc(app: &AppHandle, req: &Value) -> Option<Value> {
 
 fn reply(id: Option<Value>, result: Value) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "result": result }))
+}
+
+/// Largest tool result we hand back to a CLI agent, in chars (~15k tokens).
+/// A single `browser_get_text` on a minified bundle or a long chat history can
+/// run to megabytes; that lands in the agent's context, and inside a WSL-
+/// isolated project the resulting memory spike is what the Linux OOM killer
+/// terminates (see sandbox::wsl_oom_report). Truncating here bounds OUR
+/// contribution to that; the CLI's own built-in tools are outside our reach.
+const MAX_TOOL_OUTPUT_CHARS: usize = 60_000;
+
+/// Cap one tool result, telling the agent plainly what happened and what to do
+/// instead — a silently shortened page reads as a complete one and the agent
+/// concludes from half the evidence. Splits on a char boundary, never mid-UTF-8.
+fn cap_tool_output(tool: &str, text: &str) -> String {
+    if text.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let total = text.chars().count();
+    format!(
+        "{head}\n\n…[OWLLM truncated {tool}: {total} characters, showing the first \
+         {MAX_TOOL_OUTPUT_CHARS}. This is NOT the whole result — do not conclude \
+         anything from its absence. Narrow the request (search the page, target a \
+         specific element, or scroll to the region you need) and call the tool again.]"
+    )
 }
 
 fn tool_content(text: &str, is_error: bool) -> Value {
@@ -943,6 +968,33 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_output_is_capped_and_says_so() {
+        // Under the cap → returned byte-for-byte, no notice bolted on.
+        let small = "hello";
+        assert_eq!(cap_tool_output("browser_get_text", small), small);
+        let exact = "x".repeat(MAX_TOOL_OUTPUT_CHARS);
+        assert_eq!(cap_tool_output("browser_get_text", &exact), exact);
+
+        // Over the cap → truncated, and the agent is TOLD, so it cannot mistake
+        // a partial page for the whole page.
+        let big = "y".repeat(MAX_TOOL_OUTPUT_CHARS + 5_000);
+        let out = cap_tool_output("browser_get_text", &big);
+        assert!(out.chars().count() < big.chars().count(), "must shrink");
+        assert!(out.starts_with(&"y".repeat(100)), "keeps the head");
+        assert!(out.contains("OWLLM truncated browser_get_text"), "{out}");
+        assert!(out.contains("NOT the whole result"), "{out}");
+    }
+
+    #[test]
+    fn tool_output_cap_never_splits_a_utf8_char() {
+        // Multi-byte text straddling the boundary must not panic or corrupt.
+        let big = "é".repeat(MAX_TOOL_OUTPUT_CHARS + 10);
+        let out = cap_tool_output("browser_get_text", &big);
+        assert!(out.starts_with("éé"));
+        assert!(out.contains("OWLLM truncated"));
+    }
 
     #[test]
     fn token_is_256_bit_hex() {

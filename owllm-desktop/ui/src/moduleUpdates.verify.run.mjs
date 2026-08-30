@@ -1,0 +1,275 @@
+// Regression gate: an installed module with a newer build on the server must be
+// REACHABLE and ANNOUNCED. The shipped code did neither, and the consequence was
+// not cosmetic — it made a published engine impossible to install.
+//
+// What this pins:
+//
+//  1. ModuleWizard has always had a `mode="settings"`, and its header even
+//     renders the title "Modules" for it — but nothing ever mounted it that
+//     way. `useNeedsFirstRunWizard()` goes false the moment any module is
+//     installed, so after the first launch the page did not exist. The
+//     local-inference crash hint told users, by name, to go to a route with
+//     no entry point anywhere in the app.
+//  2. Nothing ever re-checked the module registry. It is republished
+//     independently of the app (that is the whole point of modules), so a
+//     launch-time "nothing new" answer expires within days — an install could
+//     sit for months on an engine that cannot load current GGUF architectures.
+//  3. Opening the page from an "engine update" prompt landed on an unticked
+//     checkbox and a disabled-looking Install button.
+//
+// Section 1 EXECUTES runtime/moduleUpdates.ts; the rest pins the wiring in the
+// surfaces that consume it.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import os from "node:os";
+import * as esbuild from "esbuild";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STORE = path.join(HERE, "runtime", "moduleUpdates.ts");
+const SHELL = path.join(HERE, "AppShell.tsx");
+const WIZARD = path.join(HERE, "pages", "modules", "ModuleWizard.tsx");
+const SERVER = path.join(HERE, "..", "..", "src-tauri", "src", "server.rs");
+
+let failures = 0;
+const check = (label, condition) => {
+  if (condition) console.log(`  ✓ ${label}`);
+  else { failures += 1; console.error(`  ✗ ${label}`); }
+};
+
+/// Comments quote the very shapes some checks forbid, so every source pin runs
+/// against code with comments removed.
+function codeOf(file) {
+  if (!fs.existsSync(file)) return null;
+  const src = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  return {
+    src,
+    code: src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n"),
+  };
+}
+
+console.log("\nModule updates are reachable and announced:\n");
+
+// ---- 1. EXECUTE the real store ---------------------------------------------
+
+const store = codeOf(STORE);
+if (!store) {
+  check("runtime/moduleUpdates.ts exists", false);
+} else {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-moduleupdates-"));
+  const bundle = path.join(tmp, "store.mjs");
+  await esbuild.build({
+    entryPoints: [STORE], bundle: true, format: "esm", platform: "node",
+    outfile: bundle, logLevel: "silent",
+  });
+  const mod = await import(`file://${bundle.replace(/\\/g, "/")}`);
+
+  const engine = (installed, available) => ({
+    id: "local-inference", displayName: "Local Inference",
+    installedVersion: installed, availableVersion: available,
+  });
+
+  let renders = 0;
+  const stop = mod.subscribeModuleUpdates(() => { renders += 1; });
+
+  check("starts empty — no badge before anything has been checked",
+    mod.getModuleUpdates().length === 0);
+
+  mod.setModuleUpdates([engine("b3850-cuda12.4", "b10358-cuda12.4")]);
+  check("a pending update is published to subscribers",
+    renders === 1 && mod.getModuleUpdates()[0].availableVersion === "b10358-cuda12.4");
+
+  // The 6-hourly check re-reports the same answer. It must not repaint the
+  // chrome, or the badge flickers every few hours forever.
+  mod.setModuleUpdates([engine("b3850-cuda12.4", "b10358-cuda12.4")]);
+  check("re-reporting the SAME pending update is idempotent (no repaint)", renders === 1);
+
+  mod.setModuleUpdates([engine("b3850-cuda12.4", "b11000-cuda12.4")]);
+  check("a NEWER available version does repaint", renders === 2);
+
+  mod.setModuleUpdates([]);
+  check("installing it clears the badge",
+    renders === 3 && mod.getModuleUpdates().length === 0);
+
+  // A listener that throws must not stop the others: the update check is the
+  // only thing that can tell a user their engine is too old.
+  const order = [];
+  const stopBad = mod.subscribeModuleUpdates(() => { order.push("bad"); throw new Error("boom"); });
+  const stopGood = mod.subscribeModuleUpdates(() => { order.push("good"); });
+  mod.setModuleUpdates([engine("b3850-cuda12.4", "b10358-cuda12.4")]);
+  check("a throwing subscriber cannot break the check", order.includes("good"));
+  stopBad(); stopGood();
+
+  const before = renders;
+  stop();
+  mod.setModuleUpdates([]);
+  check("unsubscribing really detaches", renders === before);
+
+  // The route out of the store: openModulesPage() must actually reach AppShell.
+  const seen = [];
+  globalThis.window = {
+    dispatchEvent: (e) => { seen.push(e.type); return true; },
+    CustomEvent: class { constructor(type) { this.type = type; } },
+  };
+  globalThis.CustomEvent = globalThis.window.CustomEvent;
+  mod.openModulesPage();
+  check("openModulesPage() fires the event AppShell mounts the page on",
+    seen.length === 1 && seen[0] === mod.OPEN_MODULES_EVENT);
+  delete globalThis.window; delete globalThis.CustomEvent;
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---- 2. The page is REACHABLE ----------------------------------------------
+
+const shell = codeOf(SHELL);
+if (!shell) {
+  check("AppShell.tsx exists", false);
+} else {
+  check("the Modules page is mounted in settings mode (the route exists at all)",
+    /<ModuleWizard\s+mode="settings"/.test(shell.code));
+
+  check("that mount is driven by OPEN_MODULES_EVENT",
+    /addEventListener\(OPEN_MODULES_EVENT/.test(shell.code)
+    && /removeEventListener\(OPEN_MODULES_EVENT/.test(shell.code));
+
+  check("the mount is rendered, not merely defined",
+    /<ModulesPageMount\s*\/>/.test(shell.code));
+
+  check("Settings has a Modules row that opens it",
+    /data-ui="SettingsModulesRow"/.test(shell.code)
+    && /onOpenModules\?\.\(\)/.test(shell.code));
+
+  check("the chrome carries its own module badge, wired to the same opener",
+    /data-ui="ModuleUpdateBadge"/.test(shell.code)
+    && /onOpenModules=\{openModulesPage\}/.test(shell.code));
+
+  // The app-update chip already occupies one spot under the OWLLM mark. Two
+  // absolutely-positioned chips on the same coordinates would overlap.
+  check("the module badge steps aside when the app-update badge is also showing",
+    /translate\(38px, \$\{updateBadge \? 40 : 22\}px\)/.test(shell.code));
+
+  // ---- 3. The check REPEATS ------------------------------------------------
+
+  check("module updates are checked on a repeating interval, not once per launch",
+    /setInterval\(\(\) => \{ void checkModuleUpdates\(\); \}, 6 \* 60 \* 60 \* 1000\)/.test(shell.code));
+
+  check("the watcher is rendered",
+    /<ModuleUpdateWatcher\s*\/>/.test(shell.code));
+
+  check("the check asks the backend and publishes what it finds",
+    /invoke<[\s\S]*?>\("module_list"\)/.test(shell.code)
+    && /state === "update-available"/.test(shell.code)
+    && /setModuleUpdates\(pending\)/.test(shell.code));
+
+  check("a backend that isn't up yet cannot break the shell",
+    /catch \{[\s\S]{0,200}\n  \}\n\}\n\n/.test(shell.code.slice(shell.code.indexOf("async function checkModuleUpdates"))));
+
+  check("closing the page re-checks, so the badge clears after installing",
+    /onClose=\{\(\) => \{ setOpen\(false\); void checkModuleUpdates\(\); \}\}/.test(shell.code));
+}
+
+// ---- 4. Landing there is one click -----------------------------------------
+
+const wizard = codeOf(WIZARD);
+if (!wizard) {
+  check("ModuleWizard.tsx exists", false);
+} else {
+  check("modules with an update waiting arrive pre-selected",
+    /if \(m\.state === "update-available"\) pre\.add\(m\.id\)/.test(wizard.code)
+    && /if \(pre\.size > 0\) setSelected\(pre\)/.test(wizard.code));
+
+  check("settings mode can still be dismissed — it must never hold the GUI hostage",
+    /mode === "settings" && \(\s*\n?\s*<button onClick=\{onClose\}/.test(wizard.code)
+    || /\{mode === "settings" &&[\s\S]{0,120}onClick=\{onClose\}/.test(wizard.code));
+}
+
+// ---- 5. The crash hint points at a route that EXISTS -----------------------
+
+const server = codeOf(SERVER);
+if (!server) {
+  check("src-tauri/src/server.rs exists", false);
+} else {
+  const hintStart = server.code.indexOf('"arch_unsupported"');
+  const hint = hintStart < 0 ? "" : server.code.slice(hintStart, hintStart + 700);
+
+  check("the unsupported-architecture hint exists and still refuses to blame the file",
+    hint.length > 0 && /NOT corrupt/.test(hint));
+
+  check("it sends the user to Settings → Modules, not the old 'Home → Modules' dead end",
+    /Settings \(⚙, top right\) → Modules/.test(hint) && !/Home → Modules/.test(hint));
+
+  check("no hint anywhere still names the route that never existed",
+    !/Home → Modules/.test(server.code) && !/Home → reinstall/.test(server.code));
+}
+
+// ---- 6. The engine updates ITSELF ------------------------------------------
+//
+// Reachable and announced was not enough. `local-inference` IS llama.cpp: a
+// build older than a model's GGUF architecture cannot load it, and the user
+// reads that as a broken app. An offer is easy to decline once, so on real
+// installs the engine sat on b3850 for months while b10358 was published.
+// The same argument applies to `tools-python`, which the agents' screenshot
+// tool needs and which no first-run default ever selected.
+
+const MODULES_RS = path.join(HERE, "..", "..", "src-tauri", "src", "modules.rs");
+const LIB_RS = path.join(HERE, "..", "..", "src-tauri", "src", "lib.rs");
+const mods = codeOf(MODULES_RS);
+const lib = codeOf(LIB_RS);
+
+if (!mods || !lib) {
+  check("src-tauri/src/modules.rs and lib.rs exist", false);
+} else {
+  check("a background maintenance sweep exists at all",
+    /pub fn spawn_auto_maintenance<R: Runtime>/.test(mods.code)
+    && /async fn auto_maintain<R: Runtime>/.test(mods.code));
+
+  check("it is actually spawned on startup, right where the manager is registered",
+    /modules::spawn_auto_maintenance\(app\.handle\(\)\.clone\(\)\)/.test(lib.code));
+
+  check("it installs every module with a newer build waiting",
+    /state == ModuleState::UpdateAvailable/.test(mods.code)
+    && /\.install\(app, &id, &snap\)/.test(mods.code));
+
+  check("the agents' Python tools are installed unasked",
+    /const AUTO_INSTALL_IDS: &\[&str\] = &\["tools-python"\]/.test(mods.code));
+
+  // NotSupported (no build for this platform — tools-python is Windows-only
+  // today) must not be retried forever, and Installed must not be reinstalled.
+  check("only NotInstalled auto-installs are attempted",
+    /state == ModuleState::NotInstalled/.test(mods.code));
+
+  check("it repeats — a one-shot sweep expires the same way a launch-time check does",
+    /AUTO_MAINTAIN_INTERVAL: Duration = Duration::from_secs\(6 \* 60 \* 60\)/.test(mods.code)
+    && /loop \{[\s\S]{0,200}auto_maintain\(&app\)\.await;[\s\S]{0,120}AUTO_MAINTAIN_INTERVAL/.test(mods.code));
+
+  check("a failed registry check is reported, never treated as 'nothing to do'",
+    /registry check failed/.test(mods.code));
+
+  // Three callers can now ask for the same module at once (wizard, server.rs
+  // engine auto-install, this sweep) and they share one staging file and one
+  // destination directory per (variant, version).
+  check("installs are serialized so concurrent callers cannot corrupt an extract",
+    /install_lock: tokio::sync::Mutex<\(\)>/.test(mods.code)
+    && /let _install_guard = self\.install_lock\.lock\(\)\.await;/.test(mods.code));
+
+  // The wizard owns first run. A sweep downloading behind it would race it for
+  // the same staging path and spend a new user's bandwidth mid-question.
+  check("first run is left to the wizard",
+    /modules\.is_empty\(\)/.test(mods.code));
+}
+
+if (shell) {
+  check("the badge clears as soon as a background install lands, not 6h later",
+    /listen<\{ stage\?: string \}>\("module-progress"/.test(shell.code)
+    && /stage === "completed"/.test(shell.code)
+    && /void checkModuleUpdates\(\)/.test(shell.code));
+}
+
+console.log("");
+if (failures > 0) {
+  throw new Error(`FAILED: ${failures} module-update check(s) failed.`);
+}
+console.log("PASS: module updates are reachable, re-checked, announced, and one click to install.\n");

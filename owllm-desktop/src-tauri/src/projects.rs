@@ -251,6 +251,20 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN created_device_name TEXT NOT NULL DEFAULT ''",
         [],
     );
+    // `read_projects` sorts by updated_at while selecting graph_json /
+    // chat_json / agent_logs_json, which run to megabytes per row. Without
+    // this index SQLite answers the ORDER BY with a temp B-tree, so every
+    // poll feeds those blobs through the external merge sorter and spills
+    // them back to disk (sqlite3VdbeSorterWrite -> vdbeSorterFlushPMA ->
+    // pwrite). macOS microstackshots caught that path dirtying 8.6 GB in
+    // 90 minutes on 1.0.13 and 34 GB in one session on 1.0.11, which trips
+    // the daily disk-writes limit and stalls the app. Sorting from the
+    // index streams the rows in order instead, so nothing spills.
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_projects_updated_at \
+         ON agent_projects(updated_at DESC)",
+        [],
+    );
     // Migrate the old global location column into a binding owned by THIS
     // computer. Previous sync releases copied foreign absolute paths into every
     // DB and then stamped them into each device's vault map. A path that does
@@ -334,6 +348,16 @@ fn git_origin_url(location: &str) -> String {
     }
 }
 
+/// The project-list read. Shared with the test that guards it against
+/// regrowing a temp-B-tree sort over the multi-megabyte JSON columns.
+const LIST_PROJECTS_SQL: &str = "SELECT id, name, description, \
+     CASE WHEN location_device_id = ?1 THEN location ELSE '' END, \
+     COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
+     COALESCE(created_device_name, ''), trust_writes, \
+     auto_approve_all, team_json, team_default_model_id, graph_json, \
+     chat_json, agent_logs_json, updated_at, COALESCE(repo_url, '') \
+     FROM agent_projects ORDER BY updated_at DESC";
+
 fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     // Open read-write so we can run the idempotent migration that
     // adds chat_json / agent_logs_json to pre-existing databases.
@@ -355,15 +379,7 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
 
     let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
     let mut stmt = conn
-        .prepare(
-            "SELECT id, name, description, \
-             CASE WHEN location_device_id = ?1 THEN location ELSE '' END, \
-             COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
-             COALESCE(created_device_name, ''), trust_writes, \
-             auto_approve_all, team_json, team_default_model_id, graph_json, \
-             chat_json, agent_logs_json, updated_at, COALESCE(repo_url, '') \
-             FROM agent_projects ORDER BY updated_at DESC",
-        )
+        .prepare(LIST_PROJECTS_SQL)
         .map_err(|e| format!("prepare: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![self_id], |r| {
@@ -754,9 +770,8 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let team_json = serde_json::to_string(&input.team).unwrap_or("[]".into());
 
         let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
-        let self_name = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "This PC".to_string());
+        let self_name =
+            crate::hardware::machine_name().unwrap_or_else(|| "This PC".to_string());
         let repo_url = normalize_repo_url(&input.repo_url);
         conn.execute(
             "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
@@ -961,6 +976,50 @@ mod tests {
             args,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The project list is polled every few seconds. If SQLite answers its
+    /// ORDER BY with a temp B-tree, every poll pushes each row's graph_json /
+    /// chat_json / agent_logs_json through the external merge sorter, which
+    /// spills them to disk. That is what dirtied gigabytes per session and
+    /// tripped the macOS disk-writes limit, so the ordering must come from an
+    /// index instead.
+    #[test]
+    fn listing_projects_never_sorts_through_a_temp_btree() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        for i in 0..8 {
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, created_at, updated_at, graph_json) \
+                 VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![
+                    format!("p{i}"),
+                    format!("Project {i}"),
+                    format!("2026-08-{:02}T00:00:00Z", i + 1),
+                    "x".repeat(64 * 1024),
+                ],
+            )
+            .unwrap();
+        }
+
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {LIST_PROJECTS_SQL}"))
+            .unwrap()
+            .query_map(rusqlite::params![""], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let plan = plan.join("\n");
+
+        assert!(
+            !plan.to_uppercase().contains("TEMP B-TREE"),
+            "project list falls back to a temp B-tree sort, which spills the \
+             JSON columns to disk on every poll:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_agent_projects_updated_at"),
+            "project list should take its order from the updated_at index:\n{plan}"
         );
     }
 

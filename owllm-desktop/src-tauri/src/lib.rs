@@ -44,6 +44,7 @@ mod bridges;
 mod browser;
 mod browser_import;
 mod browser_vault;
+mod cli_orphans;
 mod code;
 mod crypt;
 mod data_layer;
@@ -55,10 +56,12 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod fleet_scratch;
 mod gguf;
 mod git;
 mod github;
 mod hardware;
+mod host_guard;
 mod huggingface;
 mod kvm;
 mod linux_updater;
@@ -79,16 +82,20 @@ mod recommendations;
 mod release;
 mod remote_devices;
 mod sandbox;
+mod screencast;
 mod server;
+mod session_health;
 mod signing;
 mod skill_library;
 mod slack;
 mod state_mirror;
 mod support;
+mod support_seal;
 mod sync_core;
 mod telegram;
 mod vault;
 mod webhook;
+mod webkit_children;
 mod wsl;
 mod wsl_setup;
 
@@ -102,35 +109,58 @@ mod wsl_setup;
 fn install_crash_log_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let entry = format!(
+        append_crash_log(&format!(
             "[{}] panic on thread '{}': {}\nbacktrace:\n{}\n\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             std::thread::current().name().unwrap_or("<unnamed>"),
             info,
             std::backtrace::Backtrace::force_capture(),
-        );
-        for base in [
-            std::env::var_os("TEMP"),
-            std::env::var_os("USERPROFILE"),
-            std::env::var_os("HOME"),
-            Some(std::ffi::OsString::from("/tmp")),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let path = std::path::PathBuf::from(base).join("owllm-crash.log");
-            use std::io::Write;
-            let ok = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .and_then(|mut f| f.write_all(entry.as_bytes()));
-            if ok.is_ok() {
-                break;
-            }
-        }
+        ));
         default(info);
     }));
+}
+
+/// Append to the crash file, trying each base until one accepts the write.
+fn append_crash_log(entry: &str) {
+    for base in [
+        std::env::var_os("TEMP"),
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOME"),
+        Some(std::ffi::OsString::from("/tmp")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = std::path::PathBuf::from(base).join("owllm-crash.log");
+        use std::io::Write;
+        let ok = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(entry.as_bytes()));
+        if ok.is_ok() {
+            break;
+        }
+    }
+}
+
+/// Record an exit-path event to stderr and the crash file.
+///
+/// The Linux "it just vanishes" reports of 2026-08 had no trace of a crash at
+/// all: no panic in `owllm-crash.log`, no signal death (apport logs every one,
+/// including for unpackaged AppImage binaries — its log had no OwLLM entry
+/// across the whole window in which the app vanished repeatedly), and no OOM
+/// kill. The app was leaving through an ordinary Tauri shutdown, and that path
+/// printed nothing, so a normal exit and a crash looked identical from the
+/// outside. These breadcrumbs make the difference legible: whoever asked for
+/// the exit now says so before the process goes.
+fn log_exit_path(entry: &str) {
+    let line = format!(
+        "[{}] exit-path: {entry}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+    );
+    eprint!("[owllm] {line}");
+    append_crash_log(&line);
 }
 
 /// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
@@ -154,6 +184,27 @@ fn configure_linux_webkit_renderer() {
 #[cfg(not(target_os = "linux"))]
 fn configure_linux_webkit_renderer() {}
 
+/// Append a native webview failure to the durable user-data directory, falling
+/// back to TEMP when that directory cannot be resolved or written.
+fn append_native_webview_log(file_name: &str, entry: &str) {
+    let mut targets = paths::user_data_root()
+        .map(|root| vec![root.join(file_name)])
+        .unwrap_or_default();
+    targets.push(std::env::temp_dir().join(format!("owllm-{file_name}")));
+    for target in targets {
+        use std::io::Write;
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target)
+            .and_then(|mut file| file.write_all(entry.as_bytes()))
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
 /// WebKitGTK runs the page in a separate process. If that process is killed by
 /// the renderer or its memory limit, keeping the native Tauri process alive
 /// with a dead webview looks exactly like a random app crash. Record the native
@@ -175,22 +226,7 @@ fn install_linux_webview_recovery(app: &tauri::App) {
                     "[{}] main WebKit process terminated: {reason:?}; reloading\n",
                     chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
                 );
-                let mut targets = paths::user_data_root()
-                    .map(|root| vec![root.join("linux-webkit.log")])
-                    .unwrap_or_default();
-                targets.push(std::env::temp_dir().join("owllm-linux-webkit.log"));
-                for target in targets {
-                    use std::io::Write;
-                    if std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&target)
-                        .and_then(|mut file| file.write_all(entry.as_bytes()))
-                        .is_ok()
-                    {
-                        break;
-                    }
-                }
+                append_native_webview_log("linux-webkit.log", &entry);
                 eprint!("[owllm] {entry}");
                 if matches!(
                     reason,
@@ -207,6 +243,278 @@ fn install_linux_webview_recovery(app: &tauri::App) {
 
 #[cfg(not(target_os = "linux"))]
 fn install_linux_webview_recovery(_app: &tauri::App) {}
+
+/// The Windows half of the same failure. WebView2 also runs the page in its own
+/// render process, and Chromium sheds that process under host memory pressure —
+/// but WRY listens for nothing, so the window keeps its host HWND with the
+/// entire Chromium widget tree (`Chrome_WidgetWin_*`,
+/// `Chrome_RenderWidgetHostHWND`) gone from underneath it. Nothing paints into
+/// it and it stays solid black until the app is restarted. Recover the way
+/// Linux already does: record the native failure and reload.
+///
+/// A render-process exit is the only kind reloaded. `Reload` cannot revive a
+/// dead *browser* process (that needs a new environment), and reloading an
+/// unresponsive-but-alive renderer would throw away a page that is merely busy.
+#[cfg(windows)]
+fn install_windows_webview_recovery(app: &tauri::App) {
+    use tauri::Manager;
+
+    match app.get_webview_window("main") {
+        Some(main) => arm_windows_webview_recovery(&main, "main"),
+        None => eprintln!("[owllm] main WebView2 is unavailable; crash recovery was not installed"),
+    }
+}
+
+#[cfg(not(windows))]
+fn install_windows_webview_recovery(_app: &tauri::App) {}
+
+/// Arm one window's WebView2 for render-process recovery.
+///
+/// Every webview needs this separately — the subscription is per `ICoreWebView2`,
+/// not per app. Measured: killing both render processes of a running instance
+/// brought back only the view that had been armed, and left the other window
+/// permanently without its `Chrome_RenderWidgetHostHWND`. The overlay frame is
+/// the app's own chrome, so an unarmed one is a black title bar for the rest of
+/// the session.
+#[cfg(windows)]
+pub(crate) fn arm_windows_webview_recovery(webview: &tauri::WebviewWindow, label: &'static str) {
+    if let Err(error) = webview.with_webview(move |platform| {
+        arm_windows_platform_webview(platform, label.to_string(), Webview2Recovery::Reload)
+    }) {
+        eprintln!("[owllm] could not install {label} WebView2 process recovery: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn arm_windows_webview_recovery(_webview: &tauri::WebviewWindow, _label: &'static str) {}
+
+/// What a view does once its render process is gone.
+///
+/// The app's own surfaces are trusted and should simply come back, so they
+/// reload. An agent-browser tab is showing an arbitrary internet page that may
+/// be killing its own renderer on load, so it gets one reload and then a local
+/// notice — the invariant the Linux tab path has always held
+/// (`browser.rs::linux_configure_browser_webview`): a page failure stays inside
+/// its tab and never becomes a reload loop.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+pub(crate) enum Webview2Recovery {
+    /// Reload, bounded by the short burst budget below.
+    Reload,
+    /// Reload once, then leave this HTML in the view instead of reloading again.
+    ReloadThenNotice { html: &'static str },
+}
+
+#[cfg(windows)]
+impl Webview2Recovery {
+    fn max_reloads(self) -> u32 {
+        match self {
+            Self::Reload => 3,
+            Self::ReloadThenNotice { .. } => 1,
+        }
+    }
+}
+
+/// Arm any already-resolved WebView2, whichever Tauri type owns it.
+///
+/// Browser tabs are not `WebviewWindow`s in the framed shape — they are child
+/// `Webview`s added to the browser window — so the entry point above cannot
+/// reach them. Both call `with_webview` and end up here with the same platform
+/// handle.
+#[cfg(windows)]
+pub(crate) fn arm_windows_platform_webview(
+    platform: tauri::webview::PlatformWebview,
+    label: String,
+    policy: Webview2Recovery,
+) {
+    match unsafe { platform.controller().CoreWebView2() } {
+        Ok(core) => arm_webview2_process_failed(&core, std::rc::Rc::from(label.as_str()), policy),
+        Err(error) => eprintln!("[owllm] could not reach the {label} WebView2 core: {error}"),
+    }
+}
+
+/// Subscribe to one `ProcessFailed` event, and re-subscribe from inside it.
+///
+/// webview2-com builds every event callback from a `FnOnce` that its `Invoke`
+/// takes out of the cell on first use, so a single `add_ProcessFailed` recovers
+/// exactly one renderer death and is then silently dead — the same black window
+/// one crash later. Re-arming inside the handler is what makes the recovery
+/// durable rather than a one-shot.
+///
+/// The spent subscription must be REMOVED before its replacement is added.
+/// Leaving it registered looked harmless — a consumed `FnOnce` cannot run twice
+/// — but measured over three rounds of killing every render process, each view
+/// logged 1, then 2, then 4 failures: the handler list doubles on every
+/// failure. Removing by token keeps exactly one live subscription per view.
+#[cfg(windows)]
+fn arm_webview2_process_failed(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    label: std::rc::Rc<str>,
+    policy: Webview2Recovery,
+) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs2, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED, COREWEBVIEW2_PROCESS_FAILED_REASON,
+    };
+    use webview2_com::ProcessFailedEventHandler;
+    use windows::core::Interface;
+
+    let token = Rc::new(Cell::new(0i64));
+    let handler = ProcessFailedEventHandler::create(Box::new({
+        let token = Rc::clone(&token);
+        let label = Rc::clone(&label);
+        move |sender, args| {
+        let kind = args.as_ref().and_then(|args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            unsafe { args.ProcessFailedKind(&mut kind) }.ok().map(|()| kind)
+        });
+        // Reason/ExitCode need the newer args interface. They are what tells a
+        // support snapshot whether the renderer was killed for memory or died
+        // on its own, so read them when the installed runtime offers them.
+        let detail = args
+            .as_ref()
+            .and_then(|args| args.cast::<ICoreWebView2ProcessFailedEventArgs2>().ok())
+            .map(|args| {
+                let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON::default();
+                let mut exit_code = 0i32;
+                unsafe {
+                    let _ = args.Reason(&mut reason);
+                    let _ = args.ExitCode(&mut exit_code);
+                }
+                format!(" reason={} exit_code={exit_code}", reason.0)
+            })
+            .unwrap_or_default();
+
+        let Some(core) = sender else { return Ok(()) };
+        // Drop this spent subscription, then re-arm before recovering, so the
+        // next failure is caught as well without the list growing.
+        unsafe {
+            let _ = core.remove_ProcessFailed(token.get());
+        }
+        arm_webview2_process_failed(&core, Rc::clone(&label), policy);
+
+        let entry = format!(
+            "[{}] {label} WebView2 process failed: kind={}{detail}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            kind.map(|kind| kind.0).unwrap_or(-1),
+        );
+        append_native_webview_log("windows-webview2.log", &entry);
+        eprint!("[owllm] {entry}");
+
+        if kind == Some(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
+            if webview2_recovery_allowed(&label, policy.max_reloads()) {
+                unsafe {
+                    let _ = core.Reload();
+                }
+            } else if let Webview2Recovery::ReloadThenNotice { html } = policy {
+                // A tab that keeps killing its renderer is left with a readable
+                // local page rather than a black rectangle with no explanation.
+                unsafe {
+                    let _ = core.NavigateToString(&windows::core::HSTRING::from(html));
+                }
+            }
+        }
+        Ok(())
+        }
+    }));
+    let mut raw = 0i64;
+    if let Err(error) = unsafe { core.add_ProcessFailed(&handler, &mut raw) } {
+        eprintln!("[owllm] could not subscribe to WebView2 ProcessFailed: {error}");
+        return;
+    }
+    // The handler removes itself by this token, so it has to be readable from
+    // inside the closure — which only runs after this point.
+    token.set(raw);
+}
+
+/// A reload storm is worse than one black window: a page that kills its own
+/// renderer while loading would be reloaded forever. Allow a short burst, then
+/// stop reloading and leave the failure legible in the log instead. The ceiling
+/// comes from the caller's `Webview2Recovery` — app surfaces get a wider one
+/// than a tab showing an arbitrary site.
+///
+/// The budget is **per webview**. A single shared counter looked right and was
+/// not: with the main view and the overlay frame both armed, one round of
+/// failures spent two of three slots, so measured over three rounds of killing
+/// every render process the app recovered 2, then 1, then 0 views — the app's
+/// own chrome went black while the budget was still nominally unspent.
+#[cfg(windows)]
+fn webview2_recovery_allowed(label: &str, max_per_window: u32) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const BURST_WINDOW: Duration = Duration::from_secs(60);
+    static BURSTS: Mutex<Option<HashMap<String, (u32, Instant)>>> = Mutex::new(None);
+
+    let now = Instant::now();
+    let mut guard = BURSTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let bursts = guard.get_or_insert_with(HashMap::new);
+    // Tab keys are per tab id, so without this the map would keep an entry for
+    // every tab that ever lost a renderer. Dropping expired entries is also how
+    // a view's budget refills: a tab that failed an hour ago starts clean.
+    bursts.retain(|_, (_, started)| now.duration_since(*started) < BURST_WINDOW);
+    match bursts.get(label).copied() {
+        Some((count, started)) => {
+            if count >= max_per_window {
+                return false;
+            }
+            bursts.insert(label.to_string(), (count + 1, started));
+        }
+        None => {
+            bursts.insert(label.to_string(), (1, now));
+        }
+    }
+    true
+}
+
+/// WebKitGTK hides `navigator.mediaDevices` on an insecure origin unless
+/// `enable-media-stream` is set, and WRY leaves it off. The app's own scheme is
+/// registered as secure, so `getDisplayMedia` is present either way there — but
+/// camera and microphone capture still need the setting plus an answer to
+/// `permission-request`, which WebKitGTK denies by default. WKWebView (macOS)
+/// and WebView2 (Windows) do both for us, which is why only Linux needs this.
+/// (Screen recording does NOT come back from this: it fails further down, in
+/// xdg-desktop-portal — see screencast.rs.) Scoped to the "main" view, which
+/// only ever loads OWLLM's own
+/// bundled UI — this is the app authorising its own trusted origin, not any
+/// remote page (the agent-browser tabs are separate views and keep the setting
+/// off, so arbitrary sites still cannot reach the microphone or screen).
+#[cfg(target_os = "linux")]
+fn enable_linux_webview_media_capture(app: &tauri::App) {
+    use tauri::Manager;
+    use webkit2gtk::glib::prelude::Cast;
+    use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[owllm] main WebKit view is unavailable; media capture was not enabled");
+        return;
+    };
+    if let Err(error) = main.with_webview(|platform| {
+        let view = platform.inner();
+        if let Some(settings) = view.settings() {
+            settings.set_enable_media_stream(true);
+        }
+        // WebKitGTK auto-denies camera/microphone/screen capture unless the
+        // embedder answers the permission-request signal. Allow it for the
+        // app's own view; screen capture still routes through the OS portal
+        // picker, so the user keeps final control over what is shared.
+        view.connect_permission_request(|_view, request| {
+            if let Some(media) = request.downcast_ref::<webkit2gtk::UserMediaPermissionRequest>() {
+                media.allow();
+                return true;
+            }
+            false
+        });
+    }) {
+        eprintln!("[owllm] could not enable WebKit media capture: {error}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_linux_webview_media_capture(_app: &tauri::App) {}
 
 /// Fit the initial macOS window inside the usable laptop desktop. The default
 /// 1400x960 window is taller than several Retina workspaces, so a centered,
@@ -269,17 +577,69 @@ fn fit_macos_main_window(window: &tauri::Window) {
 #[cfg(not(target_os = "macos"))]
 fn fit_macos_main_window(_window: &tauri::Window) {}
 
+/// The thread that owns the tao/Tauri event loop — necessarily the process main
+/// thread. Recorded so native window code can tell whether it may touch AppKit
+/// or GTK directly; see `browser::on_ui_thread`.
+static UI_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// True when the caller already runs on the UI/event-loop thread.
+pub(crate) fn is_ui_thread() -> bool {
+    UI_THREAD.get() == Some(&std::thread::current().id())
+}
+
+#[cfg(test)]
+mod ui_thread_tests {
+    /// The discrimination the agent-browser crash fix rests on: a worker thread
+    /// must never be mistaken for the event-loop thread, or `on_ui_thread` would
+    /// run AppKit/GTK window code inline on tokio's pool again — the cause of
+    /// the v1.0.7/v1.0.10 crashes of 2026-08-09.
+    #[test]
+    fn a_worker_thread_is_never_mistaken_for_the_ui_thread() {
+        // Nothing recorded yet (`run()` does not execute under cargo test), so
+        // no thread may claim to be the UI thread. An inverted check here would
+        // send every caller down the "run it inline" path.
+        assert!(!super::is_ui_thread());
+
+        // Record THIS thread the way `run()` records the event loop's.
+        super::UI_THREAD
+            .set(std::thread::current().id())
+            .expect("UI_THREAD is unset until this test records it");
+        assert!(super::is_ui_thread());
+
+        // …and a different thread is still told apart.
+        assert!(!std::thread::spawn(super::is_ui_thread).join().unwrap());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = UI_THREAD.set(std::thread::current().id());
     if linux_updater::handle_startup_mode() {
         return;
     }
     install_crash_log_hook();
+    // Before ANY subsystem can spawn git (vault ownership check, readiness
+    // probes, sync): a background git must never be able to open a modal
+    // credential dialog nobody is there to answer.
+    git::forbid_gui_credential_prompts();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // Immediately after the data root is known, and before anything heavy can
+    // fail: claim this session and collect any predecessor that never reached
+    // its exit path. This is the only detector that survives the app being
+    // killed outright, so it must not sit behind work that might not run.
+    // APP_VERSION, not CARGO_PKG_VERSION: releases bump tauri.conf.json only,
+    // so the Cargo version would stamp every crash report with 0.4.7 and make
+    // the reports useless for telling which build died.
+    let unclean = session_health::begin(&APP_VERSION);
+    if unclean > 0 {
+        log_exit_path(&format!(
+            "startup found {unclean} previous session(s) that ended without running their shutdown"
+        ));
+    }
     // Both migrations must happen BEFORE WebView2 starts. In particular, the
     // legacy localStorage importer needs to copy/open old LevelDB stores while
     // no browser process holds their LOCK file. Keeping this inside setup()
@@ -303,6 +663,19 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             install_linux_webview_recovery(app);
+            // Route termination signals through the normal exit path so the
+            // WebKit helpers are reaped instead of being orphaned onto an
+            // AppImage mount that is about to disappear under them.
+            webkit_children::install_shutdown_signals(app.handle());
+            // Same failure on Windows: a shed WebView2 render process leaves a
+            // black window that only a restart clears. Order-independent, and
+            // deliberately BELOW the signal install, which a matrix source
+            // check requires to stay close to the top of setup().
+            install_windows_webview_recovery(app);
+            // WebKitGTK denies camera/microphone capture until the app answers
+            // permission-request. Turn it on for the main view and allow
+            // capture. Order-independent.
+            enable_linux_webview_media_capture(app);
             // Kill Windows' "ghost window" so a brief main-thread stall never
             // pops a stray "(Not Responding)" frame over the overlay chrome.
             overlay_frame::disable_window_ghosting();
@@ -325,11 +698,13 @@ pub fn run() {
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
             personal_agent_teams::resume_pending(app.handle().clone());
-            // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
-            // with large regenerable caches, trim them so the .vhdx doesn't balloon
-            // unattended. Background + best-effort — never cold-starts WSL, never
-            // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
-            std::thread::spawn(sandbox::auto_housekeep_startup);
+            // Global disk janitor: sweeps EVERY app-owned fleet worktree (open
+            // or not) for stale build caches and release staging, and runs the
+            // WSL housekeeping (tool caches + stale build targets + fstrim) —
+            // first pass shortly after launch, then twice a day. Background +
+            // best-effort — never cold-starts WSL, never blocks startup, no
+            // admin, no sparse (which modern WSL flags unsafe).
+            fleet::spawn_global_disk_janitor();
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged without
             // F12 console acrobatics. Never write beside the executable:
@@ -356,6 +731,9 @@ pub fn run() {
             // launch-time vault sync publishes this device's record WITH its
             // dialable endpoints — lazy start left peers endpoint-less records.
             remote_devices::init(&app.handle());
+            // Background-work continuity: lets the orphan watcher emit
+            // cli-orphans-detected/-finished to the UI (see cli_orphans.rs).
+            cli_orphans::init(app.handle());
             // Launch-at-login: self-register on first run (idempotent, per-user,
             // honors a prior explicit opt-out) so OwLLM comes back after a reboot
             // without the user re-launching it. Failures are logged and swallowed.
@@ -367,6 +745,12 @@ pub fn run() {
                 Ok(mgr) => {
                     use tauri::Manager;
                     app.handle().manage(mgr);
+                    // Engine updates install themselves from here on. A
+                    // llama.cpp build that predates a model's GGUF architecture
+                    // reads as "the app is broken", and a badge the user
+                    // declines once is a badge they never see again — so this
+                    // does not wait to be asked. Background, never blocking.
+                    modules::spawn_auto_maintenance(app.handle().clone());
                 }
                 Err(e) => eprintln!("[owllm] ModuleManager init failed: {e}"),
             }
@@ -438,6 +822,9 @@ pub fn run() {
             accounts::gemini_cli_complete,
             accounts::grok_cli_complete,
             accounts::cli_cancel_all,
+            accounts::cli_cancel_scope,
+            cli_orphans::cli_orphans_snapshot,
+            cli_orphans::cli_orphans_ack,
             accounts::subscription_cli_login,
             accounts::subscription_cli_logout,
             accounts::cli_install,
@@ -447,6 +834,9 @@ pub fn run() {
             audio::audio_transcribe_local,
             audio::whisper_runtime_status,
             audio::whisper_runtime_install,
+            screencast::screencast_supported,
+            screencast::screencast_start,
+            screencast::screencast_stop,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -553,6 +943,9 @@ pub fn run() {
             remote_devices::device_stop_remote_control,
             remote_devices::device_audit_tail,
             remote_devices::device_selftest,
+            remote_devices::world_chat::world_chat_sign,
+            remote_devices::world_chat::world_chat_seal,
+            remote_devices::world_chat::world_chat_open,
             vault::vault_sync_devices,
             browser::browser_ensure,
             browser::browser_start,
@@ -587,6 +980,7 @@ pub fn run() {
             git::git_branches,
             git::git_checkout,
             git::git_commit,
+            git::git_untrack_runtime_files,
             git::git_diff,
             code::launch_external_editor,
             dialog::pick_folder,
@@ -606,9 +1000,11 @@ pub fn run() {
             fleet::fleet_worktree_finalize,
             fleet::fleet_worktree_diff,
             fleet::fleet_worktree_merge,
+            fleet::fleet_worktree_refresh,
             fleet::fleet_worktree_sync,
             fleet::fleet_worktree_remove,
             fleet::fleet_cleanup_orphans,
+            fleet::fleet_reclaim_page_caches,
             fleet::fleet_repo_init,
             fleet::fleet_head_files,
             hardware::hardware_info,
@@ -684,6 +1080,10 @@ pub fn run() {
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,
+            session_health::session_health_pending,
+            session_health::session_health_dismiss,
+            session_health::session_health_expect_replacement,
+            session_health::session_health_rearm,
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,
@@ -781,7 +1181,12 @@ pub fn run() {
             sandbox::sandbox_clear_caches,
             sandbox::sandbox_reclaim_disk,
             sandbox::sandbox_enable_sparse,
+            sandbox::sandbox_raise_memory,
             sandbox::sandbox_trim,
+            host_guard::host_guard_status,
+            host_guard::host_guard_install,
+            host_guard::host_guard_remove,
+            host_guard::host_guard_reclaim_now,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,
@@ -832,6 +1237,7 @@ pub fn run() {
                     event: tauri::WindowEvent::CloseRequested { .. },
                     ..
                 } if label == "main" => {
+                    log_exit_path("main window received CloseRequested");
                     MAIN_WINDOW_CLOSE_REQUESTED.store(true, Ordering::SeqCst);
                     overlay_frame::close_if_present(app);
                     // Reap llama-server HERE too, not only on ExitRequested —
@@ -845,6 +1251,25 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-close");
                     }
+                    // The X is a deliberate user close. Drop the marker here as
+                    // well as on Exit/ExitRequested, because on some Windows
+                    // paths the event loop is gone before RunEvent::Exit fires
+                    // and the marker survives as a false "crash" report.
+                    session_health::end_clean();
+                }
+                // A window going away without a CloseRequested first is a
+                // window we did not close: a dead webview, or the WM
+                // destroying it. When it is "main", it is also what turns into
+                // an ExitRequested nobody asked for.
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    log_exit_path(&format!(
+                        "window '{label}' destroyed (main close requested={})",
+                        MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
+                    ));
                 }
                 tauri::RunEvent::ExitRequested { code, api, .. }
                     if code.is_none()
@@ -855,22 +1280,54 @@ pub fn run() {
                     // main window is still registered and the user did not
                     // close it, so accepting this request would turn a tab
                     // failure into a clean whole-app exit.
-                    eprintln!("[owllm] prevented auxiliary-window failure from exiting the app");
+                    log_exit_path("prevented auxiliary-window failure from exiting the app");
                     api.prevent_exit();
                 }
-                tauri::RunEvent::ExitRequested { .. } => {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    // The exit is going through. Name its origin: a code means
+                    // someone called `app.exit(n)` (the deferred AppImage
+                    // updater, or the SIGHUP/INT/TERM handler), and the
+                    // backtrace points straight at which. No code means the
+                    // event loop decided — every window is gone.
+                    match code {
+                        Some(code) => log_exit_path(&format!(
+                            "ExitRequested(code={code}) — requested in-process\nbacktrace:\n{}",
+                            std::backtrace::Backtrace::force_capture()
+                        )),
+                        None => log_exit_path(&format!(
+                            "ExitRequested(no code) — accepted; main window present={}, close requested={}",
+                            app.get_window("main").is_some(),
+                            MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst),
+                        )),
+                    }
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit-requested");
                     }
+                    // Redundant with CloseRequested and Exit: whatever path
+                    // actually gets us here, make sure the marker is gone.
+                    session_health::end_clean();
                 }
                 tauri::RunEvent::Exit => {
+                    log_exit_path("Exit — process is leaving");
+                    screencast::shutdown();
                     overlay_frame::close_if_present(app);
                     server::deregister_window();
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-exit");
                     }
+                    // Last thing before the process leaves: a WebKit helper
+                    // that outlives us keeps executing code mmap'd out of the
+                    // AppImage mount, which the runtime tears down the moment
+                    // we go. Its next cold page fault is a SIGBUS and an
+                    // "Ubuntu has experienced an internal error" dialog.
+                    webkit_children::reap("app-exit");
+                    // Last of all: we got here, so this session ended the way
+                    // it should. Drop the marker — anything that skips this
+                    // line is exactly what the next startup should report.
+                    session_health::end_clean();
                 }
                 _ => {}
             }

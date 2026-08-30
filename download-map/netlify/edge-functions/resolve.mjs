@@ -16,8 +16,12 @@
 export const PLATFORM_MATCHERS = {
   win: [/\.exe$/i],
   mac: [/\.dmg$/i, /\.app\.tar\.gz$/i],
-  linux: [/\.appimage$/i],
-  deb: [/\.deb$/i],
+  linux: [/^OwLLM\.Desktop(?:_[\d.]+_(?:amd64|x86_64))?\.AppImage$/i],
+  deb: [/^OwLLM\.Desktop(?:_[\d.]+_(?:amd64|x86_64))?\.deb$/i],
+  rpm: [/^OwLLM\.Desktop(?:\.x86_64|_[\d.]+_x86_64)\.rpm$/i],
+  "linux-arm64": [/^OwLLM\.Desktop(?:\.(?:aarch64|arm64)|_[\d.]+_(?:aarch64|arm64))\.AppImage$/i],
+  "deb-arm64": [/^OwLLM\.Desktop(?:\.(?:aarch64|arm64)|_[\d.]+_(?:aarch64|arm64))\.deb$/i],
+  "rpm-arm64": [/^OwLLM\.Desktop(?:\.(?:aarch64|arm64)|_[\d.]+_(?:aarch64|arm64))\.rpm$/i],
 };
 
 export const RELEASES_API =

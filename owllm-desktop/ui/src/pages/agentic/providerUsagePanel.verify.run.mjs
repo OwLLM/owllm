@@ -30,7 +30,10 @@ function check(name, ok) {
 check(
   "PtyTerminal URL auto-open is opt-in (autoOpenAuthUrls gate)",
   pty.includes("autoOpenAuthUrls?: boolean")
-    && /if \(!autoOpenAuthUrls \|\| authUrlOpened\) return;/.test(pty),
+    && /if \(!autoOpenAuthUrls\) return;/.test(pty)
+    // The browser is still opened at most once per session; only the record of
+    // the URL (which backs the manual "Open sign-in page" action) outlives it.
+    && /if \(authUrlOpened\) return;\s*\n\s*authUrlOpened = true;/.test(pty),
 );
 check(
   "Accounts login terminal opts in to auth-URL auto-open",
@@ -60,6 +63,24 @@ check(
   "Usage panel renders balance-style providers (Moonshot/DeepSeek)",
   sidePanel.includes("balance?: string | null")
     && /usage\?\.balance &&/.test(sidePanel),
+);
+
+// The Anthropic OAuth usage payload also carries the provider's INTERNAL
+// buckets under codenames ("nimbus_quill", "cinder_cove", "tangelo"…) that
+// carry a `utilization` but no `resets_at`. The generic parser rendered them as
+// quota bars the user cannot act on — an undocumented key with no reset time is
+// skipped, while a genuinely NEW documented window still shows.
+check(
+  "undocumented codename buckets without a reset time are not rendered as quota bars",
+  accountsRs.includes("fn usage_window_known_label(")
+    && /if resets_at\.is_none\(\) && usage_window_known_label\(key\)\.is_none\(\) \{\s*\n\s*continue;/.test(accountsRs),
+);
+check(
+  "the documented windows still resolve to their friendly labels",
+  /"five_hour" => Some\("Session \(5hr\)"\)/.test(accountsRs)
+    && /"seven_day" => Some\("Weekly \(7 day\)"\)/.test(accountsRs)
+    // EOL-agnostic: this file carries CRLF, edited hunks may land as LF.
+    && /usage_window_known_label\(key\)\r?\n\s*\.map\(\|s\| s\.to_string\(\)\)/.test(accountsRs),
 );
 
 if (failed) {

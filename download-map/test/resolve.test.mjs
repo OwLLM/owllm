@@ -6,6 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { resolveDownloadTarget } from "../netlify/edge-functions/resolve.mjs";
 
 // Fixture mirrors the real repo state that caused the 404s: v0.9.39 is a
@@ -33,6 +34,10 @@ const RELEASES = [
     assets: [
       { name: "OwLLM.Desktop.Setup.exe", browser_download_url: "u/37/Setup.exe" },
       { name: "OwLLM.Desktop_0.9.37_aarch64.AppImage", browser_download_url: "u/37/App.AppImage" },
+      { name: "OwLLM.Desktop_0.9.37_amd64.AppImage", browser_download_url: "u/37/amd64.AppImage" },
+      { name: "OwLLM.Desktop_0.9.37_arm64.deb", browser_download_url: "u/37/arm64.deb" },
+      { name: "OwLLM.Desktop_0.9.37_x86_64.rpm", browser_download_url: "u/37/x86_64.rpm" },
+      { name: "OwLLM.Desktop_0.9.37_aarch64.rpm", browser_download_url: "u/37/aarch64.rpm" },
       { name: "OwLLM.Desktop_aarch64.app.tar.gz", browser_download_url: "u/37/app.tar.gz" },
     ],
   },
@@ -78,7 +83,70 @@ test("mac falls back to .app.tar.gz when no .dmg exists anywhere", async () => {
 
 test("linux matches the version-stamped AppImage filename", async () => {
   const url = await resolveDownloadTarget("linux", fakeFetch(RELEASES));
-  assert.equal(url, "u/37/App.AppImage");
+  assert.equal(url, "u/37/amd64.AppImage");
+});
+
+test("linux never hands an ARM64 visitor the x86-64 package or vice versa", async () => {
+  assert.equal(
+    await resolveDownloadTarget("linux-arm64", fakeFetch(RELEASES)),
+    "u/37/App.AppImage",
+  );
+  assert.equal(
+    await resolveDownloadTarget("deb-arm64", fakeFetch(RELEASES)),
+    "u/37/arm64.deb",
+  );
+  assert.equal(
+    await resolveDownloadTarget("rpm", fakeFetch(RELEASES)),
+    "u/37/x86_64.rpm",
+  );
+  assert.equal(
+    await resolveDownloadTarget("rpm-arm64", fakeFetch(RELEASES)),
+    "u/37/aarch64.rpm",
+  );
+});
+
+test("stable guided-download aliases resolve for every Linux package", async () => {
+  const stable = [{
+    tag_name: "v1.0.30",
+    draft: false,
+    assets: [
+      { name: "OwLLM.Desktop.AppImage", browser_download_url: "u/stable/x86.AppImage" },
+      { name: "OwLLM.Desktop.deb", browser_download_url: "u/stable/x86.deb" },
+      { name: "OwLLM.Desktop.x86_64.rpm", browser_download_url: "u/stable/x86.rpm" },
+      { name: "OwLLM.Desktop.aarch64.AppImage", browser_download_url: "u/stable/arm.AppImage" },
+      { name: "OwLLM.Desktop.arm64.deb", browser_download_url: "u/stable/arm.deb" },
+      { name: "OwLLM.Desktop.aarch64.rpm", browser_download_url: "u/stable/arm.rpm" },
+    ],
+  }];
+  assert.equal(await resolveDownloadTarget("linux", fakeFetch(stable)), "u/stable/x86.AppImage");
+  assert.equal(await resolveDownloadTarget("deb", fakeFetch(stable)), "u/stable/x86.deb");
+  assert.equal(await resolveDownloadTarget("rpm", fakeFetch(stable)), "u/stable/x86.rpm");
+  assert.equal(await resolveDownloadTarget("linux-arm64", fakeFetch(stable)), "u/stable/arm.AppImage");
+  assert.equal(await resolveDownloadTarget("deb-arm64", fakeFetch(stable)), "u/stable/arm.deb");
+  assert.equal(await resolveDownloadTarget("rpm-arm64", fakeFetch(stable)), "u/stable/arm.rpm");
+});
+
+test("an API fallback never sends a download button to the raw release page", () => {
+  const edgeFunction = fs.readFileSync(
+    new URL("../netlify/edge-functions/dl.ts", import.meta.url),
+    "utf8",
+  );
+  const fallbackBlock = edgeFunction.match(/const FALLBACK[\s\S]*?\n};/)?.[0] ?? "";
+  assert.ok(fallbackBlock);
+  assert.doesNotMatch(
+    fallbackBlock,
+    /https:\/\/github\.com\/OwLLM\/owllm\/releases\/latest["']/,
+  );
+  for (const asset of [
+    "OwLLM.Desktop.AppImage",
+    "OwLLM.Desktop.deb",
+    "OwLLM.Desktop.x86_64.rpm",
+    "OwLLM.Desktop.aarch64.AppImage",
+    "OwLLM.Desktop.arm64.deb",
+    "OwLLM.Desktop.aarch64.rpm",
+  ]) {
+    assert.match(fallbackBlock, new RegExp(asset.replaceAll(".", "\\.")));
+  }
 });
 
 test("deb resolves to the newest release carrying a .deb", async () => {

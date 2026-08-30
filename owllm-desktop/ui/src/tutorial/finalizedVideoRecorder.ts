@@ -35,22 +35,38 @@ const VIDEO_CANDIDATES: readonly VideoCandidate[] = [
   { codec: "vp9", extension: "webm", label: "Finalized VP9 WebM", mimeType: "video/webm" },
 ];
 
+// A display-capture track frequently reports no dimensions until its first frame
+// arrives, and the encoder-capability probe needs *some* size. The recorded box
+// is taken from the first real frame either way, so probing at a standard size
+// keeps a perfectly good WebCodecs track from silently falling back to
+// MediaRecorder's fragmented, unseekable output.
+const PROBE_WIDTH = 1920;
+const PROBE_HEIGHT = 1080;
+
+function asError(value: unknown, fallback: string): Error {
+  return value instanceof Error ? value : new Error(fallback);
+}
+
 /**
  * Record a MediaStreamTrack through WebCodecs into a finalized, indexed file.
  * MediaRecorder's MP4 output is fragmented (`moof`/`mdat`) and has no global
  * seek index in WebView2. Mediabunny writes a normal MP4/WebM and completes its
  * sample tables before the Blob is returned.
+ *
+ * `onEncoderError` fires the moment the encoder dies mid-recording, so the UI
+ * can stop and say so instead of letting the user record for another hour into
+ * a dead encoder and only discover the loss at save time.
  */
 export async function createFinalizedVideoRecorder(
   track: MediaStreamTrack,
   fps: number,
   bitrate: number,
+  onEncoderError?: (error: Error) => void,
 ): Promise<FinalizedVideoRecorder | null> {
   if (track.kind !== "video") return null;
   const settings = track.getSettings();
-  const width = settings.width;
-  const height = settings.height;
-  if (!width || !height) return null;
+  const width = settings.width || PROBE_WIDTH;
+  const height = settings.height || PROBE_HEIGHT;
 
   for (const candidate of VIDEO_CANDIDATES) {
     const encodingOptions = {
@@ -77,24 +93,31 @@ export async function createFinalizedVideoRecorder(
         latencyMode: "quality",
         contentHint: "detail",
         keyFrameInterval: 2,
-        sizeChangeBehavior: "deny",
+        // The captured surface changes size whenever the user resizes,
+        // maximizes, or drags the window to a display with different scaling.
+        // 'deny' threw at finalize and destroyed the whole recording; 'contain'
+        // letterboxes the new size into the original box and keeps recording.
+        sizeChangeBehavior: "contain",
       },
       { frameRate: fps },
     );
     let encoderError: unknown = null;
+    let finalized = false;
     void source.errorPromise.catch((error) => {
       encoderError = error;
+      // Closing the source during finalize/cancel is not a recording failure.
+      if (!finalized) onEncoderError?.(asError(error, "The video encoder stopped unexpectedly."));
     });
     output.addVideoTrack(source);
 
     try {
       await output.start();
     } catch {
+      finalized = true;
       await output.cancel().catch(() => {});
       continue;
     }
 
-    let finalized = false;
     return {
       label: candidate.label,
       extension: candidate.extension,
@@ -106,9 +129,7 @@ export async function createFinalizedVideoRecorder(
         source.close();
         await output.finalize();
         if (encoderError) {
-          throw encoderError instanceof Error
-            ? encoderError
-            : new Error("The video encoder stopped unexpectedly.");
+          throw asError(encoderError, "The video encoder stopped unexpectedly.");
         }
         if (!target.buffer) throw new Error("The video muxer produced no output.");
         return {

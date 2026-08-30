@@ -1,10 +1,5 @@
 export const REMOTE_DEVICE_RECENT_MS = 5 * 60 * 1000;
 
-/// How often a running app republishes its vault heartbeat (and pulls peers').
-/// Two beats per REMOTE_DEVICE_RECENT_MS window, so one missed beat (offline
-/// network, git push race) doesn't flicker a live device to offline.
-export const REMOTE_DEVICE_HEARTBEAT_MS = 2.5 * 60 * 1000;
-
 export type DeviceLivenessRecord = {
   is_self: boolean;
   last_seen: string | null;
@@ -43,7 +38,7 @@ export function isDeviceOnline(device: DeviceLivenessRecord, now = Date.now()): 
   // Online requires a FRESH vault heartbeat. A record with no published_at (or
   // a stale one) is offline: the old "legacy records count as online" grace
   // made powered-off machines immortal-online, because a heartbeat-less record
-  // re-ingests unchanged forever. Running apps republish every
-  // REMOTE_DEVICE_HEARTBEAT_MS, so a live machine is never stale for long.
+  // re-ingests unchanged forever. The native backend republishes every 150
+  // seconds, independent of backgrounded/suspended WebView timers.
   return hasRecentDevicePublication(device, now);
 }

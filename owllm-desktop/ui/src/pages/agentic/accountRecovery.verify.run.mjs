@@ -60,7 +60,11 @@ check(
 );
 check(
   "subscription cards expose precise recovery actions",
-  accounts.includes("CLI not installed · install it first")
+  // The card must still name "CLI not installed" as the state. It used to end
+  // that line with "install it first"; Connect now installs the CLI itself,
+  // so assert the state is reported — not the sentence that sent the user off
+  // to press a different button.
+  /CLI not installed · \S/.test(accounts)
     && accounts.includes("CLI installed · sign in required")
     && accounts.includes("CLI outdated or incompatible · update required")
     && accounts.includes('data-cli-repair={route.backend}')
@@ -81,17 +85,18 @@ check(
     && !accounts.includes('claude_cli: { cli: "claude", args: [], send: "/login\\r" }'),
 );
 check(
-  "provider sign-in uses a private tab that cannot inherit Gmail or Claude sessions",
+  "provider sign-in uses a persistent isolated tab that cannot inherit ordinary sessions",
   browser.includes("pub fn browser_open_auth_tab")
     && lib.includes("browser::browser_open_auth_tab")
     && browser.includes("private_tabs: HashSet<u64>")
-    && browser.includes("content = content.incognito(true)")
-    && browser.includes("builder = builder.incognito(true)")
+    && browser.includes("provider_auth_data_dir(&auth_profile_url)")
+    && !browser.includes("content = content.incognito(true)")
+    && !browser.includes("builder = builder.incognito(true)")
     && pty.includes('invoke<string>("browser_open_auth_tab"')
     && !pty.includes('invoke<string>("browser_open_tab", { url, activate: true })'),
 );
 check(
-  "private provider sign-in saves typed credentials only in the encrypted vault",
+  "provider sign-in keeps automatic account selection explicit",
   browser.includes("if action == \"cred\"")
     && browserVault.includes("browser_vault_autofill_tab")
     && browserVault.includes("autofill_eval_for_user")

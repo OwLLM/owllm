@@ -143,9 +143,13 @@ check("the acknowledged list reaches the gate", /--allow-stale "\$ALLOW_STALE"/.
 
 // The disclosure must reach the release body, and only the body: latest.json's
 // notes render inside the in-app update popup, where a markdown table is noise.
-check("the coverage table is appended to the release body", /BODY="\$NOTES\n\n\$\(cat "\$COVERAGE_MD"\)"/.test(sh));
+// Composition moved into scripts/lib/release-body.sh so the table can be
+// rewritten on a release that already exists (v1.0.19 lost it that way) — same
+// invariant, asserted against the composer. See releaseBody.verify.run.mjs.
+check("the coverage table is read into the release body", /COVERAGE_TEXT="\$\(cat "\$COVERAGE_MD"\)"/.test(sh));
+check("the coverage table is appended to the release body", /BODY="\$\(compose_release_body "\$NOTES" "\$COVERAGE_TEXT"\)"/.test(sh));
 check("gh release create publishes BODY", /gh release create[^\n]*--notes "\$BODY"/.test(sh));
-check("gh release edit refreshes BODY", /gh release edit[^\n]*--notes "\$BODY"/.test(sh));
+check("gh release edit refreshes the body WITH the coverage table", /gh release edit[\s\S]{0,120}compose_release_body "\$NOTES" "\$COVERAGE_TEXT"/.test(sh));
 check("latest.json still gets the clean NOTES, not the table", /NOTES="\$NOTES"[^\n]*node -e/.test(sh) || /^NOTES="\$NOTES"/m.test(sh) || /SIG="\$SIG" NOTES="\$NOTES"/.test(sh));
 
 // Drafts sort first in the list endpoint, so a 30-item page can be all drafts.

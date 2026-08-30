@@ -23,6 +23,7 @@
 //     trigger renders and survive page unmount.
 
 import { setRunActivity } from "./runActivity";
+import { notifyListeners } from "./listenerBus";
 
 export type ChatStreamStatus =
   | "idle"
@@ -133,7 +134,7 @@ export class ChatRuntimeStore {
 
   private notify(id: string): void {
     const set = this.listeners.get(id);
-    if (set) for (const cb of set) cb();
+    if (set) notifyListeners(set, `chatRuntime:${id}`);
   }
 
   /// Replace the cached snapshot with a NEW object (so Object.is sees a

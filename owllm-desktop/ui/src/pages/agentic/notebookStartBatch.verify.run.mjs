@@ -60,6 +60,10 @@ const js = ts.transpileModule(src, {
   },
 }).outputText;
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nb-verify-"));
+// The sandbox below copies react/react-dom/scheduler into TMP (~4 MB a run) and
+// the gate runs on every publish, so leaving it behind leaks temp space forever.
+// `exit` fires on the explicit process.exit() at the end of both paths.
+process.on("exit", () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {} });
 fs.mkdirSync(path.join(TMP, "hooks"), { recursive: true });
 fs.mkdirSync(path.join(TMP, "components"), { recursive: true });
 fs.writeFileSync(path.join(TMP, "pages.js"), js); // placeholder name below
@@ -117,11 +121,18 @@ out = out
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")')
   .replace(/require\("\.\.\/\.\.\/runtime\/renderingPolicy"\)/g, 'require("./renderingPolicy.js")')
+  .replace(/require\("\.\.\/\.\.\/runtime\/notebookMerge"\)/g, 'require("./notebookMerge.js")')
   .replace(/require\("\.\/notebookDigestAura"\)/g, 'require("./notebookDigestAura.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./localization.js")')
   .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")')
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./tauri.js")');
 fs.writeFileSync(path.join(TMP, "RunNotebook.js"), out);
+// The REAL step-merge module (dependency-free), not a stub: saveNotebook's
+// optimistic-concurrency reconcile runs through it on every contended write.
+fs.writeFileSync(path.join(TMP, "notebookMerge.js"), ts.transpileModule(
+  readLF(path.join(REPO, "ui/src/runtime/notebookMerge.ts")),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } },
+).outputText);
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });
 for (const m of ["react", "react-dom", "scheduler"]) {
@@ -699,8 +710,13 @@ console.log("case 9: a queue owned by another window is ghosted here");
   const { root } = mount({ surfaceId: "code:this-window" });
   check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
   check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
-  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
-  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  // The control is a state machine now: while another live window owns the queue
+  // it reads "Running elsewhere", not "Start queue". The invariant is unchanged —
+  // it must exist, be disabled, and say which state it is in — and targeting it
+  // by data-ui means a MISSING control can no longer satisfy this check.
+  const startBtn = document.querySelector('[data-ui="NotebookQueueControl"]');
+  check("Start queue is disabled here",
+    !!startBtn && startBtn.disabled && startBtn.getAttribute("data-queue-status") === "locked");
   const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
   check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
   const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
@@ -762,8 +778,13 @@ console.log("case 9: a queue owned by another window is ghosted here");
   const { root } = mount({ surfaceId: "code:this-window" });
   check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
   check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
-  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
-  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  // The control is a state machine now: while another live window owns the queue
+  // it reads "Running elsewhere", not "Start queue". The invariant is unchanged —
+  // it must exist, be disabled, and say which state it is in — and targeting it
+  // by data-ui means a MISSING control can no longer satisfy this check.
+  const startBtn = document.querySelector('[data-ui="NotebookQueueControl"]');
+  check("Start queue is disabled here",
+    !!startBtn && startBtn.disabled && startBtn.getAttribute("data-queue-status") === "locked");
   const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
   check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
   const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
@@ -888,6 +909,281 @@ console.log("case 11: only a queue-driven (or explicitly armed) run advances the
   // The old pause notice told the user a plain message would resume the queue —
   // the very accident this case exists to prevent. It must not say that again.
   check("no page still advertises 'send a message' as a way to resume", !codePageSrc.includes("send a message or press ▶ Start queue") && !agentsPageSrc.includes("fix or dispatch the next one (▶ Start queue)"));
+}
+
+// ---- 12. Auto-feed is the DEFAULT for a notebook nobody has decided about.
+//          The queue is the point of the notebook, and having to find and tick
+//          a checkbox before the team would walk it meant the Agents page sat
+//          on a full list doing nothing. `autoFeed` used to be read as
+//          `p.autoFeed === true`, which conflates "never chosen" with "the user
+//          switched it off" — so the default could only ever be OFF. It is now
+//          tri-state on load: an absent flag means ON, a stored boolean is the
+//          user's word and is obeyed in both directions.
+//
+//          Crucially this must NOT resurrect case 11's incident. The permission
+//          to BEGIN a chain is still `autoFeedArmed` / queue provenance; the
+//          toggle only governs whether a live chain CONTINUES. ----
+console.log("case 12: the notebook opens with auto-feed already on, and obeys an explicit OFF");
+{
+  const AF_PID = "verify-autofeed-default";
+  const AF_KEY = `owllm:agents:notebook:${AF_PID}`;
+  const AGENTS_SURFACE = "agents:page-1";
+  const CODE_SURFACE = "code:page-1";
+  const afBlob = () => JSON.parse(localStorage.getItem(AF_KEY) || "null");
+  const seedSteps = (steps) => localStorage.setItem(AF_KEY, JSON.stringify({
+    text: "", plan: "", digest: [], steps, // NO autoFeed key — never chosen
+  }));
+
+  // --- first open: a project whose notebook has never been touched ---
+  localStorage.removeItem(AF_KEY);
+  check("a never-seen notebook loads with auto-feed ON", NB.loadNotebook(AF_PID).autoFeed === true);
+  const m1 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  const firstBox = document.querySelector("input[type=checkbox]");
+  check("the Agents-page toggle renders already checked", !!firstBox && firstBox.checked === true);
+  act(() => m1.root.unmount());
+
+  // --- agent output advances the queue with no user action at all ---
+  // The blob carries steps but still no autoFeed key, so ONLY the default can
+  // make this dispatch. Provenance is the queue's own run (ranFromNotebook).
+  seedSteps([
+    { id: "a1", text: "first agent task", status: "pending", ts: 1 },
+    { id: "a2", text: "second agent task", status: "pending", ts: 2 },
+  ]);
+  const fed = [];
+  check("a queue-driven run advances the list without the user enabling anything",
+    NB.continueNotebookAutoFeed(AF_PID, AGENTS_SURFACE, (s) => fed.push(s.id)) === "dispatched" && fed.join(",") === "a1");
+  check("the fed card is recorded in the shared per-project notebook blob",
+    afBlob()?.steps.find((s) => s.id === "a1")?.status === "sent");
+
+  // --- that shared list is the SAME one the Coding-page notebook renders ---
+  const m2 = mount({ projectId: AF_PID, surfaceId: CODE_SURFACE });
+  check("the other surface shows the step the Agents page fed", textOf(document.body).includes("first agent task"));
+  check("the other surface shows the rest of the shared queue", textOf(document.body).includes("second agent task"));
+  act(() => m2.root.unmount());
+
+  // --- an explicit OFF is the user's word: persisted, and never re-defaulted ---
+  const m3 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("unchecking persists an explicit OFF", afBlob()?.autoFeed === false);
+  act(() => m3.root.unmount());
+  check("a restart re-reads OFF rather than the ON default", NB.loadNotebook(AF_PID).autoFeed === false);
+  const m4 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  const reopened = document.querySelector("input[type=checkbox]");
+  check("the reopened toggle is still unchecked", !!reopened && reopened.checked === false);
+  act(() => m4.root.unmount());
+  const afterOff = [];
+  check("a user-disabled queue does not advance", NB.continueNotebookAutoFeed(AF_PID, AGENTS_SURFACE, (s) => afterOff.push(s.id)) === "inactive" && afterOff.length === 0);
+  check("  ...and its cards stay pending", NB.loadNotebook(AF_PID).steps.find((s) => s.id === "a2")?.status === "pending");
+
+  // --- switching it back on is equally durable ---
+  const m5 = mount({ projectId: AF_PID, surfaceId: AGENTS_SURFACE });
+  clickEl(document.querySelector("input[type=checkbox]"));
+  act(() => m5.root.unmount());
+  check("re-enabling persists an explicit ON", NB.loadNotebook(AF_PID).autoFeed === true);
+
+  // --- the default must not re-open case 11's hole ---
+  seedSteps([{ id: "b1", text: "queued work", status: "pending", ts: 1 }]);
+  check("the ON default still cannot START a chain from an unrelated clean run",
+    NB.consumeAutoFeedArm(AF_PID, AGENTS_SURFACE) === false);
+  check("  ...and that card stays pending", NB.loadNotebook(AF_PID).steps[0]?.status === "pending");
+
+  // --- both surfaces share one store and one default: neither page may hold
+  //     its own autoFeed seed, or the two notebooks drift apart again ---
+  check("no page seeds its own auto-feed default",
+    !/autoFeed\s*:\s*(true|false)/.test(agentsPageSrc) && !/autoFeed\s*:\s*(true|false)/.test(codePageSrc));
+  check("the ON default is a documented tri-state read, not a coerced boolean",
+    !src.includes("autoFeed: p.autoFeed === true") && src.includes('typeof p.autoFeed === "boolean" ? p.autoFeed : true'));
+}
+
+// ---- 13. The BUTTONS publish the queue, not just the exported helpers ----
+// notebookQueueGithubSync proves the exported queue helpers push to the vault
+// inside the start action. It cannot reach the handlers the user actually
+// clicks: feedStep/setStep are closures inside the component, so a gate that
+// only calls the module exports passes while ▶ Start queue still waits on the
+// ~9s snapshot poll. That is the hole this case closes — same claim, driven
+// through the rendered DOM.
+console.log("case 13: the queue buttons publish inside the click");
+{
+  const QUEUE_EVENT = "owllm:notebook-queue-changed";
+  let published = 0;
+  const onPublish = () => { published++; };
+  window.addEventListener(QUEUE_EVENT, onPublish);
+
+  // The event name is the contract between the page and the runtime pusher.
+  check("the harness listens on the name the page actually dispatches",
+    src.includes(`export const NOTEBOOK_QUEUE_EVENT = "${QUEUE_EVENT}"`));
+
+  // --- starting the queue: the headline requirement ---
+  seed();
+  const m = mount({ onFeed: () => "dispatched" });
+  published = 0;
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("▶ Start queue publishes the queue within the click", published > 0);
+  check("  ...and the click is what moved the job to sent",
+    blob().steps.find((s) => s.id === "s1")?.status === "sent");
+  // A publish is only worth anything if the document it pushes is the versioned
+  // one — queue id and revision are what let device B order the two copies.
+  check("  ...and the published document carries its queue id and revision",
+    typeof blob().queueId === "string" && blob().queueId.length > 0
+    && typeof blob().queueRev === "number" && blob().queueRev > 0);
+  // `runningOn` needs the device identity, which arrives from an async Tauri
+  // invoke this harness stubs out — notebookQueueGithubSync case 4 covers it,
+  // seeding the device directly. What IS observable here is the local half of
+  // the same claim: the click made this window the queue's owner.
+  check("  ...and the click claimed the queue for this window",
+    blob().autoFeedOwner != null);
+  act(() => m.root.unmount());
+
+  // --- archiving: a per-job state transition reached only from the UI ---
+  // Target the per-step control by aria-label: "Archive" alone also matches the
+  // Active/Archive TAB, and clicking that would switch tabs and publish nothing.
+  seed();
+  const m2 = mount({});
+  published = 0;
+  clickEl(buttons().find((b) => b.getAttribute("aria-label") === "Archive step"));
+  check("Archive publishes the job's transition to done", published > 0);
+  check("  ...and the step really is done", blob().steps.find((s) => s.id === "s1")?.status === "done");
+  act(() => m2.root.unmount());
+
+  // --- the negative: content edits must NOT publish, or the vault takes a git
+  //     commit per keystroke. This is the check that keeps the fix honest. ---
+  seed();
+  const m3 = mount({});
+  const notes = [...document.querySelectorAll("textarea")][0];
+  published = 0;
+  if (notes) {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(notes, "typing working notes");
+      notes.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+  }
+  check("a notes keystroke found a textarea to type into", !!notes);
+  check("typing notes does NOT publish (no commit per keystroke)", published === 0);
+  check("  ...but the keystroke was still persisted locally", blob().text === "typing working notes");
+  act(() => m3.root.unmount());
+
+  window.removeEventListener(QUEUE_EVENT, onPublish);
+
+  // The seam itself: a publishing write must reach saveNotebook's opts, or every
+  // check above could pass through some other dispatch.
+  check("updateNotebook forwards publish to saveNotebook",
+    /saveNotebook\(projRef\.current, next, opts\)/.test(src));
+  check("a step lifecycle patch publishes on exactly that condition",
+    /\}\), \{ publish: changesLifecycle \}\);/.test(src));
+}
+
+// ---- 14. The Start-queue control is a STATE MACHINE over the queue document,
+//         not a one-shot button ------------------------------------------------
+// The label and the enabled state must follow the queue's own status — which
+// lives in the persisted/synced step records (a card is `sent` with no
+// finishedAt) — rather than the caller's device-local `running` prop. Every
+// mount below passes `running: false`, so any check that passes here does so
+// because the DOCUMENT said the queue was live.
+console.log("case 14: Start queue reflects the real queue status and always recovers");
+{
+  const control = () => document.querySelector('[data-ui="NotebookQueueControl"]');
+  const stopBtn = () => document.querySelector('[data-ui="NotebookQueueStop"]');
+  const label = () => textOf(control() || { textContent: "" });
+  // Report a missing control as a failure instead of throwing, so one absent
+  // element cannot hide the rest of the state machine's checks.
+  const clickIf = (el, what) => {
+    if (!el) { console.error("  FAIL nothing to click: " + what); failures++; return false; }
+    clickEl(el);
+    return true;
+  };
+  const isDisabled = () => control()?.disabled === true;
+  // Seed a queue document directly — this is how a peer's copy, or this
+  // window's own copy after a crash, arrives: as persisted step statuses.
+  const seedDoc = (steps, extra = {}) => {
+    localStorage.setItem(KEY, JSON.stringify({
+      text: "", plan: PLAN, autoFeed: true, digest: [], steps, ...extra,
+    }));
+  };
+
+  // --- start → running ---
+  seed();
+  const m = mount({ running: false });
+  check("an idle queue offers Start", !!control() && /Start queue/.test(label()) && !isDisabled());
+  check("  ...and shows no Stop affordance while idle", !stopBtn());
+  clickIf(control(), "Start queue (idle)");
+  check("starting flips the control to a Running indicator", /Running/.test(label()));
+  check("  ...which is not pressable (one click cannot double-dispatch)", isDisabled());
+  check("  ...and a Stop affordance appears alongside it", !!stopBtn());
+  check("  ...the document really is mid-job", blob().steps.find((s) => s.id === "s1")?.status === "sent");
+  act(() => m.root.unmount());
+
+  // --- running → finished → restartable ---
+  NB.markNotebookStepFinished(PID, "s1", Date.now());
+  const m2 = mount({ running: false });
+  check("a finished job makes the queue pressable again", !!control() && /Start queue/.test(label()) && !isDisabled());
+  act(() => m2.root.unmount());
+
+  // --- running → failed → restartable ---
+  seed();
+  const m3 = mount({ running: false });
+  clickIf(control(), "Start queue (before failure)");
+  act(() => m3.root.unmount());
+  NB.markNotebookStepFailed(PID, "s1", "the run stopped", Date.now());
+  const m4 = mount({ running: false });
+  check("a failed job leaves the queue restartable, not stuck on Running",
+    !!control() && /Start queue/.test(label()) && !isDisabled());
+  act(() => m4.root.unmount());
+
+  // --- cancellation ---
+  seed();
+  const m5 = mount({ running: false });
+  clickIf(control(), "Start queue (before cancel)");
+  clickIf(stopBtn(), "Stop queue");
+  check("Stop returns the in-flight card to pending", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("  ...releases the run lease", blob().autoFeedOwner == null);
+  check("  ...records the sequence as stopped rather than completed",
+    blob().autoFeedStopped === true && typeof blob().autoFeedFinishedAt === "number");
+  check("  ...and the control is immediately pressable again",
+    /Start queue/.test(label()) && !isDisabled());
+  // A cancelled card must stay cancelled: the abandoned run still ends and
+  // calls the same stamper, which would otherwise archive it behind the user.
+  NB.markNotebookStepFinished(PID, "s1", Date.now());
+  check("the abandoned run cannot silently un-cancel the card",
+    NB.loadNotebook(PID).steps.find((s) => s.id === "s1")?.status === "pending");
+  act(() => m5.root.unmount());
+
+  // --- recovery from a stale running state (the lockout) ---
+  // One card, fed, never finished, owned by a window that is gone. Before the
+  // fix the control was gated on `pendingCount > 0`, so this state rendered NO
+  // queue control at all — the user could not restart the queue at all.
+  seedDoc(
+    [{ id: "s1", text: "crashed mid-job", status: "sent", ts: 1, startedAt: 1000 }],
+    { autoFeedOwner: "agents:dead-window", autoFeedHeartbeat: Date.now() - 300_000, autoFeedStartedAt: 1000 },
+  );
+  const m6 = mount({ running: false });
+  check("a stale in-flight queue still renders its control", !!control());
+  check("  ...and offers an explicit reset", /Reset queue/.test(label()) && !isDisabled());
+  clickIf(control(), "Reset queue");
+  check("reset returns the stranded card to pending", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("  ...clears the dead owner's lease", blob().autoFeedOwner == null);
+  check("  ...and the queue is startable again", /Start queue/.test(label()) && !isDisabled());
+  act(() => m6.root.unmount());
+
+  // --- a LIVE owner elsewhere still wins: recovery must not become a way for a
+  //     second window to yank a card out from under a running one ---
+  seedDoc(
+    [{ id: "s1", text: "running in the other window", status: "sent", ts: 1, startedAt: 1000 }],
+    { autoFeedOwner: "agents:other-live-window", autoFeedHeartbeat: Date.now(), autoFeedStartedAt: 1000 },
+  );
+  const m7 = mount({ running: false });
+  check("a live owner elsewhere keeps the control disabled", !!control() && isDisabled());
+  check("  ...and offers no reset that would steal its card", !/Reset queue/.test(label()));
+  act(() => m7.root.unmount());
+
+  // The seam: the state must be computed from the step records. A check on the
+  // rendering alone would still pass if someone reintroduced a local flag that
+  // happened to track them.
+  check("queue status is derived from the persisted step records",
+    /const inFlight[\s\S]{0,200}status === "sent" && s\.finishedAt == null[\s\S]{0,1600}const queueStatus[\s\S]{0,300}inFlight/.test(src));
+  check("the run-end stampers refuse a card that left the run",
+    /function markNotebookStepFinished[\s\S]{0,400}stepLeftTheRun\(/.test(src)
+    && /function markNotebookStepFailed[\s\S]{0,500}stepLeftTheRun\(/.test(src));
 }
 
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");

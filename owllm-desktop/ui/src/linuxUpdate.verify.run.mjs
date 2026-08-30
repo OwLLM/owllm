@@ -43,6 +43,25 @@ check(
     && wiring.indexOf("PageLoadEvent::Finished") < wiring.indexOf("confirm_successful_boot();"),
 );
 check(
+  // The 2026-08-15 revert loop: a supervisor (systemd unit, autostart) relaunches
+  // the app without FIRST_BOOT_ENV seconds after the swap, and an existence-only
+  // marker check rolled back every update on such machines. Rollback must be
+  // age-gated, and a fresh-marker launch must be adopted as the first boot.
+  "A fresh update marker never triggers rollback (supervised-relaunch race)",
+  rust.includes("PENDING_MARKER_GRACE")
+    && rust.includes("fn pending_marker_is_stale(")
+    && /if pending_marker_is_stale\(&pending\)\s*\{[\s\S]{0,300}rollback_incomplete_update/.test(rust)
+    && !/pending_path\(&target\)\.is_file\(\)\s*\{\s*if let Err\(error\) = rollback_incomplete_update/.test(rust),
+);
+check(
+  // Its other half: the adopted first boot carries no env var, so confirmation
+  // must key on the marker's presence — an env-gated confirm would leave the
+  // marker to go stale and roll back a healthy update minutes later.
+  "Boot confirmation keys on the marker, not on the first-boot env var",
+  /fn confirm_successful_boot[\s\S]{0,900}if !pending\.is_file\(\)/.test(rust)
+    && !/fn confirm_successful_boot[\s\S]{0,600}FIRST_BOOT_ENV/.test(rust),
+);
+check(
   "Linux release assets and updater URLs are architecture-specific",
   release.includes('INSTALLER="dist/OwLLM.Desktop_${VERSION}_${ARCH}.AppImage"')
     && release.includes('OwLLM.Desktop_${VERSION}_${ARCH}.AppImage"'),

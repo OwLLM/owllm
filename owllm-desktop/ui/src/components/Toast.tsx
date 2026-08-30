@@ -12,9 +12,10 @@
 // Usage: call `notify("…")` from anywhere; <ToastHost/> is mounted once at the
 // app root and renders the stack.
 import React, { useEffect, useRef, useState } from "react";
+import { notifyListeners } from "../runtime/listenerBus";
 
 export type ToastKind = "info" | "error";
-export type Toast = { id: number; kind: ToastKind; text: string };
+export type Toast = { id: number; kind: ToastKind; text: string; sticky?: boolean };
 
 /** Longest a toast stays up. Errors linger — they are the ones worth reading. */
 const DISMISS_MS: Record<ToastKind, number> = { info: 6000, error: 12000 };
@@ -28,7 +29,7 @@ let nextId = 1;
 
 function publish() {
   const snapshot = toasts;
-  listeners.forEach((fn) => fn(snapshot));
+  notifyListeners(listeners, "toast", snapshot);
 }
 
 export function dismissToast(id: number) {
@@ -40,12 +41,24 @@ export function dismissToast(id: number) {
  * Show a notification. Blank text is a no-op (pages clear their old status by
  * passing ""), and an identical message already on screen is not duplicated.
  */
-export function notify(text: string, kind: ToastKind = "info"): void {
+export function notify(
+  text: string,
+  kind: ToastKind = "info",
+  opts: { sticky?: boolean } = {},
+): void {
   const body = (text ?? "").trim();
   if (!body) return;
   if (toasts.some((t) => t.text === body)) return;
-  const toast: Toast = { id: nextId++, kind, text: body };
-  toasts = [...toasts, toast].slice(-MAX_VISIBLE);
+  const toast: Toast = { id: nextId++, kind, text: body, sticky: opts.sticky };
+  // Trim by dropping the oldest DISMISSABLE toast first. A sticky notice is one
+  // the user is meant to act on (the app crashed; a report is waiting), so a
+  // burst of ordinary chatter must not silently push it off the stack.
+  const next = [...toasts, toast];
+  while (next.length > MAX_VISIBLE) {
+    const victim = next.findIndex((t) => !t.sticky);
+    next.splice(victim === -1 ? 0 : victim, 1);
+  }
+  toasts = next;
   publish();
 }
 
@@ -72,7 +85,10 @@ export function ToastHost() {
       if (!live.has(id)) { window.clearTimeout(handle); timers.current.delete(id); }
     });
     items.forEach((t) => {
-      if (timers.current.has(t.id)) return;
+      // A sticky toast waits for the click instead of a timer: it reports
+      // something that already happened and needs the user to do something,
+      // and a notice that expires before it is read may as well not exist.
+      if (t.sticky || timers.current.has(t.id)) return;
       timers.current.set(t.id, window.setTimeout(() => dismissToast(t.id), DISMISS_MS[t.kind]));
     });
   }, [items]);

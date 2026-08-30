@@ -58,13 +58,56 @@ fn unwrap_secret(wrapped: &str, what: &str) -> Result<[u8; 32], String> {
         .map_err(|_| format!("{what}: unwrapped key not 32 bytes"))
 }
 
+/// Domain separator for the anonymous public-presence token. Must stay byte-for
+/// byte identical to `DEVICE_PRESENCE_DOMAIN` in ui/src/pages/gamify/worldPresence.ts
+/// so a device keeps the same World Map dot however the id was derived.
+const PRESENCE_DOMAIN: &str = "owllm-world-presence-device-v1\0";
+
+/// Anonymous, stable public-presence id for a device id: `hex(SHA-256(domain || id))`.
+///
+/// Derived here rather than in the webview because `crypto.subtle` is only
+/// available in a secure context; when it is missing the frontend used to fall
+/// back to a *random* id, so one installation could be recorded as a new World
+/// Map node on every launch. Rust has SHA-256 unconditionally on every OS.
+pub fn presence_id(device_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = device_id.trim().to_lowercase();
+    if normalized.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(PRESENCE_DOMAIN.as_bytes());
+    hasher.update(normalized.as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod presence_id_tests {
+    /// Pinned to the value the webview's `presenceNodeIdForDevice` produces for
+    /// the same input (SHA-256 over the domain + lowercased id). If these two
+    /// ever diverge every installation silently moves to a different World Map
+    /// dot, which is exactly the duplicate-device bug this replaced.
+    #[test]
+    fn matches_the_webview_derivation() {
+        assert_eq!(
+            super::presence_id("DEVICE-A"),
+            "9f237f170bbade01efe38077c45d3dee14a6e122393ac413fbe44ec369ea28a9",
+        );
+        assert_eq!(super::presence_id("device-a"), super::presence_id("  DEVICE-A  "));
+        assert_eq!(super::presence_id(""), "");
+    }
+}
+
+/// The name EVERY Linux/macOS install used to receive, because the old
+/// derivation read `COMPUTERNAME`/`HOSTNAME` — a Windows-only and a *shell*
+/// variable that a GUI-launched app never inherits. Identities stamped with
+/// it before the fix are healed in `load_or_create`; the match is exact, so
+/// a name the user typed themselves is never touched.
+const LEGACY_PLACEHOLDER_NAME: &str = "This OwLLM PC";
+
 /// Best-effort machine name for the default device name.
 fn machine_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "This OwLLM PC".to_string())
+    crate::hardware::machine_name().unwrap_or_else(|| LEGACY_PLACEHOLDER_NAME.to_string())
 }
 
 /// Load the identity, creating (and persisting) a fresh keypair on first use.
@@ -78,11 +121,21 @@ pub fn load_or_create() -> Result<Identity, String> {
             };
             // Guard against a corrupted/edited id that no longer matches the key.
             if secrets.device_id() == f.device_id {
-                return Ok(Identity {
+                let mut ident = Identity {
                     secrets,
                     name: f.name,
                     created_at: f.created_at,
-                });
+                };
+                // Heal an identity stamped before the OS-level lookup existed,
+                // so an existing install stops showing up under the shared
+                // placeholder. Only ever rewrites that exact string.
+                if ident.name == LEGACY_PLACEHOLDER_NAME {
+                    if let Some(real) = crate::hardware::machine_name() {
+                        ident.name = real;
+                        let _ = write_identity(&ident);
+                    }
+                }
+                return Ok(ident);
             }
         }
     }

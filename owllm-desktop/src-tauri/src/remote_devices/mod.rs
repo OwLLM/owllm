@@ -32,6 +32,7 @@ mod relay;
 mod session;
 mod transport;
 mod trust;
+pub mod world_chat;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -50,6 +51,12 @@ use protocol::{
     PairRequest, PermissionPolicy, SignedEnvelope, TrustState, TrustedController,
 };
 use transport::{LanDirectTransport, LoopbackTransport, Transport};
+
+/// Transport health is native work, not WebView work. Thirty seconds keeps a
+/// sleep/wake failure short while the five-tick heartbeat retains the existing
+/// 150-second vault cadence.
+const DEVICE_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(30);
+const DEVICE_HEARTBEAT_EVERY_TICKS: u8 = 5;
 
 // ------------------------------------------------------------------
 // Shared small helpers
@@ -952,16 +959,32 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
 /// the endpoints it advertises are whatever the listener exposes at that
 /// moment — starting lazily (first Devices-page visit) published endpoint-less
 /// records, which made every peer's "Pair" fail with "no known LAN endpoint".
+/// The native task continues supervising health every 30 seconds and publishes
+/// presence every 150 seconds, even while the WebView is suspended.
 pub fn init(app: &AppHandle) {
     store_app(app);
-    tauri::async_runtime::spawn(async {
-        ensure_listener_started(tokio::runtime::Handle::current());
-        // Publish our record (endpoints + p2p node id) and pull peers right at
-        // boot, so an auto-enabled machine becomes discoverable without anyone
-        // clicking Discover on it. Fire-and-forget — the git round-trip must
-        // not stall startup, and it's a no-op when the feature is off.
-        if feature_enabled() {
-            let _ = crate::vault::vault_sync_devices().await;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(DEVICE_HEALTHCHECK_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut heartbeat_tick = 0_u8;
+        loop {
+            // interval() fires its first tick immediately, so launch still
+            // starts listeners and publishes without waiting 30 seconds.
+            ticker.tick().await;
+            ensure_listener_started(tokio::runtime::Handle::current());
+            // Publish our record (endpoints + p2p node id) and pull peers. The
+            // native cadence is independent of window visibility/App Nap.
+            if feature_enabled() && heartbeat_tick == 0 {
+                match crate::vault::vault_sync_devices().await {
+                    Ok(true) => {
+                        let _ = app.emit("owllm:devices:refresh", ());
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("remote_devices: heartbeat sync failed: {e}"),
+                }
+            }
+            heartbeat_tick = (heartbeat_tick + 1) % DEVICE_HEARTBEAT_EVERY_TICKS;
         }
     });
 }
@@ -990,6 +1013,7 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         ensure_listener_started(runtime);
         let rec = self_public_record()?;
         Ok(json!({
+            "presence_id": identity::presence_id(&rec.device_id),
             "device_id": rec.device_id,
             "name": rec.name,
             "os": rec.os,
@@ -1285,12 +1309,24 @@ pub async fn agent_device_exec(
         return Err("device is required (a paired device name or id)".into());
     }
     let self_pub = self_public_record()?;
-    let target = registry::list(&self_pub)
-        .into_iter()
+    // The list is freshness-ordered (registry::order_for_resolution), so the
+    // first name match is the machine's LIVE identity, not a stale re-pair twin.
+    let all = registry::list(&self_pub);
+    let target = all
+        .iter()
         .find(|d| {
             !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want))
         })
+        .cloned()
         .ok_or_else(|| format!("no paired device '{want}' — pair it on the Devices page first"))?;
+    let stale_twins = all
+        .iter()
+        .filter(|d| {
+            !d.is_self
+                && d.public.device_id != target.public.device_id
+                && d.public.name.eq_ignore_ascii_case(&target.public.name)
+        })
+        .count();
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::Shell,
@@ -1298,7 +1334,26 @@ pub async fn agent_device_exec(
         timeout_ms: 60_000,
         ..Default::default()
     };
-    send_request(&target.public.device_id, req).await
+    send_request(&target.public.device_id, req).await.map_err(|e| {
+        // Re-pairing mints a new device_id, so one name can carry dead twins;
+        // say exactly which identity was dialed and how fresh it was, or an
+        // unreachable-but-online machine is undiagnosable from the error alone.
+        let heartbeat = target
+            .public
+            .published_at
+            .as_deref()
+            .or(target.last_seen.as_deref())
+            .unwrap_or("never");
+        let twins = if stale_twins > 0 {
+            format!("; {stale_twins} older identit{} share this name (stale re-pair leftovers, skipped)",
+                if stale_twins == 1 { "y" } else { "ies" })
+        } else {
+            String::new()
+        };
+        let id8 = &target.public.device_id[..target.public.device_id.len().min(8)];
+        format!("{e} [dialed '{}' identity {id8}…, last heartbeat {heartbeat}{twins}]",
+            target.public.name)
+    })
 }
 
 /// Open an interactive remote shell (SSH-like). Returns the session id.

@@ -31,7 +31,7 @@ devices into one cross-platform desktop application.
     <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=3" width="260" alt="Download OWLLM for Windows" />
   </a>
   &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/releases/latest">
+  <a href="https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md">
     <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg?v=3" width="260" alt="Download OWLLM for Linux" />
   </a>
   &nbsp;&nbsp;
@@ -42,8 +42,8 @@ devices into one cross-platform desktop application.
 
 <div align="center">
 
-**Linux:** [AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage)
-· [Debian / Ubuntu `.deb`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb)
+**Linux:** [Choose the right package and install it](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md)
+— Ubuntu/Debian, Fedora/RHEL, or AppImage · x86-64 or ARM64
 &nbsp;&nbsp;|&nbsp;&nbsp;
 **Every platform:** [release notes and checksums](https://github.com/OwLLM/owllm/releases/latest)
 

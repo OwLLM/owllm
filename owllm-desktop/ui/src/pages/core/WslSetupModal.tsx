@@ -12,6 +12,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { LogBox } from "../../components/LogBox";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { invalidateWslStatus } from "../agentic/wslIsolation";
 
 type WslSetupStatus = {
   stage: "virtualizationOff" | "needsInstall" | "needsDistro" | "needsReboot" | "needsUser" | "needsPython" | "ready" | "unsupported";
@@ -67,6 +68,10 @@ export default function WslSetupModal({
 
   const refresh = useCallback(async () => {
     setErr(null);
+    // This is the explicit "Re-check" the setup flow tells the user to press
+    // after installing WSL. Drop the session-cached wsl_status first, or the
+    // rest of the app would keep serving the pre-install answer.
+    invalidateWslStatus();
     try {
       const s = await invoke<WslSetupStatus>("wsl_setup_status");
       setStatus(s);

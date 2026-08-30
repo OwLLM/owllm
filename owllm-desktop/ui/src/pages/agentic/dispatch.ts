@@ -36,7 +36,7 @@ import {
 } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
-import { samplingFor } from "./modelProfiles";
+import { samplingFor, sanitizeSampling } from "./modelProfiles";
 // Per-agent SKILL injection — the SAME builder the desktop path (AgentsPage)
 // uses, so bridge runs (Telegram/WhatsApp/…) get equipped-skill bodies and the
 // .owllm/skills self-load guidance too, not just the mirrored files on disk.
@@ -52,13 +52,15 @@ import {
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
 import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { claudeCliUnavailableMessage, type ClaudeCliStatus } from "./cliAuthMessage";
+import { detectRunBlocker, detectRunFailure, type RunBlocker } from "./runBlockers";
 import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
 import { DEVICE_PREFIX, parseDeviceModel, peerNameFor } from "./peerCatalogue";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
-import { makeGenMeter } from "../../utils/genStats";
+import { makeGenMeter, timingTokensPerSecond } from "../../utils/genStats";
 import { isProviderUsageLimit } from "../advanced/accountHealth";
 // Deterministic routing — shared with the desktop path so BOTH dispatch loops
 // route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
@@ -68,8 +70,31 @@ import {
   bestAgentForGoal,
   agentDomain,
   normalizeRoleToolAllowlist,
+  isReviewAgent,
+  normalizeRunOutput,
   roleCanWrite,
 } from "./teamConfig";
+import {
+  MAX_AGENT_RERUNS,
+  MAX_CHAIN_HOPS,
+  downstreamTargets,
+  handoffStopReason,
+  handoffSupplementalResults,
+  loopExhaustedNotice,
+  nextHandoffs,
+  runsAsSubLeader,
+} from "./handoffRouting";
+export {
+  MAX_AGENT_RERUNS,
+  MAX_CHAIN_HOPS,
+  downstreamTargets,
+  handoffStopReason,
+  handoffSupplementalResults,
+  loopExhaustedNotice,
+  nextHandoffs,
+  runsAsSubLeader,
+} from "./handoffRouting";
+export type { Handoff, HandoffPlan } from "./handoffRouting";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -188,6 +213,16 @@ export function makeResponsiveHandlers(onDelta: StreamHandler, onThought?: Thoug
 // path AND the caller cares about thinking / tool surfacing — i.e.
 // the AgentsPage Thought tab. Falls back to claude_cli_complete (one
 // final blob) when no onThought handler is supplied.
+// Per-run consent to widen the CLI's filesystem scope to the user's home
+// profile (--add-dir). DEFAULT FALSE — the agent stays jailed to the project.
+// Flipped true only when the user approves the "grant home for this run"
+// consent prompt (AgentsPage's FileAccessConsentModal), and RESET to false at
+// the start of every dispatch so a grant never silently leaks into a later
+// run. Module-scoped so every Claude CLI call site reads it without threading
+// a param through the stream* signatures.
+let grantHomeThisRun = false;
+export function setGrantHomeThisRun(v: boolean) { grantHomeThisRun = v; }
+
 async function runClaudeCliStream(args: {
   systemPrompt: string;
   userMessage: string;
@@ -201,6 +236,9 @@ async function runClaudeCliStream(args: {
   effort?: string | null;
   /// Persistent session UUID — same id across calls gives multi-turn memory.
   sessionId?: string | null;
+  /// Which run owns the spawned child, so a per-run Stop kills only its own
+  /// CLI (see setCliCancelScope). Unset = Rust scopes it to `cwd`.
+  cancelScope?: string | null;
   /// Enable SendUserMessage tool (--brief). The dispatch tap below
   /// surfaces those questions to the user via onAskUser if supplied,
   /// or falls back to a "❓ to user" entry in the Thought channel.
@@ -283,6 +321,10 @@ async function runClaudeCliStream(args: {
       // explicitly to disable when truly autonomous behaviour is wanted.
       briefMode: args.briefMode ?? true,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
+      // Per-run, user-consented home-profile access (--add-dir). False unless
+      // the user approved the consent prompt this run. See grantHomeThisRun.
+      grantHome: grantHomeThisRun,
       onEvent: ch,
     });
   } finally {
@@ -314,6 +356,8 @@ export async function runCodexCliStream(args: {
   /// tools, so the orchestrator edited the project, left it dirty, and every
   /// specialist worktree afterwards failed to cut.
   readOnly?: boolean;
+  /// Which run owns the spawned child (see setCliCancelScope).
+  cancelScope?: string | null;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -355,6 +399,7 @@ export async function runCodexCliStream(args: {
       effort: args.effort ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
       onEvent: ch,
     });
   } finally {
@@ -373,6 +418,8 @@ export async function runKimiCliStream(args: {
   allowedTools?: string[];
   /// See runClaudeCliStream — normally derived from `allowedTools`.
   readOnly?: boolean;
+  /// Which run owns the spawned child (see setCliCancelScope).
+  cancelScope?: string | null;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -417,6 +464,7 @@ export async function runKimiCliStream(args: {
       model: args.model ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
       readOnly: isAgentReadOnly(args),
+      cancelScope: args.cancelScope ?? null,
       onEvent: ch,
     });
   } finally {
@@ -672,6 +720,7 @@ export type AgentSpec = {
   /// disclosure), not function calls. Sourced from the team's agentSkills blob
   /// and/or a template's per-agent `extra_skills`.
   extraSkills?: string[];
+  role?: "leader" | "agent";
 };
 export type Edge = { source: string; target: string };
 
@@ -703,37 +752,6 @@ export function wiredDispatchTargets(
 /// agent is a chain SINK → its output returns to the orchestrator to integrate.
 /// An arrow `coder → critic` makes the critic receive the coder's output; an
 /// arrow back to the orchestrator just ends the chain. Pure + unit-tested.
-export function downstreamTargets(
-  team: { edges?: Edge[] },
-  agentName: string,
-  orchName: string,
-): string[] {
-  const edges = Array.isArray(team.edges) ? team.edges : [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const e of edges) {
-    if (
-      e && e.source === agentName && typeof e.target === "string" &&
-      e.target !== orchName && e.target !== agentName && !seen.has(e.target)
-    ) {
-      seen.add(e.target);
-      out.push(e.target);
-    }
-  }
-  return out;
-}
-
-/// Global backstop: the maximum TOTAL agent runs a single handoff chain may make
-/// before it stops — guards against runaway loops no matter how the graph is
-/// drawn. Combined with the per-agent re-run cap below this guarantees
-/// termination even with intentional cycles (critic→coder→critic→…).
-export const MAX_CHAIN_HOPS = 12;
-
-/// How many times ONE agent may run within a single chain. Lets a critic↔coder
-/// loop iterate a few rounds, then forces a stop. The per-agent cap (not a
-/// run-once visited set) is what makes real loops possible while staying finite.
-export const MAX_AGENT_RERUNS = 3;
-
 /// Routing instruction appended to a specialist's prompt. THIS is what turns the
 /// edges into an allow-list the agent CHOOSES from, instead of a forced pipe.
 /// If the agent has arrows to other (non-orchestrator) teammates it MAY hand off
@@ -742,7 +760,14 @@ export const MAX_AGENT_RERUNS = 3;
 /// stays a leaf: do its work and return (exactly today's behavior).
 export function routingHint(team: Team, spec: AgentSpec): string {
   const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
-  const allowed = downstreamTargets(team, spec.name, orchName);
+  const downstream = downstreamTargets(team, spec.name, orchName);
+  // A reviewer may return actionable findings to the worker that feeds it even
+  // when the canvas only authors the natural worker→review edge. The runtime
+  // enforces the same reverse path below; this hint lets the model be explicit.
+  const repair = isReviewAgent(spec)
+    ? team.edges.filter((edge) => edge.target === spec.name && edge.source !== orchName).map((edge) => edge.source)
+    : [];
+  const allowed = [...new Set([...downstream, ...repair])];
   if (allowed.length === 0) {
     return [
       "The orchestrator has dispatched the task below. Reply concisely and directly with your work.",
@@ -755,75 +780,8 @@ export function routingHint(team: Team, spec: AgentSpec): string {
     "  - To hand work to a teammate you're connected to, END your reply with a line:  @<name>: <exactly what they should do>.",
     `  - You may route ONLY to: ${targets}.`,
     "  - If your work is complete and no teammate needs it, just give your answer — it returns to whoever dispatched you.",
-    "  - Reviewer/critic: when NOT satisfied, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
+    "  - Reviewer/critic/red team: when you find any actionable defect, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
     "  - Loops are capped — be decisive, don't ping-pong without making progress.",
-  ].join("\n");
-}
-
-export type Handoff = { name: string; input: string; explicit: boolean };
-export type HandoffPlan = {
-  /// Targets to actually run next.
-  hands: Handoff[];
-  /// Targets the agent EXPLICITLY tried to route to but which were blocked by
-  /// the per-agent re-run cap — i.e. a loop that did NOT converge. The chain
-  /// surfaces these to the orchestrator (P2 supervision) instead of silently
-  /// dropping them.
-  capped: string[];
-};
-
-/// Decide where an agent's OUTPUT goes next — the heart of agent-decided routing.
-/// Edges are an ALLOW-LIST. If the agent explicitly @-routed to allowed targets,
-/// honor that (and let those targets re-run up to MAX_AGENT_RERUNS, enabling
-/// loops). Otherwise fall back to LEGACY auto-flow along every arrow, run-once —
-/// so teams that don't @-route behave exactly as before. `runCount` bounds it.
-/// Pure + unit-tested.
-export function nextHandoffs(
-  team: Team,
-  agentName: string,
-  agentOutput: string,
-  runCount: Map<string, number>,
-): HandoffPlan {
-  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
-  const allowed = downstreamTargets(team, agentName, orchName);
-  if (allowed.length === 0) return { hands: [], capped: [] };
-  const dispatched = parseDispatches(agentOutput, team, agentName).filter((d) =>
-    allowed.includes(d.agentName),
-  );
-  if (dispatched.length > 0) {
-    // Agent-decided routing. Split into runnable vs cap-blocked (exhausted loop).
-    const hands: Handoff[] = [];
-    const capped: string[] = [];
-    for (const d of dispatched) {
-      if ((runCount.get(d.agentName) ?? 0) < MAX_AGENT_RERUNS) {
-        hands.push({ name: d.agentName, input: d.instruction, explicit: true });
-      } else {
-        capped.push(d.agentName);
-      }
-    }
-    return { hands, capped };
-  }
-  // Legacy auto-flow: each downstream runs ONCE (run-once == today's behavior).
-  const handoff = `You are continuing a team workflow. @${agentName} produced the following — build on it for YOUR part of the task:\n\n${agentOutput}`;
-  const hands = allowed
-    .filter((t) => (runCount.get(t) ?? 0) === 0)
-    .map((t) => ({ name: t, input: handoff, explicit: false }));
-  return { hands, capped: [] };
-}
-
-/// P2 SUPERVISION: when an agent tried to loop work back to teammate(s) that hit
-/// the re-run cap, the chain emits THIS as a result instead of silently dying.
-/// The orchestrator integrates it (and, in director mode, the Critical Thinker
-/// reviews it) and decides the next step — ship, re-scope, or ask the user.
-/// Pure + unit-tested.
-export function loopExhaustedNotice(
-  agentName: string,
-  capped: string[],
-  runCount: Map<string, number>,
-): string {
-  const who = capped.map((t) => `@${t} (ran ${runCount.get(t) ?? 0}×)`).join(", ");
-  return [
-    `⚠ SUPERVISOR — loop did not converge: @${agentName} tried to route back to ${who}, but they reached the ${MAX_AGENT_RERUNS}-round per-agent cap.`,
-    `Orchestrator: decide the next step — ship what we have, give the agent fresh direction, or ask the user. Do NOT silently re-loop.`,
   ].join("\n");
 }
 
@@ -1802,6 +1760,33 @@ export function isAbortError(e: unknown): boolean {
   return (e as { name?: string } | null)?.name === "AbortError";
 }
 
+/// Which run owns the CLI children a dispatch spawns, keyed by the run's
+/// AbortSignal — the object that ALREADY identifies "this turn" everywhere in
+/// this file, so nothing new has to be threaded through the long positional
+/// parameter lists below.
+///
+/// Aborting the signal never reaches a spawned claude/codex/kimi/grok/gemini
+/// process (Tauri `invoke` has no cancellation channel), so a Stop button must
+/// also ask Rust to kill that run's children. `cli_cancel_scope` does exactly
+/// that — but only for children registered under the SAME scope string, and
+/// Rust defaults an unset scope to the project `cwd`. Two agents sharing one
+/// workspace therefore land in the same scope and cannot be stopped apart:
+/// that is why the Code page's second agent had a dead Stop.
+///
+/// A caller that wants an independently stoppable run registers its scope here
+/// before dispatching, and passes the identical string to `cli_cancel_scope`.
+/// Leaving it unset keeps the previous behaviour (children scoped to `cwd`).
+const cliCancelScopes = new WeakMap<AbortSignal, string>();
+
+export function setCliCancelScope(signal: AbortSignal, scope: string): void {
+  const s = scope.trim();
+  if (s) cliCancelScopes.set(signal, s);
+}
+
+export function cliCancelScopeFor(signal?: AbortSignal | null): string | null {
+  return (signal && cliCancelScopes.get(signal)) || null;
+}
+
 /// Await `p`, but stop waiting the instant `signal` aborts.
 ///
 /// This does NOT cancel the underlying work — a Tauri `invoke` has no
@@ -1842,6 +1827,15 @@ export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | 
   _authWaitHandler = handler;
 }
 
+/// Same shape for the OTHER kind of stall: the CLI answered fine but refused
+/// to act, and buried the reason in prose. Registered by AgentsPage so the
+/// cause + the one fix surface in the thread instead of the user re-asking.
+export type RunBlockerInfo = RunBlocker & { backend: string };
+let _blockerHandler: ((info: RunBlockerInfo) => void) | null = null;
+export function setRunBlockerHandler(handler: ((info: RunBlockerInfo) => void) | null): void {
+  _blockerHandler = handler;
+}
+
 /// Run a subscription-CLI call (Claude, Codex, Gemini, or Kimi), retrying on auth
 /// (401) failures with backoff. Forces a token refresh before each retry. Non-auth
 /// errors are NOT retried here (they bubble straight up). Honors the run's
@@ -1860,9 +1854,24 @@ export async function withCliAuthRetry<T>(
     try {
       const result = await fn();
       if (attempt > 0) _authWaitHandler?.({ kind: "recovered", backend }); // we recovered after a 401
+      // A refusal is not an error — it arrives as a perfectly normal reply. This
+      // is the one place EVERY subscription-CLI call (both dispatch copies, all
+      // backends, streaming and one-shot) passes through, so the check lives
+      // here rather than at ~20 call sites that would drift apart.
+      if (typeof result === "string") {
+        const blocker = detectRunBlocker(result);
+        if (blocker) _blockerHandler?.({ ...blocker, backend });
+      }
       return result;
     } catch (e: any) {
       const msg = e?.message ?? String(e);
+      // A CLI that was KILLED (OOM, Stop) writes nothing, so the only place its
+      // real cause can be explained is here — same single funnel the refusal
+      // check uses, for the same reason: ~20 call sites would drift apart.
+      // Reported before the abort check, so a run the user stopped still gets
+      // an honest "you stopped it" instead of a bare exit code.
+      const failure = detectRunFailure(msg);
+      if (failure) _blockerHandler?.({ ...failure, backend });
       if (signal.aborted) throw e;
       // A WSL project executes its own distro-local Codex, independently of
       // the green Windows Accounts binary. New subscription models can reject
@@ -2452,6 +2461,19 @@ export async function streamChatCompletion(
   // `effectiveText` carries the original prompt + transcript blocks
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
+  // CLI subscription paths take text-only stdin. Claude gets images via the
+  // file-reference path (appendCliImageFiles) and Codex via `-i`, so no
+  // warning there. Kimi/Gemini/OpenAI CLIs don't yet — surface the drop as a
+  // visible note instead of letting the model "not see" the attachment.
+  if (forceSub && images.length > 0 && onSystemWarning &&
+      (provider === "moonshot" || provider === "gemini")) {
+    const providerName = provider === "moonshot" ? "Kimi" : "Gemini";
+    const apiKey = provider === "moonshot" ? "MOONSHOT_API_KEY" : "GEMINI_API_KEY";
+    onSystemWarning(
+      `⚠ ${images.length} image attachment${images.length === 1 ? "" : "s"} can't be sent via the ${providerName} CLI subscription path (stdin is text-only). ` +
+      `To send images, switch to the API row (set ${apiKey} on the Accounts page) or pick a local vision model.`
+    );
+  }
   const effectiveText = appendImageAttachmentNotes(
     await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
@@ -2671,7 +2693,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   let answeredWithoutTools = false;
   // Per-family sampling from the data-driven profile, with optional
   // caller overrides (ChatPage per-column controls).
-  const sampling = { ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) };
+  const sampling = sanitizeSampling({ ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) });
   // Where to send inference: the local managed server (default) or a remote
   // llama-server on another host (the Windows-GPU / Linux-agents split).
   // resolveInferenceBase() reads the persisted endpoint; local mode uses the
@@ -2753,18 +2775,23 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // meter before executing tools so tool latency and next-turn prompt prefill
   // never dilute the displayed generation rate.
   const meterStream = async (
-    run: (onDelta: StreamHandler, onThought: ThoughtHandler) => Promise<string>,
+    run: (
+      onDelta: StreamHandler,
+      onThought: ThoughtHandler,
+      onTiming: (toksPerSec: number) => void,
+    ) => Promise<string>,
   ): Promise<string> => {
     const genTick = makeGenMeter();
+    let exactToksPerSec: number | undefined;
     const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
     const countingThought: ThoughtHandler = (channel, role, delta) => {
       if (delta) genTick();
       emitThought?.(channel, role, delta);
     };
     try {
-      return await run(countingDelta, countingThought);
+      return await run(countingDelta, countingThought, (tps) => { exactToksPerSec = tps; });
     } finally {
-      genTick.stop();
+      genTick.stop(exactToksPerSec);
     }
   };
   const maybeYield = makeUiYield();
@@ -2867,8 +2894,8 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
     lastReply = await meterStream(
-      (countingDelta, countingThought) =>
-        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls),
+      (countingDelta, countingThought, onTiming) =>
+        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls, onTiming),
     );
     }
     // No tools available at all → single-shot, done.
@@ -2959,8 +2986,8 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         });
         if (fresp.ok) {
           const finalText = await meterStream(
-            (countingDelta, countingThought) =>
-              consumeOpenAISse(fresp, countingDelta, countingThought, []),
+            (countingDelta, countingThought, onTiming) =>
+              consumeOpenAISse(fresp, countingDelta, countingThought, [], onTiming),
           );
           if (finalText.trim()) lastReply = finalText;
         }
@@ -3118,6 +3145,10 @@ async function streamAnthropic(
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
   const imgList = images ?? [];
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
+
   // Picker encodes effort tier as ":high"/":xhigh"/etc on the model id.
   // Split it out so both paths (CLI sub --effort, API thinking budget)
   // receive the clean wire-name + a normalised effort label.
@@ -3158,54 +3189,74 @@ async function streamAnthropic(
     }
   };
   if (wantSub) {
-    const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+    const status = await invoke<ClaudeCliStatus>("accounts_status");
     if (!status?.claude_cli) {
-      throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+      throw new Error(claudeCliUnavailableMessage({
+        loggedIn: false,
+        installed: status?.claude_cli_installed === true,
+      }));
     }
     // Refresh the CLI token once per session so the first chat doesn't hit
     // the cold-start 401 (what "Test" on the Accounts page worked around).
-    await ensureCliWarm("claude_cli");
+    // Pass the cwd so a sandboxed project ALSO re-mirrors the refreshed creds
+    // into its WSL sandbox (the agentic-team 401 fix) — the in-distro CLI
+    // reads a copy, not the host token.
+    await ensureCliWarm("claude_cli", claudeCwd);
     // Stream when the consumer wants thought traffic (AgentsPage); fall
     // back to one-shot --print blob otherwise (the bridge runner that
-    // doesn't display a Thought tab).
+    // doesn't display a Thought tab). Every call rides withCliAuthRetry so a
+    // mid-run 401 (token expired) backs off + re-warms instead of failing the
+    // turn — the same funnel every other subscription CLI already uses.
     if (onThought) {
-      return await runWithSessionRetry((sid) => runClaudeCliStream({
-        systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-        autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort, sessionId: sid,
-        onDelta, onThought,
-      }));
+      return await withCliAuthRetry("claude_cli", signal, () =>
+        runWithSessionRetry((sid) => runClaudeCliStream({
+          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+          autoApprove: autoApprove ?? false, allowedTools,
+          model: cliModel, effort: claudeEffort, sessionId: sid,
+          cancelScope,
+          onDelta, onThought,
+        })), claudeCwd);
     }
-    const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-      systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-      autoApprove: autoApprove ?? false,
-      readOnly: isReadOnlyToolAllowlist(allowedTools),
-      model: cliModel, effort: claudeEffort, sessionId: sid,
-    }));
+    const reply = await withCliAuthRetry("claude_cli", signal, () =>
+      runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
+        systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+        autoApprove: autoApprove ?? false,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
+        model: cliModel, effort: claudeEffort, sessionId: sid,
+        cancelScope,
+        grantHome: grantHomeThisRun,
+      })), claudeCwd);
     if (reply) onDelta(reply);
     return reply;
   }
   const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
   if (!key) {
     if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+    let cliInstalled = false;
     try {
-      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+      const status = await invoke<ClaudeCliStatus>("accounts_status");
+      cliInstalled = status?.claude_cli_installed === true;
       if (status?.claude_cli) {
-        await ensureCliWarm("claude_cli");
+        await ensureCliWarm("claude_cli", claudeCwd);
         if (onThought) {
-          return await runWithSessionRetry((sid) => runClaudeCliStream({
-            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-            autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort, sessionId: sid,
-            onDelta, onThought,
-          }));
+          return await withCliAuthRetry("claude_cli", signal, () =>
+            runWithSessionRetry((sid) => runClaudeCliStream({
+              systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+              autoApprove: autoApprove ?? false, allowedTools,
+              model: cliModel, effort: claudeEffort, sessionId: sid,
+              cancelScope,
+              onDelta, onThought,
+            })), claudeCwd);
         }
-        const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-          autoApprove: autoApprove ?? false,
-          readOnly: isReadOnlyToolAllowlist(allowedTools),
-          model: cliModel, effort: claudeEffort, sessionId: sid,
-        }));
+        const reply = await withCliAuthRetry("claude_cli", signal, () =>
+          runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
+            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+            autoApprove: autoApprove ?? false,
+            readOnly: isReadOnlyToolAllowlist(allowedTools),
+            model: cliModel, effort: claudeEffort, sessionId: sid,
+            cancelScope,
+            grantHome: grantHomeThisRun,
+          })), claudeCwd);
         if (reply) onDelta(reply);
         return reply;
       }
@@ -3213,8 +3264,9 @@ async function streamAnthropic(
       console.error("claude_cli_complete failed", e);
     }
     throw new Error(
-      "No ANTHROPIC_API_KEY saved and Claude Code CLI not detected. " +
-      "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
+      "No ANTHROPIC_API_KEY saved. " +
+      claudeCliUnavailableMessage({ loggedIn: false, installed: cliInstalled }) +
+      " Or save a key on the Accounts page instead."
     );
   }
   const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {
@@ -3373,6 +3425,9 @@ async function streamOpenAI(
   /// side can detect the Browser role and wire the MCP browser gateway.
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
   // the Claude subscription routes through claude_cli_complete. Without
   // this the chat demanded OPENAI_API_KEY even when a Codex subscription
@@ -3411,6 +3466,7 @@ async function streamOpenAI(
         effort: codexEffort,
         allowedTools,
         readOnly: isReadOnlyToolAllowlist(allowedTools),
+        cancelScope,
         onDelta,
         onThought,
       }), codexCwd);
@@ -3422,6 +3478,7 @@ async function streamOpenAI(
       imagePaths: codexImagePaths,
       model: codexModel,
       effort: codexEffort,
+      cancelScope,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
@@ -3471,6 +3528,9 @@ async function streamMoonshot(
   images?: Attachment[],
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("kimi_cli", projectCwd);
     // Kimi --print mode has no native image flag, but it CAN read image files
@@ -3487,6 +3547,7 @@ async function streamMoonshot(
         cwd: kimiCwd ?? null,
         model: modelId,
         allowedTools,
+        cancelScope,
         onDelta,
         onThought: onThought ?? (() => {}),
       }),
@@ -3530,6 +3591,9 @@ async function streamXai(
   images?: Attachment[],
   allowedTools?: string[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("grok_cli", projectCwd);
     // grok -p has no image flag but reads files from its cwd — save pasted
@@ -3547,6 +3611,7 @@ async function streamXai(
         userMessage: prompt,
         cwd: grokCwd ?? null,
         model: modelId,
+        cancelScope,
       }),
       grokCwd,
     );
@@ -3612,6 +3677,9 @@ async function streamGemini(
   projectCwd?: string,
   history?: HistoryItem[],
 ): Promise<string> {
+  // Which run owns the CLI children spawned below, so a per-run Stop kills
+  // only its own processes (see setCliCancelScope).
+  const cancelScope = cliCancelScopeFor(signal);
   if (route.forceSub === true) {
     await ensureCliWarm("gemini_cli", projectCwd);
     // Bounded fold — see streamXai. Unbounded before, on a path that also folds
@@ -3623,6 +3691,7 @@ async function streamGemini(
         userMessage: prompt,
         cwd: projectCwd ?? null,
         model: modelId,
+        cancelScope,
       }),
       projectCwd,
     );
@@ -3763,6 +3832,9 @@ async function consumeOpenAISse(
   /// 3, Hermes) emit these instead of inline content; the caller routes
   /// them through canonicalizeNativeCalls → executeToolCall.
   toolCallsOut?: RawNativeCall[],
+  /// llama-server's final SSE chunk carries an authoritative measured speed.
+  /// Local callers retain it in the header; cloud callers omit this callback.
+  onTiming?: (toksPerSec: number) => void,
 ): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
@@ -3883,6 +3955,8 @@ async function consumeOpenAISse(
       if (!body || body === "[DONE]") continue;
       try {
         const j = JSON.parse(body);
+        const predictedPerSecond = timingTokensPerSecond(j);
+        if (predictedPerSecond !== undefined) onTiming?.(predictedPerSecond);
         // llama-server can emit an error mid-stream as
         // `data: {"error": {"message": "...", "type": "..."}}` (or
         // similar). The previous code only read `choices[0].delta`
@@ -4653,7 +4727,11 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   hooks.onPhase("dispatching");
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
   // Run ONE agent on `instruction`; returns {name, text} (or an error reply).
-  const runOneAgent = async (spec: AgentSpec, instruction: string): Promise<{ name: string; text: string }> => {
+  const runOneAgent = async (
+    spec: AgentSpec,
+    instruction: string,
+    runOptions?: { emitReply?: boolean; promptFor?: (skillBlock: string) => string },
+  ): Promise<{ name: string; text: string }> => {
     hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
@@ -4668,7 +4746,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       runtimeSkillIds(spec, legacySkills),
       !!spec.runtimePersonal,
     );
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
+    const specPrompt = runOptions?.promptFor?.(skillBlock)
+      ?? buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
     const specModel = effectiveModelFor(spec);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path
@@ -4715,16 +4794,16 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         const pub = await harvestPublishRequest(cleaned, projectCwd);
         if (pub) cleaned = `${cleaned}\n\n[host publish result]\n${pub.slice(-1600)}`;
       }
-      if (specMemKey) {
+      if (specMemKey && runOptions?.emitReply !== false) {
         await appendAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name, instruction, cleaned);
         await logScopedTeamWork(specMemKey, spec.name, instruction, cleaned);
       }
-      hooks.onAgentReply(spec.name, cleaned);
+      if (runOptions?.emitReply !== false) hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {
       const errMsg = `(error: ${String(e?.message ?? e)})`;
       hooks.onLogDelta(spec.name, "\n\n" + errMsg);
-      hooks.onAgentReply(spec.name, errMsg);
+      if (runOptions?.emitReply !== false) hooks.onAgentReply(spec.name, errMsg);
       return { name: spec.name, text: errMsg };
     } finally {
       hooks.onAgentEnd(spec.name);
@@ -4741,32 +4820,100 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // last cleanly); leaves (no non-orchestrator arrow) are the terminal results
   // the orchestrator integrates. A per-tree `ran` set (claimed synchronously
   // before each await) + MAX_CHAIN_HOPS dedupe fan-in and guarantee termination.
-  const runFrom = async (name: string, input: string, runCount: Map<string, number>): Promise<Array<{ name: string; text: string }>> => {
+  async function runFrom(
+    name: string,
+    input: string,
+    runCount: Map<string, number>,
+    lastOutput: Map<string, string>,
+  ): Promise<Array<{ name: string; text: string }>> {
     const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
     if (total >= MAX_CHAIN_HOPS) return [];                      // global backstop
     if ((runCount.get(name) ?? 0) >= MAX_AGENT_RERUNS) return []; // per-agent cap
     runCount.set(name, (runCount.get(name) ?? 0) + 1);
     const spec = team.agents.find(a => a.name === name);
     if (!spec) return [];
-    const out = await runOneAgent(spec, input);
+    const shouldRunAsLeader = runsAsSubLeader(
+      spec,
+      !!roleByName.get(spec.base)?.canDispatch,
+      orch?.name ?? "orchestrator",
+      wiredDispatchTargets(team, name)?.size ?? 0,
+    );
+    const out = shouldRunAsLeader
+      ? await runBridgeLeaderUnit(spec, input, runCount, lastOutput)
+      : await runOneAgent(spec, input);
+    const ranAsLeader = shouldRunAsLeader;
+    const cur = normalizeRunOutput(out.text);
+    const stopReason = handoffStopReason(lastOutput.get(name), cur, ranAsLeader);
+    lastOutput.set(name, cur);
+    if (stopReason === "no-progress") {
+      hooks.onThought(name, { role: "system", color: "#ffb74d",
+        text: `⚠ @${name} repeated its previous output — no progress; stopping this chain to avoid a loop.` });
+      return [out];
+    }
+    if (stopReason === "leader") return [out];
     // Agent-decided routing: the agent's reply picks where its output goes next
     // (explicit @target among its allowed edges), else legacy run-once auto-flow.
-    const { hands, capped } = nextHandoffs(team, name, out.text, runCount);
+    const { hands, capped, diagnostics } = nextHandoffs(team, name, out.text, runCount);
     const results: Array<{ name: string; text: string }> = [];
     if (hands.length > 0) {
       hooks.onThought(name, { role: "dispatch", color: "#a578ff",
         text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
-      for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount));
+      for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount, lastOutput));
     }
     if (capped.length > 0) {
-      // P2 supervision: exhausted loop → surface a digest the orchestrator integrates.
-      const notice = loopExhaustedNotice(name, capped, runCount);
-      hooks.onThought(name, { role: "dispatch", color: "#ffb45a", text: notice });
-      results.push({ name, text: notice });
+      hooks.onThought(name, { role: "dispatch", color: "#ffb45a",
+        text: loopExhaustedNotice(name, capped, runCount) });
     }
+    for (const diagnostic of diagnostics) {
+      hooks.onThought(name, { role: "system", color: "#ffb74d", text: diagnostic });
+    }
+    results.push(...handoffSupplementalResults(out, { capped, diagnostics }, runCount));
     return results.length ? results : [out];
-  };
-  const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Map<string, number>())));
+  }
+
+  async function runBridgeLeaderUnit(
+    leader: AgentSpec,
+    instruction: string,
+    runCount: Map<string, number>,
+    lastOutput: Map<string, string>,
+  ): Promise<{ name: string; text: string }> {
+    const members = wiredDispatchTargets(team, leader.name) ?? new Set<string>();
+    const promptFor = (skillBlock: string) => buildOrchestratorPrompt(
+      team, roleByName, leader, directives, false, undefined, projectCwd, skillBlock,
+    );
+    const plan = (await runOneAgent(leader, instruction, { emitReply: false, promptFor })).text;
+    const parsed = parseDispatchesDetailed(plan, team, leader.name);
+    const memberInstructions = new Map<string, string[]>();
+    for (const dispatch of parsed.dispatches) {
+      if (!members.has(dispatch.agentName)) continue;
+      const instructions = memberInstructions.get(dispatch.agentName) ?? [];
+      if (!instructions.includes(dispatch.instruction)) instructions.push(dispatch.instruction);
+      memberInstructions.set(dispatch.agentName, instructions);
+    }
+    const replies: Array<{ name: string; text: string }> = [];
+    for (const [member, instructions] of memberInstructions) {
+      replies.push(...await runFrom(member, instructions.join("\n\n"), runCount, lastOutput));
+    }
+    if (replies.length === 0) {
+      hooks.onAgentReply(leader.name, plan);
+      return { name: leader.name, text: plan };
+    }
+    const integrationInput = [
+      `Your sub-team handled this task:\n${instruction}`,
+      "",
+      "Their replies:",
+      ...replies.map((reply) => `\n— ${displayLabel(reply.name)} —\n${reply.text}`),
+      "",
+      "Consolidate this into ONE result to hand back to the orchestrator. Be concise; quote what matters.",
+    ].join("\n");
+    return runOneAgent(leader, integrationInput, { promptFor });
+  }
+  const settled = await Promise.allSettled(dispatches.map(d => runFrom(
+    d.agentName,
+    d.instruction,
+    new Map<string, number>(),
+    new Map<string, string>(),
+  )));
   const specialistReplies: Array<{ name: string; text: string }> = [];
   for (const r of settled) {
     if (r.status === "fulfilled" && r.value) specialistReplies.push(...r.value);

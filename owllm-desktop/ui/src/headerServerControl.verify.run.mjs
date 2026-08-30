@@ -1,8 +1,14 @@
-// Regression check for the live server/VRAM control on the right of the main
+// Regression check for the live server/VRAM readout on the right of the main
 // header. It was silently dropped by 3ff832b9 (a mac-overlay commit) even
 // though the user had asked only for the API-key line to go, and the guard
-// protecting it was inverted in the same commit. It must stay visible, stay
-// clickable into the Server modal, and stay sized for the 88px header.
+// protecting it was inverted in the same commit. It must stay visible and stay
+// sized for the 88px header.
+//
+// It must ALSO no longer be a link. The block used to open the Server modal on
+// click, which made a permanent corner of the chrome navigate away on any
+// stray click; the user asked for that link gone. Both halves are guarded
+// here, because the two failures look identical from a screenshot: the
+// readout vanishing, and the readout quietly becoming a button again.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +27,7 @@ for (const present of [
   'data-ui="SysInfoBlock"',
   'data-ui="HeaderServersLabel"',
   'data-ui="HeaderVramLabel"',
-  '<GenSpeedBadge variant="header" />',
+  '<GenSpeedBadge variant="header" active={server.running} />',
 ]) {
   check(shell.includes(present), `main header renders ${present}`);
 }
@@ -31,11 +37,16 @@ const sysEnd = shell.indexOf("\n    </div>\n  );", sysStart);
 check(sysStart !== -1 && sysEnd !== -1, "the header status block is a complete element");
 const sysInfo = shell.slice(sysStart, sysEnd);
 
-check(sysInfo.includes("onClick={onOpenServer}"),
-  "clicking the status block opens Server Control");
-check(shell.includes("<SysInfoBlock onOpenServer={onOpenServer} />")
-  && shell.includes("onOpenServer={() => setServerModalOpen(true)}"),
-  "the block is mounted in the header and wired to the Server modal");
+check(!/onClick=/.test(sysInfo),
+  "the status block is a readout, not a link into Server Control");
+check(!/cursor: "pointer"/.test(sysInfo),
+  "...and it does not advertise itself as clickable");
+check(shell.includes("<SysInfoBlock />"),
+  "the block is still mounted in the header");
+// The prop that carried the link is gone from the whole chain, so nothing can
+// re-attach it by simply restoring one onClick.
+check(!shell.includes("onOpenServer"),
+  "no onOpenServer prop is left threaded through the header");
 check(shell.includes('gridTemplateColumns: "auto 1fr auto auto"'),
   "the header grid keeps a dedicated column for the status block");
 
@@ -49,6 +60,8 @@ check(shell.includes('invoke<ServerStatusLite>("server_status")')
   && shell.includes('invoke<VramStatusLite>("vram_status")')
   && shell.includes("window.setInterval(tick, 2000)"),
   "server and VRAM values are polled live from the same commands ServerPage uses");
+check(shell.includes('<GenSpeedBadge variant="header" active={server.running} />'),
+  "the completed local speed clears when its model server stops");
 check(shell.includes("let dead = false") && shell.includes("window.clearInterval(id)"),
   "the poller is torn down on unmount");
 

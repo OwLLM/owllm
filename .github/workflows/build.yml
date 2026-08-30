@@ -63,6 +63,10 @@ jobs:
         working-directory: owllm-desktop
         run: npm ci
 
+      - name: Verify every regression harness in the repo
+        working-directory: owllm-desktop
+        run: npm run test:all
+
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop
         run: npm run build
@@ -210,6 +214,10 @@ jobs:
       - name: Install UI deps
         working-directory: owllm-desktop
         run: npm ci
+
+      - name: Verify every regression harness in the repo
+        working-directory: owllm-desktop
+        run: npm run test:all
 
       - name: Build the Vite UI (TypeScript → dist/)
         working-directory: owllm-desktop

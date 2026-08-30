@@ -71,17 +71,27 @@ pub struct VramGpu {
     pub index: u32,
     pub used_mib: u32,
     pub total_mib: u32,
+    /// The GPU shares system memory instead of owning dedicated VRAM.
+    #[serde(default)]
+    pub unified: bool,
+    /// `used_mib` is scoped to OwLLM's local model processes. Dedicated-GPU
+    /// drivers expose only whole-device usage, so this is false there.
+    #[serde(default)]
+    pub model_scoped: bool,
 }
 
-/// Tauri command: live VRAM usage via nvidia-smi (no console popup).
-/// Called every 2s by the header SysInfo block. Returns an empty GPU
-/// list when nvidia-smi is unavailable (non-NVIDIA / no driver) so
-/// the UI can degrade gracefully.
+/// Tauri command: live local-model memory usage. Dedicated NVIDIA GPUs use
+/// nvidia-smi. Apple Silicon has no separate VRAM counter, so it reports the
+/// resident working set of local llama-server processes against the same
+/// unified-memory budget used for model-fit decisions.
 #[tauri::command]
 pub async fn vram_status() -> Result<VramStatus, String> {
-    Ok(VramStatus {
-        gpus: vram_via_nvidia_smi().await.unwrap_or_default(),
-    })
+    let mut gpus = vram_via_nvidia_smi().await.unwrap_or_default();
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if gpus.is_empty() {
+        gpus = macos_unified_vram_status();
+    }
+    Ok(VramStatus { gpus })
 }
 
 /// nvidia-smi is identical on Windows and Linux; on macOS the binary is
@@ -107,26 +117,61 @@ async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
     // apply_unified_budgets: 75 % of system RAM as the pool, live used from
     // system memory, so the two views can't disagree.
     if parsed.is_empty() && stdout.contains("[N/A]") {
-        return Some(vec![unified_vram_from_ram()]);
+        return Some(vec![unified_vram_from_ram(None, false)]);
     }
     Some(parsed)
 }
 
-/// Live unified-memory reading for SoCs where nvidia-smi reports "[N/A]"
-/// (Jetson/Tegra): the GPU addresses system RAM, so used comes from live
-/// system memory and total is the same 75 % budget apply_unified_budgets
-/// assigns the GPU.
-fn unified_vram_from_ram() -> VramGpu {
+/// Unified-memory reading. `model_used_mib` is supplied on Apple Silicon,
+/// where sysinfo can measure each local llama-server's resident working set.
+/// Jetson/Tegra exposes no per-process GPU accounting, so its fallback remains
+/// whole-system unified-memory use and is explicitly marked non-model-scoped.
+fn unified_vram_from_ram(model_used_mib: Option<u32>, model_scoped: bool) -> VramGpu {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     const MIB: u64 = 1024 * 1024;
     let total_mib = ((sys.total_memory() as f64 * 0.75) / MIB as f64) as u32;
-    let used_mib = ((sys.used_memory() / MIB) as u32).min(total_mib);
+    let used_mib = model_used_mib
+        .unwrap_or_else(|| (sys.used_memory() / MIB) as u32)
+        .min(total_mib);
     VramGpu {
         index: 0,
         used_mib,
         total_mib,
+        unified: true,
+        model_scoped,
     }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn macos_unified_vram_status() -> Vec<VramGpu> {
+    vec![unified_vram_from_ram(
+        Some(local_model_resident_mib()),
+        true,
+    )]
+}
+
+/// Apple does not expose an NVIDIA-style per-process VRAM number because CPU
+/// and GPU use the same physical pages. The resident set is therefore the
+/// honest local-model working set: it includes the model's resident mmap pages,
+/// Metal buffers, KV cache, and the small llama-server runtime overhead.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn local_model_resident_mib() -> u32 {
+    use sysinfo::{ProcessesToUpdate, System};
+
+    const MIB: u64 = 1024 * 1024;
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let bytes = sys
+        .processes()
+        .values()
+        .filter(|process| is_llama_server_name(&process.name().to_string_lossy()))
+        .fold(0_u64, |total, process| total.saturating_add(process.memory()));
+    (bytes / MIB).min(u32::MAX as u64) as u32
+}
+
+fn is_llama_server_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("llama-server") || name.eq_ignore_ascii_case("llama-server.exe")
 }
 
 /// Max CUDA version the installed NVIDIA driver supports, parsed from the
@@ -182,6 +227,8 @@ fn parse_nvidia_smi(text: &str) -> Vec<VramGpu> {
                 index: i as u32,
                 used_mib: u.trim().parse().ok()?,
                 total_mib: t.trim().parse().ok()?,
+                unified: false,
+                model_scoped: false,
             })
         })
         .collect()
@@ -694,6 +741,31 @@ fn load_gpu_selection() -> Option<GpuSelection> {
     None
 }
 
+/// This machine's real name, asked of the OS — `None` when it names nothing,
+/// so each caller keeps its own fallback wording.
+///
+/// `COMPUTERNAME` is set only on Windows and `HOSTNAME` is a *shell* variable
+/// that a GUI-launched app never inherits, so every Linux/macOS install used
+/// to fall through to a hardcoded constant — which is why a whole fleet of
+/// them showed up in Remote Devices under one identical name. `sysinfo` (an
+/// existing dependency) asks the OS directly on all three platforms.
+pub fn machine_name() -> Option<String> {
+    let raw = sysinfo::System::host_name()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())?;
+    // `thor.local` / `thor.lan` read better as plain `thor`; a bare
+    // `localhost` distinguishes nothing, so let the caller's fallback win.
+    let name = raw
+        .trim()
+        .trim_end_matches(".local")
+        .trim_end_matches(".lan")
+        .trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// The GPU UUIDs the user selected in gpu_config.json (authoritative).
 /// Empty = no explicit selection → callers should leave the backend's
 /// default GPU behaviour untouched. Used by the model-server spawn to pin
@@ -846,6 +918,22 @@ mod tests {
     #[test]
     fn parses_nvidia_smi_empty() {
         assert!(parse_nvidia_smi("").is_empty());
+    }
+
+    #[test]
+    fn unified_status_uses_model_working_set_when_available() {
+        let status = unified_vram_from_ram(Some(123), true);
+        assert_eq!(status.used_mib, 123);
+        assert!(status.total_mib >= status.used_mib);
+        assert!(status.unified);
+        assert!(status.model_scoped);
+    }
+
+    #[test]
+    fn identifies_local_model_server_processes() {
+        assert!(is_llama_server_name("llama-server"));
+        assert!(is_llama_server_name("LLAMA-SERVER.EXE"));
+        assert!(!is_llama_server_name("owllm-desktop"));
     }
 
     #[test]

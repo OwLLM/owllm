@@ -20,6 +20,10 @@ export type SandboxStatus = {
   confined: boolean;
   targets: string[];
   defaultTarget: string | null;
+  /** Why the engine is unavailable, when the reason is actionable (e.g. the
+   *  kernel blocks unprivileged user namespaces, cured once per machine by
+   *  Harden). Null when available or when it's simply not installed. */
+  detail?: string | null;
 };
 
 export type SandboxProject = {
@@ -35,7 +39,7 @@ export async function sandboxStatus(): Promise<SandboxStatus> {
   try {
     return await invoke<SandboxStatus>("sandbox_status");
   } catch {
-    return { available: false, kind: "none", strong: false, beta: false, confined: false, targets: [], defaultTarget: null };
+    return { available: false, kind: "none", strong: false, beta: false, confined: false, targets: [], defaultTarget: null, detail: null };
   }
 }
 

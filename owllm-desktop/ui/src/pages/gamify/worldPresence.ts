@@ -1,7 +1,9 @@
 export const WORLD_MAP_MODE_KEY = "owllm:world-map:mode";
-// Stable, opaque, device-local id so the same installation is one recorded node
-// across reconnects instead of inflating the recorded-users total every time it
-// comes online. Never synced (see vaultSync DENY_EXACT) — it identifies nothing.
+// Obsolete: a *random* per-webview-profile id. It was minted whenever the native
+// device identity was unavailable, so an installation whose localStorage moved
+// (a WebView profile hop) or whose identity failed to decrypt was recorded as a
+// brand-new World Map node on every single launch — one device became dozens.
+// The recorded id is now ONLY the device-derived token; this key is purged.
 export const WORLD_PRESENCE_NODE_ID_KEY = "owllm:world-map:node-id";
 export const WORLD_PRESENCE_RECONNECT_BASE_MS = 1_000;
 export const WORLD_PRESENCE_RECONNECT_MAX_MS = 30_000;
@@ -11,28 +13,6 @@ export const WORLD_PRESENCE_RECONNECT_MAX_MS = 30_000;
 export const DEFAULT_WORLD_PRESENCE_URL = "https://owllm-world-presence.mc-9fa.workers.dev";
 
 const LEGACY_WORLD_PRESENCE_TOKEN_KEY = "owllm:world-map:presence-token";
-
-function randomNodeId(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID().replace(/-/g, "");
-    }
-  } catch { /* fall through to a non-crypto id */ }
-  return `n${Math.abs(Math.floor(Math.random() * 1e15)).toString(36)}${Date.now().toString(36)}`;
-}
-
-/** Read the stable anonymous node id for this installation, creating it once. */
-export function readOrCreateNodeId(storage: PresenceStorage | undefined = availableStorage()): string {
-  try {
-    const existing = storage?.getItem(WORLD_PRESENCE_NODE_ID_KEY);
-    const sanitized = typeof existing === "string" ? existing.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64) : "";
-    if (sanitized) return sanitized;
-  } catch { /* storage unavailable */ }
-  const created = randomNodeId();
-  try { storage?.setItem(WORLD_PRESENCE_NODE_ID_KEY, created); }
-  catch { /* storage unavailable — id stays session-local */ }
-  return created;
-}
 
 const DEVICE_PRESENCE_DOMAIN = "owllm-world-presence-device-v1\0";
 
@@ -70,6 +50,8 @@ export type PublicPresenceNode = {
   id: string;
   region: string;
   os: PresenceOs;
+  /** OwLLM release this installation last connected with; "" for older clients. */
+  appVersion: string;
   latitude: number;
   longitude: number;
   firstSeen: string;
@@ -112,13 +94,24 @@ type SocketEvent = Event | MessageEvent<unknown>;
 
 type SocketLike = {
   close(code?: number, reason?: string): void;
+  send(data: string): void;
   addEventListener(type: SocketEventName, listener: (event: SocketEvent) => void): void;
+};
+
+/** A live connection: stop it, or write a frame back up the same socket. */
+export type PresenceSocketHandle = {
+  stop: () => void;
+  /** False when there is no open socket right now — the caller must retry. */
+  send: (value: unknown) => boolean;
 };
 
 type ConnectionOptions = {
   baseUrl?: string;
   nodeId?: string;
   os?: PresenceOs;
+  appVersion?: string;
+  /** Ask the service for an identity challenge so this socket can carry chat. */
+  chat?: boolean;
   socketFactory?: (url: string) => SocketLike;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
@@ -204,11 +197,18 @@ export function groupPresenceByCountry(nodes: PublicPresenceNode[]): CountryPres
   );
 }
 
+/** Release string reduced to the characters a version can legitimately contain. */
+export function normalizePresenceVersion(value: unknown): string {
+  return String(value ?? "").trim().replace(/[^0-9A-Za-z.+-]/g, "").slice(0, 24);
+}
+
 export function worldPresenceSocketUrl(
   role: PresenceSocketRole,
   baseUrl = worldPresenceEndpoint(),
   nodeId = "",
   os: PresenceOs | "" = "",
+  appVersion = "",
+  chat = false,
 ): string {
   const normalized = baseUrl.trim().replace(/\/$/, "");
   if (!normalized) return "";
@@ -221,6 +221,14 @@ export function worldPresenceSocketUrl(
     // Only presence sockets carry the stable anonymous id; viewers stay generic.
     if (role === "presence" && nodeId) url.searchParams.set("id", nodeId);
     if (role === "presence" && os) url.searchParams.set("os", os);
+    // Release string only — shown beside the anonymous dot so an install's
+    // version is visible without exposing anything device-identifying.
+    const version = role === "presence" ? normalizePresenceVersion(appVersion) : "";
+    if (version) url.searchParams.set("v", version);
+    // Only asked for when the user has turned chat on. Without it the service
+    // never issues a challenge, so no key is presented and presence stays as
+    // anonymous as it was before chat existed.
+    if (role === "presence" && nodeId && chat) url.searchParams.set("chat", "1");
     return url.toString();
   } catch {
     return "";
@@ -250,6 +258,7 @@ export function sanitizePresenceNodes(value: unknown): PublicPresenceNode[] {
       longitude,
       region: typeof row.region === "string" ? row.region.trim().slice(0, 80) : "",
       os: normalizePresenceOs(row.os),
+      appVersion: normalizePresenceVersion(row.appVersion ?? (row as { app_version?: unknown }).app_version),
       firstSeen: typeof row.firstSeen === "string" ? row.firstSeen : "",
       lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : "",
       // Missing `online` (e.g. an older upsert) is treated as online.
@@ -273,13 +282,14 @@ function reconnectDelay(attempt: number): number {
   return Math.min(WORLD_PRESENCE_RECONNECT_MAX_MS, WORLD_PRESENCE_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 5)));
 }
 
-function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): () => void {
-  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "", options.os ?? "");
-  if (!url) return () => {};
+function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): PresenceSocketHandle {
+  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "", options.os ?? "", options.appVersion ?? "", options.chat ?? false);
+  if (!url) return { stop: () => {}, send: () => false };
   const socketFactory = options.socketFactory ?? ((target) => new WebSocket(target));
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
   let socket: SocketLike | undefined;
+  let open = false;
   let timer: TimerHandle | undefined;
   let attempt = 0;
   let disposed = false;
@@ -311,6 +321,7 @@ function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionO
     next.addEventListener("open", () => {
       if (disposed || generation !== ownGeneration) return;
       attempt = 0;
+      open = true;
       options.onOpen?.();
     });
     next.addEventListener("message", (event) => {
@@ -324,19 +335,32 @@ function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionO
     next.addEventListener("close", () => {
       if (disposed || generation !== ownGeneration) return;
       socket = undefined;
+      open = false;
       options.onDisconnect?.("World presence connection closed");
       schedule();
     });
   };
 
   connect();
-  return () => {
-    disposed = true;
-    generation += 1;
-    cancelTimer();
-    try { socket?.close(1000, "disabled"); }
-    catch { /* already closed */ }
-    socket = undefined;
+  return {
+    stop: () => {
+      disposed = true;
+      generation += 1;
+      cancelTimer();
+      try { socket?.close(1000, "disabled"); }
+      catch { /* already closed */ }
+      socket = undefined;
+      open = false;
+    },
+    send: (value: unknown) => {
+      if (disposed || !socket || !open) return false;
+      try {
+        socket.send(typeof value === "string" ? value : JSON.stringify(value));
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -390,17 +414,46 @@ export function subscribeWorldPresence(options: PresenceSubscriptionOptions): ()
         emit(message.updatedAt);
       }
     },
-  });
+  }).stop;
 }
 
-type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage };
+/**
+ * Everything the presence socket needs in order to also carry chat. The keys
+ * stay in Rust: this side only asks for a signature over the relay's challenge.
+ */
+export type WorldChatHooks = {
+  /** Public halves of this device's identity, or null when chat is off. */
+  identity: () => Promise<{ publicKey: string; xPub: string } | null>;
+  /** Sign the relay's 64-hex challenge with the native device key. */
+  sign: (nonce: string) => Promise<string>;
+  /** Display name, picture, and whether strangers may send a first contact. */
+  profile: () => { nick: string; avatar: string; reachable: boolean };
+  /** Every chat and room frame the relay sends. */
+  onFrame: (frame: Record<string, unknown>) => void;
+  /** Called with a writer when authenticated, and with null when it drops. */
+  onTransport: (send: ((value: unknown) => boolean) | null) => void;
+  /** Surfaced so a failed handshake is visible instead of silently doing nothing. */
+  onError?: (error: string) => void;
+};
+
+type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage; chatHooks?: WorldChatHooks };
 
 /**
  * Maintain one anonymous presence socket for this installation.
  *
- * Presence is ALWAYS on: it shares only an opaque device-local id, a normalized
- * OS family, and a coarse server-derived region. Every install is counted on
- * the board; no opt-in flag gates this.
+ * Presence is ALWAYS on: it shares only an opaque device-derived id, a
+ * normalized OS family, the release string, and a coarse server-derived region.
+ * Every install is counted on the board; no opt-in flag gates this.
+ *
+ * There is no polling and no status heartbeat: opening the socket IS the
+ * sign-in event and closing it IS the sign-off event. `pagehide` closes it
+ * explicitly on quit so the map updates immediately instead of waiting for the
+ * transport to time out.
+ *
+ * `nodeId` is the device-derived token and NOTHING else. When it is missing the
+ * socket still connects, but without an id — the service then shows the dot
+ * while it is live and never writes a row, so a device that cannot identify
+ * itself can never accumulate one recorded node per launch.
  */
 export function installWorldPresenceConnection(options: PresenceRunnerOptions = {}): () => void {
   const storage = options.storage ?? availableStorage();
@@ -408,28 +461,98 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
   let stopSocket: (() => void) | undefined;
   let disposed = false;
 
-  // D1-era opaque tokens are obsolete and must never sync or affect identity.
-  try { storage?.removeItem(LEGACY_WORLD_PRESENCE_TOKEN_KEY); }
-  catch { /* storage unavailable */ }
+  // D1-era opaque tokens and the random per-profile node id are obsolete: both
+  // minted a fresh identity whenever local storage moved, which is what
+  // recorded one installation as many nodes. Purge them.
+  for (const key of [LEGACY_WORLD_PRESENCE_TOKEN_KEY, WORLD_PRESENCE_NODE_ID_KEY]) {
+    try { storage?.removeItem(key); }
+    catch { /* storage unavailable */ }
+  }
 
-  // Stable, device-local id so this installation is one recorded node forever
-  // instead of a new "user" on every reconnect.
-  const nodeId = options.nodeId ?? readOrCreateNodeId(storage);
+  const nodeId = options.nodeId ?? "";
   const os = options.os ?? currentPresenceOs();
+  const appVersion = normalizePresenceVersion(options.appVersion);
+  const chatHooks = options.chatHooks;
+  const chat = Boolean(chatHooks) && Boolean(nodeId);
+
+  /**
+   * Answer the relay's challenge. The signature is produced natively, so a
+   * webview without `crypto.subtle` still authenticates — and a device that
+   * cannot sign simply stays a plain anonymous dot instead of guessing.
+   */
+  const answerChallenge = async (nonce: string, send: (value: unknown) => boolean) => {
+    if (!chatHooks) return;
+    try {
+      const identity = await chatHooks.identity();
+      if (!identity) return;
+      const profile = chatHooks.profile();
+      send({
+        type: "chat_auth",
+        publicKey: identity.publicKey,
+        xPub: identity.xPub,
+        signature: await chatHooks.sign(nonce),
+        nick: profile.nick,
+        avatar: profile.avatar,
+        reachable: profile.reachable,
+      });
+    } catch (reason) {
+      chatHooks.onError?.(String(reason));
+    }
+  };
 
   const sync = () => {
     stopSocket?.();
     stopSocket = undefined;
-    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId, os)) return;
-    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId, os });
+    chatHooks?.onTransport(null);
+    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId, os, appVersion, chat)) return;
+    const handle = createReconnectingSocket("presence", {
+      ...options,
+      baseUrl,
+      nodeId,
+      os,
+      appVersion,
+      chat,
+      onDisconnect: (error) => {
+        chatHooks?.onTransport(null);
+        options.onDisconnect?.(error);
+      },
+      onMessage: (value) => {
+        options.onMessage?.(value);
+        if (!chatHooks || !value || typeof value !== "object") return;
+        const frame = value as Record<string, unknown>;
+        const type = typeof frame.type === "string" ? frame.type : "";
+        if (type === "chat_challenge" && typeof frame.nonce === "string") {
+          void answerChallenge(frame.nonce, handle.send);
+          return;
+        }
+        if (!type.startsWith("chat_") && !type.startsWith("room_")) return;
+        // The writer is handed over only once the relay has accepted the
+        // identity, so nothing can be sent on a socket that is not yet bound.
+        if (type === "chat_ready") chatHooks.onTransport(handle.send);
+        if (type === "chat_error") chatHooks.onError?.(String(frame.error ?? "chat error"));
+        chatHooks.onFrame(frame);
+      },
+    });
+    stopSocket = handle.stop;
   };
   const onOnline = () => sync();
+  const signOff = () => {
+    stopSocket?.();
+    stopSocket = undefined;
+    chatHooks?.onTransport(null);
+  };
 
-  if (typeof window !== "undefined") window.addEventListener("online", onOnline);
+  if (typeof window !== "undefined") {
+    window.addEventListener("online", onOnline);
+    window.addEventListener("pagehide", signOff);
+  }
   sync();
   return () => {
     disposed = true;
-    stopSocket?.();
-    if (typeof window !== "undefined") window.removeEventListener("online", onOnline);
+    signOff();
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("pagehide", signOff);
+    }
   };
 }

@@ -21,6 +21,29 @@ const APPLY_PARENT_ENV: &str = "OWLLM_LINUX_UPDATE_PARENT";
 #[cfg(target_os = "linux")]
 const FIRST_BOOT_ENV: &str = "OWLLM_LINUX_UPDATE_FIRST_BOOT";
 
+/// How long a pending-update marker may exist before an unflagged launch reads
+/// it as "the first boot of the new build failed" and rolls back.
+///
+/// Must be comfortably longer than swap + relaunch + WebView load on slow
+/// hardware, and comfortably shorter than a human noticing a crash loop and
+/// intervening. A supervisor restarting a genuinely broken build every few
+/// seconds crosses this threshold quickly and still gets the rollback.
+#[cfg(target_os = "linux")]
+const PENDING_MARKER_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// True when the marker has outlived [`PENDING_MARKER_GRACE`] — the first boot
+/// never confirmed, so the new build is presumed broken. An unreadable mtime
+/// counts as stale: that was the pre-grace behaviour (roll back on sight), and
+/// rolling back to a known-good build is the safe way to fail.
+#[cfg(target_os = "linux")]
+fn pending_marker_is_stale(pending: &Path) -> bool {
+    std::fs::metadata(pending)
+        .and_then(|m| m.modified())
+        .and_then(|t| t.elapsed().map_err(|e| std::io::Error::other(e)))
+        .map(|age| age > PENDING_MARKER_GRACE)
+        .unwrap_or(true)
+}
+
 #[cfg(target_os = "linux")]
 fn backup_path(target: &Path) -> PathBuf {
     target.with_file_name(format!(
@@ -223,11 +246,33 @@ pub fn handle_startup_mode() -> bool {
         if std::env::var_os(FIRST_BOOT_ENV).is_none() {
             if let Some(raw_target) = std::env::var_os("APPIMAGE") {
                 if let Ok(target) = validated_appimage_target(&raw_target) {
-                    if pending_path(&target).is_file() {
-                        if let Err(error) = rollback_incomplete_update(&target) {
-                            eprintln!("[owllm updater] automatic rollback failed: {error}");
+                    let pending = pending_path(&target);
+                    if pending.is_file() {
+                        // A marker alone is NOT proof the update failed. Any
+                        // supervisor that relaunches OwLLM (systemd unit,
+                        // session autostart, a user double-clicking during the
+                        // handoff) starts the swapped-in AppImage without
+                        // FIRST_BOOT_ENV seconds after the helper wrote the
+                        // marker — and the old rule rolled the update back on
+                        // the spot, every time. Downloaded, installed,
+                        // reverted, "update available" again: the exact
+                        // Linux-only loop reported on 2026-08-15.
+                        //
+                        // So judge by AGE, which converges either way. A fresh
+                        // marker means the first boot is happening right now —
+                        // possibly as THIS process — so boot normally and let
+                        // `confirm_successful_boot` clean up. A new build that
+                        // cannot boot keeps failing until the marker goes
+                        // stale, and then the rollback still runs.
+                        if pending_marker_is_stale(&pending) {
+                            if let Err(error) = rollback_incomplete_update(&target) {
+                                eprintln!("[owllm updater] automatic rollback failed: {error}");
+                            }
+                            return true;
                         }
-                        return true;
+                        eprintln!(
+                            "[owllm updater] fresh update marker: adopting this launch as the first boot"
+                        );
                     }
                 }
             }
@@ -356,12 +401,15 @@ pub async fn linux_appimage_update_install(
 }
 
 /// Remove the rollback copy only after the new Linux WebView has loaded.
+///
+/// Gated on the MARKER, not on `FIRST_BOOT_ENV`: a supervisor-relaunched
+/// instance adopted as the first boot (see `handle_startup_mode`) has no env
+/// var, but it is running the swapped-in build and its WebView loading is
+/// exactly the success the marker is waiting for. Leaving the marker there
+/// would let it go stale and trigger a rollback of a perfectly healthy update.
 pub fn confirm_successful_boot() {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os(FIRST_BOOT_ENV).is_none() {
-            return;
-        }
         let Some(raw_target) = std::env::var_os("APPIMAGE") else {
             return;
         };
@@ -369,6 +417,9 @@ pub fn confirm_successful_boot() {
             return;
         };
         let pending = pending_path(&target);
+        if !pending.is_file() {
+            return;
+        }
         if let Err(error) = std::fs::remove_file(&pending) {
             eprintln!(
                 "[owllm updater] could not remove recovery marker {}: {error}",
@@ -398,6 +449,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The Linux update-revert loop of 2026-08-15: a supervisor (systemd unit,
+    /// session autostart) relaunches the app seconds after the helper swaps the
+    /// AppImage and writes the marker. That relaunch has no FIRST_BOOT_ENV, and
+    /// treating its bare existence-check as "the update failed" rolled back
+    /// every single update on such machines. A fresh marker must read as "the
+    /// first boot is happening now", never as failure.
+    #[test]
+    fn a_fresh_marker_is_not_stale() {
+        let dir = fixture("fresh-marker");
+        let pending = dir.join("OwLLM.AppImage.update-pending");
+        std::fs::write(&pending, b"pending\n").unwrap();
+
+        assert!(!pending_marker_is_stale(&pending));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The counterpart that keeps crash recovery working: a marker nobody
+    /// confirmed within the grace window means the new build never managed to
+    /// boot, and rollback must still happen.
+    #[test]
+    fn a_marker_older_than_the_grace_window_is_stale() {
+        let dir = fixture("stale-marker");
+        let pending = dir.join("OwLLM.AppImage.update-pending");
+        let file = std::fs::File::create(&pending).unwrap();
+        let old = std::time::SystemTime::now() - (PENDING_MARKER_GRACE * 2);
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(file);
+
+        assert!(pending_marker_is_stale(&pending));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A marker whose age cannot be read must fail toward rollback — that is
+    /// the pre-grace behaviour, and restoring a known-good build is the safe
+    /// direction to be wrong in.
+    #[test]
+    fn an_unreadable_marker_counts_as_stale() {
+        let dir = fixture("gone-marker");
+        let pending = dir.join("OwLLM.AppImage.update-pending");
+        // Never created: metadata() fails.
+        assert!(pending_marker_is_stale(&pending));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

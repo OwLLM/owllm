@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "owllm-desktop"
-version = "1.0.6"
+version = "1.0.31"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4343,6 +4343,7 @@ dependencies = [
  "windows 0.61.3",
  "windows-sys 0.59.0",
  "x25519-dalek",
+ "zbus",
  "zip 0.6.6",
 ]
 

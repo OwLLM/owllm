@@ -39,7 +39,7 @@ check(sync.includes("if (!st?.connected) return") &&
       sync.includes("if (!st.cloned) st = await vaultEnsure()"),
   "a connected device ensures its vault clone before project sync");
 check(sync.indexOf("if (!st.cloned) st = await vaultEnsure()") <
-      sync.indexOf("if (await syncProjectsNow() && reloadOnce()) return"),
+      sync.indexOf("await syncProjectsNow()"),
   "vault recovery happens before projects are pulled");
 check(sync.includes("_started = false") &&
       sync.includes("[vaultSync] vault startup failed"),
@@ -83,6 +83,22 @@ fs.writeFileSync(
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText,
 );
+// The cache modules repaintAfterAdopt invalidates instead of reloading. All
+// dependency-free, so the REAL sources go in rather than stubs that could drift.
+const worldDir = path.join(temp, "pages", "world");
+fs.mkdirSync(worldDir, { recursive: true });
+for (const [dir, rel] of [
+  [githubDir, ["pages", "agentic", "modelProfiles.ts"]],
+  [githubDir, ["pages", "agentic", "cloudCatalogue.ts"]],
+  [worldDir, ["pages", "world", "worldState.ts"]],
+]) {
+  fs.writeFileSync(
+    path.join(dir, rel[rel.length - 1].replace(/\.ts$/, ".js")),
+    ts.transpileModule(read(path.join(SRC, ...rel)), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText,
+  );
+}
 // vaultSync reads/writes hot blobs (keys that deliberately never touch
 // localStorage). Back the stub with a real map and take the prefix list from
 // the REAL stateMirror source, so this stub cannot drift from the app.
@@ -100,6 +116,22 @@ fs.writeFileSync(
     "  writeHotBlob: (k, v) => { m.set(k, String(v)); },\n" +
     "  isHotBlobKey: (k) => P.some((p) => k.startsWith(p)),\n" +
     "};\n",
+);
+// The REAL step-merge module vaultSync now shares with the notebook page —
+// dependency-free, so it runs as-is rather than as a stub that could drift.
+fs.writeFileSync(
+  path.join(runtimeDir, "notebookMerge.js"),
+  ts.transpileModule(read(path.join(SRC, "runtime", "notebookMerge.ts")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText,
+);
+// The shared watcher fan-out helper — cloudCatalogue/worldState notify
+// through it, so the REAL (dependency-free) module goes in.
+fs.writeFileSync(
+  path.join(runtimeDir, "listenerBus.js"),
+  ts.transpileModule(read(path.join(SRC, "runtime", "listenerBus.ts")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText,
 );
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
 
@@ -121,7 +153,11 @@ globalThis.document = { addEventListener: () => {}, visibilityState: "visible" }
 globalThis.window = {
   addEventListener: () => {},
   dispatchEvent: () => {},
+  // Both timer families must be stubbed. wireListeners arms repeating syncs AND
+  // a self-rescheduling notebook pull; a real timer here re-arms forever and
+  // holds this process open instead of letting it exit.
   setInterval: () => 1,
+  setTimeout: () => 1,
 };
 const startupEvents = [];
 let ensureCalls = 0;

@@ -11,6 +11,8 @@
 // at a functional level (enabled / voice_id / rate, plus a stable
 // per-agent fallback when voice_id is empty).
 
+import { notifyListeners } from "../../runtime/listenerBus";
+
 export type VoiceConfig = {
   enabled: boolean;
   voiceURI: string;  // "" = Auto (deterministic per-agent pick)
@@ -41,9 +43,7 @@ if (typeof window !== "undefined" && "speechSynthesis" in window) {
   // first call and listVoices() would lie about availability.
   window.speechSynthesis.addEventListener("voiceschanged", () => {
     _refresh();
-    for (const cb of _listeners) {
-      try { cb(_cached!); } catch { /* listener errors don't kill TTS */ }
-    }
+    notifyListeners(_listeners, "voice", _cached!);
   });
 }
 

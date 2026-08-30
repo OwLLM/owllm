@@ -32,6 +32,7 @@ import {
 // github bindings so there's no parallel auth path.
 import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT } from "../pages/agentic/github";
 import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
+import { fetchAccounts, getCachedAccounts, subscribeAccounts } from "../pages/core/accountsStore";
 
 /** Open a URL in OwLLM's persistent browser so the session remains available to agents. */
 function openExternal(url: string) {
@@ -293,7 +294,10 @@ export default function WatcherDrawer({
   // AI chat (Slice 5): free-text questions answered by an auto-chosen model.
   const [draft, setDraft] = React.useState("");
   const [models, setModels] = React.useState<ModelInfo[]>([]);
-  const [accounts, setAccounts] = React.useState<AccountsStatusLite | null>(null);
+  // Informational only (drives the picker's enabled/dimmed entries). Seeded
+  // from the shared session cache so opening the drawer paints the badges in
+  // their final state instead of empty-then-filled.
+  const [accounts, setAccounts] = React.useState<AccountsStatusLite | null>(() => getCachedAccounts());
   const [server, setServer] = React.useState<ServerStatusT | null>(null);
   // Cloud use needs one explicit confirmation (the question + snapshot
   // leave the device). Holds the pending question while we wait.
@@ -386,9 +390,10 @@ export default function WatcherDrawer({
   React.useEffect(() => {
     if (!open) return;
     invoke<ModelInfo[]>("list_models").then((m) => setModels(Array.isArray(m) ? m : [])).catch(() => {});
-    invoke<AccountsStatusLite>("accounts_status").then(setAccounts).catch(() => {});
+    const unsubscribe = subscribeAccounts(() => setAccounts(getCachedAccounts()));
+    void fetchAccounts();
     invoke<ServerStatusT>("server_status").then(setServer).catch(() => {});
-    return () => { abortRef.current?.abort(); };
+    return () => { unsubscribe(); abortRef.current?.abort(); };
   }, [open]);
 
   /// Resolve which model answers. An EXPLICIT user pick (shared ModelPicker)
@@ -502,20 +507,40 @@ export default function WatcherDrawer({
         (userNote ? `**What the user reported:**\n\n${redactForReport(userNote)}\n\n` : "") +
         "_Captured view:_ " + redactForReport(entry.text).slice(0, 600) +
         "\n\n---\n<details><summary>diagnostics snapshot</summary>\n\n```json\n" + json + "\n```\n</details>";
-      const sent = await invoke<{ issueUrl: string; bundleUrl: string }>("support_send_report", {
+      const sent = await invoke<{ issueUrl: string; bundleUrl: string; public: boolean }>("support_send_report", {
         title, bodyMd: body, reportJson: json, pngBase64: pngFromEntry,
       });
-      say(`✅ Sent to the OwLLM team — they (and the AI fixer) can see it here:\n${sent.issueUrl}`);
+      if (sent.public) {
+        // The issue itself is encrypted, so a screenshot must NOT be dragged
+        // into it — that would publish in the clear the one thing the seal
+        // exists to protect. Keep it locally and say so.
+        const dir = pngFromEntry
+          ? await invoke<string>("support_export_report", {
+              reportJson: json, pngBase64: pngFromEntry,
+            }).catch(() => null)
+          : null;
+        say(
+          `✅ Sent to the OwLLM team, encrypted — only they can read it:\n${sent.issueUrl}\n\n` +
+          `The issue is public but its contents are sealed, so nothing about your machine is readable there.` +
+          (pngFromEntry
+            ? `\n\nYour screenshot was NOT uploaded (it can't be encrypted the same way). It stays on your PC here, in case the team asks for it:\n${dir ?? "(couldn't save it locally)"}`
+            : ""),
+        );
+      } else {
+        say(`✅ Sent to the OwLLM team — they (and the AI fixer) can see it here:\n${sent.issueUrl}`);
+      }
     } catch (e) {
-      // GitHub not connected / network → refresh the connection state (so the
-      // "Connect GitHub" step shows next time) and save locally so it isn't lost.
+      // Network / GitHub down / token revoked → refresh the connection state
+      // and save locally so the report isn't lost. NOT assumed to be "GitHub
+      // isn't connected": that guess sent users in circles when the real
+      // cause was the intake repo refusing their account.
       void githubStatus().then((s) => { setGhConnected(s.connected); setGhLogin(s.login); }).catch(() => setGhConnected(false));
       try {
         const dir = await invoke<string>("support_export_report", {
           reportJson: redactForReport(JSON.stringify({ userNote: userNote || null, reportedMessage }, null, 2)),
           pngBase64: pngFromEntry,
         });
-        say(`Couldn't send it directly (${e}).\n\nMost likely GitHub isn't connected — click "Report a bug" again and I'll walk you through connecting it (free, one-time). I saved a copy locally meanwhile:\n${dir}`);
+        say(`Couldn't send it: ${e}\n\nI saved the full report locally so nothing is lost — you can attach this folder to a message, or try Send again:\n${dir}`);
       } catch (e2) {
         say(`Couldn't send the report (${e}) and the local fallback also failed (${e2}).`);
       }
@@ -907,7 +932,16 @@ export default function WatcherDrawer({
                   </div>
                 )}
                 {ghConnected === true && ghLogin && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7ff0c5" }}><ActionIcon name="check" size={14} />GitHub connected as {ghLogin} — ready to send.</div>
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7ff0c5" }}><ActionIcon name="check" size={14} />GitHub connected as {ghLogin} — ready to send.</div>
+                    {/* Say where it lands BEFORE the click. Team members go to
+                        the private intake; everyone else's own token can only
+                        reach the public repo, so their report is filed there —
+                        encrypted, because that repo is public. */}
+                    <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
+                      Goes to the OwLLM team's private intake if your account is on the team — otherwise it's filed as an <b>encrypted public issue</b> on github.com/OwLLM/owllm: the text above is sealed so only the OwLLM team can read it, and your screenshot is never uploaded.
+                    </div>
+                  </>
                 )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <button

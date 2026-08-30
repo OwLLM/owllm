@@ -8,6 +8,7 @@
 // survive navigation; ModelsPage just subscribes via useSyncExternalStore and
 // re-reads the in-flight progress whenever it remounts.
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 export type DownloadProgress = {
   file: string;
@@ -17,6 +18,11 @@ export type DownloadProgress = {
   fileCount: number;
   done: boolean;
   error: string | null;
+  /** Files still owed when this row last changed — the failed one plus every
+   *  one after it. Kept so a failure is RETRYABLE: the banner used to print
+   *  "✗ <error>" and stop there, with no way back except re-opening the
+   *  quantization picker and guessing which files were already on disk. */
+  remaining?: string[];
 };
 
 type DownloadEvent =
@@ -45,7 +51,7 @@ const listeners = new Set<() => void>();
 
 function commit() {
   snapshot = { downloading, progress };
-  listeners.forEach((l) => l());
+  notifyListeners(listeners, "downloadStore");
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -107,6 +113,31 @@ export async function resumeInterrupted(): Promise<InterruptedDownload[]> {
   return [...byModel.values()].flat();
 }
 
+/// Drop a finished/failed row from the banner. Errors are deliberately NOT
+/// auto-cleared (the user must see them), so this is the only way a failed row
+/// leaves the screen — without it the banner was permanent.
+export function dismiss(modelId: string): void {
+  if (!progress.has(modelId)) return;
+  const next = new Map(progress);
+  next.delete(modelId);
+  progress = next;
+  commit();
+}
+
+/// Re-run a failed download from the file it died on, keeping the rest of the
+/// queue. hf_download skips files already complete on disk and resumes any
+/// `.partial` via HTTP Range, so this is safe to press repeatedly.
+export async function retry(modelId: string): Promise<void> {
+  const cur = progress.get(modelId);
+  const files = cur?.remaining && cur.remaining.length > 0
+    ? [...cur.remaining]
+    : cur?.file
+      ? [cur.file]
+      : [];
+  dismiss(modelId);
+  await startDownload(modelId, files);
+}
+
 /// Download one HF model (all `files`, or every file when empty). Idempotent
 /// per model id — a second call while one is in flight is a no-op. Progress
 /// streams into the store and survives page navigation.
@@ -124,11 +155,15 @@ export async function startDownload(modelId: string, files: string[]): Promise<v
     let failed: string | null = null;
     for (let i = 0; i < toFetch.length; i++) {
       const file = toFetch[i];
+      const remaining = toFetch.slice(i);
       const ch = new Channel<DownloadEvent>();
       ch.onmessage = (ev) => {
         const cur = progress.get(modelId);
-        const base: DownloadProgress = cur ?? {
-          file, received: 0, total: null, fileIndex: i, fileCount: toFetch.length, done: false, error: null,
+        const base: DownloadProgress = {
+          ...(cur ?? {
+            file, received: 0, total: null, fileIndex: i, fileCount: toFetch.length, done: false, error: null,
+          }),
+          remaining,
         };
         const next = new Map(progress);
         if (ev.kind === "started") {

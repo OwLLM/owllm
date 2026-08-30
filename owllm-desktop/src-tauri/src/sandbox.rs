@@ -29,16 +29,24 @@
 // filesystem view and drops the rest of $HOME, with a dedicated sandbox-home so
 // the agent CLIs' logins persist without exposing the real one.
 //
-// ⚠ BETA: the Linux (bwrap) and macOS (lima) command shapes are compile-checked
-// on their CI legs but have NOT yet been runtime-verified on real hardware. They
-// are surfaced to the user as "beta — not yet hardware-verified". The pure
-// helpers below ARE unit-tested (and compile on every OS leg).
+// ⚠ BETA: the macOS (lima) command shape is compile-checked on its CI leg but
+// has NOT yet been runtime-verified on real hardware. The Linux (bwrap) prefix
+// HAS now been run on real aarch64 Ubuntu 24.04 — the production argv shape
+// exits 0 and git works inside the jail — but only once the machine-wide
+// AppArmor profile exists (see BWRAP_APPARMOR_PROFILE); without it every spawn
+// dies at `setting up uid map`. Both engines are still surfaced to the user as
+// "beta". The pure helpers below ARE unit-tested (and compile on every OS leg).
 
 use serde::Serialize;
 
 /// Sub-directory of the sandbox user's home that holds isolated projects
 /// (~/owllm/<name>). Matches the WSL backend layout so the concept is uniform.
 pub const ISO_SUBDIR: &str = "owllm";
+
+/// Sub-directory of the user's home holding OWLLM-managed worktrees
+/// (~/.owllm/fleet/<project>/<page>/<agent>). Must track `fleet::fleet_root()`
+/// — every agent run gets a worktree there, so it is an isolation root too.
+pub const FLEET_SUBDIR: &str = ".owllm/fleet";
 
 /// Cross-platform sandbox availability, surfaced to the UI so it can show the
 /// right engine + honest strength/beta labelling on every OS.
@@ -62,6 +70,10 @@ pub struct SandboxStatus {
     pub targets: Vec<String>,
     /// Preferred target (default distro / instance).
     pub default_target: Option<String>,
+    /// Why the engine is unavailable, when we know something actionable (e.g.
+    /// bubblewrap installed but the kernel blocks unprivileged user namespaces).
+    /// None when available, or when the reason is just "not installed".
+    pub detail: Option<String>,
 }
 
 impl Default for SandboxStatus {
@@ -74,6 +86,7 @@ impl Default for SandboxStatus {
             confined: false,
             targets: Vec::new(),
             default_target: None,
+            detail: None,
         }
     }
 }
@@ -107,13 +120,56 @@ fn sanitize_name(name: &str) -> String {
 
 // ---- pure helpers (unit-tested; compiled on every OS) ---------------------
 
-/// True if `path` is inside `<home>/owllm` (the managed isolated-project root).
-/// Used on Linux/macOS where an isolated project is an ordinary host path under
-/// that root (unlike WSL, where the UNC prefix is the marker).
-pub fn is_under_iso_root(path: &str, home: &str) -> bool {
-    let root = format!("{}/{}", home.trim_end_matches('/'), ISO_SUBDIR);
+/// True if `path` is `root` itself or sits underneath it. Segment-aware, so
+/// `/home/me/owllmx` does NOT match the root `/home/me/owllm`.
+fn is_under(path: &str, root: &str) -> bool {
+    let root = root.trim_end_matches('/');
     let p = path.trim_end_matches('/');
     p == root || p.starts_with(&format!("{root}/"))
+}
+
+/// True if `path` is inside EITHER OWLLM-managed root on Linux/macOS:
+///   `<home>/owllm`        — isolated project copies (ISO_SUBDIR)
+///   `<home>/.owllm/fleet` — per-page/per-agent worktrees (FLEET_SUBDIR)
+/// Used where an isolated project is an ordinary host path under one of those
+/// roots (unlike WSL, where the UNC prefix is the marker).
+///
+/// The fleet arm is load-bearing: every agent run is handed a worktree under
+/// FLEET_SUBDIR, so matching only ISO_SUBDIR meant that cutting a worktree
+/// moved the run OUT of the isolation root and silently onto the bare host
+/// while the UI still reported "isolated". Confirmed on real aarch64 Linux —
+/// `~/.owllm/fleet/…` was rejected while `~/owllm/…` was accepted.
+pub fn is_under_iso_root(path: &str, home: &str) -> bool {
+    let home = home.trim_end_matches('/');
+    is_under(path, &format!("{home}/{ISO_SUBDIR}"))
+        || is_under(path, &format!("{home}/{FLEET_SUBDIR}"))
+}
+
+/// Given the contents of a worktree's `.git` FILE
+/// (`gitdir: /path/to/repo/.git/worktrees/<name>`), the main repository's git
+/// directory — the parent of `worktrees/<name>`. That single path covers BOTH
+/// the worktree's own metadata and the shared object store, so binding it is
+/// enough to make git work inside the jail.
+///
+/// A worktree's `.git` lives OUTSIDE the worktree, so a jail that binds only
+/// the project directory leaves it invisible and every `git` call inside fails.
+/// Returns None for a normal checkout, where `.git` is a directory already
+/// inside the project bind, and for anything that isn't a gitdir pointer.
+pub fn worktree_git_common_dir(dot_git_file: &str) -> Option<String> {
+    let raw = dot_git_file
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))?
+        .trim()
+        .replace('\\', "/");
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    // `<git-dir>/worktrees/<name>` → `<git-dir>`; any other pointer as-is.
+    Some(match trimmed.rfind("/worktrees/") {
+        Some(i) => trimmed[..i].to_string(),
+        None => trimmed.to_string(),
+    })
 }
 
 /// The bubblewrap argv PREFIX (everything before the trailing `bash -lc …`):
@@ -121,7 +177,17 @@ pub fn is_under_iso_root(path: &str, home: &str) -> bool {
 /// bound as $HOME (so CLI logins persist but the real home is invisible), the
 /// project bound read-write and made cwd, and namespaces unshared. `allow_net`
 /// keeps networking (needed for git + cloud CLIs); false fully isolates the net.
-pub fn bwrap_prefix_argv(project_dir: &str, sandbox_home: &str, allow_net: bool) -> Vec<String> {
+///
+/// `extra_rw` are additional paths bound read-write — used for the main repo's
+/// git directory when the project is a worktree (see `worktree_git_common_dir`),
+/// without which git is broken inside the jail. Bound with `--bind-try` so a
+/// path that has since vanished degrades instead of killing the run.
+pub fn bwrap_prefix_argv(
+    project_dir: &str,
+    sandbox_home: &str,
+    allow_net: bool,
+    extra_rw: &[String],
+) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut ro = |p: &str| {
         // --ro-bind-try tolerates paths that don't exist on a given distro.
@@ -151,6 +217,12 @@ pub fn bwrap_prefix_argv(project_dir: &str, sandbox_home: &str, allow_net: bool)
     a.push("--bind".into());
     a.push(project_dir.into());
     a.push(project_dir.into());
+    // Anything the project needs from outside its own tree (worktree gitdir).
+    for p in extra_rw {
+        a.push("--bind-try".into());
+        a.push(p.into());
+        a.push(p.into());
+    }
     a.push("--chdir".into());
     a.push(project_dir.into());
     // Isolate namespaces; drop into a fresh session. (User namespace remaps to
@@ -242,6 +314,16 @@ if [ -n "$RT" ] && [ "$RT" != "/etc/resolv.conf" ]; then
   } > "$SBR" 2>/dev/null
   [ -s "$SBR" ] && RESOLV_BIND=(--ro-bind-try "$SBR" "$RT")
 fi
+# A fleet worktree's .git is a POINTER FILE (`gitdir: <repo>/.git/worktrees/<n>`)
+# to metadata + the object store, both of which live OUTSIDE the worktree. Bind
+# that git dir too or every git call inside the jail fails with "not a git
+# repository". Mirrors sandbox::worktree_git_common_dir — keep the two in step.
+GIT_BIND=()
+if [ -f "$CWD/.git" ]; then
+  GD="$(sed -n 's/^[[:space:]]*gitdir:[[:space:]]*//p' "$CWD/.git" | head -n1)"
+  GD="${GD%/}"; GD="${GD%/worktrees/*}"
+  [ -n "$GD" ] && [ -d "$GD" ] && GIT_BIND=(--bind-try "$GD" "$GD")
+fi
 exec bwrap \
   --ro-bind-try /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
   --ro-bind-try /lib /lib --ro-bind-try /lib32 /lib32 --ro-bind-try /lib64 /lib64 \
@@ -258,7 +340,7 @@ exec bwrap \
   --bind-try "$HOME/.git-credentials" "$SB/.git-credentials" \
   --bind-try "$HOME/.config/gh" "$SB/.config/gh" \
   --bind-try "$HOME/.owllm/agent_env.sh" "$SB/.owllm/agent_env.sh" \
-  --bind "$CWD" "$CWD" --chdir "$CWD" \
+  --bind "$CWD" "$CWD" "${GIT_BIND[@]}" --chdir "$CWD" \
   --unshare-user-try --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
   --die-with-parent --new-session \
   bash -lc '[ -f "$HOME/.owllm/agent_env.sh" ] && . "$HOME/.owllm/agent_env.sh" 2>/dev/null; '"$CMD"
@@ -364,27 +446,34 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 }
 
 // ---- per-project "full host access" (explicit opt-out of the sandbox) -------
-// A project the user has deliberately marked TRUSTED runs OUTSIDE the bwrap
-// jail: plain WSL routing, so the agent can reach the Windows drives (/mnt/c),
-// invoke Windows tools via interop (powershell.exe), and read beyond the project
-// folder — "more power" when the user knowingly wants it (bug #19). OFF by
-// default; the UI gates the ON path behind an explicit confirmation. Keyed by
-// the project cwd (the same value the CLIs run with) so the decision lives in
-// ONE place — program_argv/shell_argv — without threading a flag through every
-// agent-CLI call. This is the "always allow everything, unsandboxed" end of the
+// A project the user has deliberately marked TRUSTED runs OUTSIDE the jail —
+// plain WSL routing on Windows, no bwrap/Lima wrapper on Linux/macOS — so the
+// agent can read and write beyond the project folder and reach host tools:
+// "more power" when the user knowingly wants it (bug #19). OFF by default; the
+// UI gates the ON path behind an explicit confirmation. Keyed by the project
+// cwd (the same value the CLIs run with) so the decision lives in ONE place —
+// program_argv/shell_argv — without threading a flag through every agent-CLI
+// call. This is the "always allow everything, unsandboxed" end of the
 // graduated-trust scale; per-action approval is a planned follow-up.
-#[cfg(windows)]
+//
+// Cross-platform since the isolation audit: it used to be Windows-only, which
+// left Linux/macOS users with no way to opt out of a sandbox they could not
+// turn off, contradicting the graduated-trust promise in FEATURES.md.
 fn full_access_path() -> Option<std::path::PathBuf> {
     // Shared resolver — honors portable mode (USB-portable Block 1).
     Some(crate::paths::owllm_config_home()?.join("full-access.json"))
 }
-#[cfg(windows)]
+/// Normalise a cwd into a stable set key. Case is folded on Windows only —
+/// Linux/macOS agent paths are case-sensitive, so folding there could match a
+/// DIFFERENT directory and hand it full access.
 fn norm_cwd(cwd: &str) -> String {
-    cwd.trim()
-        .trim_end_matches(|c| c == '/' || c == '\\')
-        .to_lowercase()
+    let t = cwd.trim().trim_end_matches(|c| c == '/' || c == '\\');
+    if cfg!(windows) {
+        t.to_lowercase()
+    } else {
+        t.to_string()
+    }
 }
-#[cfg(windows)]
 fn full_access_set() -> std::collections::BTreeSet<String> {
     full_access_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -393,8 +482,7 @@ fn full_access_set() -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 /// True when the user has marked this project's folder full-access (trusted):
-/// agents run OUTSIDE the bwrap jail. Checked in program_argv/shell_argv.
-#[cfg(windows)]
+/// agents run OUTSIDE the jail. Checked in program_argv/shell_argv.
 pub fn is_full_access(cwd: Option<&str>) -> bool {
     matches!(cwd, Some(c) if !c.trim().is_empty() && full_access_set().contains(&norm_cwd(c)))
 }
@@ -418,16 +506,10 @@ pub fn is_bwrap_jailed(_cwd: Option<&str>) -> bool {
     false
 }
 
-#[cfg(windows)]
 fn full_access_get_impl(cwd: String) -> bool {
     is_full_access(Some(&cwd))
 }
-#[cfg(not(windows))]
-fn full_access_get_impl(_cwd: String) -> bool {
-    false
-}
 
-#[cfg(windows)]
 fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
     let p = full_access_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
@@ -446,10 +528,6 @@ fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
     )
     .map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(())
-}
-#[cfg(not(windows))]
-fn full_access_set_impl(_cwd: String, _enabled: bool) -> Result<(), String> {
-    Err("full host access is a WSL (Windows) feature today".into())
 }
 
 // ---- image inbox: let a subscription/CLI agent SEE pasted images -----------
@@ -666,6 +744,32 @@ pub fn agent_full_access_set(cwd: String, enabled: bool) -> Result<(), String> {
     full_access_set_impl(cwd, enabled)
 }
 
+/// Argv that aborts the run at once because the distro has no outbound
+/// network. Returned INSTEAD of the CLI so a wedged WSL network costs seconds
+/// and names itself, rather than leaving the CLI blocked in `connect()` until
+/// the run times out with no output. See [`crate::wsl::NET_DOWN_MARKER`].
+#[cfg(windows)]
+fn net_down_argv(distro: String) -> (String, Vec<String>) {
+    let msg = format!(
+        "{}: the WSL sandbox cannot reach the network — outbound connections \
+from inside the distro time out, so the agent CLI would hang instead of \
+answering. This is a Windows-side WSL networking failure, not the model, your \
+login, or this project.",
+        crate::wsl::NET_DOWN_MARKER
+    );
+    (
+        "wsl.exe".to_string(),
+        vec![
+            "-d".into(),
+            distro,
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            format!("printf '%s\\n' {} >&2; exit 78", crate::wsl::sh_quote(&msg)),
+        ],
+    )
+}
+
 #[cfg(windows)]
 pub fn program_argv(
     cwd: Option<&str>,
@@ -673,6 +777,12 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    // Preflight the sandbox's outbound network before handing over to the CLI.
+    // Runs on the program_argv path only, which never applies --unshare-net, so
+    // a deliberately offline run can't be mistaken for a broken one.
+    if !crate::wsl::sandbox_net_ok(&distro) {
+        return Some(net_down_argv(distro));
+    }
     // A full-access (trusted) project opts OUT of the bwrap jail entirely — plain
     // WSL routing below, which can reach the Windows drives + interop. Otherwise
     // confine to the project folder when bubblewrap is available.
@@ -717,6 +827,9 @@ pub fn program_argv_unjailed(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    if !crate::wsl::sandbox_net_ok(&distro) {
+        return Some(net_down_argv(distro));
+    }
     let script = format!(
         "cd {} && {}",
         crate::wsl::sh_quote(&linux_cwd),
@@ -871,16 +984,57 @@ pub fn cleanup_deleted_project(location: &str) {
     }
 }
 
-// ---- Linux: bubblewrap ----------------------------------------------------
+// ---- engine liveness (Linux/macOS) ----------------------------------------
+//
+// `<engine> --version` is NOT evidence that the engine can isolate anything. It
+// answers "is the binary here?", and both engines fail LATER for reasons a
+// version print cannot see — so the app reported "isolated" while every run was
+// unsandboxed. We spawn a real, throwaway jail instead, and cache the verdict.
 
-#[cfg(target_os = "linux")]
-fn engine_available(exe: &str) -> bool {
-    std::process::Command::new(exe)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// How long an engine verdict is trusted before re-probing. Short enough that a
+/// user who installs the AppArmor profile (or bubblewrap, or the Lima instance)
+/// mid-session is picked up without a restart; long enough that the probe never
+/// runs in the hot path of a busy agent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::type_complexity)]
+fn probe_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
+
+/// Run `probe` at most once per PROBE_TTL per `key`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cached_probe(key: &str, probe: impl FnOnce() -> bool) -> bool {
+    if let Ok(c) = probe_cache().lock() {
+        if let Some((at, v)) = c.get(key) {
+            if at.elapsed() < PROBE_TTL {
+                return *v;
+            }
+        }
+    }
+    let v = probe();
+    if let Ok(mut c) = probe_cache().lock() {
+        c.insert(key.to_string(), (std::time::Instant::now(), v));
+    }
+    v
+}
+
+/// Drop cached verdicts so the next call re-probes immediately — called after
+/// we install bubblewrap or the AppArmor profile.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn invalidate_probe_cache() {
+    if let Ok(mut c) = probe_cache().lock() {
+        c.clear();
+    }
+}
+
+// ---- Linux: bubblewrap ----------------------------------------------------
 
 #[cfg(target_os = "linux")]
 fn sandbox_home() -> Option<String> {
@@ -890,10 +1044,51 @@ fn sandbox_home() -> Option<String> {
     Some(sb)
 }
 
+/// True when bubblewrap is not merely INSTALLED but can actually build a jail.
+///
+/// On Ubuntu 24.04+ (`kernel.apparmor_restrict_unprivileged_userns=1`) an
+/// unprofiled, non-setuid `bwrap` prints its version happily and then dies with
+/// `setting up uid map: Permission denied` on every real run. Measured on
+/// aarch64 Ubuntu 24.04 with identical argv: exit 0 with an AppArmor `userns`
+/// profile attached, exit 1 without, while `--version` returned 0 in both.
+/// So the probe spawns the SAME prefix production uses, over a throwaway dir.
+#[cfg(target_os = "linux")]
+fn bwrap_runnable() -> bool {
+    cached_probe("bwrap", || {
+        let Some(sb) = sandbox_home() else {
+            return false;
+        };
+        let probe_dir = format!("{sb}/.probe");
+        if std::fs::create_dir_all(&probe_dir).is_err() {
+            return false;
+        }
+        let mut argv = bwrap_prefix_argv(&probe_dir, &sb, true, &[]);
+        argv.push("/bin/true".into());
+        std::process::Command::new("bwrap")
+            .args(&argv)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// True when the kernel is blocking unprivileged user namespaces — the reason a
+/// present `bwrap` still can't run. Drives the actionable remedy in `harden`.
+#[cfg(target_os = "linux")]
+fn userns_restricted() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     let p = cwd?;
-    if !crate::wsl::wsl_isolation_get().enabled {
+    if !crate::wsl::wsl_isolation_get_blocking().enabled {
+        return None;
+    }
+    // Explicit per-project trust — the user opted this folder OUT of the jail.
+    if is_full_access(Some(p)) {
         return None;
     }
     let home = std::env::var("HOME").ok()?;
@@ -904,9 +1099,24 @@ fn isolated_dir(cwd: Option<&str>) -> Option<String> {
     }
 }
 
+/// Paths outside the project that must still be bound into the jail: the main
+/// repository's git dir when the project is an OWLLM fleet worktree.
+#[cfg(target_os = "linux")]
+fn extra_binds_for(project_dir: &str) -> Vec<String> {
+    let dot_git = std::path::Path::new(project_dir).join(".git");
+    if !dot_git.is_file() {
+        return Vec::new(); // ordinary checkout — .git is inside the project bind
+    }
+    std::fs::read_to_string(&dot_git)
+        .ok()
+        .and_then(|s| worktree_git_common_dir(&s))
+        .into_iter()
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 pub fn is_isolated(cwd: Option<&str>) -> bool {
-    isolated_dir(cwd).is_some() && engine_available("bwrap")
+    isolated_dir(cwd).is_some() && bwrap_runnable()
 }
 
 #[cfg(target_os = "linux")]
@@ -916,11 +1126,11 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("bwrap") {
+    if !bwrap_runnable() {
         return None;
     }
     let sb = sandbox_home()?;
-    let mut v = bwrap_prefix_argv(&dir, &sb, true);
+    let mut v = bwrap_prefix_argv(&dir, &sb, true, &extra_binds_for(&dir));
     v.push("bash".into());
     v.push("-lc".into());
     v.push(exec_script(program, args));
@@ -930,11 +1140,11 @@ pub fn program_argv(
 #[cfg(target_os = "linux")]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("bwrap") {
+    if !bwrap_runnable() {
         return None;
     }
     let sb = sandbox_home()?;
-    let mut v = bwrap_prefix_argv(&dir, &sb, true);
+    let mut v = bwrap_prefix_argv(&dir, &sb, true, &extra_binds_for(&dir));
     v.push("bash".into());
     v.push("-lc".into());
     v.push(command.to_string());
@@ -946,18 +1156,28 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
 #[cfg(target_os = "macos")]
 const LIMA_INSTANCE: &str = "owllm";
 
+/// True when the Lima VM can actually run a command — not merely that
+/// `limactl` is installed. `limactl --version` succeeds even when the `owllm`
+/// instance was never created or is stopped, in which case every isolated run
+/// fails; same false-positive class as bubblewrap's version check on Linux.
+///
+/// NOT yet runtime-verified: no Mac in reach has Lima installed, so this shape
+/// is reasoned from `limactl shell` semantics, unlike the Linux probe which was
+/// measured. It is strictly stricter than the check it replaces.
 #[cfg(target_os = "macos")]
-fn engine_available(exe: &str) -> bool {
-    std::process::Command::new(exe)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn lima_runnable() -> bool {
+    cached_probe("lima", || {
+        std::process::Command::new("limactl")
+            .args(["shell", LIMA_INSTANCE, "true"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(target_os = "macos")]
 pub fn is_isolated(cwd: Option<&str>) -> bool {
-    isolated_dir(cwd).is_some() && engine_available("limactl")
+    isolated_dir(cwd).is_some() && lima_runnable()
 }
 
 #[cfg(target_os = "macos")]
@@ -967,7 +1187,7 @@ pub fn program_argv(
     args: &[String],
 ) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("limactl") {
+    if !lima_runnable() {
         return None;
     }
     Some((
@@ -979,7 +1199,7 @@ pub fn program_argv(
 #[cfg(target_os = "macos")]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
-    if !engine_available("limactl") {
+    if !lima_runnable() {
         return None;
     }
     let bash_args = vec!["-lc".to_string(), command.to_string()];
@@ -1012,7 +1232,7 @@ pub fn shell_argv(_cwd: Option<&str>, _command: &str) -> Option<(String, Vec<Str
 
 #[cfg(windows)]
 fn status_impl() -> SandboxStatus {
-    let w = crate::wsl::wsl_status();
+    let w = crate::wsl::wsl_status_blocking();
     // Report the distro the sandbox will actually use (best_linux_distro —
     // never docker-desktop); fall back to the raw default for display when
     // only system distros exist.
@@ -1037,12 +1257,25 @@ fn status_impl() -> SandboxStatus {
         confined,
         targets: w.distros,
         default_target,
+        detail: None,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn status_impl() -> SandboxStatus {
-    let ok = engine_available("bwrap");
+    let ok = bwrap_runnable();
+    // Distinguish "not installed" from "installed but the kernel won't let it
+    // build a namespace" — the second is invisible to a version check and is
+    // what made the app claim isolation it did not have.
+    let detail = if ok {
+        None
+    } else if !which("bwrap") {
+        Some("bubblewrap is not installed — use Harden to install it.".into())
+    } else if userns_restricted() {
+        Some(BWRAP_USERNS_HELP.into())
+    } else {
+        Some("bubblewrap is installed but could not create a sandbox.".into())
+    };
     SandboxStatus {
         available: ok,
         kind: if ok {
@@ -1055,12 +1288,22 @@ fn status_impl() -> SandboxStatus {
         confined: ok, // bubblewrap IS the folder-confinement on Linux
         targets: Vec::new(),
         default_target: None,
+        detail,
     }
 }
 
 #[cfg(target_os = "macos")]
 fn status_impl() -> SandboxStatus {
-    let ok = engine_available("limactl");
+    let ok = lima_runnable();
+    let detail = if ok {
+        None
+    } else if which("limactl") {
+        Some(format!(
+            "Lima is installed but the `{LIMA_INSTANCE}` VM isn't running — start it with `limactl start --name {LIMA_INSTANCE}`."
+        ))
+    } else {
+        Some(MAC_PROVISION_HELP.into())
+    };
     SandboxStatus {
         available: ok,
         kind: if ok { "lima".into() } else { "none".into() },
@@ -1069,6 +1312,7 @@ fn status_impl() -> SandboxStatus {
         confined: ok, // Lima is a VM — confinement comes with availability
         targets: Vec::new(),
         default_target: None,
+        detail,
     }
 }
 
@@ -1105,11 +1349,30 @@ fn harden_impl(distro: Option<String>) -> Result<SandboxStatus, String> {
 
 #[cfg(target_os = "linux")]
 fn harden_impl(_distro: Option<String>) -> Result<SandboxStatus, String> {
-    if engine_available("bwrap") {
+    if bwrap_runnable() {
         return Ok(status_impl());
     }
-    linux_provision()?;
-    Ok(status_impl())
+    if !which("bwrap") {
+        linux_provision()?;
+        invalidate_probe_cache();
+        if bwrap_runnable() {
+            return Ok(status_impl());
+        }
+    }
+    // Installed but still can't build a namespace: on Ubuntu 24.04+ that is the
+    // unprivileged-userns restriction, cured ONCE PER MACHINE by giving bwrap
+    // an AppArmor profile (see linux_install_userns_profile).
+    if userns_restricted() {
+        linux_install_userns_profile()?;
+        invalidate_probe_cache();
+    }
+    let st = status_impl();
+    if !st.available {
+        return Err(st
+            .detail
+            .unwrap_or_else(|| "bubblewrap could not create a sandbox.".into()));
+    }
+    Ok(st)
 }
 
 #[cfg(target_os = "macos")]
@@ -1152,6 +1415,10 @@ pub struct SandboxDisk {
     pub cache_bytes: u64,
     /// Total size of OwLLM sandbox project COPIES (~/owllm/*).
     pub copies_bytes: u64,
+    /// Linux-release build workspace (~/owllm-build) — cargo targets from WSL
+    /// builds, the single biggest silent grower (30 GB measured). Stale targets
+    /// are pruned by the janitor after a week idle.
+    pub build_bytes: u64,
     /// Meaningful only where there's a managed VM disk (Windows/WSL today).
     pub available: bool,
     /// `.wslconfig` has `sparseVhd=true`, so freed space auto-returns to Windows
@@ -1227,6 +1494,7 @@ for d in "$HOME/.cache/uv" "$HOME/.npm/_cacache" "$HOME/.cache/pip" "$HOME/.cach
 done
 echo "OWLLM_CACHE=$c"
 if [ -d "$HOME/owllm" ]; then echo "OWLLM_COPIES=$(du -sb "$HOME/owllm" 2>/dev/null | cut -f1)"; else echo "OWLLM_COPIES=0"; fi
+if [ -d "$HOME/owllm-build" ]; then echo "OWLLM_BUILD=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)"; else echo "OWLLM_BUILD=0"; fi
 "#;
 
 #[cfg(windows)]
@@ -1246,19 +1514,21 @@ fn disk_usage_impl(distro: Option<String>) -> SandboxDisk {
         Some((p, b)) => (Some(p), b),
         None => (None, 0),
     };
-    let (cache_bytes, copies_bytes) =
+    let (cache_bytes, copies_bytes, build_bytes) =
         match crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT) {
             Ok(out) => (
                 parse_sentinel(&out, "OWLLM_CACHE="),
                 parse_sentinel(&out, "OWLLM_COPIES="),
+                parse_sentinel(&out, "OWLLM_BUILD="),
             ),
-            Err(_) => (0, 0),
+            Err(_) => (0, 0, 0),
         };
     SandboxDisk {
         vhdx_bytes,
         vhdx_path,
         cache_bytes,
         copies_bytes,
+        build_bytes,
         available: true,
         sparse_config: wslconfig_has_sparse(),
     }
@@ -1358,6 +1628,376 @@ pub(crate) fn ensure_sparse_config() -> Result<bool, String> {
             std::fs::write(&p, updated).map_err(|e| format!("write {}: {e}", p.display()))?;
             Ok(true)
         }
+    }
+}
+
+// ---- WSL MEMORY: the OOM-killer that reads as "CLI exited 1, no output" -----
+// A WSL-isolated project runs the agent CLI INSIDE the distro, and WSL2's
+// default memory cap is 50% of host RAM. A context-heavy run (minified bundles,
+// large greps) can pass that cap, at which point the Linux OOM killer SIGKILLs
+// the biggest process on the box — usually the CLI itself. It dies without
+// flushing, so the app only sees a non-zero exit with empty stdout/stderr while
+// the real cause sits in the distro's kernel log. Host runs never hit this:
+// Windows pages to disk instead of killing.
+//
+// Two halves, both here: raise the cap (`ensure_memory_config`) and, when it
+// still happens, READ the kernel log and say so (`wsl_oom_report`).
+
+/// Recommended WSL2 `[wsl2] memory` / `swap` for this host, in GB.
+/// 75% of physical RAM (vs WSL's 50% default) leaves Windows headroom while
+/// giving a context-heavy agent room to finish; swap = half of that, capped, so
+/// a spike pages instead of being killed. Floors keep tiny hosts usable.
+/// Pure given `host_ram_gb` so it is unit-testable on every OS.
+fn recommended_wsl_memory_gb(host_ram_gb: u32) -> (u32, u32) {
+    let mem = ((host_ram_gb as u64 * 3) / 4).clamp(4, 64) as u32;
+    let swap = (mem / 2).clamp(2, 16);
+    (mem, swap)
+}
+
+/// Merge `memory=`/`swap=` into a `.wslconfig`'s `[wsl2]` section, mirroring
+/// `merge_sparse_into_wslconfig`. Returns the new file text, or `None` when the
+/// file ALREADY grants at least this much (never lowers a user's own higher
+/// limit). Preserves every other setting/section. Pure + unit-tested.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_memory_into_wslconfig(existing: &str, memory_gb: u32, swap_gb: u32) -> Option<String> {
+    let cur_mem = wslconfig_key_gb(existing, "memory");
+    let cur_swap = wslconfig_key_gb(existing, "swap");
+    if cur_mem.is_some_and(|m| m >= memory_gb) && cur_swap.is_some_and(|s| s >= swap_gb) {
+        return None;
+    }
+    let want_mem = cur_mem.unwrap_or(0).max(memory_gb);
+    let want_swap = cur_swap.unwrap_or(0).max(swap_gb);
+    let is_key = |l: &str, k: &str| {
+        l.trim_start()
+            .to_ascii_lowercase()
+            .starts_with(&format!("{k}="))
+            || l.trim_start()
+                .to_ascii_lowercase()
+                .starts_with(&format!("{k} ="))
+    };
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    let mut wrote_mem = false;
+    let mut wrote_swap = false;
+    for l in lines.iter_mut() {
+        if is_key(l, "memory") {
+            *l = format!("memory={want_mem}GB");
+            wrote_mem = true;
+        } else if is_key(l, "swap") {
+            *l = format!("swap={want_swap}GB");
+            wrote_swap = true;
+        }
+    }
+    if !wrote_mem || !wrote_swap {
+        let mut pending: Vec<String> = Vec::new();
+        if !wrote_mem {
+            pending.push(format!("memory={want_mem}GB"));
+        }
+        if !wrote_swap {
+            pending.push(format!("swap={want_swap}GB"));
+        }
+        match lines
+            .iter()
+            .position(|l| l.trim().eq_ignore_ascii_case("[wsl2]"))
+        {
+            // A [wsl2] section exists → add the missing keys just under it.
+            Some(i) => {
+                for (n, k) in pending.into_iter().enumerate() {
+                    lines.insert(i + 1 + n, k);
+                }
+            }
+            // No section at all → append a fresh one, keeping existing content.
+            None => {
+                if !lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push("[wsl2]".to_string());
+                lines.extend(pending);
+            }
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Some(out)
+}
+
+/// Read a `.wslconfig` size value ("24GB", "16384MB", "8") as whole GB.
+/// Anything unparsable reads as absent, so we then treat it as "not granted".
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wslconfig_key_gb(text: &str, key: &str) -> Option<u32> {
+    for l in text.lines() {
+        let Some((k, v)) = l.trim().split_once('=') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let v = v.trim().to_ascii_lowercase();
+        let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(n) = digits.parse::<u64>() else {
+            continue;
+        };
+        return Some(if v.ends_with("mb") {
+            (n / 1024) as u32
+        } else if v.ends_with("kb") {
+            (n / 1024 / 1024) as u32
+        } else {
+            n as u32
+        });
+    }
+    None
+}
+
+// ---- WSL MEMORY GIVE-BACK: idle vmmem must shrink, not hoard ----------------
+//
+// WSL2 keeps every byte the VM ever touched (page cache from builds, greps,
+// npm installs) until `wsl --shutdown` — which we deliberately never run. So a
+// day of agent runs leaves a multi-GB `vmmem` sitting on the host with the
+// distro internally idle, and the user can't even attribute it to this app.
+// `[experimental] autoMemoryReclaim=gradual` (WSL >= 1.3.10) makes the VM hand
+// idle cached memory back to Windows; older WSL ignores unknown keys, so the
+// setting is safe to write unconditionally.
+
+/// Merge `autoMemoryReclaim=gradual` into a `.wslconfig`'s `[experimental]`
+/// section. Returns the new file text, or `None` when the key is ALREADY set to
+/// any value — a user's own choice (`dropcache`, `disabled`) is never
+/// overridden. Preserves every other setting/section. Pure + unit-tested.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_reclaim_into_wslconfig(existing: &str) -> Option<String> {
+    let is_reclaim_line = |l: &str| {
+        l.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("automemoryreclaim")
+    };
+    if existing.lines().any(|l| is_reclaim_line(l) && l.contains('=')) {
+        return None;
+    }
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    // An [experimental] section exists → add the key just under its header.
+    if let Some(i) = lines
+        .iter()
+        .position(|l| l.trim().eq_ignore_ascii_case("[experimental]"))
+    {
+        lines.insert(i + 1, "autoMemoryReclaim=gradual".to_string());
+        let mut out = lines.join("\n");
+        out.push('\n');
+        return Some(out);
+    }
+    // No section at all → append a fresh one, keeping any existing content.
+    let mut out = existing.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str("[experimental]\nautoMemoryReclaim=gradual\n");
+    Some(out)
+}
+
+/// Ensure the `.wslconfig` global default has `autoMemoryReclaim=gradual`.
+/// No WSL restart — it takes effect on the next VM start, and the warm-check
+/// pre-flight calls this BEFORE starting a cold distro, so every VM this app
+/// boots runs with give-back on. Ok(true) if it wrote a change.
+#[cfg(windows)]
+pub(crate) fn ensure_reclaim_config() -> Result<bool, String> {
+    let p = wslconfig_path().ok_or_else(|| "no USERPROFILE".to_string())?;
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    match merge_reclaim_into_wslconfig(&existing) {
+        None => Ok(false),
+        Some(updated) => {
+            std::fs::write(&p, updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+            Ok(true)
+        }
+    }
+}
+
+/// What the OOM killer recorded, in units the user can act on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct OomHit {
+    /// Process the kernel killed, e.g. "claude.exe".
+    pub task: String,
+    /// Resident memory it held when killed.
+    pub used_gb: f32,
+    /// The distro's total RAM (its WSL cap), when readable.
+    pub limit_gb: Option<f32>,
+}
+
+/// Parse the kernel's OOM verdict out of a `/var/log/kern.log` + `dmesg` dump.
+///
+/// Only accepts a kill whose ISO timestamp is at or after `cutoff_iso` — an OOM
+/// from last week must never be blamed for today's exit. ISO-8601 sorts
+/// lexicographically, so a string compare of the leading 19 chars IS the time
+/// compare. Lines with no parsable timestamp are ignored for the same reason.
+/// Pure + unit-tested against a real captured log line.
+pub(crate) fn parse_oom_report(text: &str, cutoff_iso: &str) -> Option<OomHit> {
+    const MARK: &str = "Out of memory: Killed process";
+    let limit_gb = text.lines().find_map(|l| {
+        let rest = l.trim().strip_prefix("MemTotal:")?;
+        let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+        Some(kb as f32 / 1024.0 / 1024.0)
+    });
+    // Last matching kill wins — it is the most recent.
+    let mut hit: Option<OomHit> = None;
+    for line in text.lines() {
+        let Some(at) = line.find(MARK) else { continue };
+        // Leading ISO stamp (kern.log, and `dmesg --time-format=iso`).
+        let stamp: String = line.chars().take(19).collect();
+        let dated = stamp.len() == 19
+            && stamp.as_bytes()[4] == b'-'
+            && (stamp.as_bytes()[10] == b'T' || stamp.as_bytes()[10] == b' ');
+        if !dated || stamp.as_str() < cutoff_iso {
+            continue;
+        }
+        let tail = &line[at + MARK.len()..];
+        // "… 26855 (claude.exe) total-vm:…kB, anon-rss:12863744kB, …"
+        let task = tail
+            .split_once('(')
+            .and_then(|(_, r)| r.split_once(')'))
+            .map(|(n, _)| n.to_string())
+            .unwrap_or_default();
+        if task.is_empty() {
+            continue;
+        }
+        let used_gb = tail
+            .split("anon-rss:")
+            .nth(1)
+            .and_then(|r| {
+                let d: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+                d.parse::<u64>().ok()
+            })
+            .map(|kb| kb as f32 / 1024.0 / 1024.0)
+            .unwrap_or(0.0);
+        hit = Some(OomHit {
+            task,
+            used_gb,
+            limit_gb,
+        });
+    }
+    hit
+}
+
+/// Human sentence for an OOM hit, naming the cause AND the one action that
+/// fixes it. Pure so the wording is gate-assertable.
+pub(crate) fn oom_message(cli: &str, hit: &OomHit) -> String {
+    let limit = match hit.limit_gb {
+        Some(g) => format!(" of a {g:.1} GB WSL limit"),
+        None => String::new(),
+    };
+    format!(
+        "{cli} CLI was killed by Linux out-of-memory — this project runs in WSL, \
+         and {} was using {:.1} GB{limit}. Nothing is wrong with your account, the \
+         model or the task. Raise the WSL memory limit (Settings → Sandbox → \
+         \"Raise WSL memory\"), then run it again.",
+        hit.task, hit.used_gb
+    )
+}
+
+/// Ask the distro's kernel whether it killed this CLI in the last 10 minutes.
+/// Windows-only: a WSL-isolated run is the only shape with a hard memory cap —
+/// Linux agents run on the host and macOS uses Lima, neither of which produces
+/// this failure mode. Best-effort; any probe failure reads as "no evidence".
+#[cfg(windows)]
+pub(crate) fn wsl_oom_report(cli: &str, cwd: Option<&str>) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    if !is_isolated(cwd) {
+        return None;
+    }
+    let distro = resolve_linux_distro(None).ok()?;
+    // One round trip: the cutoff is computed INSIDE the distro so it is in the
+    // same clock/zone as the log stamps we compare it against.
+    const PROBE: &str = "date -d '-10 minutes' '+OWLLM_CUTOFF=%Y-%m-%dT%H:%M:%S' 2>/dev/null; \
+         grep MemTotal /proc/meminfo 2>/dev/null; \
+         { cat /var/log/kern.log 2>/dev/null; dmesg --time-format=iso 2>/dev/null; } \
+         | grep -F 'Out of memory: Killed process' | tail -n 20";
+    let out = std::process::Command::new("wsl.exe")
+        .args(["-d", &distro, "--", "sh", "-lc", PROBE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cutoff = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("OWLLM_CUTOFF="))?
+        .to_string();
+    let hit = parse_oom_report(&text, &cutoff)?;
+    Some(oom_message(cli, &hit))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn wsl_oom_report(_cli: &str, _cwd: Option<&str>) -> Option<String> {
+    None
+}
+
+/// Raise `%USERPROFILE%\.wslconfig`'s `[wsl2] memory`/`swap` to this host's
+/// recommendation. Never lowers an existing higher value. Takes effect on the
+/// next WSL start — deliberately does NOT run `wsl --shutdown`, which would kill
+/// every running agent and any other distro work the user has open.
+/// Returns the (memory_gb, swap_gb) now configured, and whether it wrote.
+#[cfg(windows)]
+pub(crate) fn ensure_memory_config() -> Result<(u32, u32, bool), String> {
+    let host_gb = {
+        use sysinfo::System;
+        let mut s = System::new();
+        s.refresh_memory();
+        ((s.total_memory() as f64) / 1024.0 / 1024.0 / 1024.0).round() as u32
+    };
+    let (mem, swap) = recommended_wsl_memory_gb(host_gb);
+    let p = wslconfig_path().ok_or_else(|| "no USERPROFILE".to_string())?;
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    match merge_memory_into_wslconfig(&existing, mem, swap) {
+        None => Ok((
+            wslconfig_key_gb(&existing, "memory").unwrap_or(mem),
+            wslconfig_key_gb(&existing, "swap").unwrap_or(swap),
+            false,
+        )),
+        Some(updated) => {
+            std::fs::write(&p, &updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+            Ok((
+                wslconfig_key_gb(&updated, "memory").unwrap_or(mem),
+                wslconfig_key_gb(&updated, "swap").unwrap_or(swap),
+                true,
+            ))
+        }
+    }
+}
+
+/// Result of the "Raise WSL memory" action, for the UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WslMemoryPlan {
+    pub memory_gb: u32,
+    pub swap_gb: u32,
+    /// True when the config file was changed by this call.
+    pub changed: bool,
+    /// True when a WSL restart is still needed for it to take effect.
+    pub restart_required: bool,
+}
+
+/// User-triggered: raise the WSL memory cap so a context-heavy agent stops
+/// being OOM-killed. No-op (reported, not failed) off Windows, where agents do
+/// not run inside a memory-capped VM.
+#[tauri::command]
+pub async fn sandbox_raise_memory() -> Result<WslMemoryPlan, String> {
+    #[cfg(windows)]
+    {
+        // Raising the cap without give-back would let vmmem hoard even more —
+        // the two settings only make sense together.
+        if let Err(e) = ensure_reclaim_config() {
+            eprintln!("wslconfig autoMemoryReclaim not ensured: {e}");
+        }
+        let (memory_gb, swap_gb, changed) = ensure_memory_config()?;
+        let restart_required = changed && !running_distros().is_empty();
+        Ok(WslMemoryPlan {
+            memory_gb,
+            swap_gb,
+            changed,
+            restart_required,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(WslMemoryPlan {
+            memory_gb: 0,
+            swap_gb: 0,
+            changed: false,
+            restart_required: false,
+        })
     }
 }
 
@@ -1522,8 +2162,26 @@ fn running_distros() -> Vec<String> {
     }
 }
 
-/// Clear caches when large (or `force`d by the manual button), then fstrim.
-/// Returns bytes of cache freed. Safe: regenerable caches only, no admin.
+/// Stale Linux-build workspaces: any `target/` under the app-owned
+/// `~/owllm-build` with no file touched for a week is deleted. The warm cargo
+/// cache of an active release week survives (mtime-fresh); an abandoned one
+/// stops costing tens of GB forever. Rooted at `$HOME/owllm-build` only —
+/// never a user directory. Reports bytes freed via before/after `du`.
+#[cfg(windows)]
+const PRUNE_BUILD_WORKSPACE_SCRIPT: &str = r#"b=0; a=0
+if [ -d "$HOME/owllm-build" ]; then
+  b=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)
+  find "$HOME/owllm-build" -mindepth 2 -maxdepth 6 -type d -name target 2>/dev/null | while IFS= read -r t; do
+    if [ -z "$(find "$t" -newermt "7 days ago" -print -quit 2>/dev/null)" ]; then rm -rf "$t"; fi
+  done
+  a=$(du -sb "$HOME/owllm-build" 2>/dev/null | cut -f1)
+fi
+echo "OWLLM_BUILD_FREED=$(( ${b:-0} - ${a:-0} ))"
+"#;
+
+/// Clear caches when large (or `force`d by the manual button), prune stale
+/// linux-build targets, then fstrim. Returns bytes freed. Safe: regenerable
+/// caches and app-owned build output only, no admin.
 #[cfg(windows)]
 fn trim_impl(distro: Option<String>, force: bool) -> Result<u64, String> {
     let distro = resolve_linux_distro(distro)?;
@@ -1536,6 +2194,11 @@ fn trim_impl(distro: Option<String>, force: bool) -> Result<u64, String> {
         if let Ok(out) = crate::wsl::run_in_distro_script(&distro, CLEAR_CACHE_SCRIPT) {
             freed = parse_sentinel(&out, "OWLLM_FREED=");
         }
+    }
+    // Week-stale cargo targets in the linux-build workspace — the 30 GB class
+    // of growth no cache-clean ever saw.
+    if let Ok(out) = crate::wsl::run_in_distro_script(&distro, PRUNE_BUILD_WORKSPACE_SCRIPT) {
+        freed += parse_sentinel(&out, "OWLLM_BUILD_FREED=");
     }
     // fstrim (root — no password in WSL) marks the freed blocks reclaimable. Safe
     // on any WSL and a no-op when there's nothing to trim.
@@ -1553,11 +2216,12 @@ fn trim_impl(_distro: Option<String>, _force: bool) -> Result<u64, String> {
     Ok(0)
 }
 
-/// Startup housekeeping: if a real Linux distro is ALREADY running and its caches
-/// are over the threshold, clear them. Best-effort, background, never cold-starts
-/// WSL. Keeps a long-lived session's sandbox from ballooning unattended.
+/// Periodic housekeeping (called by the global disk janitor on its schedule):
+/// if a real Linux distro is ALREADY running, clear oversized caches and prune
+/// stale build targets. Best-effort, background, never cold-starts WSL just to
+/// housekeep. Keeps a long-lived session's sandbox from ballooning unattended.
 #[cfg(windows)]
-pub(crate) fn auto_housekeep_startup() {
+pub(crate) fn auto_housekeep() {
     let Some(distro) = crate::wsl::best_linux_distro() else {
         return;
     };
@@ -1568,7 +2232,7 @@ pub(crate) fn auto_housekeep_startup() {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn auto_housekeep_startup() {}
+pub(crate) fn auto_housekeep() {}
 
 /// Trim the sandbox now — clear regenerable caches + fstrim. Safe (no restart,
 /// no admin, no data risk). `force` clears caches regardless of size. Returns
@@ -1803,7 +2467,7 @@ pub fn sandbox_list_projects() -> Vec<SandboxProject> {
 
 // ---- provisioning ---------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn which(p: &str) -> bool {
     std::process::Command::new("sh")
         .arg("-c")
@@ -1853,20 +2517,78 @@ fn linux_provision() -> Result<String, String> {
     // Same npm ENOTEMPTY self-heal as the WSL paths (accounts::NPM_CLEAN_STALE_SNIPPET):
     // an interrupted global install leaves a hidden `.<pkg>-<rand>` staging dir that
     // makes every later `npm install -g` fail permanently. Clear it first — Linux hits
-    // this exactly like WSL does.
+    // this exactly like WSL does. DPKG_REPAIR_SNIPPET covers the apt twin: an
+    // interrupted dpkg makes the `apt-get install` below refuse with exit 100.
     let script = format!(
-        "set -e; {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
+        "set -e; {repair} {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
          (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
          {clean} \
          npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
          echo PROVISION_DONE",
         clean = crate::accounts::NPM_CLEAN_STALE_SNIPPET,
+        repair = crate::accounts::DPKG_REPAIR_SNIPPET,
     );
     if which("pkexec") {
         run_capture("pkexec", &["bash", "-lc", &script])
     } else {
         Err(format!(
             "Root required and pkexec not found. Run in a terminal:\n  sudo bash -lc '{script}'"
+        ))
+    }
+}
+
+// ---- Linux: unprivileged user namespaces ----------------------------------
+//
+// Ubuntu 24.04 turned on `kernel.apparmor_restrict_unprivileged_userns=1`,
+// which denies unprivileged user namespaces to any binary without an AppArmor
+// profile granting `userns`. bubblewrap ships without one, so a non-setuid
+// `bwrap` dies with `setting up uid map: Permission denied` on every run while
+// `bwrap --version` still succeeds. The remedy is the same 4-line profile
+// Ubuntu already ships for ch-run, crun, chrome and a dozen others.
+//
+// This is installed ONCE PER MACHINE, not per project and not per agent: the
+// profile attaches to the binary path /usr/bin/bwrap, so it covers every user,
+// every project, every worktree and every agent on that host, and it persists
+// across reboots (apparmor.service loads /etc/apparmor.d at boot).
+
+/// The profile path — attaches to the bwrap BINARY, hence machine-wide.
+#[cfg(target_os = "linux")]
+const BWRAP_APPARMOR_PATH: &str = "/etc/apparmor.d/bwrap";
+
+#[cfg(target_os = "linux")]
+const BWRAP_APPARMOR_PROFILE: &str = "abi <abi/4.0>,\n\
+include <tunables/global>\n\
+\n\
+profile bwrap /usr/bin/bwrap flags=(unconfined) {\n\
+\x20 userns,\n\
+\x20 include if exists <local/bwrap>\n\
+}\n";
+
+#[cfg(target_os = "linux")]
+const BWRAP_USERNS_HELP: &str = "bubblewrap is installed but this kernel blocks \
+unprivileged user namespaces (apparmor_restrict_unprivileged_userns), so it \
+cannot create a sandbox. Use Harden to install the one-time AppArmor profile \
+at /etc/apparmor.d/bwrap (needs your password once, machine-wide).";
+
+/// Install the machine-wide AppArmor profile that lets bwrap use user
+/// namespaces, then reload it. Needs root exactly once; idempotent.
+#[cfg(target_os = "linux")]
+fn linux_install_userns_profile() -> Result<String, String> {
+    // Written via a quoted heredoc so the profile lands byte-for-byte.
+    let script = format!(
+        "set -e; cat > {path} <<'OWLLM_AA_EOF'\n{profile}OWLLM_AA_EOF\n\
+         chmod 0644 {path}; \
+         (apparmor_parser -r {path} || systemctl reload apparmor || true); \
+         echo AA_PROFILE_DONE",
+        path = BWRAP_APPARMOR_PATH,
+        profile = BWRAP_APPARMOR_PROFILE,
+    );
+    if which("pkexec") {
+        run_capture("pkexec", &["bash", "-lc", &script])
+    } else {
+        Err(format!(
+            "Root required and pkexec not found. Run this ONCE in a terminal, \
+             then retry Harden:\n  sudo bash -lc '{script}'"
         ))
     }
 }
@@ -1941,7 +2663,7 @@ pub struct SyncResult {
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MirrorStatus {
-    /// codex | claude | gemini | kimi | keys
+    /// codex | claude | gemini | kimi | keys | ssh
     pub provider: String,
     pub on_host: bool,
     pub in_sandbox: bool,
@@ -1953,19 +2675,28 @@ pub struct MirrorStatus {
 /// per provider. Unit-tested; shared wording for every sync surface.
 #[cfg_attr(not(windows), allow(dead_code))] // sync is WSL/Windows-only today
 fn build_mirror_report(found_on_host: &[String], synced: &[String]) -> Vec<MirrorStatus> {
-    const PROVIDERS: [&str; 5] = ["codex", "claude", "gemini", "kimi", "keys"];
+    const PROVIDERS: [&str; 6] = ["codex", "claude", "gemini", "kimi", "keys", "ssh"];
     PROVIDERS
         .iter()
         .map(|p| {
             let on_host = found_on_host.iter().any(|s| s == p);
             let in_sandbox = synced.iter().any(|s| s == p);
-            let what = if *p == "keys" { "API keys" } else { "login" };
+            let what = match *p {
+                "keys" => "API keys",
+                "ssh" => "SSH keys",
+                _ => "login",
+            };
             let detail = match (on_host, in_sandbox) {
                 (true, true) => "mirrored into the sandbox".to_string(),
                 (true, false) => format!(
                     "{what} found on Windows but did NOT land in the sandbox — check the WSL distro (Set up WSL on Home), then Sync logins again"
                 ),
                 (false, true) => "present in the sandbox (no Windows copy — synced earlier or logged in inside the distro)".to_string(),
+                // SSH keys are not a "login" you can perform elsewhere, so the
+                // generic wording would be misleading here.
+                (false, false) if *p == "ssh" => {
+                    "no SSH keys in the Windows ~/.ssh — nothing to mirror".to_string()
+                }
                 (false, false) => format!("no {what} on Windows — log in there first, then sync"),
             };
             MirrorStatus { provider: p.to_string(), on_host, in_sandbox, detail }
@@ -2027,16 +2758,22 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     // Windows to sync" are now distinguishable instead of a silent no-op.
     let script = format!(
         "WH={wh}; \
-         mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
+         mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm ~/.ssh; \
+         chmod 700 ~/.ssh 2>/dev/null; \
          found=''; \
          [ -f \"$WH/.codex/auth.json\" ] && found=\"$found codex\"; \
          [ -f \"$WH/.claude/.credentials.json\" ] && found=\"$found claude\"; \
          {{ [ -s \"$WH/.gemini/oauth_creds.json\" ] || [ -s \"$WH/.gemini/credentials.json\" ]; }} && found=\"$found gemini\"; \
          {{ [ -f \"$WH/.kimi/credentials/kimi-code.json\" ] || [ -f \"$WH/.kimi/config.toml\" ]; }} && found=\"$found kimi\"; \
+         ls \"$WH\"/.ssh/id_* >/dev/null 2>&1 && found=\"$found ssh\"; \
          cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
          cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \
          cp -rf \"$WH/.gemini/.\" ~/.gemini/ 2>/dev/null; \
          cp -rf \"$WH/.kimi/.\" ~/.kimi/ 2>/dev/null; \
+         for k in \"$WH\"/.ssh/id_*; do [ -f \"$k\" ] && cp -f \"$k\" ~/.ssh/ 2>/dev/null; done; \
+         [ -f \"$WH/.ssh/config\" ] && sed 's/\\r$//' \"$WH/.ssh/config\" > ~/.ssh/config 2>/dev/null; \
+         cat \"$WH/.ssh/known_hosts\" ~/.ssh/known_hosts 2>/dev/null | tr -d '\\r' | sort -u > ~/.ssh/known_hosts.merged 2>/dev/null && mv ~/.ssh/known_hosts.merged ~/.ssh/known_hosts 2>/dev/null; \
+         chmod 600 ~/.ssh/config ~/.ssh/known_hosts 2>/dev/null; chmod 600 ~/.ssh/id_* 2>/dev/null; chmod 644 ~/.ssh/*.pub 2>/dev/null; \
          printf '%s' {env_quoted} > ~/.owllm/agent_env.sh; chmod 600 ~/.owllm/agent_env.sh 2>/dev/null; \
          chmod 600 ~/.codex/auth.json ~/.claude/.credentials.json ~/.kimi/config.toml ~/.kimi/credentials/kimi-code.json 2>/dev/null; \
          syn=''; \
@@ -2045,6 +2782,7 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
          {{ [ -s ~/.gemini/oauth_creds.json ] || [ -s ~/.gemini/credentials.json ]; }} && syn=\"$syn gemini\"; \
          {{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }} && syn=\"$syn kimi\"; \
          [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
+         ls ~/.ssh/id_* >/dev/null 2>&1 && syn=\"$syn ssh\"; \
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
          echo \"FOUND:$found\"; echo \"SYNCED:$syn\""
     );
@@ -2206,6 +2944,19 @@ fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())
 }
 
+/// Blocking mirror of host logins into the sandbox, for callers that are ALREADY
+/// on a blocking thread (spawn_blocking) and must not build a nested runtime.
+///
+/// This exists because `sandbox_sync_logins` is `async`: calling it from a
+/// blocking closure as `let _ = sandbox_sync_logins(None);` compiles cleanly
+/// (`let _` suppresses the `#[must_use]` future warning) but only CONSTRUCTS a
+/// future and drops it — the credential re-mirror never runs. That silent no-op
+/// is what made the agentic-team 401 recur after it was "fixed". Blocking
+/// callers must use THIS function; the gate enforces it.
+pub(crate) fn sandbox_sync_logins_blocking(distro: Option<String>) -> Result<SyncResult, String> {
+    sync_logins_impl(distro)
+}
+
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
 #[tauri::command]
@@ -2218,6 +2969,48 @@ pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, S
         .map_err(|e| format!("sandbox login sync task failed: {e}"))?
 }
 
+/// Result of the pre-flight reachability check. The UI uses `reachable` to decide
+/// whether to proceed, `host_fallback` to degrade gracefully from a broken WSL
+/// isolation path back to the real Windows folder, and `reason` to explain a
+/// failure instead of the generic "WSL is still starting up" message.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmCheckResult {
+    pub reachable: bool,
+    /// When a WSL UNC path is not reachable but the corresponding host folder
+    /// exists, this contains that host path so the UI can run un-isolated rather
+    /// than failing completely.
+    pub host_fallback: Option<String>,
+    /// Human-readable explanation when `reachable` is false.
+    pub reason: Option<String>,
+}
+
+/// Off Windows there is no WSL UNC form, so there is never a host twin to fall
+/// back to. Defined so the callers below need no `cfg` fork.
+#[cfg(not(windows))]
+fn wsl_unc_to_host_path(_unc: &str) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn wsl_unc_to_host_path(unc: &str) -> Option<String> {
+    let norm = unc.replace('\\', "/");
+    let rest = norm
+        .strip_prefix("//wsl.localhost/")
+        .or_else(|| norm.strip_prefix("//wsl$/"))?;
+    let mut parts = rest.splitn(3, '/');
+    let _distro = parts.next()?;
+    let mnt = parts.next()?;
+    let tail = parts.next()?;
+    if mnt != "mnt" {
+        return None;
+    }
+    let mut drive_tail = tail.splitn(2, '/');
+    let drive = drive_tail.next()?;
+    let path_tail = drive_tail.next().unwrap_or("");
+    Some(format!("{}:\\{}", drive.to_uppercase(), path_tail.replace('/', "\\")))
+}
+
 /// Pre-flight for an isolated run: make sure WSL is warm and the project folder is
 /// actually reachable BEFORE dispatching. After a PC reboot WSL comes back COLD —
 /// the distro isn't started and /mnt isn't mounted yet — so a project reached
@@ -2226,16 +3019,33 @@ pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, S
 /// report "can't find the code" (the post-reboot regression). For a WSL path this
 /// STARTS the distro (which mounts /mnt) and tests the folder — both warming AND
 /// verifying in one round-trip. For a plain host path it just stats it. Returns
-/// true when the agents will actually be able to see the folder.
+/// a `WarmCheckResult` so the UI can fall back to the host folder or surface a
+/// precise reason.
 #[tauri::command]
-pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String> {
+pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<WarmCheckResult, String> {
     let Some(cwd) = cwd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
-        return Ok(false);
+        return Ok(WarmCheckResult {
+            reachable: false,
+            host_fallback: None,
+            reason: Some("No project folder is set.".into()),
+        });
     };
-    let fut = tokio::task::spawn_blocking(move || -> bool {
+    // Kept for the timeout arm below: a WEDGED WSL must degrade to the host
+    // folder exactly like a failed one, otherwise a stuck distro is the one
+    // remaining way for isolation to block a run outright.
+    let cwd_for_timeout = cwd.clone();
+    let fut = tokio::task::spawn_blocking(move || -> WarmCheckResult {
         #[cfg(windows)]
         {
             if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&cwd) {
+                // `.wslconfig` is read at VM creation, and this pre-flight is the
+                // moment a cold distro gets started — so ensure memory give-back
+                // is configured NOW, or an agent-heavy day leaves vmmem holding
+                // gigabytes of dead page cache until a manual `wsl --shutdown`.
+                // Best-effort: a config-write failure must never block a run.
+                if let Err(e) = ensure_reclaim_config() {
+                    eprintln!("wslconfig autoMemoryReclaim not ensured: {e}");
+                }
                 // Running ANY command starts the distro + mounts /mnt; `test -d`
                 // then verifies the project folder is present. This both warms and
                 // checks in a single trip (run_in_distro_script is mangle-proof).
@@ -2244,26 +3054,84 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String>
                     crate::wsl::sh_quote(&linux_cwd)
                 );
                 return match crate::wsl::run_in_distro_script(&distro, &script) {
-                    Ok(o) => o.contains("OWLLM_REACH_OK"),
-                    Err(_) => false,
+                    Ok(o) if o.contains("OWLLM_REACH_OK") => WarmCheckResult {
+                        reachable: true,
+                        host_fallback: None,
+                        reason: None,
+                    },
+                    Ok(_) => {
+                        let host_fallback = wsl_unc_to_host_path(&cwd)
+                            .filter(|p| std::path::Path::new(p).is_dir());
+                        WarmCheckResult {
+                            reachable: false,
+                            host_fallback,
+                            reason: Some(format!(
+                                "Folder not reachable through WSL distro '{}'.",
+                                distro
+                            )),
+                        }
+                    }
+                    Err(e) => {
+                        let host_fallback = wsl_unc_to_host_path(&cwd)
+                            .filter(|p| std::path::Path::new(p).is_dir());
+                        WarmCheckResult {
+                            reachable: false,
+                            host_fallback,
+                            reason: Some(format!("WSL command failed: {e}")),
+                        }
+                    }
                 };
             }
         }
         // Plain host path (or non-Windows): stat it directly.
-        std::path::Path::new(&cwd).is_dir()
+        let reachable = std::path::Path::new(&cwd).is_dir();
+        WarmCheckResult {
+            reachable,
+            host_fallback: None,
+            reason: if reachable {
+                None
+            } else {
+                Some(format!("Project folder not found: {cwd}"))
+            },
+        }
     });
     // BOUND IT: starting a cold distro can take a bit, but a stuck WSL must never
     // hang the pre-flight forever. 45 s is generous for a cold-start; past that we
     // report not-reachable so the run surfaces a clear message instead of blocking.
     match tokio::time::timeout(std::time::Duration::from_secs(45), fut).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(_)) | Err(_) => Ok(false),
+        Ok(Err(_)) | Err(_) => Ok(WarmCheckResult {
+            reachable: false,
+            host_fallback: wsl_unc_to_host_path(&cwd_for_timeout)
+                .filter(|p| std::path::Path::new(p).is_dir()),
+            reason: Some("WSL warm/check timed out — the distro may be starting.".into()),
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_to_host_path_round_trips_windows_paths() {
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\mnt\c\Users\me\proj"),
+            Some(r"C:\Users\me\proj".to_string()),
+        );
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl$\Ubuntu\mnt\d\code\repo"),
+            Some(r"D:\code\repo".to_string()),
+        );
+        assert_eq!(
+            wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\mnt\c"),
+            Some(r"C:\".to_string()),
+        );
+        // Non-mnt paths and plain Windows paths return None.
+        assert_eq!(wsl_unc_to_host_path(r"\\wsl.localhost\Ubuntu\home\me\proj"), None);
+        assert_eq!(wsl_unc_to_host_path(r"C:\Users\me\proj"), None);
+    }
 
     #[test]
     fn mirror_report_covers_every_state() {
@@ -2278,7 +3146,7 @@ mod tests {
             "keys".to_string(),
         ];
         let r = build_mirror_report(&found, &synced);
-        assert_eq!(r.len(), 5, "one row per provider");
+        assert_eq!(r.len(), 6, "one row per provider");
         let get = |p: &str| r.iter().find(|m| m.provider == p).unwrap();
         // found + synced → mirrored
         assert!(get("claude").detail.contains("mirrored"));
@@ -2295,6 +3163,12 @@ mod tests {
             "{}",
             get("kimi").detail
         );
+        // SSH keys are not a login — the "log in there first" wording would be
+        // nonsense, so that row gets its own message.
+        let ssh = get("ssh");
+        assert!(!ssh.on_host && !ssh.in_sandbox);
+        assert!(!ssh.detail.contains("log in"), "{}", ssh.detail);
+        assert!(ssh.detail.contains("nothing to mirror"), "{}", ssh.detail);
     }
 
     /// Live probe (real WSL + whatever logins exist on this machine):
@@ -2502,6 +3376,101 @@ mod tests {
         assert!(!is_managed_sandbox_copy("/home/mc/owllm/proj/sub"));
     }
 
+    // ---- WSL memory cap + OOM forensics ------------------------------------
+    // The captured kernel verdict that made "claude CLI exited 1 — no stdout or
+    // stderr" explicable. Kept VERBATIM so the parser is tested against reality,
+    // not against a shape I invented.
+    const REAL_OOM_LOG: &str = "\
+2026-08-10T11:54:37.041233+09:00 owllm kernel: systemd invoked oom-killer: gfp_mask=0x1100cca, order=0, global_oom
+2026-08-10T11:54:37.041301+09:00 owllm kernel: oom-kill:constraint=CONSTRAINT_NONE,task=claude.exe,pid=26855,uid=1000
+2026-08-10T11:54:37.041400+09:00 owllm kernel: Out of memory: Killed process 26855 (claude.exe) total-vm:17026816kB, anon-rss:12863744kB, file-rss:0kB, shmem-rss:0kB, UID:1000 pgtables:29184kB oom_score_adj:0
+";
+
+    #[test]
+    fn oom_parser_reads_the_real_kernel_verdict() {
+        let text = format!("MemTotal:       16385236 kB\n{REAL_OOM_LOG}");
+        let hit = parse_oom_report(&text, "2026-08-10T11:44:37").expect("recent OOM is reported");
+        assert_eq!(hit.task, "claude.exe");
+        // 12863744 kB ≈ 12.3 GB resident, inside a ~15.6 GB VM.
+        assert!(
+            (hit.used_gb - 12.27).abs() < 0.1,
+            "used_gb was {}",
+            hit.used_gb
+        );
+        assert!(hit.limit_gb.is_some_and(|g| (g - 15.63).abs() < 0.1));
+        // The sentence must name the cause AND the one action.
+        let msg = oom_message("claude", &hit);
+        assert!(msg.contains("out-of-memory"), "{msg}");
+        assert!(msg.contains("claude.exe"), "{msg}");
+        assert!(msg.contains("Raise the WSL memory limit"), "{msg}");
+    }
+
+    #[test]
+    fn oom_parser_never_blames_a_stale_kill() {
+        // Same log, but the failure we are explaining happened days later.
+        // An old OOM must NOT be reported as today's cause.
+        assert!(parse_oom_report(REAL_OOM_LOG, "2026-08-14T00:00:00").is_none());
+        // …and a line with no timestamp is equally untrustworthy.
+        let undated = "kernel: Out of memory: Killed process 1 (claude.exe) anon-rss:100kB";
+        assert!(parse_oom_report(undated, "2026-08-10T11:44:37").is_none());
+        // No OOM at all → nothing to report.
+        assert!(parse_oom_report("MemTotal: 16385236 kB\n", "2026-01-01T00:00:00").is_none());
+    }
+
+    #[test]
+    fn wsl_memory_recommendation_beats_the_50pct_default() {
+        // A 32 GB host: WSL's default cap is 16 GB — exactly what got killed.
+        let (mem, swap) = recommended_wsl_memory_gb(32);
+        assert_eq!((mem, swap), (24, 12));
+        assert!(mem > 16, "must exceed WSL's 50% default");
+        // Floors/ceilings keep tiny and huge hosts sane.
+        assert_eq!(recommended_wsl_memory_gb(4), (4, 2));
+        assert_eq!(recommended_wsl_memory_gb(256), (64, 16));
+    }
+
+    #[test]
+    fn memory_merge_adds_section_and_is_idempotent() {
+        let out = merge_memory_into_wslconfig("", 24, 12).unwrap();
+        assert!(out.contains("[wsl2]"), "{out}");
+        assert!(out.contains("memory=24GB"), "{out}");
+        assert!(out.contains("swap=12GB"), "{out}");
+        assert!(merge_memory_into_wslconfig(&out, 24, 12).is_none(), "{out}");
+    }
+
+    #[test]
+    fn memory_merge_never_lowers_a_users_own_higher_limit() {
+        let existing = "[wsl2]\nmemory=48GB\nswap=32GB\nprocessors=8\n";
+        assert!(merge_memory_into_wslconfig(existing, 24, 12).is_none());
+        // A LOWER existing value is raised, and siblings survive.
+        let out = merge_memory_into_wslconfig("[wsl2]\nmemory=8GB\nprocessors=8\n", 24, 12).unwrap();
+        assert!(out.contains("memory=24GB"), "{out}");
+        assert!(out.contains("swap=12GB"), "{out}");
+        assert!(out.contains("processors=8"), "{out}");
+        assert_eq!(out.matches("[wsl2]").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn memory_merge_coexists_with_the_sparse_setting() {
+        // Both writers touch the same file; neither may clobber the other.
+        let sparse = merge_sparse_into_wslconfig("").unwrap();
+        let both = merge_memory_into_wslconfig(&sparse, 24, 12).unwrap();
+        assert!(both.contains("sparseVhd=true"), "{both}");
+        assert!(both.contains("memory=24GB"), "{both}");
+        assert!(merge_sparse_into_wslconfig(&both).is_none(), "{both}");
+    }
+
+    #[test]
+    fn wslconfig_key_gb_reads_the_documented_unit_suffixes() {
+        assert_eq!(wslconfig_key_gb("[wsl2]\nmemory=24GB\n", "memory"), Some(24));
+        assert_eq!(
+            wslconfig_key_gb("[wsl2]\nmemory=16384MB\n", "memory"),
+            Some(16)
+        );
+        assert_eq!(wslconfig_key_gb("[wsl2]\nmemory = 12 \n", "memory"), Some(12));
+        assert_eq!(wslconfig_key_gb("[wsl2]\nswap=0\n", "swap"), Some(0));
+        assert_eq!(wslconfig_key_gb("[wsl2]\nprocessors=8\n", "memory"), None);
+    }
+
     #[test]
     fn sparse_merge_adds_section_to_empty_or_missing() {
         // Missing/empty file → a fresh [experimental] section.
@@ -2549,6 +3518,52 @@ mod tests {
     }
 
     #[test]
+    fn reclaim_merge_adds_section_and_is_idempotent() {
+        // Missing/empty file → a fresh [experimental] section with give-back on.
+        let out = merge_reclaim_into_wslconfig("").unwrap();
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("autoMemoryReclaim=gradual"));
+        // Idempotent: feeding the result back is a no-op.
+        assert!(merge_reclaim_into_wslconfig(&out).is_none());
+    }
+
+    #[test]
+    fn reclaim_merge_never_overrides_a_users_own_choice() {
+        // ANY existing value — including a deliberate opt-out — is respected.
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nautoMemoryReclaim=dropcache\n")
+            .is_none());
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nautoMemoryReclaim=disabled\n")
+            .is_none());
+        assert!(merge_reclaim_into_wslconfig("[experimental]\nAutoMemoryReclaim = Gradual\n")
+            .is_none());
+    }
+
+    #[test]
+    fn reclaim_merge_coexists_with_sparse_and_memory_settings() {
+        // All three writers touch the same file; none may clobber another.
+        let sparse = merge_sparse_into_wslconfig("").unwrap();
+        let mem = merge_memory_into_wslconfig(&sparse, 24, 12).unwrap();
+        let all = merge_reclaim_into_wslconfig(&mem).unwrap();
+        assert!(all.contains("sparseVhd=true"), "{all}");
+        assert!(all.contains("memory=24GB"), "{all}");
+        assert!(all.contains("autoMemoryReclaim=gradual"), "{all}");
+        // Reclaim joined the EXISTING [experimental] section, no duplicate header.
+        assert_eq!(all.matches("[experimental]").count(), 1, "{all}");
+        assert!(merge_sparse_into_wslconfig(&all).is_none(), "{all}");
+        assert!(merge_reclaim_into_wslconfig(&all).is_none(), "{all}");
+    }
+
+    #[test]
+    fn reclaim_merge_preserves_existing_settings() {
+        let existing = "[wsl2]\nmemory=8GB\nprocessors=4\n";
+        let out = merge_reclaim_into_wslconfig(existing).unwrap();
+        assert!(out.contains("memory=8GB"));
+        assert!(out.contains("processors=4"));
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("autoMemoryReclaim=gradual"));
+    }
+
+    #[test]
     fn iso_root_matching() {
         assert!(is_under_iso_root("/home/me/owllm/proj", "/home/me"));
         assert!(is_under_iso_root("/home/me/owllm", "/home/me"));
@@ -2558,9 +3573,37 @@ mod tests {
         assert!(!is_under_iso_root("/etc/passwd", "/home/me"));
     }
 
+    /// D1: a fleet worktree IS an isolation root. Before this, cutting a
+    /// worktree moved the run out of `~/owllm` and silently un-sandboxed it —
+    /// reproduced on real aarch64 Linux with the shipping function.
+    #[test]
+    fn fleet_worktree_is_an_iso_root() {
+        assert!(is_under_iso_root(
+            "/home/farisland/.owllm/fleet/LLM-Studio/main/code",
+            "/home/farisland"
+        ));
+        assert!(is_under_iso_root("/home/me/.owllm/fleet", "/home/me"));
+        // Trailing slash and a redundant home slash both normalise.
+        assert!(is_under_iso_root("/home/me/.owllm/fleet/p/", "/home/me/"));
+        // Siblings of the fleet root stay OUTSIDE — `.owllm` holds the sandbox
+        // home and credentials, which must never count as a project root.
+        assert!(!is_under_iso_root("/home/me/.owllm", "/home/me"));
+        assert!(!is_under_iso_root("/home/me/.owllm/sbhome", "/home/me"));
+        assert!(!is_under_iso_root("/home/me/.owllm/fleetx", "/home/me"));
+        // A DIFFERENT user's fleet is not ours.
+        assert!(!is_under_iso_root("/home/you/.owllm/fleet/p", "/home/me"));
+    }
+
+    /// FLEET_SUBDIR must track fleet::fleet_root(), which builds
+    /// `$HOME/.owllm/fleet` from two joined components.
+    #[test]
+    fn fleet_subdir_matches_fleet_root_layout() {
+        assert_eq!(FLEET_SUBDIR, ".owllm/fleet");
+    }
+
     #[test]
     fn bwrap_prefix_binds_project_and_home_not_real_home() {
-        let a = bwrap_prefix_argv("/home/me/owllm/p", "/home/me/.owllm/sbhome", true);
+        let a = bwrap_prefix_argv("/home/me/owllm/p", "/home/me/.owllm/sbhome", true, &[]);
         let joined = a.join(" ");
         assert!(joined.contains("--bind /home/me/owllm/p /home/me/owllm/p"));
         assert!(joined.contains("--chdir /home/me/owllm/p"));
@@ -2573,8 +3616,96 @@ mod tests {
 
     #[test]
     fn bwrap_prefix_can_isolate_net() {
-        let a = bwrap_prefix_argv("/p", "/sb", false);
+        let a = bwrap_prefix_argv("/p", "/sb", false, &[]);
         assert!(a.join(" ").contains("--unshare-net"));
+    }
+
+    /// The worktree gitdir is bound read-write, and BEFORE --chdir so the jail
+    /// is fully assembled when it enters the project.
+    #[test]
+    fn bwrap_prefix_binds_extra_rw_paths() {
+        let extra = vec!["/repo/.git".to_string()];
+        let a = bwrap_prefix_argv("/home/me/.owllm/fleet/p/code", "/sb", true, &extra);
+        let joined = a.join(" ");
+        assert!(
+            joined.contains("--bind-try /repo/.git /repo/.git"),
+            "{joined}"
+        );
+        let bind_at = joined.find("--bind-try /repo/.git").unwrap();
+        let chdir_at = joined.find("--chdir").unwrap();
+        assert!(bind_at < chdir_at, "gitdir must be bound before --chdir");
+        // Nothing extra leaks in when there is none.
+        assert!(!bwrap_prefix_argv("/p", "/sb", true, &[])
+            .join(" ")
+            .contains("--bind-try /repo"));
+    }
+
+    /// A worktree's `.git` is a POINTER to metadata + objects living in the
+    /// main repo. Binding only the worktree breaks every git call in the jail.
+    #[test]
+    fn worktree_gitdir_resolves_to_main_repo_git_dir() {
+        // Real shapes observed on both machines during the audit.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /home/farisland/Documents/1_Git/LLM-Studio/.git/worktrees/code\n").as_deref(),
+            Some("/home/farisland/Documents/1_Git/LLM-Studio/.git"),
+        );
+        assert_eq!(
+            worktree_git_common_dir("gitdir: D:/1_GitHome/LLM-Studio/.git/worktrees/code7")
+                .as_deref(),
+            Some("D:/1_GitHome/LLM-Studio/.git"),
+        );
+        // Windows-style separators normalise to the forward-slash form bwrap wants.
+        assert_eq!(
+            worktree_git_common_dir(r"gitdir: D:\repo\.git\worktrees\w").as_deref(),
+            Some("D:/repo/.git"),
+        );
+        // A repo whose own path contains "worktrees" must strip only the LAST one.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /srv/worktrees/repo/.git/worktrees/a").as_deref(),
+            Some("/srv/worktrees/repo/.git"),
+        );
+        // A plain gitdir pointer (submodule) is passed through, not mangled.
+        assert_eq!(
+            worktree_git_common_dir("gitdir: /repo/.git/modules/sub").as_deref(),
+            Some("/repo/.git/modules/sub"),
+        );
+        // Non-pointer content yields nothing to bind.
+        assert_eq!(worktree_git_common_dir(""), None);
+        assert_eq!(worktree_git_common_dir("ref: refs/heads/main"), None);
+        assert_eq!(worktree_git_common_dir("gitdir:   "), None);
+    }
+
+    /// D2: the trust key must NOT case-fold on Linux/macOS, where `/Repo` and
+    /// `/repo` are different directories — folding would grant full host access
+    /// to a folder the user never approved.
+    #[test]
+    fn full_access_key_case_sensitivity_is_per_os() {
+        let a = norm_cwd("/home/me/Repo/");
+        let b = norm_cwd("/home/me/repo");
+        if cfg!(windows) {
+            assert_eq!(a, b, "Windows paths are case-insensitive");
+        } else {
+            assert_ne!(a, b, "POSIX paths are case-sensitive");
+        }
+        // Trailing separators normalise on every OS.
+        assert_eq!(norm_cwd("/home/me/repo/"), norm_cwd("/home/me/repo"));
+        assert_eq!(norm_cwd("  /home/me/repo  "), norm_cwd("/home/me/repo"));
+    }
+
+    /// The exact profile that made bwrap runnable on Thor. It must attach to
+    /// the BINARY path (that is what makes it machine-wide — one install covers
+    /// every user, project, worktree and agent) and grant `userns`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bwrap_apparmor_profile_grants_userns_machine_wide() {
+        let p = BWRAP_APPARMOR_PROFILE;
+        assert!(p.contains("profile bwrap /usr/bin/bwrap"), "{p}");
+        assert!(p.lines().any(|l| l.trim() == "userns,"), "{p}");
+        assert!(p.contains("abi <abi/4.0>"), "{p}");
+        assert!(p.trim_end().ends_with('}'), "{p}");
+        // Machine-wide by construction: the path is under /etc, not a home dir.
+        assert_eq!(BWRAP_APPARMOR_PATH, "/etc/apparmor.d/bwrap");
+        assert!(!BWRAP_APPARMOR_PATH.contains("$HOME"));
     }
 
     #[test]

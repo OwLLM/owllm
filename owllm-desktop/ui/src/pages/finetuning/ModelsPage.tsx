@@ -24,6 +24,7 @@ import WeightPickerDialog from "./widgets/WeightPickerDialog";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import * as downloadStore from "./downloadStore";
 import { chip, INPUT, BUTTON, banner } from "../../theme/styles";
+import { notify } from "../../components/Toast";
 
 // Browser mode (vite dev / TwinForge / the website's embedded demo) has no
 // Tauri IPC — mount-time invokes would surface a raw TypeError banner.
@@ -853,6 +854,12 @@ export default function ModelsPage() {
   // when there's no partial left to resume (e.g. the user deleted it).
   const resumeDownload = async (name: string, dirPath: string) => {
     const hfId = name.replace(/__/g, "/");
+    // Already running: pressing Resume again is a no-op inside the store, which
+    // reads to the user as a dead button. Say what is actually happening.
+    if (downloadStore.isActive(hfId)) {
+      notify(`'${hfId}' is already downloading — see the Downloads bar at the top.`);
+      return;
+    }
     try {
       const parts = await invoke<Array<{ file: string; bytesOnDisk: number }>>(
         "models_partial_files", { dir: dirPath },
@@ -863,7 +870,13 @@ export default function ModelsPage() {
         refreshDownloaded();
         return;
       }
-    } catch { /* fall through to the picker */ }
+    } catch (e) {
+      notify(`Could not read '${hfId}' on disk: ${String(e)}`);
+      return;
+    }
+    // Nothing half-written left. Resuming is impossible; re-opening the picker
+    // silently made the button look broken, so name the situation first.
+    notify(`Nothing left to resume for '${hfId}' — no partly-downloaded file on disk. Choose which weights to fetch.`);
     setPickerFor(hfId);
   };
 
@@ -1100,7 +1113,28 @@ export default function ModelsPage() {
                   <span style={{ color:"var(--fg-muted)" }}>· file {p.fileIndex + 1}/{p.fileCount}: {p.file}</span>
                   <span style={{ flex:1 }} />
                   {p.error
-                    ? <span style={{ color:"#ff8c8c", fontWeight:600 }}>✗ {p.error.slice(0, 120)}</span>
+                    ? <>
+                        {/* A failure with no way forward is what the user hit:
+                            "it says the download was broken without taking any
+                            further action". Retry resumes from the .partial. */}
+                        <span title={p.error} style={{ color:"#ff8c8c", fontWeight:600 }}>✗ {p.error.slice(0, 120)}</span>
+                        <button
+                          onClick={() => { void downloadStore.retry(id); }}
+                          style={{
+                            padding:"2px 10px", fontSize:11, fontWeight:700, cursor:"pointer",
+                            background:"rgba(255,217,122,0.18)", color:"#ffd97a",
+                            border:"1px solid rgba(255,217,122,0.5)", borderRadius:5,
+                          }}
+                        >↻ Retry</button>
+                        <button
+                          onClick={() => downloadStore.dismiss(id)}
+                          style={{
+                            padding:"2px 8px", fontSize:11, cursor:"pointer",
+                            background:"transparent", color:"var(--fg-muted)",
+                            border:"1px solid var(--border-strong)", borderRadius:5,
+                          }}
+                        >Dismiss</button>
+                      </>
                     : p.done
                       ? <span style={{ color:"#5af09c", fontWeight:600 }}>✓ Done</span>
                       : <span style={{ color:"var(--fg-muted)" }}>

@@ -3,17 +3,48 @@
 // The release smoke matrix auto-discovers this harness before publishing.
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "../../../../..");
 const ASSETS = path.join(ROOT, "profile-assets");
-const PROFILE = process.argv.includes("--stdin")
+const LINUX_GUIDE_URL =
+  "https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md";
+// Windows Git checkouts commonly use CRLF. Normalize before checking the
+// profile's adjacent HTML lines so the release gate validates content rather
+// than the host's configured line-ending convention.
+const PROFILE = (process.argv.includes("--stdin")
   ? fs.readFileSync(0, "utf8")
   : fs.readFileSync(
       path.join(ROOT, "owllm-dotgithub-profile-README.md"),
       "utf8",
-    );
+    )).replace(/\r\n/g, "\n");
+const ROOT_README = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+const LINUX_GUIDE_PATH = path.join(ROOT, "INSTALL_LINUX.md");
+const LINUX_GUIDE = fs.existsSync(LINUX_GUIDE_PATH)
+  ? fs.readFileSync(LINUX_GUIDE_PATH, "utf8")
+  : "";
+const PUBLISH_SCRIPT = fs.readFileSync(
+  path.join(ROOT, "owllm-desktop", "scripts", "publish-release.sh"),
+  "utf8",
+);
+const FINISH_SCRIPT = fs.readFileSync(
+  path.join(ROOT, "owllm-desktop", "scripts", "finish-multihost.sh"),
+  "utf8",
+);
+const RELEASE_WORKFLOW = fs.readFileSync(
+  path.join(ROOT, ".github", "workflows", "release.yml"),
+  "utf8",
+);
+const DOWNLOAD_EDGE = fs.readFileSync(
+  path.join(ROOT, "download-map", "netlify", "edge-functions", "dl.ts"),
+  "utf8",
+);
+const { resolveDownloadTarget } = await import(
+  pathToFileURL(
+    path.join(ROOT, "download-map", "netlify", "edge-functions", "resolve.mjs"),
+  ).href
+);
 
 let failed = 0;
 function check(name, ok) {
@@ -27,8 +58,6 @@ function check(name, ok) {
 
 for (const asset of [
   "OwLLM.Desktop.Setup.exe",
-  "OwLLM.Desktop.AppImage",
-  "OwLLM.Desktop.deb",
   "OwLLM.Desktop.Setup.dmg",
 ]) {
   check(
@@ -38,6 +67,90 @@ for (const asset of [
     ),
   );
 }
+
+check(
+  "the organization Linux card opens the guided installer, not GitHub's asset pile",
+  PROFILE.includes(`<a href="${LINUX_GUIDE_URL}">\n    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg`)
+    && !PROFILE.includes('<a href="https://github.com/OwLLM/owllm/releases/latest">\n    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg'),
+);
+check(
+  "the repository Linux card opens the same guided installer",
+  ROOT_README.includes(`](${LINUX_GUIDE_URL})`)
+    && !ROOT_README.includes(
+      "](https://github.com/OwLLM/owllm/releases/latest)\n\nllama.cpp payloads",
+    ),
+);
+check("the public Linux installation guide exists", LINUX_GUIDE.length > 0);
+
+for (const asset of [
+  "OwLLM.Desktop.AppImage",
+  "OwLLM.Desktop.deb",
+  "OwLLM.Desktop.x86_64.rpm",
+  "OwLLM.Desktop.aarch64.AppImage",
+  "OwLLM.Desktop.arm64.deb",
+  "OwLLM.Desktop.aarch64.rpm",
+]) {
+  check(
+    `the Linux guide links the stable ${asset} release asset`,
+    LINUX_GUIDE.includes(
+      `https://github.com/OwLLM/owllm/releases/latest/download/${asset}`,
+    ),
+  );
+  check(
+    `host and CI releases publish the stable ${asset} asset`,
+    PUBLISH_SCRIPT.includes(`dist/${asset}`)
+      && FINISH_SCRIPT.includes(asset)
+      && RELEASE_WORKFLOW.includes(`stage/${asset}`),
+  );
+}
+
+check(
+  "the Linux guide teaches architecture selection instead of exposing filenames",
+  LINUX_GUIDE.includes("uname -m")
+    && LINUX_GUIDE.includes("x86_64")
+    && LINUX_GUIDE.includes("aarch64")
+    && LINUX_GUIDE.includes("arm64"),
+);
+check(
+  "the Linux guide gives install commands for deb, rpm and AppImage",
+  LINUX_GUIDE.includes("sudo apt install")
+    && LINUX_GUIDE.includes("sudo dnf install")
+    && LINUX_GUIDE.includes("chmod +x"),
+);
+
+const resolverAssets = [{
+  tag_name: "v-test",
+  draft: false,
+  assets: [
+    { name: "OwLLM.Desktop_9.9.9_amd64.AppImage", browser_download_url: "x86-appimage" },
+    { name: "OwLLM.Desktop_9.9.9_aarch64.AppImage", browser_download_url: "arm-appimage" },
+    { name: "OwLLM.Desktop_9.9.9_amd64.deb", browser_download_url: "x86-deb" },
+    { name: "OwLLM.Desktop_9.9.9_arm64.deb", browser_download_url: "arm-deb" },
+    { name: "OwLLM.Desktop_9.9.9_x86_64.rpm", browser_download_url: "x86-rpm" },
+    { name: "OwLLM.Desktop_9.9.9_aarch64.rpm", browser_download_url: "arm-rpm" },
+  ],
+}];
+const resolverFetch = async () => ({ ok: true, json: async () => resolverAssets });
+for (const [platform, expected] of [
+  ["linux", "x86-appimage"],
+  ["linux-arm64", "arm-appimage"],
+  ["deb", "x86-deb"],
+  ["deb-arm64", "arm-deb"],
+  ["rpm", "x86-rpm"],
+  ["rpm-arm64", "arm-rpm"],
+]) {
+  check(
+    `the download resolver selects ${platform} without crossing architectures`,
+    await resolveDownloadTarget(platform, resolverFetch) === expected,
+  );
+}
+
+const fallbackBlock = DOWNLOAD_EDGE.match(/const FALLBACK[\s\S]*?\n};/)?.[0] ?? "";
+check(
+  "a resolver failure still downloads an installer instead of opening the raw release page",
+  fallbackBlock.length > 0
+    && !/https:\/\/github\.com\/OwLLM\/owllm\/releases\/latest["']/.test(fallbackBlock),
+);
 
 for (const capability of [
   "Local GGUF",

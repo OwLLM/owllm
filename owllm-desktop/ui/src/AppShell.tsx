@@ -14,7 +14,7 @@
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
@@ -41,12 +41,21 @@ import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncMo
 import { githubStatus, GITHUB_CHANGED_EVENT } from "./pages/agentic/github";
 import WatcherDrawer from "./support/WatcherDrawer";
 import GenSpeedBadge from "./components/GenSpeedBadge";
+import { notify } from "./components/Toast";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
 import { isRunActive, isRunActiveMatching, getRunActivityVersion, subscribeRunActivity } from "./runtime/runActivity";
 import { continuousUiAnimation } from "./runtime/renderingPolicy";
+import {
+  getUpdateAvailability, markUpdateAnnounced, requestUpdateInstall,
+  shouldAnnounceUpdate, subscribeUpdateAvailability,
+} from "./runtime/updateAvailability";
+import {
+  getModuleUpdates, openModulesPage, OPEN_MODULES_EVENT, setModuleUpdates,
+  subscribeModuleUpdates, type ModuleUpdate,
+} from "./runtime/moduleUpdates";
 import {
   initTabActivity, isWorkflowAwarePage, runPrefixesForPage, showFinishedBadge, stepTabActivity,
 } from "./runtime/headerTabActivity";
@@ -56,7 +65,14 @@ import {
 } from "./chatFontPreferences";
 import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
+import { getVersion } from "@tauri-apps/api/app";
 import { installWorldPresenceConnection, presenceNodeIdForDevice } from "./pages/gamify/worldPresence";
+import {
+  openWorldChatThread,
+  subscribeWorldChat,
+  worldChatHooks,
+} from "./pages/gamify/worldChatRuntime";
+import { worldChatConversations, worldChatUnreadCount } from "./pages/gamify/worldChat";
 import { getIdentity } from "./pages/advanced/remoteDevices";
 import { openWebUrl } from "./utils/openWebUrl";
 
@@ -224,6 +240,37 @@ function useLocalServerKeySync() {
   }, []);
 }
 
+// If OwLLM died last time instead of closing, say so — once, on the launch that
+// discovered it. Users who report "it keeps closing on its own" have no way to
+// tell us what happened; the details are already attached to any support report
+// they send from here, so the notice's job is just to prompt them to send one.
+function useUncleanShutdownNotice() {
+  const { t } = useLocalization();
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke<{ newThisLaunch: number; reports: { reason: string }[] }>("session_health_pending")
+      .then((health) => {
+        if (health.newThisLaunch < 1) return;
+        const last = health.reports[health.reports.length - 1];
+        // The reason is a sentence fragment ("that session's process
+        // disappeared…"), so join it with a dash and punctuate it here rather
+        // than letting two half-sentences run together.
+        const cause = last?.reason ? ` — ${t(last.reason)}.` : ".";
+        notify(
+          `${t("OwLLM closed unexpectedly last time")}${cause} ${t(
+            "Sending a report from the Support page includes what we recorded.",
+          )}`,
+          "error",
+          // Stays until clicked: this asks the user to do something, and the
+          // 12s error timeout expires long before someone returning to their
+          // desk would ever see it.
+          { sticky: true },
+        );
+      })
+      .catch(() => {});
+  }, [t]);
+}
+
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
 // can't disagree.
@@ -233,7 +280,13 @@ type ServerStatusLite = {
   port: number | null;
   message: string;
 };
-type VramGpu = { index: number; used_mib: number; total_mib: number };
+type VramGpu = {
+  index: number;
+  used_mib: number;
+  total_mib: number;
+  unified?: boolean;
+  model_scoped?: boolean;
+};
 type VramStatusLite = { gpus: VramGpu[] };
 
 // Model ids commonly include the organisation, fine-tune recipe and quant.
@@ -294,6 +347,10 @@ const MIN_PARENT_H = 500;
 // ---------------------------------------------------------------------
 const BADGE_W = 300;
 const BADGE_H = 195;
+
+// How long the owl's update balloon stays before handing over to the small
+// badge under the OWLLM mark.
+const UPDATE_NOTICE_MS = 10_000;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
@@ -637,9 +694,12 @@ const HEADER_TAB_WORKING_ANIMATION = "owllm-tab-working 1.4s ease-in-out infinit
 
 function ModeBar({
   mode, setMode, installed,
-  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor,
   onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
-  onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
+  onWatcher, watcherHint, chatNotice, onOpenChatNotice,
+  updateNotice, updateBadge, onOpenUpdate,
+  moduleUpdates, onOpenModules,
+  keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
 }: {
@@ -653,7 +713,6 @@ function ModeBar({
   textColorKey: TextColorSelection;
   textColor: string;
   onPickTextColor: (color: TextColorSelection) => void;
-  onOpenServer: () => void;
   onOpenMarketplace: () => void;
   onOpenSigning: () => void;
   onOpenSettingsPage: (key: string) => void;
@@ -662,6 +721,23 @@ function ModeBar({
   /// doubles as the summon point.
   onWatcher?: () => void;
   watcherHint?: boolean;
+  /// World Chat: a message just arrived, so the owl says so. Chat can land on
+  /// any page, which is why the notice belongs to the chrome and not to the
+  /// World Map.
+  chatNotice?: { key: string; label: string; avatar: string; text: string; count: number } | null;
+  onOpenChatNotice?: () => void;
+  /// A new version is out: the owl says so once, in a comic speech bubble, for
+  /// UPDATE_NOTICE_MS. After that the bubble is replaced by `updateBadge` — a
+  /// small chip tucked under the OWLLM mark — so the offer never vanishes
+  /// without a trace, and never blocks the app either.
+  updateNotice?: string | null;
+  updateBadge?: string | null;
+  onOpenUpdate?: () => void;
+  /// Installed modules with a newer build waiting. Drives the Settings row's
+  /// dot and its own chrome chip — the app update badge can't carry these,
+  /// because a module update ships without any new app version.
+  moduleUpdates?: ModuleUpdate[];
+  onOpenModules?: () => void;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
   chatFontStep: number;
@@ -1072,6 +1148,41 @@ function ModeBar({
                 ))}
               </div>
 
+              {/* Modules — install / update the local inference engine and the
+                  other optional runtimes. The ONLY entry point: the wizard's
+                  settings mode was unreachable after first run, so a published
+                  engine update (the one that teaches llama.cpp a new GGUF
+                  architecture) could not be installed at all. */}
+              <button
+                data-ui="SettingsModulesRow"
+                onClick={() => { setSettingsOpen(false); onOpenModules?.(); }}
+                title="Install or update the local inference engine and other optional modules"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🧱</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>Modules</span>
+                  <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>
+                    Local inference engine, speech, and other optional runtimes
+                  </span>
+                </span>
+                {moduleUpdates && moduleUpdates.length > 0 && (
+                  <span style={{
+                    flexShrink: 0, padding: "2px 8px", borderRadius: 999,
+                    background: "rgba(var(--accent-rgb),0.9)", color: "var(--accent-fg)",
+                    fontSize: 10.5, fontWeight: 900, whiteSpace: "nowrap",
+                  }}>
+                    {moduleUpdates.length} update{moduleUpdates.length === 1 ? "" : "s"}
+                  </span>
+                )}
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
               {/* Signing / credential hub entry — its own separate line.
                   Opens the Signing hub as a centered popup (PageModal); it is
                   no longer a header tab, so this dropdown row is its only entry. */}
@@ -1223,6 +1334,147 @@ function ModeBar({
       )}
       <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 0%, rgba(var(--accent-rgb),0.30), transparent 72%) !important; }`}</style>
 
+      {/* World Chat push notice — a speech bubble beside the top-centre owl,
+          so a message that arrives while the user is on any other page still
+          announces itself. Clicking it goes to the conversation. It sits above
+          the OWLLM title and to the right of the owl's head, clear of the
+          Watcher satellite label (which is vertically centred). */}
+      {chatNotice && (
+        <>
+          {/* The placement is a plain style and never a keyframe: with
+              prefers-reduced-motion the animation is dropped, and a bubble
+              whose position lived in the keyframes would land on the owl. */}
+          <style>{`
+            @keyframes owllm-chat-pop {
+              0%   { opacity: 0; transform: scale(0.86); }
+              100% { opacity: 1; transform: scale(1); }
+            }
+          `}</style>
+          <button
+            data-ui="WorldChatNotice"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenChatNotice?.(); }}
+            title={`World Chat — ${chatNotice.label}: ${chatNotice.text}`}
+            style={{
+              position: "absolute",
+              left: "50%", top: 6,
+              transform: "translateX(80px)",
+              transformOrigin: "left center",
+              padding: "3px 11px",
+              borderRadius: "999px",
+              background: "rgba(var(--accent-rgb),0.92)",
+              border: "1px solid rgba(var(--accent-rgb),1)",
+              color: "#fff", fontSize: 12, fontWeight: 800,
+              letterSpacing: 0.3, whiteSpace: "nowrap",
+              maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
+              cursor: "pointer", zIndex: 8,
+              boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
+            }}
+          >
+            {/* The sender's name, because "got a message" from nobody in
+                particular is a riddle rather than a notification. */}
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              animation: continuousUiAnimation("owllm-chat-pop 220ms ease-out 1 both"),
+            }}>
+              {/* Their picture when they publish one. Only ever a GitHub
+                  avatar URL — the relay refuses any other host — so the
+                  bubble cannot be made to fetch from somewhere else. */}
+              {chatNotice.avatar && (
+                <span
+                  data-ui="WorldChatNotice:avatar"
+                  aria-hidden="true"
+                  style={{
+                    width: 16, height: 16, borderRadius: "50%",
+                    backgroundImage: `url("${chatNotice.avatar}")`,
+                    backgroundSize: "cover", backgroundPosition: "center",
+                  }}
+                />
+              )}
+              💬 Got a message{chatNotice.label ? ` from ${chatNotice.label}` : ""}{chatNotice.count > 1 ? ` (${chatNotice.count})` : ""}
+            </span>
+          </button>
+        </>
+      )}
+
+      {/* Update announcement — the owl asks, comic-book style, from the LEFT
+          edge of a balloon beside its head. It sits below the World Chat chip,
+          so either notice can appear without covering the other. Ten seconds,
+          clickable, then it hands over to the badge under the OWLLM mark.
+          Deliberately not a modal: an update is an invitation, not an
+          interruption. */}
+      {updateNotice && (
+        <>
+          <style>{`
+            @keyframes owllm-update-bubble-in {
+              0%   { opacity: 0; transform: scale(0.7) rotate(-6deg); }
+              60%  { opacity: 1; transform: scale(1.06) rotate(1.5deg); }
+              100% { opacity: 1; transform: scale(1) rotate(-1.2deg); }
+            }
+            @keyframes owllm-update-bubble-nudge {
+              0%, 100% { transform: rotate(-1.2deg) translateY(0); }
+              50%      { transform: rotate(-1.2deg) translateY(-2.5px); }
+            }
+            .owllm-update-bubble:hover { filter: brightness(1.06); }
+          `}</style>
+          <button
+            data-ui="UpdateNotice"
+            className="owllm-update-bubble"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenUpdate?.(); }}
+            title={`OwLLM Desktop ${updateNotice} is available — click to update`}
+            style={{
+              position: "absolute",
+              // Keep placement out of `transform`: the entrance/nudge
+              // keyframes animate transform continuously and used to override
+              // it, silently moving the balloon away from its intended side.
+              left: "calc(50% + 92px)", top: 25,
+              transformOrigin: "left 28px",
+              zIndex: 9,
+              width: 268, textAlign: "left",
+              padding: "9px 13px 10px",
+              // Manga speech balloon: paper-white, thick ink outline, hard
+              // offset shadow — the comic vocabulary, not a UI toast.
+              background: "#fdfdf7",
+              border: "2.5px solid #14181f",
+              borderRadius: "18px 18px 20px 18px",
+              color: "#14181f",
+              boxShadow: "3px 4px 0 rgba(20,24,31,0.85)",
+              cursor: "pointer",
+              animation: continuousUiAnimation(
+                "owllm-update-bubble-in 320ms cubic-bezier(.2,1.4,.4,1) 1 both, owllm-update-bubble-nudge 2.4s ease-in-out 320ms infinite",
+              ),
+            }}
+          >
+            <span style={{ display: "block", fontSize: 13.5, fontWeight: 900, lineHeight: 1.28, letterSpacing: 0.1 }}>
+              Please, update your app!
+            </span>
+            <span style={{ display: "block", marginTop: 2, fontSize: 12, fontWeight: 700, lineHeight: 1.3, color: "#2b3444" }}>
+              We fixed a few bugs and added cool features!
+            </span>
+            <span style={{ display: "block", marginTop: 5, fontSize: 10.5, fontWeight: 900, letterSpacing: 0.6, textTransform: "uppercase", color: "#b8330f" }}>
+              ⬆ Tap to install v{updateNotice}
+            </span>
+            {/* The tail, aimed at the owl's beak. Two stacked triangles so the
+                ink outline reads as one continuous balloon edge. */}
+            <span aria-hidden="true" style={{
+              position: "absolute", left: -17, top: 20,
+              width: 0, height: 0,
+              borderTop: "8px solid transparent",
+              borderBottom: "11px solid transparent",
+              borderRight: "18px solid #14181f",
+            }} />
+            <span aria-hidden="true" style={{
+              position: "absolute", left: -12, top: 21,
+              width: 0, height: 0,
+              borderTop: "6px solid transparent",
+              borderBottom: "9px solid transparent",
+              borderRight: "14px solid #fdfdf7",
+            }} />
+          </button>
+        </>
+      )}
+
       {/* The OWLLM title stays a drag surface, and hovering it restores the
           decorative frame. Clicking the compact owl hotspot above still
           summons the Watcher drawer. */}
@@ -1243,6 +1495,62 @@ function ModeBar({
           pointerEvents: "auto",
         }}
       >OWLLM</div>
+
+      {/* Where the offer LIVES once the bubble has had its say: under the
+          OWLLM mark, at its bottom-right. Small, quiet, and permanent until the
+          update is installed — the previous design had no such resting place, so
+          dismissing the dialog lost the update entirely. */}
+      {updateBadge && (
+        <button
+          data-ui="UpdateBadge"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onOpenUpdate?.(); }}
+          title={`OwLLM Desktop ${updateBadge} is available — click to update`}
+          style={{
+            position: "absolute",
+            left: "50%", top: "50%",
+            transform: "translate(38px, 22px)",
+            padding: "2px 9px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.9)",
+            border: "1px solid rgba(var(--accent-rgb),1)",
+            color: "#fff", fontSize: 10.5, fontWeight: 900,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            cursor: "pointer", zIndex: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+          }}
+        >
+          ⬆ Update available
+        </button>
+      )}
+
+      {/* Engine/module offer. Sits one line BELOW the app-update chip so the
+          two can never overlap, and stands on its own when there is no app
+          update at all — which is the normal case, since the module registry
+          is republished without shipping a new app. */}
+      {moduleUpdates && moduleUpdates.length > 0 && (
+        <button
+          data-ui="ModuleUpdateBadge"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onOpenModules?.(); }}
+          title={moduleUpdates
+            .map((m) => `${m.displayName}: ${m.installedVersion} → ${m.availableVersion}`)
+            .join("\n")}
+          style={{
+            position: "absolute",
+            left: "50%", top: "50%",
+            transform: `translate(38px, ${updateBadge ? 40 : 22}px)`,
+            padding: "2px 9px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.75)",
+            border: "1px solid rgba(var(--accent-rgb),1)",
+            color: "var(--accent-fg)", fontSize: 10.5, fontWeight: 900,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            cursor: "pointer", zIndex: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+          }}
+        >
+          🧱 Engine update
+        </button>
+      )}
       {watcherHint && (
         <>
           <style>{`
@@ -1272,16 +1580,18 @@ function ModeBar({
         </>
       )}
 
-      <SysInfoBlock onOpenServer={onOpenServer} />
+      <SysInfoBlock />
       <WindowControls />
     </div>
   );
 }
 
-// Header right-block — live status. Clicking it opens the Server modal
-// (same trigger as the "Server" tab) so the user can spin a model up/down
-// from anywhere. Laid out for the 88px header: two compact lines.
-function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
+// Header right-block — a live status readout, and nothing more. It used to
+// double as a link into the Server modal; that made an always-visible corner
+// of the chrome navigate somewhere on any stray click. Server Control is
+// reached from its own "Server" tab, which is where a destination belongs.
+// Laid out for the 88px header: two compact lines.
+function SysInfoBlock() {
   const { server, vram } = useLiveSysInfo();
   // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
   // ServerStatusLite carries only one server, so N is 0 or 1.
@@ -1292,15 +1602,17 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
     : vram.gpus
-        .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
+        .map(g => {
+          const value = `${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`;
+          if (g.unified && g.model_scoped) return `Unified model: ${value}`;
+          if (g.unified) return `Unified: ${value}`;
+          return `GPU${g.index}: ${value}`;
+        })
         .join("   ");
   return (
     <div
       data-ui="SysInfoBlock"
-      onClick={onOpenServer}
-      title={server.running
-        ? `Model: ${fullModelId}\nOpen Server Control`
-        : "Open Server Control"}
+      title={server.running ? `Model: ${fullModelId}` : undefined}
       style={{
         // Narrower and shorter than the pre-0.9.90 block so it fits the
         // 88px header without crowding the mode toggles. overflow:hidden +
@@ -1311,12 +1623,11 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         alignItems: "stretch", justifyContent: "center", gap: 2,
         fontSize: 11, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
         overflow: "hidden",
-        cursor: "pointer",
       }}
     >
       <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
-        <GenSpeedBadge variant="header" />
+        <GenSpeedBadge variant="header" active={server.running} />
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}
@@ -1373,7 +1684,14 @@ function SubTabs({
     return (
       <div
         key={p.key}
+        role="button"
+        tabIndex={0}
         onClick={() => onChange(p.key)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onChange(p.key);
+        }}
         title={working ? `${p.label} — working…` : done ? `${p.label} — finished (unseen)` : undefined}
         style={{
           display: "flex", alignItems: "center", gap: 6,
@@ -1624,6 +1942,7 @@ const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.use
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   useLocalServerKeySync();
+  useUncleanShutdownNotice();
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
   // straight to the page it wants to diff (e.g. ?page=train).
   const initialDeep = useMemo(() => {
@@ -1771,6 +2090,61 @@ export default function AppShell() {
     setWatcherHint(false);
     setWatcherOpen(true);
   };
+  // World Chat push notice. A message can arrive on any page — the World Map
+  // is one tab among many — so the owl in the top-centre of the frame is where
+  // it is announced.
+  //
+  // It is derived from the unread counts and NOT from a timer: a notice that
+  // faded after a few seconds took the message with it — you were left knowing
+  // something had arrived and with no way back to it. This one names the
+  // sender, survives a restart, and stays until the conversation is opened.
+  const [chatNotice, setChatNotice] = useState<{ key: string; label: string; avatar: string; text: string; count: number } | null>(null);
+  useEffect(() => subscribeWorldChat((state) => {
+    const count = worldChatUnreadCount(state);
+    const newest = count ? worldChatConversations(state).find((entry) => entry.unread > 0) : undefined;
+    setChatNotice(newest ? { key: newest.key, label: newest.label, avatar: newest.avatar, text: newest.last?.text ?? "", count } : null);
+  }), []);
+  const openChatNotice = () => {
+    if (chatNotice) openWorldChatThread(chatNotice.key);
+  };
+
+  // Update offer. The owl greets ONCE per version per session (the bubble), then
+  // the badge under the OWLLM mark carries it for as long as the update stands.
+  const updateVersion = React.useSyncExternalStore(
+    subscribeUpdateAvailability,
+    () => getUpdateAvailability().version,
+  );
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!updateVersion) { setUpdateNotice(null); return; }
+    if (!shouldAnnounceUpdate(updateVersion)) return;
+    markUpdateAnnounced(updateVersion);
+    setUpdateNotice(updateVersion);
+    const t = window.setTimeout(() => setUpdateNotice(null), UPDATE_NOTICE_MS);
+    return () => window.clearTimeout(t);
+  }, [updateVersion]);
+
+  // A balloon is the OWL talking, so the owl has to be on screen while it does.
+  // The decorative frame — which is where the owl lives, inline in HybridFrame
+  // on macOS and in the click-through overlay window on Windows — idles away
+  // FRAME_IDLE_HIDE_MS after launch, long before the updater's first check
+  // lands (2.5s) or a World Chat message arrives. The balloon then floated over
+  // the header with its tail pointing at nothing. Reveal the frame for as long
+  // as either notice is up, then hand back to the normal idle-hide (which
+  // keepFrameVisible still overrides).
+  const noticeShowing = Boolean(updateNotice || chatNotice);
+  useEffect(() => {
+    if (!noticeShowing) return;
+    revealFrame();
+    return () => hideFrameAfter(FRAME_LEAVE_HIDE_MS);
+  }, [noticeShowing]);
+
+  // Module offers (the local-inference engine above all). Separate from the app
+  // update: the registry is republished on its own schedule, and an engine that
+  // cannot load current models is worth its own badge rather than waiting for
+  // the next app release to mention it.
+  const moduleUpdates = React.useSyncExternalStore(subscribeModuleUpdates, getModuleUpdates);
+
   // The always-visible "🦉 Watcher" chrome button (and any other surface)
   // summons via this window event, so it never depends on the click-through
   // owl's geometry.
@@ -1968,7 +2342,6 @@ export default function AppShell() {
             textColorKey={theme.textColorKey}
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
-            onOpenServer={() => setServerModalOpen(true)}
             onOpenSigning={() => setSigningModalOpen(true)}
             onOpenMarketplace={() => {
               openWebUrl(MARKETPLACE_URL)
@@ -1979,6 +2352,15 @@ export default function AppShell() {
             }}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}
+            chatNotice={chatNotice}
+            onOpenChatNotice={openChatNotice}
+            updateNotice={updateNotice}
+            // The badge takes over the moment the bubble is done, and is the
+            // only surface while a later session re-finds the same version.
+            updateBadge={updateVersion && !updateNotice ? updateVersion : null}
+            onOpenUpdate={requestUpdateInstall}
+            moduleUpdates={moduleUpdates}
+            onOpenModules={openModulesPage}
             keepFrameVisible={keepFrameVisible}
             onKeepFrameVisible={setKeepFrameVisible}
             chatFontStep={chatFontStep}
@@ -2076,6 +2458,8 @@ export default function AppShell() {
       )}
       <TutorialRecorder enabled={true} />
       <FirstRunWizardMount />
+      <ModulesPageMount />
+      <ModuleUpdateWatcher />
       {/* Account/Sync onboarding — self-gates to first run + the
           `owllm:open-sync` event. Invites GitHub sign-in so chats/settings
           follow the user across devices (their own private owllm-vault). */}
@@ -2093,14 +2477,29 @@ function WorldPresenceRunner() {
     let disposed = false;
     let stop: (() => void) | undefined;
     void getIdentity()
-      .then((identity) => presenceNodeIdForDevice(identity.device_id))
-      .then((nodeId) => {
-        if (!disposed) stop = installWorldPresenceConnection({ nodeId });
+      .then(async (identity) => ({
+        // Rust derives the same hash without needing `crypto.subtle`, which is
+        // secure-context-only; the webview hash stays as the browser-dev path.
+        nodeId: identity.presence_id || await presenceNodeIdForDevice(identity.device_id),
+        appVersion: identity.app_version,
+      }))
+      .then(({ nodeId, appVersion }) => {
+        // chatHooks is undefined unless the user turned World Chat on, in which
+        // case no key is ever presented and the socket stays anonymous.
+        if (!disposed) stop = installWorldPresenceConnection({ nodeId, appVersion, chatHooks: worldChatHooks() });
       })
-      .catch(() => {
-        // Browser-only development and a temporarily unavailable native identity
-        // retain the old device-local anonymous id instead of losing presence.
-        if (!disposed) stop = installWorldPresenceConnection();
+      .catch(async () => {
+        // No native identity (browser-only development, or a device that cannot
+        // read its own keypair): connect with NO id. The service shows the dot
+        // while it is live and records nothing, so repeated launches can never
+        // become repeated "users" — that is what a random fallback id did.
+        //
+        // The VERSION is still sent. It does not come from the identity — the
+        // app knows its own build without any keypair — and dropping it here was
+        // the one code path that could put an ONLINE dot on the map with
+        // "Version unknown" beside it.
+        const appVersion = await getVersion().catch(() => undefined);
+        if (!disposed) stop = installWorldPresenceConnection({ appVersion });
       });
     return () => {
       disposed = true;
@@ -2114,4 +2513,71 @@ function FirstRunWizardMount() {
   const { needed, setDismissed } = useNeedsFirstRunWizard();
   if (!needed) return null;
   return <ModuleWizard mode="first-run" onClose={setDismissed} />;
+}
+
+// The Modules page, on demand — the ONLY route to it after first run.
+//
+// `useNeedsFirstRunWizard()` goes false as soon as anything is installed, so
+// until this mount existed the settings mode of ModuleWizard was dead code and
+// a published module update was uninstallable: no button, no menu entry, no
+// route. The local-inference crash hint told users to go there by name.
+function ModulesPageMount() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_MODULES_EVENT, show as EventListener);
+    return () => window.removeEventListener(OPEN_MODULES_EVENT, show as EventListener);
+  }, []);
+  if (!open) return null;
+  return <ModuleWizard mode="settings" onClose={() => { setOpen(false); void checkModuleUpdates(); }} />;
+}
+
+/// Ask the backend which installed modules have a newer build waiting and
+/// publish the answer to runtime/moduleUpdates. Safe to call at any time; a
+/// backend that isn't ready yet just leaves the previous answer standing.
+async function checkModuleUpdates(): Promise<void> {
+  try {
+    const mods = await invoke<Array<{
+      id: string; displayName: string; state: string;
+      installedVersion: string | null; availableVersion: string | null;
+    }>>("module_list");
+    const pending: ModuleUpdate[] = mods
+      .filter((m) => m.state === "update-available")
+      .map((m) => ({
+        id: m.id,
+        displayName: m.displayName,
+        installedVersion: m.installedVersion ?? "",
+        availableVersion: m.availableVersion ?? "",
+      }));
+    setModuleUpdates(pending);
+  } catch {
+    // Module manager not up yet, or offline — the repeating check retries.
+  }
+}
+
+// Same cadence as the app updater (UpdatePrompt): once shortly after launch,
+// then every 6 hours. A one-shot check is how installs sit for months on an
+// engine that cannot load current models — the registry is republished
+// independently of the app, so "nothing new at launch" expires fast.
+function ModuleUpdateWatcher() {
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+    const first = window.setTimeout(() => { void checkModuleUpdates(); }, 4000);
+    const iv = window.setInterval(() => { void checkModuleUpdates(); }, 6 * 60 * 60 * 1000);
+    // The backend now installs these on its own (modules::spawn_auto_maintenance).
+    // Re-check the moment one lands, or the badge would advertise an update
+    // that is already installed for up to six more hours.
+    let unlisten: UnlistenFn | null = null;
+    let dropped = false;
+    void listen<{ stage?: string }>("module-progress", (evt) => {
+      if (evt.payload?.stage === "completed") void checkModuleUpdates();
+    }).then((fn) => { if (dropped) { try { fn(); } catch {} } else { unlisten = fn; } });
+    return () => {
+      dropped = true;
+      window.clearTimeout(first);
+      window.clearInterval(iv);
+      try { unlisten?.(); } catch {}
+    };
+  }, []);
+  return null;
 }

@@ -11,6 +11,8 @@ const UI = path.resolve(HERE, "../../..");
 const APP = path.resolve(UI, "..");
 const read = (relative) => fs.readFileSync(path.join(APP, relative), "utf8");
 const accounts = read("src-tauri/src/accounts.rs");
+const browser = read("src-tauri/src/browser.rs");
+const smoke = read("scripts/smoke-matrix.mjs");
 const health = read("ui/src/pages/advanced/accountHealth.ts");
 const dispatch = read("ui/src/pages/agentic/dispatch.ts");
 
@@ -42,6 +44,29 @@ check(
 check(
   "rejected long-window limits never enter the transient retry schedule",
   dispatch.includes("if (isProviderUsageLimit(msg)) return false"),
+);
+check(
+  "modern Keychain-backed Claude login is detected through the CLI",
+  accounts.includes('"auth"')
+    && accounts.includes('"status"')
+    && accounts.includes('"loggedIn"')
+    && accounts.includes("claude_auth_status_logged_in"),
+);
+check(
+  "legacy Claude credential files remain a compatible fast path",
+  accounts.includes('.join(".credentials.json")')
+    && /credentials.*is_file\(\)/s.test(accounts),
+);
+check(
+  "Claude browser callback is parsed and emitted only to the main app",
+  browser.includes("claude_auth_code_from_callback")
+    && browser.includes('"platform.claude.com"')
+    && browser.includes('emit_to("main", "owllm:claude-auth-code"'),
+);
+check(
+  "the release gate exercises Keychain-backed Claude instead of skipping it",
+  smoke.includes("claudeAuthStatusLoggedIn")
+    && smoke.includes('runCli(bin, ["auth", "status"]'),
 );
 
 console.log(`Claude CLI connection verification: ${passed}/${passed} passed`);

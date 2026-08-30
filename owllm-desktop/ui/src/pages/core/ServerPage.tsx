@@ -29,6 +29,7 @@ import {
   SERVER_CTX_PRESETS, fmtCtx, approxKvGb,
 } from "./serverContext";
 import { listRemoteModels, startRemoteModel, type RemoteModelCatalog } from "../advanced/remoteDevices";
+import { notifyListeners } from "../../runtime/listenerBus";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
@@ -1241,12 +1242,12 @@ class ServerLogHub {
 
   push(line: string) {
     this.lines = [...this.lines, line].slice(-LOG_MAX);
-    for (const l of this.listeners) l(this.lines);
+    notifyListeners(this.listeners, "serverLogHub", this.lines);
   }
 
   clear() {
     this.lines = [];
-    for (const l of this.listeners) l(this.lines);
+    notifyListeners(this.listeners, "serverLogHub", this.lines);
   }
 
   snapshot() {

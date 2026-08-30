@@ -141,6 +141,74 @@ export function agentDomain(spec: AgentSpec): AgentDomain {
   return "other";
 }
 
+/// Review agents are read-only judges, not terminal reporters. Keep this
+/// deliberately name/base based so custom Red Team and reviewer agents get the
+/// same control-flow guarantees as the built-in Critical Thinker.
+export function isReviewAgent(spec: Pick<AgentSpec, "name" | "base">): boolean {
+  const hay = `${spec.name} ${spec.base}`.toLowerCase().replace(/[_-]+/g, " ");
+  return /\b(critic|critical thinker|red team|reviewer|code review|security audit|tester)\b/.test(hay);
+}
+
+/// Deterministic signal that a review found an actionable defect. Structured
+/// verdicts are preferred, but P0/P1 and failed-gate output are accepted because
+/// external/custom reviewers do not all use the built-in verdict contract.
+export function reviewRequiresRepair(output: string): boolean {
+  const text = output || "";
+  const structuredFailure = /^\s*(?:VERDICT:\s*)?(?:CONCERN|REVISE|REJECT|FAIL(?:ED)?)\b/im.test(text)
+    || /^\s*P[01](?:\s|:|-)/im.test(text)
+    || /\[lane verify:\s*failed\]/i.test(text)
+    || /\b(?:blocking|must[- ]fix|should[- ]fix)\b/i.test(text)
+    || /\b(?:actionable|material|serious)\s+(?:issue|defect|finding)s?\b/i.test(text);
+  if (structuredFailure) return true;
+  const explicitlyClean = /\b(?:no|zero)\s+(?:actionable\s+)?(?:issues?|defects?|bugs?|findings?|vulnerabilit(?:y|ies))\b/i.test(text);
+  const reportsFindings = /\b(?:found|identified|detected|uncovered|reports?)\s+(?:an?\s+|\d+\s+|several\s+|multiple\s+|these\s+)?(?:issues?|defects?|bugs?|findings?|vulnerabilit(?:y|ies))\b/i.test(text)
+    || /^\s*(?:issue|defect|bug|finding|vulnerability)s?\s*:/im.test(text);
+  return reportsFindings && !explicitlyClean;
+}
+
+/// A reviewer repairs through the agent(s) that actually handed work to it.
+/// This derives the bounded reverse path from the authored worker→review edge;
+/// users do not need to draw a cycle merely to make review findings actionable.
+export function reviewRepairTargets(
+  team: Pick<Team, "agents" | "edges">,
+  reviewerName: string,
+  output: string,
+  runCount: ReadonlyMap<string, number>,
+): string[] {
+  const reviewer = team.agents.find((agent) => agent.name === reviewerName);
+  if (!reviewer || !isReviewAgent(reviewer) || !reviewRequiresRepair(output)) return [];
+  const names = new Set(team.agents.map((agent) => agent.name));
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const edge of team.edges ?? []) {
+    if (edge.target !== reviewerName || !names.has(edge.source) || seen.has(edge.source)) continue;
+    const source = team.agents.find((agent) => agent.name === edge.source);
+    if (!source || isReviewAgent(source) || (runCount.get(source.name) ?? 0) === 0) continue;
+    const hay = `${source.name} ${source.base}`.toLowerCase();
+    if (/orchestrator|publisher|producer/.test(hay)) continue;
+    seen.add(source.name);
+    targets.push(source.name);
+  }
+  return targets;
+}
+
+/// A repaired worker must go through its reviewer again. Legacy graph flow is
+/// run-once, so explicitly permit this one bounded re-review when the worker is
+/// itself on a repair run.
+export function shouldRepeatReview(
+  team: Pick<Team, "agents">,
+  agentName: string,
+  targetName: string,
+  runCount: ReadonlyMap<string, number>,
+  maxRuns: number,
+): boolean {
+  const target = team.agents.find((agent) => agent.name === targetName);
+  return (runCount.get(agentName) ?? 0) > 1
+    && !!target
+    && isReviewAgent(target)
+    && (runCount.get(targetName) ?? 0) < maxRuns;
+}
+
 /// Classify a CODER agent's lane — frontend vs backend vs full-stack — from its
 /// name/base, so a code goal can be routed to the matching lane instead of blindly
 /// taking the first coder in roster order. Mirrors the gate-scope signal used to

@@ -214,6 +214,11 @@ fn create_overlay(app: &mut App, main: &WebviewWindow) -> tauri::Result<WebviewW
 
     let overlay = builder.build()?;
 
+    // This window IS the app's chrome. If its render process goes away nothing
+    // paints into it and the title bar stays black for the rest of the session,
+    // so it needs the same recovery the main view gets (no-op off Windows).
+    crate::arm_windows_webview_recovery(&overlay, "overlay frame");
+
     // AppKit normally constrains every NSWindow to the visible screen frame.
     // That is wrong for this window: its transparent decoration deliberately
     // extends beyond `main`, including above the menu bar when the user drags

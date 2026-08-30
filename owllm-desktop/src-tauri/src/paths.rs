@@ -194,7 +194,15 @@ pub fn llama_server_exe() -> Option<PathBuf> {
 ///
 /// Returns the first matching binary across all installed variants of
 /// a module family (e.g. `local-inference-cuda-bXXX`, `local-inference-cpu-bXXX`).
-/// Picks the lexicographically latest variant if multiple exist.
+///
+/// The directory the installer RECORDED in `installed.json` wins. An upgrade
+/// extracts to a new `<variant-id>-<version>/` and leaves the old directory in
+/// place, so several versions of a family coexist and a name sort has to pick
+/// between them — which it does textually, not numerically. llama.cpp build
+/// tags make that concretely wrong: `b9488` sorts ABOVE `b10357`, so installing
+/// a newer engine left the app still running the old one. Falls back to the
+/// name sort for a module installed before `installed.json` existed, or dropped
+/// in by hand.
 pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf> {
     let modules_root = appdata_root()?.join("modules");
     let entries = std::fs::read_dir(&modules_root).ok()?;
@@ -208,8 +216,7 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
         })
         .map(|e| e.path())
         .collect();
-    candidates.sort();
-    candidates.reverse();
+    order_module_candidates(&mut candidates, &installed_module_dirs(&modules_root));
     for dir in candidates {
         let direct = dir.join(binary_name);
         if direct.is_file() {
@@ -229,6 +236,47 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
         }
     }
     None
+}
+
+/// Order the variant directories of one module family, best first: the
+/// directories `installed.json` records as current, then everything else by
+/// descending name so a hand-dropped module still resolves.
+fn order_module_candidates(candidates: &mut [PathBuf], installed: &[String]) {
+    candidates.sort();
+    candidates.reverse();
+    // Stable, so the descending-name order survives inside each group.
+    candidates.sort_by_key(|p| {
+        !p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| installed.iter().any(|d| d == n))
+            .unwrap_or(false)
+    });
+}
+
+/// Directory names the module installer recorded as the CURRENT install of
+/// each module, read straight from `<modules_root>/installed.json`.
+///
+/// Deliberately parsed loosely rather than through `modules::InstalledState`:
+/// `paths::*` is called from contexts that have no `AppHandle` and must not
+/// fail resolution because one unrelated field of that file is malformed.
+fn installed_module_dirs(modules_root: &Path) -> Vec<String> {
+    let raw = match std::fs::read_to_string(modules_root.join("installed.json")) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    parsed
+        .get("modules")
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.values()
+                .filter_map(|v| v.get("path")?.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Self-heal the exec bit on a resolved module binary. Modules installed
@@ -331,6 +379,67 @@ fn repair_posix_node_shims(bin_dir: &Path) {
 
 #[cfg(not(unix))]
 fn repair_posix_node_shims(_bin_dir: &Path) {}
+
+#[cfg(test)]
+mod module_resolution_tests {
+    use super::{installed_module_dirs, order_module_candidates};
+    use std::path::PathBuf;
+
+    const OLD: &str = "local-inference-linux-arm64-cuda-b9488-cuda13.2";
+    const NEW: &str = "local-inference-linux-arm64-cuda-b10357-cuda13.2";
+
+    fn dirs() -> Vec<PathBuf> {
+        vec![PathBuf::from(OLD), PathBuf::from(NEW)]
+    }
+
+    /// The bug: `b9488` sorts above `b10357` textually, so after upgrading the
+    /// engine the app kept spawning the OLD llama-server — which has no
+    /// `muse-glimmer` architecture and refuses the model in under a second.
+    #[test]
+    fn the_recorded_install_beats_a_higher_sorting_older_build() {
+        let mut c = dirs();
+        order_module_candidates(&mut c, &[NEW.to_string()]);
+        assert_eq!(c[0], PathBuf::from(NEW));
+        // Guard the premise: a plain name sort really does pick the old build,
+        // so this test cannot quietly pass for the wrong reason.
+        let mut plain = dirs();
+        plain.sort();
+        plain.reverse();
+        assert_eq!(plain[0], PathBuf::from(OLD));
+    }
+
+    /// Nothing recorded (pre-`installed.json` install, or hand-dropped) must
+    /// still resolve, via the original descending-name order.
+    #[test]
+    fn an_unrecorded_module_still_resolves_by_name() {
+        let mut c = dirs();
+        order_module_candidates(&mut c, &[]);
+        assert_eq!(c[0], PathBuf::from(OLD));
+    }
+
+    #[test]
+    fn installed_json_yields_the_recorded_directory_names() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("installed.json"),
+            format!(
+                r#"{{"schemaVersion":1,"modules":{{"local-inference":{{"variant":"x","version":"b10357","path":"{NEW}"}}}}}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(installed_module_dirs(temp.path()), vec![NEW.to_string()]);
+    }
+
+    /// A malformed or absent file must degrade to "nothing recorded" rather
+    /// than making every module unresolvable.
+    #[test]
+    fn a_broken_installed_json_does_not_break_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(installed_module_dirs(temp.path()).is_empty());
+        std::fs::write(temp.path().join("installed.json"), "{not json").unwrap();
+        assert!(installed_module_dirs(temp.path()).is_empty());
+    }
+}
 
 #[cfg(all(test, unix))]
 mod node_shim_tests {
@@ -1207,24 +1316,29 @@ pub fn skills_dir() -> Option<PathBuf> {
     user_data_root().map(|r| r.join("skills"))
 }
 
+/// PRECEDENCE ORDER — first dir wins for same-id packs (list_skill_packs
+/// dedups first-wins; skill_material takes the first hit). Every write path
+/// (install, seed, curated provision) targets the user home, and seeding
+/// promises a user-edited copy is never clobbered — so the user home must
+/// shadow the legacy home, which shadows the read-only bundled packs.
 pub fn skills_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    // Bundled, OwLLM-authored skill packs that ship with the app (read-only).
-    // Listing them here makes list_skill_packs discover them like installed packs,
-    // so roles can auto-equip them by id out of the box.
-    if let Some(root) = resources_root() {
-        let p = root.join("agents").join("skills");
-        if p.is_dir() {
-            out.push(p);
-        }
-    }
     if let Some(p) = skills_dir() {
-        if p.is_dir() && !out.contains(&p) {
+        if p.is_dir() {
             out.push(p);
         }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("skills");
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    // Bundled, OwLLM-authored skill packs that ship with the app (read-only).
+    // Listing them here makes list_skill_packs discover them like installed packs,
+    // so roles can auto-equip them by id out of the box.
+    if let Some(root) = resources_root() {
+        let p = root.join("agents").join("skills");
         if p.is_dir() && !out.contains(&p) {
             out.push(p);
         }

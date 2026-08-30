@@ -154,17 +154,69 @@ fn is_batch_shim(p: &std::path::Path) -> bool {
 // all (tree-kill on Windows — the npm .cmd shims wrap a node child that must
 // die with the shim). Global on purpose: Stop means "stop everything", the
 // same semantics the dock's Stop already promises.
-fn cli_children() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
-        std::sync::OnceLock::new();
-    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+///
+/// Each child carries an optional CANCEL SCOPE — the id of the run that owns
+/// it. Stopping one agentic run must not kill the sibling runs, whose children
+/// then died with an unexplained "exited 1 — no stdout or stderr". `None` means
+/// "unscoped": only a global Stop reaches it.
+fn cli_children() -> &'static std::sync::Mutex<std::collections::HashMap<u32, Option<String>>> {
+    static S: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u32, Option<String>>>,
+    > = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn register_cli_child(child: &std::process::Child) -> u32 {
+/// PIDs WE killed. A killed child flushes nothing, so its exit looks identical
+/// to a crash — this is what lets the error path say "you stopped it" instead of
+/// the meaningless "exited 1 — no stdout or stderr". Bounded: a run is read once,
+/// right after it exits, and the set is trimmed so it can never grow unbounded.
+fn cancelled_cli_children() -> &'static std::sync::Mutex<std::collections::VecDeque<u32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<u32>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+const CANCELLED_PID_MEMORY: usize = 256;
+
+fn mark_cli_child_cancelled(pid: u32) {
+    if let Ok(mut q) = cancelled_cli_children().lock() {
+        q.push_back(pid);
+        while q.len() > CANCELLED_PID_MEMORY {
+            q.pop_front();
+        }
+    }
+}
+
+/// True when `pid` was terminated by Stop. Consuming: a pid is reported once,
+/// so a later process that happens to reuse the number is not mislabelled.
+fn take_cli_child_cancelled(pid: u32) -> bool {
+    match cancelled_cli_children().lock() {
+        Ok(mut q) => match q.iter().position(|p| *p == pid) {
+            Some(i) => {
+                q.remove(i);
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn register_cli_child_scoped(child: &std::process::Child, scope: Option<&str>) -> u32 {
     let pid = child.id();
     if let Ok(mut s) = cli_children().lock() {
-        s.insert(pid);
+        s.insert(
+            pid,
+            scope
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
     }
+    // Sample this child's descendant tree while it lives, so background work
+    // it leaves behind at a NATURAL exit can be adopted and watched to
+    // completion (see cli_orphans.rs). Kill paths call forget() instead.
+    crate::cli_orphans::track(pid);
     pid
 }
 
@@ -172,6 +224,21 @@ fn unregister_cli_child(pid: u32) {
     if let Ok(mut s) = cli_children().lock() {
         s.remove(&pid);
     }
+}
+
+/// A CLI child ended on its own (not Stop, not timeout): hand its surviving
+/// descendants to the orphan watch under the child's cancel scope, THEN drop
+/// it from the kill registry. Every natural-exit site must go through here —
+/// a site that calls bare `unregister_cli_child` silently loses the turn's
+/// background work again.
+fn finish_cli_child_natural(pid: u32) {
+    let scope = cli_children()
+        .lock()
+        .ok()
+        .and_then(|s| s.get(&pid).cloned())
+        .flatten();
+    crate::cli_orphans::adopt(pid, scope.as_deref());
+    unregister_cli_child(pid);
 }
 
 /// Wait for a registered CLI child and drop it from the kill registry no
@@ -243,7 +310,7 @@ fn wait_cli_child(
             for t in readers {
                 let _ = t.join();
             }
-            unregister_cli_child(pid);
+            finish_cli_child_natural(pid);
             return Ok(std::process::Output {
                 status,
                 stdout: take(&stdout_buf),
@@ -259,6 +326,7 @@ fn wait_cli_child(
             for t in readers {
                 let _ = t.join();
             }
+            crate::cli_orphans::forget(pid);
             unregister_cli_child(pid);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -363,7 +431,7 @@ where
             while let Ok(line) = line_rx.try_recv() {
                 on_stdout_line(&line);
             }
-            unregister_cli_child(pid);
+            finish_cli_child_natural(pid);
             return Ok(std::process::Output {
                 status,
                 stdout: take(&stdout_buf),
@@ -379,6 +447,7 @@ where
             for t in readers {
                 let _ = t.join();
             }
+            crate::cli_orphans::forget(pid);
             unregister_cli_child(pid);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -402,16 +471,60 @@ where
 /// running. Returns how many processes were signalled.
 #[tauri::command]
 pub fn cli_cancel_all() -> Result<u32, String> {
+    kill_cli_children(None)
+}
+
+/// Kill only the CLI children belonging to ONE run. The agentic page can have
+/// several runs live at once; its per-run Cancel used to call `cli_cancel_all`,
+/// so stopping one killed every other run's CLI too and each survivor surfaced
+/// a bare "exited 1 — no stdout or stderr". Unscoped children are never touched
+/// here — only a global Stop reaches those.
+#[tauri::command]
+pub fn cli_cancel_scope(scope: String) -> Result<u32, String> {
+    let scope = scope.trim().to_string();
+    if scope.is_empty() {
+        // An empty scope must NOT silently degrade into "kill everything".
+        return Err("cli_cancel_scope: empty scope".to_string());
+    }
+    kill_cli_children(Some(&scope))
+}
+
+/// Does a registered child belong to the scope being cancelled?
+/// `want: None` is the global Stop and matches everything. A scoped Stop matches
+/// ONLY an exact owner — never an unscoped child, whose owner is unknown and so
+/// might belong to any other run. Pure, so the rule that actually caused the
+/// "one Stop killed every run" bug is testable on its own.
+pub(crate) fn cli_child_in_scope(owner: Option<&str>, want: Option<&str>) -> bool {
+    match want {
+        None => true,
+        Some(want) => owner == Some(want),
+    }
+}
+
+/// Shared kill loop. `scope: None` = every live child (global Stop);
+/// `Some(s)` = only children registered under exactly that scope.
+fn kill_cli_children(scope: Option<&str>) -> Result<u32, String> {
     let pids: Vec<u32> = cli_children()
         .lock()
-        .map(|s| s.iter().copied().collect())
+        .map(|s| {
+            s.iter()
+                .filter(|(_, owner)| cli_child_in_scope(owner.as_deref(), scope))
+                .map(|(pid, _)| *pid)
+                .collect()
+        })
         .unwrap_or_default();
     let mut killed = 0u32;
     for pid in pids {
+        // Mark BEFORE killing: the child's wait may return on another thread
+        // the instant it dies, and it must find the flag already set.
+        mark_cli_child_cancelled(pid);
         let ok = terminate_cli_child(pid);
         if ok {
             killed += 1;
         }
+        // Stop tree-kills the descendants with the CLI — a user who pressed
+        // Stop must never receive an automatic continuation for that turn.
+        crate::cli_orphans::forget(pid);
         unregister_cli_child(pid);
     }
     Ok(killed)
@@ -808,15 +921,23 @@ fn usage_tally_stats(provider: &str) -> Vec<UsageStat> {
 /// Pretty label for the OAuth usage endpoint's window keys. Unknown keys
 /// (new windows Anthropic adds) fall back to the key with underscores
 /// spaced — never dropped.
-fn usage_window_label(key: &str) -> String {
+/// Friendly name for a quota window we KNOW, or None for a key the provider
+/// has not documented to us.
+fn usage_window_known_label(key: &str) -> Option<&'static str> {
     match key {
-        "five_hour" => "Session (5hr)".to_string(),
-        "seven_day" => "Weekly (7 day)".to_string(),
-        "seven_day_opus" => "Weekly Opus".to_string(),
-        "seven_day_sonnet" => "Weekly Sonnet".to_string(),
-        "seven_day_oauth_apps" => "Weekly (apps)".to_string(),
-        other => other.replace('_', " "),
+        "five_hour" => Some("Session (5hr)"),
+        "seven_day" => Some("Weekly (7 day)"),
+        "seven_day_opus" => Some("Weekly Opus"),
+        "seven_day_sonnet" => Some("Weekly Sonnet"),
+        "seven_day_oauth_apps" => Some("Weekly (apps)"),
+        _ => None,
     }
+}
+
+fn usage_window_label(key: &str) -> String {
+    usage_window_known_label(key)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| key.replace('_', " "))
 }
 
 /// Usage for the account behind `provider` (a `providerFor()` string from
@@ -989,13 +1110,23 @@ async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUs
             let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else {
                 continue;
             };
+            let resets_at = val
+                .get("resets_at")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+            // The payload also carries the provider's INTERNAL buckets under
+            // codenames ("nimbus_quill", "cinder_cove", "tangelo"…). They are
+            // not user-facing quotas and rendering one as a bar is noise the
+            // user can't act on. A real quota window always says when it
+            // resets — so an undocumented key with no `resets_at` is skipped,
+            // while a genuinely NEW documented window still shows up.
+            if resets_at.is_none() && usage_window_known_label(key).is_none() {
+                continue;
+            }
             windows.push(UsageWindow {
                 label: usage_window_label(key),
                 used_pct: util,
-                resets_at: val
-                    .get("resets_at")
-                    .and_then(|r| r.as_str())
-                    .map(|s| s.to_string()),
+                resets_at,
             });
         }
     }
@@ -1491,8 +1622,16 @@ pub async fn accounts_refresh_sandbox_creds(cwd: Option<String>) -> Result<bool,
     let fut = tokio::task::spawn_blocking(|| {
         // Re-mirror Windows → distro (claude/codex/gemini/kimi creds + keys). The
         // distro is resolved inside (best_linux_distro). Best-effort.
-        let _ = crate::sandbox::sandbox_sync_logins(None);
-        true
+        //
+        // MUST be the *_blocking entry point: `sandbox_sync_logins` is async, so
+        // calling it here only built a future that was dropped — the re-mirror
+        // never ran and the sandbox token stayed expired (the recurring 401).
+        // Report whether creds ACTUALLY landed, so a failed sync can't read as a
+        // successful refresh.
+        match crate::sandbox::sandbox_sync_logins_blocking(None) {
+            Ok(r) => !r.synced.is_empty(),
+            Err(_) => false,
+        }
     });
     // BOUND IT: a cold / unresponsive WSL (classically right after a PC reboot) made
     // this WSL round-trip hang with no timeout — which blocked the warm-up, which
@@ -1559,7 +1698,14 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             args.extend(kimi_model_args(None));
             args.push("--prompt".into());
             args.push("ok".into());
-            probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
+            let res = probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await;
+            // A live end-to-end success is proof the credential works: heal a
+            // stale reauth marker (e.g. one written by the old any-401 rule)
+            // so a working login doesn't stay stuck on "Reconnect".
+            if res.0 {
+                clear_kimi_reauth_required();
+            }
+            res
         }
         "gemini_cli" => {
             probe_cli_subscription(
@@ -1919,11 +2065,20 @@ async fn probe_cli_subscription(
     }
 
     if name == "Kimi" && kimi_output_auth_failed(&combined) {
-        mark_kimi_reauth_required();
+        // Persist the "Reconnect" state only for a CONFIRMED revocation. A
+        // bare/transient 401 stays a retryable auth error — the warm layer
+        // refreshes the token and the next attempt recovers on its own.
+        if kimi_output_reauth_required(&combined) {
+            mark_kimi_reauth_required();
+            return (
+                false,
+                "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
+                    .to_string(),
+            );
+        }
         return (
             false,
-            "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
-                .to_string(),
+            "Kimi authentication failed (401) — the token may be cold or mid-refresh; retrying usually recovers.".to_string(),
         );
     }
 
@@ -2432,6 +2587,13 @@ pub async fn claude_cli_complete(
     // TRUE for a read-only agent — see claude_cli_stream. This one-shot path is
     // what a bridge run (no Thought pane) takes, so it needs the same boundary.
     read_only: Option<bool>,
+    // Who owns this child, so a per-run Cancel (`cli_cancel_scope`) kills only
+    // its own CLI processes instead of every live run's. DEFAULTS to `cwd` — the
+    // project directory is already threaded to every CLI path, so scoping works
+    // without a caller remembering to pass anything, and a run with no project
+    // stays unscoped (reachable only by the global Stop). Pass an explicit value
+    // only when a finer boundary than "this project" is wanted.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         // Collect args once → run as the Windows CLI or inside WSL (isolated).
@@ -2580,7 +2742,7 @@ pub async fn claude_cli_complete(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             if let Some(mut stdin) = child.stdin.take() {
                 // Best-effort, like every OTHER CLI spawn here (`let _ =`). If claude
                 // exited early — a rejected --model, a bad flag, an auth failure — its
@@ -2598,11 +2760,13 @@ pub async fn claude_cli_complete(
                 // surface the auth text (not a generic "exited N") so the retry fires.
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "claude",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             let stdout =
@@ -2714,6 +2878,39 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     format!("{cli} CLI exited {code} — {detail}")
 }
 
+/// `cli_exit_err` plus the two causes the exit code alone cannot express, both
+/// of which produced the same useless "exited N — no stdout or stderr":
+///
+///   * WE killed it (Stop). A tree-killed child flushes nothing, so its exit is
+///     indistinguishable from a crash — say so instead of reporting a fault.
+///   * LINUX killed it (OOM). A WSL-isolated run lives under a hard memory cap;
+///     the kernel SIGKILLs the biggest process and the real verdict is in the
+///     distro's kernel log, which the app never read. See sandbox::wsl_oom_report.
+///
+/// Only consulted when there is nothing better to report — a real diagnostic on
+/// stdout/stderr, and especially an auth envelope, still wins so the existing
+/// token-refresh retry keeps firing.
+fn cli_exit_err_ctx(
+    cli: &str,
+    code: i32,
+    body: &str,
+    stderr: &str,
+    pid: Option<u32>,
+    cwd: Option<&str>,
+) -> String {
+    let generic = cli_exit_err(cli, code, body, stderr);
+    if !generic.ends_with("no stdout or stderr") {
+        return generic;
+    }
+    if pid.is_some_and(take_cli_child_cancelled) {
+        return format!("{cli} CLI stopped — you cancelled this run.");
+    }
+    if let Some(msg) = crate::sandbox::wsl_oom_report(cli, cwd) {
+        return msg;
+    }
+    generic
+}
+
 /// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
 /// analogue of `claude_cli_complete`. Without this the chat fell back to
 /// demanding OPENAI_API_KEY even when a ChatGPT/Codex subscription was
@@ -2735,6 +2932,8 @@ pub async fn codex_cli_complete(
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let prompt = if system_prompt.trim().is_empty() {
@@ -2783,7 +2982,7 @@ pub async fn codex_cli_complete(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             let mut stdin = child
                 .stdin
                 .take()
@@ -2796,11 +2995,13 @@ pub async fn codex_cli_complete(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "codex",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             let reply = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -2856,7 +3057,7 @@ pub async fn codex_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         let mut stdin = child
             .stdin
             .take()
@@ -2873,11 +3074,13 @@ pub async fn codex_cli_complete(
             let body = from_file
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).into_owned());
-            return Err(cli_exit_err(
+            return Err(cli_exit_err_ctx(
                 "codex",
                 output.status.code().unwrap_or(-1),
                 &body,
                 &stderr,
+                Some(pid),
+                cwd.as_deref(),
             ));
         }
         let reply = from_file
@@ -2920,6 +3123,36 @@ for _r in /usr/local/lib/node_modules /usr/lib/node_modules; do \
     ! -name '_cacache' ! -name '.package-lock.json' -exec rm -rf {} + 2>/dev/null; \
 done; true; ";
 
+/// Recover a dpkg database left mid-transaction by an interrupted install.
+///
+/// The apt twin of [`NPM_CLEAN_STALE_SNIPPET`]. When a provisioning run is
+/// killed, the disk fills, or WSL shuts down mid-`apt`, dpkg leaves a journal in
+/// `/var/lib/dpkg/updates` and packages half-configured. Every later
+/// `apt-get install` then refuses to do anything with
+///   `E: dpkg was interrupted, you must manually run 'dpkg --configure -a'`
+/// and exit 100 -- **permanently, for every backend**, until a human intervenes.
+/// Reported live as `wsl exited 100: E: dpkg was interrupted ...`, which failed
+/// `accounts_prepare_cli_for_cwd` and stopped an agentic run before the CLI ran.
+///
+/// Both of apt's own triggers are tested (a non-empty journal directory, and a
+/// package dpkg itself audits as broken), so this stays a no-op on a healthy
+/// distro and on non-dpkg systems. Packages flagged reinstall-required (`R` in
+/// dpkg's third status column) need more than `--configure`, so they are
+/// reinstalled -- that was the state observed on the reporting machine.
+/// Best-effort throughout: a repair that cannot run must never abort the install.
+pub(crate) const DPKG_REPAIR_SNIPPET: &str = "\
+if command -v dpkg >/dev/null 2>&1 && \
+   { [ -n \"$(dpkg --audit 2>/dev/null)\" ] \
+     || [ -n \"$(ls -A /var/lib/dpkg/updates 2>/dev/null)\" ]; }; then \
+  DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true; \
+  DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true; \
+  _owllm_reinst=$(dpkg -l 2>/dev/null | awk '/^..R/ {print $2}'); \
+  if [ -n \"$_owllm_reinst\" ]; then \
+    DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y $_owllm_reinst \
+      >/dev/null 2>&1 || true; \
+  fi; \
+fi; true; ";
+
 /// Ensure the selected subscription CLI exists where a project will execute.
 ///
 /// A Windows Accounts card verifies the host binary, while an isolated project
@@ -2937,8 +3170,9 @@ pub async fn accounts_prepare_cli_for_cwd(
             return Ok(false);
         };
         let (binary, probe, install) = match backend.as_str() {
-            // NPM_CLEAN_STALE_SNIPPET runs first so a previously interrupted
-            // install can't wedge this one with ENOTEMPTY (see the const's docs).
+            // NPM_CLEAN_STALE_SNIPPET and DPKG_REPAIR_SNIPPET run first so a
+            // previously interrupted install can't wedge this one -- with npm's
+            // ENOTEMPTY or dpkg's exit-100 refusal (see the consts' docs).
             "claude_cli" => (
                 "claude",
                 "claude --version",
@@ -2989,11 +3223,13 @@ pub async fn accounts_prepare_cli_for_cwd(
                echo OWLLM_CLI_READY; exit 0; \
              fi; \
              {clean} \
+             {repair} \
              {install}; \
              command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
              {probe} >/dev/null 2>&1 || {{ echo '{binary} was installed but cannot start' >&2; exit 1; }}; \
              echo OWLLM_CLI_INSTALLED",
             clean = NPM_CLEAN_STALE_SNIPPET,
+            repair = DPKG_REPAIR_SNIPPET,
         );
         let out = tokio::task::spawn_blocking(move || {
             let _guard = wsl_cli_provision_lock()
@@ -3259,6 +3495,8 @@ pub async fn claude_cli_stream(
     // whose open work then gets swept into a checkpoint commit instead of into
     // the specialist worktree that was supposed to make the change.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3538,7 +3776,35 @@ pub async fn claude_cli_stream(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
-        let child_pid = register_cli_child(&child);
+        let child_pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
+        // The Claude stream was the ONE CLI path with no liveness bound (codex
+        // streaming, kimi, and every one-shot runner already have one): a
+        // silently-hung CLI sat until the user pressed Stop. Same
+        // inactivity/absolute ceilings as every other CLI child, measured from
+        // the last stdout line so a chatty long turn is never killed.
+        let started = Instant::now();
+        let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stream_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog = {
+            use std::sync::atomic::Ordering;
+            let done = std::sync::Arc::clone(&stream_done);
+            let activity = std::sync::Arc::clone(&last_activity);
+            let flag = std::sync::Arc::clone(&timed_out);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let idle = started.elapsed().saturating_sub(Duration::from_millis(
+                        activity.load(Ordering::Relaxed),
+                    ));
+                    if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        flag.store(true, Ordering::Relaxed);
+                        let _ = terminate_cli_child(child_pid);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            })
+        };
         if let Some(mut stdin) = child.stdin.take() {
             // Best-effort: the CLI can read what it needs and exit while we're still
             // writing the (large agentic) payload → "pipe has been ended (os error
@@ -3562,6 +3828,10 @@ pub async fn claude_cli_stream(
         // auth-retry never fires. Drained into an Err after the loop.
         let mut result_error: Option<String> = None;
         for line_res in reader.lines() {
+            last_activity.store(
+                started.elapsed().as_millis() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let line = match line_res {
                 Ok(l) => l,
                 Err(e) => {
@@ -3738,8 +4008,22 @@ pub async fn claude_cli_stream(
             }
         }
         let wait_res = child.wait();
-        unregister_cli_child(child_pid);
+        stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::cli_orphans::forget(child_pid);
+            unregister_cli_child(child_pid);
+        } else {
+            finish_cli_child_natural(child_pid);
+        }
         let status = wait_res.map_err(|e| format!("wait claude: {e}"))?;
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "Claude CLI stopped after {} seconds with no output (or {} seconds total). Try the request again or use a lower effort.",
+                CLI_CHILD_TIMEOUT.as_secs(),
+                CLI_CHILD_ABS_TIMEOUT.as_secs(),
+            ));
+        }
         if !status.success() {
             // Drain stderr after exit to surface the failure reason.
             let mut stderr_buf = String::new();
@@ -3758,11 +4042,13 @@ pub async fn claude_cli_stream(
                     return Err(err.clone());
                 }
             }
-            return Err(cli_exit_err(
+            return Err(cli_exit_err_ctx(
                 "claude",
                 status.code().unwrap_or(-1),
                 assembled.trim(),
                 &stderr_buf,
+                Some(child_pid),
+                cwd.as_deref(),
             ));
         }
         // Exit 0 but the CLI flagged the run as failed via a `result` event
@@ -3879,6 +4165,8 @@ pub async fn codex_cli_stream(
     // specialist worktree afterwards failed to cut — deadlocking the whole run.
     // The sandbox is the boundary.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -4072,7 +4360,7 @@ pub async fn codex_cli_stream(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-        let child_pid = register_cli_child(&child);
+        let child_pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         // `codex exec --json` writes progress and diagnostics to stderr.  The
         // old stream path did not read that pipe until *after* stdout closed;
         // a verbose model turn could fill the OS pipe buffer, leaving Codex
@@ -4312,7 +4600,12 @@ pub async fn codex_cli_stream(
         stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = watchdog.join();
         let _ = stderr_reader.join();
-        unregister_cli_child(child_pid);
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::cli_orphans::forget(child_pid);
+            unregister_cli_child(child_pid);
+        } else {
+            finish_cli_child_natural(child_pid);
+        }
         let status = wait_res.map_err(|e| format!("wait codex: {e}"))?;
         let asm = assembled.trim().to_string();
         if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
@@ -4330,11 +4623,13 @@ pub async fn codex_cli_stream(
                 .lock()
                 .map(|buf| String::from_utf8_lossy(&buf).into_owned())
                 .unwrap_or_default();
-            let child_error = cli_exit_err(
+            let child_error = cli_exit_err_ctx(
                 "codex",
                 status.code().unwrap_or(-1),
                 &stream_errors.join("\n"),
                 &stderr_buf,
+                Some(child_pid),
+                cwd.as_deref(),
             );
             // A CLI that fails during startup can close stdin before OwLLM
             // writes the prompt. The old early `?` returned only Windows error
@@ -4367,17 +4662,76 @@ pub async fn codex_cli_stream(
 // Subscription-CLI detection helpers
 // ---------------------------------------------------------------------
 
-/// Claude CLI persists its OAuth token at ~/.claude/.credentials.json
-/// (anthropic-ai/claude-code). Presence of the file is a reliable
-/// "logged in" signal; presence of just the binary on PATH is not.
-fn claude_cli_logged_in() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+fn claude_auth_status_json_logged_in(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("loggedIn").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Current native Claude Code builds store macOS login tokens in Keychain (and
+/// use the OS credential store on other platforms), so a credential file is no
+/// longer a complete connection test. Ask the installed CLI for its local auth
+/// status with a strict timeout. The command returns JSON and does not make a
+/// model/API request or expose the account identity to OwLLM.
+fn claude_auth_status_logged_in(cli: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    let batch = is_batch_shim(cli);
+    #[cfg(not(windows))]
+    let batch = false;
+    let mut cmd = Command::new(cli);
+    push_arg(&mut cmd, batch, "auth");
+    push_arg(&mut cmd, batch, "status");
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    sanitize_appimage_env(&mut cmd);
+    let Ok(mut child) = cmd.spawn() else {
         return false;
     };
-    let creds = PathBuf::from(home)
-        .join(".claude")
-        .join(".credentials.json");
-    creds.exists()
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    };
+    if !success {
+        return false;
+    }
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .and_then(|mut pipe| pipe.read_to_end(&mut stdout).ok())
+        .is_some()
+        && claude_auth_status_json_logged_in(&stdout)
+}
+
+/// Legacy npm Claude Code builds persisted OAuth at
+/// ~/.claude/.credentials.json. Keep that zero-process fast path, then fall
+/// back to `claude auth status` for native/Keychain-backed builds.
+fn claude_cli_logged_in() -> bool {
+    let Some(cli) = find_claude_cli() else {
+        return false;
+    };
+    let credentials = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .map(|home| home.join(".claude").join(".credentials.json"));
+    credentials.as_ref().is_some_and(|path| path.is_file()) || claude_auth_status_logged_in(&cli)
 }
 
 /// OpenAI Codex CLI persists its token at ~/.openai/auth.json (per
@@ -4715,6 +5069,23 @@ fn kimi_output_auth_failed(out: &str) -> bool {
     l.contains("401") || l.contains("unauthorized")
 }
 
+/// A CONFIRMED revocation (the refresh grant itself is dead — no retry can
+/// repair it), as opposed to an ordinary/transient 401 (stale access token,
+/// cold start — the retry layer refreshes and recovers). Only the former may
+/// write the persistent reauth marker that flips the account to "Reconnect":
+/// marking on any bare 401 turned one cold-token blip into a sticky
+/// disconnected account that refused every later dispatch ("that model isn't
+/// signed in") until the user manually re-logged. Same vocabulary as the
+/// frontend's isCliReauthRequired (dispatch.ts) — keep them in step.
+fn kimi_output_reauth_required(out: &str) -> bool {
+    let l = out.to_ascii_lowercase();
+    l.contains("authorization grant is invalid")
+        || l.contains("login expired")
+        || l.contains("signed out")
+        || (l.contains("refresh token")
+            && (l.contains("invalid") || l.contains("revoked") || l.contains("expired")))
+}
+
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
 /// pass the requested id only when the config declares it. Forcing an
 /// undeclared id makes current kimi-cli abort with `LLMNotSet` — that was the
@@ -4906,24 +5277,32 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
 ///
 /// Once the CLI writes its credentials file, the AccountsPage 3-s
 /// poll flips the card to green. Returns immediately after spawn.
-#[tauri::command]
-pub fn subscription_cli_login(backend: String) -> Result<(), String> {
-    // Resolve which CLI to launch + the login command. Two flavours:
-    //   * codex login          — real subcommand, runs OAuth and exits
-    //   * gemini (no args)     — REPL prompts for auth; the embedded
-    //                            terminal auto-sends /auth
-    //   * claude (no args)     — REPL auto-prompts /login on first run
-    //                            because there are no credentials yet
-    //   * kimi (no args)       — same: kimi REPL auto-prompts for login
-    //                            when ~/.kimi/config.toml is missing
-    //
-    // We avoid passing `/login` as a positional argv because slash
-    // commands only work INSIDE the REPL — every CLI we tested
-    // (claude, kimi) errors out with "unknown argument /login" if
-    // they receive it on the command line.
-    let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
-        "claude_cli" => (find_claude_cli, &[]),
-        "codex_cli" => (find_codex_cli, &["login"]),
+/// Which CLI to launch + the argv that starts its login. Two flavours:
+///   * codex login --device-auth — real subcommand, prints a URL + code
+///   * gemini (no args)     — REPL prompts for auth; the embedded
+///                            terminal auto-sends /auth
+///   * claude (no args)     — REPL auto-prompts /login on first run
+///                            because there are no credentials yet
+///   * kimi (no args)       — same: kimi REPL auto-prompts for login
+///                            when ~/.kimi/config.toml is missing
+///
+/// We avoid passing `/login` as a positional argv because slash
+/// commands only work INSIDE the REPL — every CLI we tested
+/// (claude, kimi) errors out with "unknown argument /login" if
+/// they receive it on the command line.
+///
+/// Codex MUST get `--device-auth`. Plain `codex login` starts a
+/// localhost:1455 OAuth callback and immediately launches the user's
+/// external default browser at auth.openai.com — the login then happens
+/// outside OwLLM entirely. The device-code variant only prints a URL and a
+/// one-time code, which the caller opens in OwLLM's own auth tab.
+/// Split out from the command so that rule is regression-testable.
+fn subscription_login_recipe(
+    backend: &str,
+) -> Result<(fn() -> Option<PathBuf>, &'static [&'static str]), String> {
+    Ok(match backend {
+        "claude_cli" => (find_claude_cli as fn() -> Option<PathBuf>, &[] as &[&str]),
+        "codex_cli" => (find_codex_cli, &["login", "--device-auth"]),
         "kimi_cli" => (find_kimi_cli, &[]),
         "gemini_cli" => (find_gemini_cli, &[]),
         // Grok Build (xAI): first interactive run opens the browser
@@ -4931,7 +5310,12 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         // as claude/kimi/gemini.
         "grok_cli" => (find_grok_cli, &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
-    };
+    })
+}
+
+#[tauri::command]
+pub fn subscription_cli_login(backend: String) -> Result<(), String> {
+    let (find_fn, login_args) = subscription_login_recipe(&backend)?;
     let exe = find_fn()
         .ok_or_else(|| format!("CLI not found on PATH for {backend} — install it first"))?;
 
@@ -4953,6 +5337,9 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         cmd.raw_arg("cmd.exe");
         cmd.raw_arg("/k");
         cmd.raw_arg(inner);
+        // Inherited by the inner cmd and the CLI: no login OwLLM starts may
+        // escape into the user's external default browser.
+        cmd.env("BROWSER", crate::pty::NO_EXTERNAL_BROWSER);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -4967,6 +5354,8 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     {
         let mut cmd = Command::new(&exe);
         cmd.args(login_args);
+        // No login OwLLM starts may escape into the user's default browser.
+        cmd.env("BROWSER", crate::pty::NO_EXTERNAL_BROWSER);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
@@ -5335,6 +5724,8 @@ pub async fn gemini_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     // Host runs get the in-app browser gateway. Gemini CLI has no per-run
     // MCP flag — it reads project-scoped `<cwd>/.gemini/settings.json`
@@ -5417,7 +5808,7 @@ pub async fn gemini_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn gemini: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         if fold_prompt_into_stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 // Best-effort like the kimi/claude folds: if gemini exited early
@@ -5432,7 +5823,7 @@ pub async fn gemini_cli_complete(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            return Err(cli_exit_err("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            return Err(cli_exit_err_ctx("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr, Some(pid), cwd.as_deref()));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         let reply = stdout.trim().to_string();
@@ -5459,6 +5850,8 @@ pub async fn grok_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let composed = if system_prompt.trim().is_empty() {
@@ -5512,7 +5905,7 @@ pub async fn grok_cli_complete(
         }
         sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn grok: {e}"))?;
-        let pid = register_cli_child(&child);
+        let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
         if fold_prompt_into_stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write as _;
@@ -5523,7 +5916,7 @@ pub async fn grok_cli_complete(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            return Err(cli_exit_err("grok", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            return Err(cli_exit_err_ctx("grok", output.status.code().unwrap_or(-1), &stdout, &stderr, Some(pid), cwd.as_deref()));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         let reply = stdout.trim().to_string();
@@ -5696,6 +6089,8 @@ async fn kimi_cli_run(
     // auto-approves every tool call, so without this a Kimi orchestrator had no
     // write boundary at all; `--plan` is kimi's read-only mode.
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every reachable Kimi agent
@@ -5954,7 +6349,7 @@ async fn kimi_cli_run(
             }
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
-            let pid = register_cli_child(&child);
+            let pid = register_cli_child_scoped(&child, cancel_scope.as_deref().or(cwd.as_deref()));
             if !use_prompt_flag {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
@@ -5997,7 +6392,13 @@ async fn kimi_cli_run(
                     return Err("kimi: LLM not set".to_string());
                 }
                 if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
-                    mark_kimi_reauth_required();
+                    // Only a confirmed revocation may flip the account to
+                    // "Reconnect" — a transient 401 rides the normal auth
+                    // retry (re-warm + backoff) like every other provider.
+                    if kimi_output_reauth_required(&stdout) || kimi_output_reauth_required(&stderr)
+                    {
+                        mark_kimi_reauth_required();
+                    }
                     let detail = if kimi_output_auth_failed(&stdout) {
                         stdout.trim()
                     } else {
@@ -6015,11 +6416,13 @@ async fn kimi_cli_run(
                     .filter(|l| !l.to_ascii_lowercase().contains("to resume this session"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(cli_exit_err(
+                return Err(cli_exit_err_ctx(
                     "kimi",
                     output.status.code().unwrap_or(-1),
                     &stdout,
                     &clean_stderr,
+                    Some(pid),
+                    cwd.as_deref(),
                 ));
             }
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
@@ -6066,7 +6469,9 @@ async fn kimi_cli_run(
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
         if kimi_output_auth_failed(&reply) {
-            mark_kimi_reauth_required();
+            if kimi_output_reauth_required(&reply) {
+                mark_kimi_reauth_required();
+            }
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
 
@@ -6091,6 +6496,8 @@ pub async fn kimi_cli_complete(
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
 ) -> Result<String, String> {
     kimi_cli_run(
         app,
@@ -6100,6 +6507,7 @@ pub async fn kimi_cli_complete(
         model,
         allowed_tools,
         read_only,
+        cancel_scope,
         None,
     )
     .await
@@ -6114,6 +6522,8 @@ pub async fn kimi_cli_stream(
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
     read_only: Option<bool>,
+    // Per-run cancel scope — see claude_cli_complete.
+    cancel_scope: Option<String>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     kimi_cli_run(
@@ -6124,6 +6534,7 @@ pub async fn kimi_cli_stream(
         model,
         allowed_tools,
         read_only,
+        cancel_scope,
         Some(on_event),
     )
     .await
@@ -6132,12 +6543,48 @@ pub async fn kimi_cli_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
-        is_browser_role_allowlist, is_unrestricted_tool_allowlist, kimi_agent_yaml, kimi_config_has_default,
-        kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
-        ClaudeStreamEvent,
+        append_codex_input_args, claude_auth_status_json_logged_in, cli_child_path, cli_exit_err,
+        codex_should_grant_browser, is_browser_role_allowlist, is_unrestricted_tool_allowlist,
+        kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
+        kimi_output_llm_unset, kimi_output_mcp_failed, parse_kimi_stream_line,
+        sanitize_appimage_env, subscription_login_recipe, ClaudeStreamEvent,
     };
+
+    // Plain `codex login` runs a localhost OAuth callback and launches the
+    // user's EXTERNAL default browser at auth.openai.com, taking the sign-in
+    // out of OwLLM. Every backend here must stay on a flow that only prints
+    // its URL, so the caller can open it in OwLLM's own auth tab.
+    #[test]
+    fn subscription_login_never_uses_a_browser_launching_flow() {
+        assert_eq!(
+            subscription_login_recipe("codex_cli").unwrap().1,
+            ["login", "--device-auth"]
+        );
+        for backend in ["claude_cli", "codex_cli", "kimi_cli", "gemini_cli", "grok_cli"] {
+            let args = subscription_login_recipe(backend).unwrap().1;
+            assert!(
+                !(args == ["login"]),
+                "{backend}: bare `login` opens the external system browser"
+            );
+        }
+        assert!(subscription_login_recipe("nope_cli").is_err());
+    }
+
+    #[test]
+    fn login_browser_env_is_a_no_op_shared_with_the_pty_terminal() {
+        // A bare executable name without `%s` makes Python's webbrowser fall
+        // through to the external default browser (see pty.rs).
+        assert!(crate::pty::NO_EXTERNAL_BROWSER.ends_with(" %s"));
+    }
+
+    #[test]
+    fn claude_auth_status_reads_only_the_logged_in_boolean() {
+        assert!(claude_auth_status_json_logged_in(
+            br#"{"loggedIn":true,"email":"private@example.com"}"#
+        ));
+        assert!(!claude_auth_status_json_logged_in(br#"{"loggedIn":false}"#));
+        assert!(!claude_auth_status_json_logged_in(b"not json"));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

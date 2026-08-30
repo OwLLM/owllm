@@ -8,9 +8,17 @@ const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za
 const UI = path.resolve(HERE, "../..");
 const read = (relative) => fs.readFileSync(path.join(UI, relative), "utf8").replace(/\r\n/g, "\n");
 const checks = [];
+// Report EVERY failing invariant, not just the first: a change that breaks the
+// presence contract usually breaks several, and one at a time hides the shape
+// of the regression.
+// Pass a thunk when the assertion touches an export that a regression may have
+// removed: a missing export must be reported as a failed check, not crash the
+// run and hide every check after it.
 function check(name, condition) {
-  checks.push({ name, ok: Boolean(condition) });
-  if (!condition) throw new Error(`FAIL ${name}`);
+  let ok = false;
+  try { ok = Boolean(typeof condition === "function" ? condition() : condition); }
+  catch { ok = false; }
+  checks.push({ name, ok });
 }
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-world-map-"));
@@ -37,6 +45,7 @@ const livenessCompiled = ts.transpileModule(livenessSource, {
 const livenessPath = path.join(temp, "deviceLiveness.mjs");
 fs.writeFileSync(livenessPath, livenessCompiled);
 const liveness = await import(pathToFileURL(livenessPath).href);
+const remoteDevicesMod = read("../../src-tauri/src/remote_devices/mod.rs");
 
 const memory = (initial = {}) => {
   const data = new Map(Object.entries(initial));
@@ -86,18 +95,21 @@ try {
   check("Fleet liveness accepts fresh synced P2P metadata", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", published_at: "2026-07-23T11:59:00.000Z", endpoint: null, p2p_node_id: "node" }, now) === true);
   check("Fleet liveness rejects heartbeat-less records (no immortal-online legacy grace)", liveness.isDeviceOnline({ is_self: false, last_seen: null, endpoint: "192.168.219.102:42445" }, now) === false);
   check("Fleet liveness rejects stale synced heartbeat records", liveness.isDeviceOnline({ is_self: false, last_seen: null, published_at: "2026-07-22T11:00:00.000Z", endpoint: "192.168.219.102:42445" }, now) === false);
-  check("Heartbeat cadence beats twice per liveness window", liveness.REMOTE_DEVICE_HEARTBEAT_MS * 2 <= liveness.REMOTE_DEVICE_RECENT_MS);
+  check("Native heartbeat cadence beats twice per liveness window",
+    remoteDevicesMod.includes("Duration::from_secs(30)")
+      && remoteDevicesMod.includes("DEVICE_HEARTBEAT_EVERY_TICKS: u8 = 5")
+      && 30 * 5 * 2 * 1000 <= liveness.REMOTE_DEVICE_RECENT_MS);
   check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
-    { id: "ok", region: "KR · Seoul", os: "Windows", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
+    { id: "ok", region: "KR · Seoul", os: "Windows", appVersion: "1.0.6", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
     { id: "bad-lat", latitude: 200, longitude: 9 },
     { id: "ok", latitude: 1, longitude: 2 },
     { id: "linux", region: "KR · Busan", os: "Linux", latitude: 2, longitude: 3, online: true },
     { id: "ghost", region: "IT · Rome", os: "macOS", latitude: 1, longitude: 2, online: false },
   ]);
   check("Presence payload validates and deduplicates coordinates", sanitized.length === 3 && sanitized[0].id === "ok");
-  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 8);
+  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 9);
   check("Offline installations are retained as ghosts", sanitized.find((node) => node.id === "ghost").online === false && sanitized[0].online === true);
   check("OS data is normalized to four anonymous families",
     presence.normalizePresenceOs("Win32") === "Windows"
@@ -132,9 +144,12 @@ try {
   check("Countries are ordered by online users before recorded totals",
     onlineFirstCountries.map((country) => country.countryCode).join(",") === "KR,US");
 
-  const stableStore = memory();
-  const firstId = presence.readOrCreateNodeId(stableStore);
-  check("Stable anonymous node id is created and reused", firstId.length > 0 && presence.readOrCreateNodeId(stableStore) === firstId);
+  // A device that cannot identify itself must NEVER be given a fabricated
+  // recorded id: the random-uuid fallback is what turned one installation into a
+  // new World Map "user" on every launch whenever its storage or its native
+  // identity moved. The minting helper must not exist at all.
+  check("No random node id can be minted device-side", presence.readOrCreateNodeId === undefined);
+  const firstId = "a".repeat(64);
   const devicePresenceId = await presence.presenceNodeIdForDevice("device-A");
   const sameDevicePresenceId = await presence.presenceNodeIdForDevice("DEVICE-A");
   const peerPresenceId = await presence.presenceNodeIdForDevice("device-B");
@@ -155,6 +170,14 @@ try {
   check("Presence socket may carry only a normalized OS family",
     presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId, "Windows").includes("os=Windows"));
   check("Viewer socket URL never carries the node id", !presence.worldPresenceSocketUrl("viewer", "https://presence.example", firstId).includes("id="));
+  check("Presence socket reports the app release",
+    presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId, "Linux", "1.0.6").includes("v=1.0.6")
+      && !presence.worldPresenceSocketUrl("viewer", "https://presence.example", firstId, "", "1.0.6").includes("v="));
+  check("Only a release string is accepted as the version", () =>
+    presence.normalizePresenceVersion("1.0.6-beta+2") === "1.0.6-beta+2"
+      && presence.normalizePresenceVersion("C:/build/x; DROP") === "CbuildxDROP"
+      && presence.normalizePresenceVersion(undefined) === "");
+  check("Public nodes carry the reported release", sanitized[0].appVersion === "1.0.6" && sanitized.find((node) => node.id === "ghost").appVersion === "");
 
   check("HTTPS endpoint becomes a viewer WebSocket", presence.worldPresenceSocketUrl("viewer", "https://presence.example/") === "wss://presence.example/v1/presence/connect?role=viewer");
   check("HTTP endpoint becomes a presence WebSocket", presence.worldPresenceSocketUrl("presence", "http://localhost:8787") === "ws://localhost:8787/v1/presence/connect?role=presence");
@@ -203,11 +226,14 @@ try {
   // No enabled flag is seeded: presence must connect for every install.
   const runnerStore = memory({
     "owllm:world-map:presence-token": "obsolete-d1-token",
+    "owllm:world-map:node-id": "legacy-random-per-profile-id",
   });
   const presenceSockets = [];
   const stopPresence = presence.installWorldPresenceConnection({
     storage: runnerStore,
     baseUrl: "https://presence.example",
+    nodeId: devicePresenceId,
+    appVersion: "1.0.6",
     socketFactory: (url) => {
       const socket = new FakeSocket(url);
       presenceSockets.push(socket);
@@ -215,11 +241,29 @@ try {
     },
   });
   check("Every installation opens one anonymous presence socket (always on, no consent)", presenceSockets.length === 1 && presenceSockets[0].url.includes("role=presence"));
-  check("Presence socket sends the stable per-installation node id", presenceSockets[0].url.includes("id="));
-  check("Node id is persisted device-locally for the next launch", (runnerStore.getItem("owllm:world-map:node-id") ?? "").length > 0);
+  check("Presence socket sends the device-derived node id and release",
+    presenceSockets[0].url.includes(`id=${devicePresenceId}`) && presenceSockets[0].url.includes("v=1.0.6"));
   check("D1-era bearer token is removed", runnerStore.getItem("owllm:world-map:presence-token") === null);
+  check("The legacy random per-profile node id is purged, never reused",
+    runnerStore.getItem("owllm:world-map:node-id") === null
+      && !presenceSockets[0].url.includes("legacy-random-per-profile-id"));
   stopPresence();
   check("Invisible or app shutdown immediately closes presence", presenceSockets[0].closed);
+
+  // Root fix for "one Linux device becomes a new user on every login": with no
+  // native identity the socket must carry NO id, so the service shows it live
+  // and records nothing, instead of the client inventing a fresh recorded id.
+  const anonymousSockets = [];
+  const stopAnonymous = presence.installWorldPresenceConnection({
+    storage: memory(),
+    baseUrl: "https://presence.example",
+    socketFactory: (url) => { const socket = new FakeSocket(url); anonymousSockets.push(socket); return socket; },
+  });
+  check("An unidentifiable install connects without any recorded id",
+    anonymousSockets.length === 1 && anonymousSockets[0].url.includes("role=presence") && !anonymousSockets[0].url.includes("id="));
+  stopAnonymous();
+  check("Presence is event-driven: sign-in on open, sign-off on close, no polling timer",
+    source.includes('window.addEventListener("pagehide", signOff)') && !/setInterval/.test(source));
 
   const page = read("pages/gamify/WorldMapPage.tsx");
   const modules = read("core/modules.ts");
@@ -321,7 +365,10 @@ try {
       && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
   check("My Fleet refreshes immediately after device vault sync", page.includes('window.addEventListener("owllm:devices:refresh"') && page.includes('window.removeEventListener("owllm:devices:refresh"'));
   check("Device vault records carry a publication heartbeat", read("../../src-tauri/src/remote_devices/protocol.rs").includes("published_at") && read("../../src-tauri/src/remote_devices/mod.rs").includes("rec.published_at = Some(now_rfc3339())"));
-  check("Running apps republish the heartbeat on an interval", vaultSync.includes("REMOTE_DEVICE_HEARTBEAT_MS") && vaultSync.includes("void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS"));
+  check("Running apps republish from a native interval, independent of WebView suspension",
+    remoteDevicesMod.includes("tokio::time::interval(DEVICE_HEALTHCHECK_INTERVAL)")
+      && remoteDevicesMod.includes("crate::vault::vault_sync_devices().await")
+      && !vaultSync.includes("REMOTE_DEVICE_HEARTBEAT_MS"));
   check("My Fleet always includes the current installation", page.includes("fleetWithSelf(identity, devices)") && page.includes("is_self: true"));
   check("Fleet satellites have aligned orbit paths and labels", page.includes("orbitPosition({ ...orbit") && page.includes("satelliteLabel(node.label"));
   for (const asset of ["earth-day.jpg", "earth-normal.jpg", "earth-specular.jpg", "earth-clouds.png"]) {
@@ -337,7 +384,36 @@ try {
   check("Presence runs application-wide from the opaque native-device hash",
     appShell.includes("<WorldPresenceRunner />")
       && appShell.includes("presenceNodeIdForDevice(identity.device_id)")
-      && appShell.includes("installWorldPresenceConnection({ nodeId })"));
+      // Options beyond these two are allowed (World Chat adds an opt-in hook),
+      // but the recorded id and the release must still come from the native
+      // identity — that pairing is what keeps one install one recorded node.
+      && /installWorldPresenceConnection\(\{ nodeId, appVersion[,}]/.test(appShell));
+  // World Chat rides the same socket. It must be strictly opt-in, or enabling
+  // an inbox would quietly de-anonymise every dot on the public map.
+  check("World Chat never presents a key unless the user turned it on",
+    appShell.includes("chatHooks: worldChatHooks()")
+      && fs.existsSync(path.join(UI, "pages/gamify/worldChatRuntime.ts"))
+      && read("pages/gamify/worldChatRuntime.ts").includes("if (!worldChatEnabled()) return undefined"));
+  // `crypto.subtle` is secure-context-only. When the webview does not expose it
+  // the old code silently fell back to a random id, so the SAME install was
+  // recorded as a new node on every launch. Rust computes the identical hash
+  // unconditionally on every OS and the frontend prefers it.
+  const rustIdentity = read("../../src-tauri/src/remote_devices/identity.rs");
+  check("The presence token is derived natively, not only via crypto.subtle",
+    rustIdentity.includes('const PRESENCE_DOMAIN: &str = "owllm-world-presence-device-v1\\0"')
+      && rustIdentity.includes("pub fn presence_id(device_id: &str) -> String")
+      && read("../../src-tauri/src/remote_devices/mod.rs").includes('"presence_id": identity::presence_id(&rec.device_id)')
+      && appShell.includes("identity.presence_id ||"));
+  // Execute the webview derivation and compare it to the vector pinned in the
+  // Rust unit test. If the two paths ever disagree, every installation silently
+  // moves to a different dot — the duplicate-device bug in a new costume.
+  const rustVector = /super::presence_id\("DEVICE-A"\),\s*"([0-9a-f]{64})"/.exec(rustIdentity)?.[1] ?? "";
+  const webviewVector = await presence.presenceNodeIdForDevice("DEVICE-A");
+  check("Native and webview presence tokens are the same value",
+    rustIdentity.includes("hasher.update(PRESENCE_DOMAIN.as_bytes())")
+      && source.includes('const DEVICE_PRESENCE_DOMAIN = "owllm-world-presence-device-v1\\0"')
+      && webviewVector.length === 64
+      && rustVector === webviewVector);
   check("Stable node id (and any legacy consent key) stay device-local", vaultSync.includes('"owllm:world-map:node-id"') && vaultSync.includes('"owllm:world-map:presence-enabled"'));
   check("Worker retains anonymous nodes in SQLite and ghosts offline ones",
     worker.includes("acceptWebSocket")
@@ -345,7 +421,7 @@ try {
       && worker.includes("CREATE TABLE IF NOT EXISTS nodes")
       && worker.includes("first_seen")
       && worker.includes("publicNode(row, false)")
-      && worker.includes("SELECT id, region, os, latitude"));
+      && worker.includes("SELECT id, region, os, app_version AS appVersion, latitude"));
   check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
   check("Worker uses real coarse-grid coordinates without per-node random displacement",
     worker.includes("Math.round(latitude / 4) * 4")
@@ -393,6 +469,29 @@ try {
   check("Sun-side illumination is raised by exactly twenty-five percent",
     page.includes("PLANET_BASE_LIGHT_INTENSITY * 0.25")
       && page.includes("new THREE.PointLight(0xffffff, PLANET_SUNLIGHT_INTENSITY, 0, 0)"));
+  check("Worker records the release without wiping the recorded history",
+    worker.includes("ALTER TABLE nodes ADD COLUMN app_version TEXT NOT NULL DEFAULT ''")
+      && worker.includes("sanitizeAppVersion")
+      && worker.includes('sanitizeAppVersion(url.searchParams.get("v"))')
+      && worker.includes("app_version = excluded.app_version")
+      && worker.includes("SELECT id, region, os, app_version AS appVersion")
+      // The schema_version bump deletes every node; a new column must not use it.
+      && (worker.match(/schema_version', '(\d+)'/)?.[1] ?? "") === "3");
+  check("Map and lists mark live installs gold and recorded-offline ones purple",
+    page.includes('export const PRESENCE_ONLINE_COLOR = "#ffc43d"')
+      && page.includes('export const PRESENCE_OFFLINE_COLOR = "#a071f5"')
+      && page.includes("const color = node.online ? PRESENCE_ONLINE_COLOR : PRESENCE_OFFLINE_COLOR;")
+      && !page.includes("0x718096")
+      && !page.includes('background: node.online ? "var(--accent)" : "var(--fg-dim)"')
+      && !page.includes('background: publicNode.online ? "var(--accent)" : "var(--fg-dim)"'));
+  check("Offline dots stay legible instead of fading into the map",
+    page.includes("multiplyScalar(node.online ? 0.6 : 0.42)")
+      && page.includes("opacity: node.online ? 0.30 : 0.20")
+      && page.includes("opacity: node.online ? 0.34 : 0.24"));
+  check("Connection details list the app release of each installation",
+    page.includes('{publicNode.appVersion ? `v${publicNode.appVersion}` : t("Version unknown")}')
+      && page.includes('${node.appVersion ? `v${node.appVersion}` : t("Version unknown")}')
+      && page.includes('${device.app_version ? `v${device.app_version}` : t("Version unknown")}'));
   check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")
       && worker.includes("request.headers.get(\"User-Agent\")")
@@ -407,13 +506,19 @@ try {
       && /\["users online",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["Click the flag for connection details",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["Unknown city",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
-      && /\["Server",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
+      && /\["Server",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Version unknown",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);
   const styles = read("styles.css");
   check("Flag font is registered flag-codepoints-only and first in the stack", styles.includes('font-family: "Twemoji Country Flags"') && styles.includes("unicode-range: U+1F1E6-1F1FF") && styles.includes('font-family: "Twemoji Country Flags", "Segoe UI"'));
 
-  for (const row of checks) console.log(`  PASS ${row.name}`);
-  console.log(`world map verification: ${checks.length}/${checks.length} passed`);
+  const failed = checks.filter((row) => !row.ok);
+  for (const row of checks) console.log(`  ${row.ok ? "PASS" : "FAIL"} ${row.name}`);
+  console.log(`world map verification: ${checks.length - failed.length}/${checks.length} passed`);
+  if (failed.length) {
+    console.error(`world map verification FAILED: ${failed.length} check(s)`);
+    process.exitCode = 1;
+  }
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

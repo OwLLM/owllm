@@ -25,11 +25,75 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[derive(Serialize, Clone, Debug)]
+/// Hard ceiling for a single `wsl.exe` probe. Generous enough for a cold WSL
+/// service to answer, short enough that a wedged one degrades quickly.
+const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Default liveness ceiling for an in-distro SCRIPT (CLI prepare, sandbox
+/// probes, login sync, cache trims). Generous: first-run CLI provisioning
+/// waits on a `flock -w 600` plus an apt+npm install. Before 2026-08-14 these
+/// had NO bound at all — a wedged wsl.exe (cold-start hang, dead 9P server)
+/// stalled the dispatch warm-up forever with zero diagnostics; that was the
+/// invisible half of the historical "wsl exited 1" run-killer family. Long
+/// legitimate work (guided WSL setup) passes its own ceiling explicitly.
+const WSL_SCRIPT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Why a `wsl.exe` probe produced no output. The caller MUST distinguish
+/// these: "wsl.exe isn't there" is a permanent answer (no WSL on this PC —
+/// bail instantly, don't retry), while "timed out" is transient (WSL exists
+/// but is wedged/cold — a retry may succeed).
+enum ProbeFail {
+    /// wsl.exe could not be launched at all — no WSL installed.
+    Spawn,
+    /// The child ran past the timeout and was killed.
+    Timeout,
+}
+
+/// Run a command to completion with a HARD timeout, killing the child if it
+/// overruns.
+///
+/// WHY THIS EXISTS: `Command::output()` blocks until the child exits AND its
+/// stdout/stderr pipes close — with NO bound. When the WSL service/VM wedges,
+/// `wsl.exe` never exits, so the call blocks *forever*. That froze the entire
+/// app (diagnosed from a live gdb backtrace: the main thread parked in
+/// `WaitForMultipleObjects` inside `child_pipe::read_output`, reached from the
+/// `wsl_isolation_get` IPC command), leaving 16 orphaned `wsl.exe` probes
+/// behind. A timeout turns "hang forever" into "WSL unavailable".
+///
+/// The probes here emit a few bytes, so polling `try_wait` then draining with
+/// `wait_with_output` cannot deadlock on a full pipe buffer.
+fn output_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, ProbeFail> {
+    let mut child = cmd.spawn().map_err(|_| ProbeFail::Spawn)?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|_| ProbeFail::Timeout),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Kill the wedged child so its pipes close and we never
+                    // leak a growing pile of stuck wsl.exe processes.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ProbeFail::Timeout);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return Err(ProbeFail::Timeout),
+        }
+    }
+}
+
+// Default: the async command wrappers below fall back to it if the
+// spawn_blocking task itself fails to join (all-false / empty = "no WSL").
+#[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WslStatus {
     /// At least one distro is installed and runnable.
@@ -89,16 +153,37 @@ pub struct WslToolchain {
 /// wsl.exe's OWN error messages (distro not found, distro failed to start,
 /// "command not found" from a busybox distro) are UTF-16LE — which, run
 /// through from_utf8_lossy, render as a wall of mojibake/□ boxes (the garbled
-/// "WSL check failed" the user saw). Stripping null bytes recovers the ASCII
-/// from UTF-16LE and is harmless for genuine UTF-8 (which has no interior
-/// nulls).
+/// "WSL check failed" the user saw). Stripping the interleaved nulls recovers
+/// the ASCII.
+///
+/// It must strip ONLY for that UTF-16LE shape. "Any null anywhere" also ate the
+/// separators of git's `-z` output, which is legitimately NUL-delimited UTF-8:
+/// `git diff --name-only -z` came back as one concatenated pseudo-path, so the
+/// merge collision classifier saw zero tracked collisions and every merge with
+/// local edits aborted with git's raw "your local changes would be
+/// overwritten" instead of adopting or naming them.
 pub(crate) fn decode_wsl(bytes: &[u8]) -> String {
-    if bytes.contains(&0) {
-        let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+    // The BOM must come off the DECODED bytes too, not just the sniffed ones —
+    // filtering nulls out of a BOM leaves a bare 0xFF, which renders as the
+    // replacement character in front of the message.
+    let body = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
+    if looks_like_utf16le(body) {
+        let stripped: Vec<u8> = body.iter().copied().filter(|&b| b != 0).collect();
         String::from_utf8_lossy(&stripped).into_owned()
     } else {
         String::from_utf8_lossy(bytes).into_owned()
     }
+}
+
+/// UTF-16LE ASCII puts a null in every ODD byte position and never in an even
+/// one. NUL-delimited UTF-8 (git `-z`) has nulls only at record boundaries, so
+/// it fails both halves of this test.
+fn looks_like_utf16le(body: &[u8]) -> bool {
+    // An odd-length buffer cannot be UTF-16.
+    if body.len() < 2 || body.len() % 2 != 0 {
+        return false;
+    }
+    body.chunks_exact(2).all(|pair| pair[1] == 0 && pair[0] != 0)
 }
 
 /// Parse a Windows path and, if it points inside a WSL distro, return
@@ -215,7 +300,19 @@ pub fn run_in_distro_script_user(
     user: Option<&str>,
     script: &str,
 ) -> Result<String, String> {
-    use std::io::Write;
+    run_in_distro_script_user_with_timeout(distro, user, script, WSL_SCRIPT_TIMEOUT)
+}
+
+/// Bounded variant — the ONE place in-distro scripts actually execute. The
+/// child is killed at the ceiling and the error names the remedy, so a wedged
+/// WSL degrades into an actionable failure instead of an eternal hang.
+pub fn run_in_distro_script_user_with_timeout(
+    distro: &str,
+    user: Option<&str>,
+    script: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-d").arg(distro);
     if let Some(u) = user {
@@ -238,15 +335,44 @@ pub fn run_in_distro_script_user(
             .map_err(|e| format!("write script to wsl stdin: {e}"))?;
         // stdin dropped here → EOF so bash runs the script and exits.
     }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("wait wsl: {e}"))?;
-    let stdout = decode_wsl(&out.stdout);
-    let stderr = decode_wsl(&out.stderr);
-    if !out.status.success() {
+    // Drain both pipes on threads so a chatty script can't dead-lock on a
+    // full pipe buffer while we poll for exit below.
+    let mut stdout_pipe = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let mut stderr_pipe = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    let out_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut b);
+        b
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "wsl script timed out after {}s and was killed — WSL may be wedged; run `wsl --shutdown` (or Home → Set up WSL) and retry",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("wait wsl: {e}")),
+        }
+    };
+    let stdout = decode_wsl(&out_h.join().unwrap_or_default());
+    let stderr = decode_wsl(&err_h.join().unwrap_or_default());
+    if !status.success() {
         return Err(format!(
             "wsl exited {}: {}",
-            out.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             if stderr.trim().is_empty() {
                 stdout.trim()
             } else {
@@ -259,6 +385,76 @@ pub fn run_in_distro_script_user(
     } else {
         format!("{stdout}\n{stderr}")
     })
+}
+
+// ---- sandbox outbound-network preflight ----------------------------------
+
+/// Marker written to a run's stderr when the preflight finds the distro has no
+/// outbound network. The UI matches on it to name the real remedy.
+///
+/// Why this exists: on 2026-08-12 the Windows HNS NAT behind WSL stopped
+/// forwarding return traffic (guest sent 506 packets, received 5). Every
+/// outbound connect from the distro timed out, so the agent CLI sat in
+/// SYN-SENT for 10+ minutes and the run looked like a hung model — no error,
+/// no output. `wsl --shutdown` did NOT restore it. A dead sandbox network must
+/// fail in seconds and say so, not consume a whole run's timeout.
+pub const NET_DOWN_MARKER: &str = "OWLLM_SANDBOX_NET_DOWN";
+
+/// A good verdict is trusted long enough that a team run spawning many agents
+/// probes once; a bad one expires fast so the first attempt after a repair
+/// goes straight through instead of staying blocked.
+const NET_OK_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const NET_DOWN_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+type NetCache = std::sync::Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>;
+
+fn net_cache() -> &'static NetCache {
+    static C: std::sync::OnceLock<NetCache> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// Whether `distro` can actually open an outbound TCP connection. Cached with
+/// the TTLs above so the happy path costs one probe per five minutes.
+pub fn sandbox_net_ok(distro: &str) -> bool {
+    let cached = net_cache().lock().ok().and_then(|m| {
+        m.get(distro).copied().and_then(|(ok, at)| {
+            let ttl = if ok { NET_OK_TTL } else { NET_DOWN_TTL };
+            if at.elapsed() < ttl {
+                Some(ok)
+            } else {
+                None
+            }
+        })
+    });
+    if let Some(ok) = cached {
+        return ok;
+    }
+    let ok = probe_sandbox_net(distro);
+    if let Ok(mut m) = net_cache().lock() {
+        m.insert(distro.to_string(), (ok, std::time::Instant::now()));
+    }
+    ok
+}
+
+/// Forget every cached verdict. Called after a repair action so the next run
+/// re-probes instead of waiting out `NET_DOWN_TTL`.
+pub fn sandbox_net_forget() {
+    if let Ok(mut m) = net_cache().lock() {
+        m.clear();
+    }
+}
+
+fn probe_sandbox_net(distro: &str) -> bool {
+    // bash's /dev/tcp needs no curl and no root — ICMP is commonly filtered in
+    // WSL, so a ping-based probe would report false failures. Two anycast
+    // resolvers on 443, 2s each: a dead network costs ~4s instead of the CLI's
+    // multi-minute connect, and one reachable host is enough to prove routing.
+    let script = "for h in 1.1.1.1 8.8.8.8; do \
+if timeout 2 bash -c \"exec 3<>/dev/tcp/$h/443\" 2>/dev/null; then \
+echo OWLLM_NET_OK; exit 0; fi; done; exit 1";
+    run_in_distro_script(distro, script)
+        .map(|o| o.contains("OWLLM_NET_OK"))
+        .unwrap_or(false)
 }
 
 /// One `wsl.exe -l -q` call. Returns (distro names, definitive_none).
@@ -296,9 +492,13 @@ fn list_distros_once() -> (Vec<String>, bool) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
-    let Ok(out) = cmd.output() else {
-        return (Vec::new(), true);
+    let out = match output_with_timeout(cmd, WSL_PROBE_TIMEOUT) {
+        Ok(out) => out,
+        // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
+        Err(ProbeFail::Spawn) => return (Vec::new(), true),
+        // Timeout = WSL exists but is wedged → NON-definitive, let the
+        // caller's backoff retry decide instead of caching "no WSL".
+        Err(ProbeFail::Timeout) => return (Vec::new(), false),
     };
     parse_distro_list_output(out.status.success(), &out.stdout, &out.stderr)
 }
@@ -341,7 +541,10 @@ fn default_distro_name() -> Option<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().ok()?;
+    // TIMEOUT-BOUNDED: this exact probe is what hung the app — a wedged WSL
+    // left `wsl.exe -- bash -lc 'printf %s "$WSL_DISTRO_NAME"'` running
+    // forever, and the unbounded `output()` blocked the UI thread with it.
+    let out = output_with_timeout(cmd, WSL_PROBE_TIMEOUT).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -391,7 +594,7 @@ pub(crate) fn is_system_distro(name: &str) -> bool {
 /// fine-tuning path should resolve through instead of the raw default,
 /// which can be `docker-desktop`.
 pub fn best_linux_distro() -> Option<String> {
-    wsl_status().best_distro
+    wsl_status_blocking().best_distro
 }
 
 /// Pure: pick the best real Linux distro from a (default, all) pair. Shared by
@@ -405,8 +608,21 @@ fn pick_best_distro(default_distro: &Option<String>, distros: &[String]) -> Opti
     distros.iter().find(|d| !is_system_distro(d)).cloned()
 }
 
+/// ASYNC + spawn_blocking — see `wsl_status_blocking`. A SYNC Tauri command
+/// runs on the WebView2 IPC/event-loop thread, so shelling out to `wsl.exe`
+/// there freezes the WHOLE UI for the duration — and forever if WSL wedges.
+/// Same fix already applied to `accounts_status`; these were missed.
 #[tauri::command]
-pub fn wsl_status() -> WslStatus {
+pub async fn wsl_status() -> WslStatus {
+    tokio::task::spawn_blocking(wsl_status_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// The real probe. Blocking + shells out to `wsl.exe` (bounded by
+/// `WSL_PROBE_TIMEOUT`), so it must NEVER be called on the UI thread —
+/// internal Rust callers already run off it.
+pub fn wsl_status_blocking() -> WslStatus {
     let distros = list_distros();
     let default_distro = default_distro_name().or_else(|| distros.first().cloned());
     let best_distro = pick_best_distro(&default_distro, &distros);
@@ -454,11 +670,25 @@ pub fn wsl_restart() -> Result<(), String> {
             detail
         ));
     }
+    // The distro is about to cold-start, so any cached network verdict is
+    // stale. Drop it or a successful repair would still be refused for the
+    // remainder of NET_DOWN_TTL.
+    sandbox_net_forget();
     Ok(())
 }
 
+/// ASYNC + spawn_blocking. THIS is the command whose sync version froze the
+/// app: normalize_isolation_distro → wsl_status → `wsl.exe`, all on the UI
+/// thread, blocking forever on a wedged WSL.
 #[tauri::command]
-pub fn wsl_isolation_get() -> WslIsolation {
+pub async fn wsl_isolation_get() -> WslIsolation {
+    tokio::task::spawn_blocking(wsl_isolation_get_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// Blocking variant for internal Rust callers (already off the UI thread).
+pub fn wsl_isolation_get_blocking() -> WslIsolation {
     let cfg = isolation_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -466,8 +696,22 @@ pub fn wsl_isolation_get() -> WslIsolation {
     normalize_isolation_distro(cfg)
 }
 
+/// ASYNC + spawn_blocking: normalize_isolation_distro shells out to `wsl.exe`
+/// (via wsl_status), which must not run on the UI thread.
 #[tauri::command]
-pub fn wsl_isolation_set(enabled: bool, distro: Option<String>) -> Result<WslIsolation, String> {
+pub async fn wsl_isolation_set(
+    enabled: bool,
+    distro: Option<String>,
+) -> Result<WslIsolation, String> {
+    tokio::task::spawn_blocking(move || wsl_isolation_set_blocking(enabled, distro))
+        .await
+        .map_err(|e| format!("wsl_isolation_set join: {e}"))?
+}
+
+fn wsl_isolation_set_blocking(
+    enabled: bool,
+    distro: Option<String>,
+) -> Result<WslIsolation, String> {
     let cfg = normalize_isolation_distro(WslIsolation { enabled, distro });
     let p = isolation_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
@@ -492,7 +736,7 @@ fn normalize_isolation_distro(mut cfg: WslIsolation) -> WslIsolation {
         cfg.distro = None;
         return cfg;
     };
-    let status = wsl_status();
+    let status = wsl_status_blocking();
     cfg.distro = status
         .distros
         .iter()
@@ -720,6 +964,60 @@ mod tests {
         assert_eq!(p, "/home/mc/owllm/proj");
     }
 
+    /// wsl.exe's own UTF-16LE errors must still decode to readable ASCII…
+    #[test]
+    fn decode_recovers_utf16le_wsl_errors() {
+        let utf16: Vec<u8> = "There is no distribution with the supplied name."
+            .bytes()
+            .flat_map(|b| [b, 0])
+            .collect();
+        assert_eq!(
+            decode_wsl(&utf16),
+            "There is no distribution with the supplied name."
+        );
+        let mut with_bom = vec![0xFF, 0xFE];
+        with_bom.extend_from_slice(&utf16);
+        assert_eq!(
+            decode_wsl(&with_bom),
+            "There is no distribution with the supplied name."
+        );
+    }
+
+    /// …but git's `-z` output is NUL-DELIMITED UTF-8, and eating those
+    /// separators made `git diff --name-only -z` decode as one concatenated
+    /// pseudo-path. The merge collision classifier then found no tracked
+    /// collisions, so a merge over local edits aborted with git's raw "your
+    /// local changes would be overwritten" instead of adopting identical ones
+    /// or naming the differing ones.
+    #[test]
+    fn decode_preserves_nul_separated_git_output() {
+        let z = b"owllm-desktop/src-tauri/src/release.rs\0owllm-desktop/ui/src/App.tsx\0";
+        let decoded = decode_wsl(z);
+        let paths: Vec<&str> = decoded.split('\0').filter(|p| !p.is_empty()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "owllm-desktop/src-tauri/src/release.rs",
+                "owllm-desktop/ui/src/App.tsx"
+            ]
+        );
+    }
+
+    #[test]
+    fn utf16_detection_rejects_plain_and_delimited_utf8() {
+        assert!(!looks_like_utf16le(b"plain ascii output\n"));
+        assert!(!looks_like_utf16le(b"src/main.rs\0ui/App.tsx\0"));
+        assert!(!looks_like_utf16le(b""));
+        assert!(!looks_like_utf16le(b"\0"));
+        // An odd-length buffer cannot be UTF-16.
+        assert!(!looks_like_utf16le(b"a\0b"));
+        assert!(looks_like_utf16le(b"a\0b\0c\0"));
+        // NOTE: a NUL-delimited list of SINGLE-character records is byte-identical
+        // to UTF-16LE and is read as UTF-16. Git never emits one — every `-z`
+        // caller here lists file paths — and resolving it the other way would
+        // re-break wsl.exe's short error messages.
+    }
+
     #[test]
     fn best_distro_skips_docker_default() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
@@ -797,7 +1095,7 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_status_detects_distros_when_cold() {
-        let s = wsl_status();
+        let s = wsl_status_blocking();
         assert!(s.available, "WSL should be detected even on a cold service");
         assert!(
             s.distros.iter().any(|d| !is_system_distro(d)),

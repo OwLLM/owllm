@@ -33,6 +33,14 @@ pub struct SupportSnapshot {
     pub wsl_distros: Vec<String>,
     /// Installed module ids (e.g. local-inference, python-runtime).
     pub modules: Vec<String>,
+    /// Sessions that ended without running their shutdown — the app being
+    /// killed, an OOM, a hard crash, a power cut. Rides along on every support
+    /// report because the user who files "it keeps closing by itself" is
+    /// exactly the user who cannot tell you why.
+    pub unclean_shutdowns: Vec<crate::session_health::UncleanShutdown>,
+    /// Tail of the crash log: panic backtraces and the exit-path breadcrumbs
+    /// that say who asked for the last shutdown.
+    pub crash_log_tail: String,
 }
 
 /// Result of a user-approved app-window capture (Slice 3). The PNG comes
@@ -79,6 +87,17 @@ pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCaptu
 /// application or monitor. Shared by Watcher and the agent browser so both
 /// surfaces use one platform implementation.
 pub(crate) fn capture_window_png(win: &tauri::Window) -> Result<(Vec<u8>, u32, u32), String> {
+    // A minimized window has no rendered pixels. Windows parks it at 160x28
+    // off-screen, so the capture SUCCEEDS and returns a black sliver that an
+    // agent then treats as a real screenshot of the page. Refuse instead of
+    // handing back evidence of nothing.
+    if win.is_minimized().unwrap_or(false) {
+        return Err(format!(
+            "the {} window is minimized, so it has no rendered pixels to capture — \
+             restore it and retry, or use scope=desktop",
+            win.label()
+        ));
+    }
     #[cfg(windows)]
     {
         let hwnd = win.hwnd().map_err(|e| format!("hwnd: {e}"))?.0 as isize;
@@ -521,8 +540,72 @@ pub async fn support_export_report(
 
 /// The team intake repo for in-app bug reports. Private; reports arrive as
 /// issues (label `auto-report`) plus the raw redacted bundle committed under
-/// reports/<stamp>/.
+/// reports/<stamp>/. Only OwLLM team members can write here.
 const BUG_REPORT_REPO: &str = "OwLLM/bug-reports";
+
+/// Where everyone else's report goes. A stranger's own GitHub token cannot
+/// even READ the private intake above — GitHub masks a repo you have no
+/// access to as 404 — so every report from outside the team used to die at
+/// the first upload. The public releases repo is the one destination any
+/// authenticated GitHub user can reach with their own token, so reports land
+/// there as ordinary issues. Still zero embedded credentials.
+const PUBLIC_REPORT_REPO: &str = "OwLLM/owllm";
+
+/// Does this GitHub status mean "your account can't touch that repo" (as
+/// opposed to a transient/network/server problem)? 404 is included on
+/// purpose: GitHub returns it instead of 403 for private repos the caller
+/// cannot see, which is exactly what a non-team user's token gets.
+pub(crate) fn gh_status_is_access_denied(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404)
+}
+
+/// The only text a passer-by sees on a public report. Deliberately says what
+/// the ciphertext is and who can open it, so the issue does not look like
+/// spam and nobody wastes time asking the reporter to "paste the details".
+const SEALED_REPORT_PREAMBLE: &str = "**Encrypted bug report from OwLLM Desktop.**\n\n\
+    The reporter is not an OwLLM team member, so this could not be filed in the team's \
+    private intake. Nothing readable is published here — the description, the diagnostics \
+    and every path, project and account name inside them are sealed to the OwLLM team's \
+    key and can only be opened by the team. Any screenshot stayed on the reporter's own \
+    machine.\n\n";
+
+/// The title of a public report. Carries the timestamp and nothing else: the
+/// real title is the first line the user typed, which routinely contains a
+/// path, a project name or a model name.
+fn public_issue_title(stamp: &str) -> String {
+    format!("Encrypted bug report — {stamp}")
+}
+
+/// Build the body of a public report: the fixed preamble plus the sealed
+/// payload. `body_md` is trimmed first if the sealed block would overflow
+/// GitHub's issue-body limit, so an oversized report arrives truncated rather
+/// than failing to arrive at all.
+fn sealed_public_body(title: &str, body_md: &str) -> Result<String, String> {
+    use crate::support_seal::{seal_for_support, MAX_SEALED_BODY_CHARS};
+
+    // Undo base64 (4/3) and the 76-column wrapping to get the plaintext
+    // budget, then leave room for the preamble, the envelope header and the
+    // JSON scaffolding around the two fields.
+    let overhead = SEALED_REPORT_PREAMBLE.chars().count() + 1024;
+    let budget_plain = MAX_SEALED_BODY_CHARS.saturating_sub(overhead) * 3 / 4 * 76 / 77;
+    let budget_body = budget_plain.saturating_sub(title.chars().count() + 128);
+
+    let mut body_md = body_md.to_string();
+    if body_md.chars().count() > budget_body {
+        body_md = body_md.chars().take(budget_body).collect::<String>()
+            + "\n\n…(truncated: the report exceeded GitHub's issue size limit)";
+    }
+    let payload = serde_json::to_string(&serde_json::json!({
+        "kind": "owllm-bug-report/sealed-v1",
+        "title": title,
+        "bodyMd": body_md,
+    }))
+    .map_err(|e| format!("seal payload: {e}"))?;
+    Ok(format!(
+        "{SEALED_REPORT_PREAMBLE}{}\n",
+        seal_for_support(payload.as_bytes())?
+    ))
+}
 
 /// Where a submitted report landed, so the UI can link the user straight to it.
 #[derive(Serialize, Clone)]
@@ -530,6 +613,26 @@ const BUG_REPORT_REPO: &str = "OwLLM/bug-reports";
 pub struct SentReport {
     pub issue_url: String,
     pub bundle_url: String,
+    /// True when the report went to the PUBLIC repo because the user is not
+    /// on the team — the UI must say so, and the screenshot is not attached.
+    pub public: bool,
+}
+
+/// A failed GitHub call, keeping the status so the caller can tell
+/// "no access" apart from "network/server hiccup".
+struct GhErr {
+    status: u16,
+    msg: String,
+}
+
+impl std::fmt::Display for GhErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.status == 0 {
+            write!(f, "{}", self.msg)
+        } else {
+            write!(f, "GitHub {}: {}", self.status, self.msg)
+        }
+    }
 }
 
 /// SEND a redacted bug report straight to the OwLLM team's GitHub intake
@@ -557,17 +660,48 @@ pub async fn support_send_report(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    // 1) Commit the redacted report bundle.
+    // 1) Commit the redacted report bundle to the private team intake. A
+    //    non-team user's token cannot write (or even see) that repo, so an
+    //    access failure here is the NORMAL path for ordinary users — fall
+    //    back to the public repo rather than losing the report.
     let report_b64 = base64::engine::general_purpose::STANDARD.encode(report_json.as_bytes());
-    gh_put_file(
+    if let Err(e) = gh_put_file(
         &client,
         &token,
+        BUG_REPORT_REPO,
         &format!("{dir}/report.json"),
         &report_b64,
         &format!("report {stamp}"),
     )
     .await
-    .map_err(|e| format!("couldn't upload the report to the OwLLM team repo: {e}"))?;
+    {
+        if !gh_status_is_access_denied(e.status) {
+            return Err(format!(
+                "couldn't upload the report to the OwLLM team repo: {e}"
+            ));
+        }
+        // The repo is public, so NOTHING readable may be posted: the title,
+        // the description and the diagnostics all name paths, projects and
+        // machines. Seal the whole payload to the team key — the issue
+        // carries ciphertext and a generic title. The screenshot cannot ride
+        // along at all (the Contents API needs write access), so the caller
+        // keeps it locally and the issue says so.
+        let body = sealed_public_body(&title, &body_md)?;
+        let issue_url = gh_create_issue(
+            &client,
+            &token,
+            PUBLIC_REPORT_REPO,
+            &public_issue_title(&stamp),
+            &body,
+        )
+        .await
+        .map_err(|e| format!("couldn't file the report on {PUBLIC_REPORT_REPO}: {e}"))?;
+        return Ok(SentReport {
+            issue_url,
+            bundle_url: String::new(),
+            public: true,
+        });
+    }
 
     let mut shot_line = String::new();
     if let Some(png) = png_base64.filter(|s| !s.is_empty()) {
@@ -576,6 +710,7 @@ pub async fn support_send_report(
         gh_put_file(
             &client,
             &token,
+            BUG_REPORT_REPO,
             &format!("{dir}/screenshot.png"),
             &png,
             &format!("screenshot {stamp}"),
@@ -592,25 +727,26 @@ pub async fn support_send_report(
     let bundle_url = format!("https://github.com/{}/tree/main/{}", BUG_REPORT_REPO, dir);
     let body =
         format!("{body_md}\n\n---\n📦 Full redacted bundle: [`{dir}/`]({bundle_url}){shot_line}",);
-    let issue_url = gh_create_issue(&client, &token, &title, &body).await?;
+    let issue_url = gh_create_issue(&client, &token, BUG_REPORT_REPO, &title, &body)
+        .await
+        .map_err(|e| format!("opened the bundle but couldn't create the issue — {e}"))?;
     Ok(SentReport {
         issue_url,
         bundle_url,
+        public: false,
     })
 }
 
-/// PUT a file into the bug-report repo via the GitHub Contents API.
+/// PUT a file into a report repo via the GitHub Contents API.
 async fn gh_put_file(
     client: &reqwest::Client,
     token: &str,
+    repo: &str,
     path: &str,
     content_b64: &str,
     message: &str,
-) -> Result<(), String> {
-    let url = format!(
-        "https://api.github.com/repos/{}/contents/{}",
-        BUG_REPORT_REPO, path
-    );
+) -> Result<(), GhErr> {
+    let url = format!("https://api.github.com/repos/{}/contents/{}", repo, path);
     let resp = client
         .put(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -618,28 +754,25 @@ async fn gh_put_file(
         .json(&serde_json::json!({ "message": message, "content": content_b64 }))
         .send()
         .await
-        .map_err(|e| format!("network: {e}"))?;
+        .map_err(|e| GhErr {
+            status: 0,
+            msg: format!("network: {e}"),
+        })?;
     if resp.status().is_success() {
         return Ok(());
     }
-    let code = resp.status();
-    let msg = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-        .unwrap_or_else(|| "unknown error".into());
-    Err(format!("GitHub {code}: {msg}"))
+    Err(gh_err(resp).await)
 }
 
-/// Open an issue in the bug-report repo. Returns its html_url.
+/// Open an issue in a report repo. Returns its html_url.
 async fn gh_create_issue(
     client: &reqwest::Client,
     token: &str,
+    repo: &str,
     title: &str,
     body: &str,
-) -> Result<String, String> {
-    let url = format!("https://api.github.com/repos/{}/issues", BUG_REPORT_REPO);
+) -> Result<String, GhErr> {
+    let url = format!("https://api.github.com/repos/{}/issues", repo);
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -647,24 +780,36 @@ async fn gh_create_issue(
         .json(&serde_json::json!({ "title": title, "body": body, "labels": ["auto-report"] }))
         .send()
         .await
-        .map_err(|e| format!("network: {e}"))?;
+        .map_err(|e| GhErr {
+            status: 0,
+            msg: format!("network: {e}"),
+        })?;
     if !resp.status().is_success() {
-        let code = resp.status();
-        let msg = resp
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .unwrap_or_else(|| "unknown error".into());
-        return Err(format!(
-            "opened the bundle but couldn't create the issue — GitHub {code}: {msg}"
-        ));
+        return Err(gh_err(resp).await);
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| format!("parse issue: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| GhErr {
+        status: 0,
+        msg: format!("parse issue: {e}"),
+    })?;
     v.get("html_url")
         .and_then(|u| u.as_str())
         .map(String::from)
-        .ok_or_else(|| "issue created but no URL returned".to_string())
+        .ok_or_else(|| GhErr {
+            status: 0,
+            msg: "issue created but no URL returned".into(),
+        })
+}
+
+/// Turn a failed GitHub response into a `GhErr`, keeping its status.
+async fn gh_err(resp: reqwest::Response) -> GhErr {
+    let status = resp.status().as_u16();
+    let msg = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "unknown error".into());
+    GhErr { status, msg }
 }
 
 #[tauri::command]
@@ -702,7 +847,9 @@ pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, 
         server,
         wsl_stage: wsl.stage,
         wsl_detail: wsl.detail,
-        wsl_distros: crate::wsl::wsl_status().distros,
+        wsl_distros: crate::wsl::wsl_status_blocking().distros,
         modules,
+        unclean_shutdowns: crate::session_health::pending(),
+        crash_log_tail: crate::session_health::crash_log_tail(16 * 1024),
     })
 }

@@ -56,9 +56,9 @@ check(/"resize" => \{\s*if let Some\(direction\) = parse_resize_direction\(data\
 check(/"nw" => D::NorthWest/.test(browser) && /"se" => D::SouthEast/.test(browser), "grip ids map onto the runtime's resize directions");
 check(browser.includes("const RESIZE_EDGE: i32 = 5"), "the exposed Linux edge is at least tao's five-pixel hit-test border");
 check(/fn linux_expose_resize_edges[\s\S]{0,600}vbox\.set_margin_start\(RESIZE_EDGE\)[\s\S]{0,300}set_margin_bottom\(RESIZE_EDGE\)/.test(browser), "Linux insets the webview box so the toplevel keeps its resize edge");
-check(browser.includes("linux_expose_resize_edges(&win)"), "the Linux resize edge is applied to the browser window");
+check(browser.includes("on_ui_thread(&win, linux_expose_resize_edges)"), "the Linux resize edge is applied to the browser window, on the UI thread GTK requires");
 check(/fn mac_enable_native_resize[\s\S]{0,900}setStyleMask: mask \| TITLED \| RESIZABLE \| FULL_SIZE_CONTENT_VIEW/.test(browser), "macOS re-adds the titled style AppKit needs to resize a window");
-check(browser.includes("mac_enable_native_resize(&win)"), "the macOS resize style is applied to the browser window");
+check(browser.includes("on_ui_thread(&win, mac_enable_native_resize)"), "the macOS resize style is applied to the browser window, on the main thread AppKit requires");
 check(/setTitlebarAppearsTransparent: true/.test(browser) && /setTitleVisibility: TITLE_HIDDEN/.test(browser) && /standardWindowButton[\s\S]{0,200}setHidden: true/.test(browser), "macOS stays frameless: no titlebar, no title, no second set of window buttons");
 
 if (failed) {

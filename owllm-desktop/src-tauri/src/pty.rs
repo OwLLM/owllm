@@ -31,6 +31,22 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::ipc::Channel;
 
+/// `BROWSER` value handed to every login CLI OwLLM spawns. Login URLs are
+/// captured from the CLI's output and opened in an isolated OwLLM auth tab, so
+/// a CLI must never hand the flow to the user's external default browser.
+/// This value makes the CLI's "open the browser" step a successful no-op.
+/// `%s` is essential on Windows: without it Python's `webbrowser` treats the
+/// whole spaced value as an executable name, fails to spawn it, then falls
+/// through to the external default browser.
+///
+/// Shared with `accounts::subscription_cli_login` so the two spawn paths can
+/// never drift apart on this rule.
+pub(crate) const NO_EXTERNAL_BROWSER: &str = if cfg!(windows) {
+    "cmd.exe /c exit 0 %s"
+} else {
+    "/usr/bin/true %s"
+};
+
 /// Resolve a bare CLI name ("kimi", "claude", …) to (exe, args) ready
 /// for portable-pty's CommandBuilder. Two Windows-specific gotchas
 /// the bare-spawn path falls over on:
@@ -173,14 +189,8 @@ pub fn pty_spawn(
         cmd.env_remove(key);
     }
     // The UI captures login URLs from PTY output and opens them in an isolated
-    // OwLLM auth tab. Give Python's webbrowser module (Kimi) a real
-    // successful no-op. `%s` is essential on Windows: without it Python treats
-    // the whole spaced value as an executable name, fails to spawn it, then
-    // falls through to the user's external default browser.
-    #[cfg(windows)]
-    cmd.env("BROWSER", "cmd.exe /c exit 0 %s");
-    #[cfg(not(windows))]
-    cmd.env("BROWSER", "/usr/bin/true %s");
+    // OwLLM auth tab.
+    cmd.env("BROWSER", NO_EXTERNAL_BROWSER);
 
     let mut child = pair
         .slave
@@ -204,6 +214,7 @@ pub fn pty_spawn(
     let session_id = uuid::Uuid::new_v4().to_string();
     let session_for_exit = session_id.clone();
     let event_for_data = on_event.clone();
+    let event_for_exit = on_event;
 
     SESSIONS.lock().unwrap().insert(
         session_id.clone(),
@@ -214,13 +225,22 @@ pub fn pty_spawn(
         },
     );
 
-    // Reader thread: pump pty output into the Channel.
+    // Bytes the reader has delivered so far. The waiter thread watches this to
+    // know when the child's final output has drained before it drops the Slot.
+    let bytes_read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let bytes_read_waiter = bytes_read.clone();
+
+    // Reader thread: pump pty output into the Channel. Exit detection must NOT
+    // live behind this loop: on Windows the ConPTY read blocks past child exit
+    // for as long as the master half is alive, so a reader-then-wait sequence
+    // never reports the exit and leaves a dead session accepting writes.
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF — child closed
                 Ok(n) => {
+                    bytes_read.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     if event_for_data
                         .send(PtyEvent::Data {
                             data: buf[..n].to_vec(),
@@ -233,12 +253,28 @@ pub fn pty_spawn(
                 Err(_) => break,
             }
         }
-        // Wait for the child to report an exit code, then notify React.
+    });
+
+    // Waiter thread: waiting on the child returns promptly even while the
+    // reader is still blocked. Once the reader has gone quiet (its byte count
+    // stops moving, capped at 1 s), notify React and drop the Slot — which
+    // tears the master down, unblocks the reader, and makes further pty_write
+    // calls fail loudly instead of feeding a dead console.
+    std::thread::spawn(move || {
         let code = match child.wait() {
             Ok(status) => status.exit_code() as i32,
             Err(_) => -1,
         };
-        let _ = event_for_data.send(PtyEvent::Exit { code: Some(code) });
+        let mut last = bytes_read_waiter.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let now = bytes_read_waiter.load(std::sync::atomic::Ordering::Relaxed);
+            if now == last {
+                break;
+            }
+            last = now;
+        }
+        let _ = event_for_exit.send(PtyEvent::Exit { code: Some(code) });
         SESSIONS.lock().unwrap().remove(&session_for_exit);
     });
     Ok(session_id)

@@ -338,7 +338,19 @@ export async function refreshBrowserState(): Promise<void> {
     const on = await invoke<boolean>("device_agents_allowed_get");
     if (on) {
       const devs = await invoke<Array<{ name: string; is_self: boolean }>>("devices_list").catch(() => []);
-      const peers = devs.filter((d) => !d.is_self).map((d) => d.name);
+      // devices_list is freshness-ordered and re-pairing mints new identities,
+      // so one machine can appear many times under one name — advertise each
+      // name once (first occurrence = the live identity).
+      const seen = new Set<string>();
+      const peers = devs
+        .filter((d) => !d.is_self)
+        .map((d) => d.name)
+        .filter((n) => {
+          const k = n.toLowerCase();
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
       _browserStateLine +=
         " REMOTE DEVICES — you CAN run shell commands on the user's OTHER paired machines with the device_exec tool " +
         "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). You can also SEE another " +
@@ -1549,6 +1561,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "that keeps the user's cookies/logins across calls (not a headless scrape). " +
       "Works for the public web AND local dev servers (localhost:5173, 127.0.0.1:3000 " +
       "default to http) — use it to check a web app you are building. " +
+      "A dev server you started INSIDE WSL is reachable here: always preview it as " +
+      "localhost:<port> (Windows forwards that into the distro). Its WSL IP " +
+      "(172.x.y.z) only works if the server binds 0.0.0.0 — a default 127.0.0.1 bind " +
+      "refuses on that address, so never conclude from it that the server is unreachable. " +
       "Starts the browser if needed, opens a NEW background tab, and returns its tab ID. " +
       "Pass that tab_id to later tools so the user can keep working in another tab.",
     args: [

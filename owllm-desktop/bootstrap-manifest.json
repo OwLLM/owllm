@@ -2,53 +2,101 @@
   "_comment": "Pinned upstream URLs for module ZIP builds. build-modules.ps1 reads this. Bump versions here, re-run bootstrap, re-publish to GitHub Releases, bump version in data/modules/registry.json with the new sha256.",
   "modules": {
     "local-inference-cuda": {
-      "moduleVersion": "b9488-cuda12.4",
+      "moduleVersion": "b10358-cuda12.4",
       "_comment": "Composite: llama binaries + cudart runtime DLLs. The cudart pack is REQUIRED at runtime — without it llama-server crashes with cudart64_*.dll missing.",
       "components": [
         {
           "name": "llama",
-          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-cuda-12.4-x64.zip",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-win-cuda-12.4-x64.zip",
           "extractStrip": 0
         },
         {
           "name": "cudart",
-          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/cudart-llama-bin-win-cuda-12.4-x64.zip",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/cudart-llama-bin-win-cuda-12.4-x64.zip",
           "extractStrip": 0
         }
+      ],
+      "requireFiles": [
+        "llama-server.exe",
+        "cudart64_12.dll"
       ]
     },
     "local-inference-vulkan": {
-      "moduleVersion": "b9488-vulkan",
-      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-vulkan-x64.zip",
+      "moduleVersion": "b10358-vulkan",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-win-vulkan-x64.zip",
       "extractStrip": 0,
-      "include": ["llama-server.exe", "*.dll"]
+      "include": [
+        "llama-server.exe",
+        "*.dll"
+      ],
+      "requireFiles": [
+        "llama-server.exe"
+      ]
     },
     "local-inference-cpu": {
-      "moduleVersion": "b9488-cpu",
-      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-cpu-x64.zip",
+      "moduleVersion": "b10358-cpu",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-win-cpu-x64.zip",
       "extractStrip": 0,
-      "include": ["llama-server.exe", "*.dll"]
+      "include": [
+        "llama-server.exe",
+        "*.dll"
+      ],
+      "requireFiles": [
+        "llama-server.exe"
+      ]
     },
     "local-inference-metal": {
-      "moduleVersion": "b9488-metal",
+      "moduleVersion": "b10358-metal",
       "_comment": "macOS Apple Silicon. Upstream is a tar.gz with SYMLINK chains (libggml.dylib -> .0 -> .0.13.1) — repack as a FLAT zip with symlinks materialized as real copies and unix modes preserved in external_attr (the app's zip extractor writes plain files; see scripts/repack note in modules registry commit 2026.07.04).",
-      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-macos-arm64.tar.gz",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-macos-arm64.tar.gz",
       "extractStrip": 1,
-      "include": ["llama-server", "*.dylib", "*.metal"]
+      "include": [
+        "llama-server",
+        "*.dylib",
+        "*.metal"
+      ],
+      "requireFiles": [
+        "llama-server"
+      ]
     },
     "local-inference-linux-vulkan": {
-      "moduleVersion": "b9488-vulkan",
+      "moduleVersion": "b10358-vulkan",
       "_comment": "Linux x64, Vulkan (NVIDIA/AMD/Intel). Same tar.gz→flat-zip repack rule as local-inference-metal.",
-      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-ubuntu-vulkan-x64.tar.gz",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-ubuntu-vulkan-x64.tar.gz",
       "extractStrip": 1,
-      "include": ["llama-server", "*.so*"]
+      "include": [
+        "llama-server",
+        "*.so*"
+      ],
+      "requireFiles": [
+        "llama-server"
+      ]
     },
     "local-inference-linux-cpu": {
-      "moduleVersion": "b9488-cpu",
+      "moduleVersion": "b10358-cpu",
       "_comment": "Linux x64, CPU-only. Same tar.gz→flat-zip repack rule as local-inference-metal.",
-      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-ubuntu-x64.tar.gz",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-ubuntu-x64.tar.gz",
       "extractStrip": 1,
-      "include": ["llama-server", "*.so*"]
+      "include": [
+        "llama-server",
+        "*.so*"
+      ],
+      "requireFiles": [
+        "llama-server"
+      ]
+    },
+    "local-inference-linux-arm64-cpu": {
+      "moduleVersion": "b10358-cpu",
+      "_comment": "Linux aarch64, CPU-only. Same tar.gz→flat-zip repack rule as local-inference-metal. The aarch64 CUDA variant has no upstream binary and is still built from source on the Jetson host.",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b10358/llama-b10358-bin-ubuntu-arm64.tar.gz",
+      "extractStrip": 1,
+      "include": [
+        "llama-server",
+        "*.so*"
+      ],
+      "requireFiles": [
+        "llama-server"
+      ]
     },
     "audio-stt-whisper-base": {
       "moduleVersion": "v1.8.4-base",
@@ -84,7 +132,21 @@
       "moduleVersion": "3.11.9",
       "upstreamUrl": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
       "extractStrip": 0,
-      "postExtract": "unblock-pip"
+      "postExtract": "unblock-pip",
+      "requireFiles": [
+        "python.exe"
+      ]
+    },
+    "nodejs-runtime-win": {
+      "moduleVersion": "node20.18.0",
+      "_comment": "Dedicated Node.js runtime — what the CLI installer's 'Node.js runtime not installed' message points at. module_node_exe() resolves the nodejs-runtime- family first, mcp-toolchain- as legacy fallback.",
+      "upstreamUrl": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
+      "extractStrip": 1,
+      "requireFiles": [
+        "node.exe",
+        "npm.cmd",
+        "npx.cmd"
+      ]
     },
     "mcp-toolchain-node-uv": {
       "moduleVersion": "node20.18.0-uv0.5.4",
@@ -101,6 +163,10 @@
           "extractStrip": 0,
           "destDir": "uv"
         }
+      ],
+      "requireFiles": [
+        "node.exe",
+        "uv.exe"
       ]
     },
     "finetune-unsloth-cu124": {

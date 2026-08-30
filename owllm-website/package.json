@@ -7,13 +7,13 @@
     "dev": "astro dev",
     "predev": "npm run sync:release && npm run build:demo",
     "prebuild": "npm run sync:release && npm run build:demo",
-    "build": "astro build",
+    "build": "astro build && npm test",
     "build:demo": "node scripts/build-app-demo.mjs",
     "test:demo": "node scripts/probe-app-demo.mjs",
     "preview": "astro preview",
     "lint": "astro check",
     "format": "prettier --write .",
-    "test": "node --test test/**/*.spec.mjs",
+    "test": "node --test test/*.spec.mjs",
     "sync:release": "node scripts/sync-release-meta.mjs"
   },
   "dependencies": {

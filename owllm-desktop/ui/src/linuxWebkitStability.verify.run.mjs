@@ -69,8 +69,17 @@ const agents = read("pages/agentic/AgentsPage.tsx");
 const code = read("pages/agentic/CodePage.tsx");
 check(shell.includes('continuousUiAnimation("owllm-aura-spin 4s linear infinite")'),
   "both persistent header auras use the rendering policy");
-check((agents.match(/continuousUiAnimation\("owllm-aura-spin 4s linear infinite"\)/g) || []).length === 2,
-  "agent tiles and graph cards use the rendering policy");
+// The tile + graph-card aura moved behind psychedelicActiveStyle() when the 🍄
+// preference landed (psychedelicMode.ts) — same invariant, one origin: that
+// helper is the single place either card gets its animation, and it still goes
+// through the rendering policy.
+const psychedelic = read("pages/agentic/psychedelicMode.ts");
+check(psychedelic.includes('const PSYCHEDELIC_SPIN = "owllm-aura-spin 4s linear infinite"')
+  && psychedelic.includes("const animation = continuousUiAnimation(PSYCHEDELIC_SPIN)"),
+  "the shared agentic card aura uses the rendering policy");
+check((agents.match(/animation: isActive \? active(Aura|NodeAura)\.animation : undefined/g) || []).length === 2
+  && !agents.includes("continuousUiAnimation("),
+  "agent tiles and graph cards take their animation from that one helper");
 check(code.includes('continuousUiAnimation("owllm-aura-spin 4s linear infinite")'),
   "coding panes use the rendering policy");
 check(code.includes('continuousUiAnimation("owllm-tab-working 1.4s ease-in-out infinite")'),
@@ -85,7 +94,16 @@ check(rust.includes("connect_web_process_terminated")
     && rust.includes("WebProcessTerminationReason::ExceededMemoryLimit")
     && rust.includes("webview.reload()"),
   "native Linux WebKit crashes and memory-limit terminations are logged and recovered");
-check(rust.includes('root.join("linux-webkit.log")'),
+// The append itself is shared with the WebView2 recovery (both engines lose
+// their page process the same way); webviewCrashRecovery.verify.run.mjs holds
+// the helper's own user-data-root-before-TEMP ordering.
+check(rust.includes('append_native_webview_log("linux-webkit.log", &entry)')
+    && rust.includes("root.join(file_name)"),
   "native WebKit termination reasons are written to the durable user-data directory");
+check(rust.includes("set_enable_media_stream(true)")
+    && rust.includes("enable_linux_webview_media_capture(app)")
+    && rust.includes("connect_permission_request")
+    && rust.includes("UserMediaPermissionRequest"),
+  "Linux main WebView enables media-stream and grants camera/microphone capture requests");
 
 console.log(`OK Linux WebKit stability: ${passed}/${passed} checks passed`);

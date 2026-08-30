@@ -46,6 +46,7 @@ import { formatDuration, formatClock, useTick } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import ActionIcon from "../../components/ActionIcon";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
+import { mergeSteps, unionTombstones } from "../../runtime/notebookMerge";
 import { notebookDigestCardStyle, notebookDigestVisualState } from "./notebookDigestAura";
 
 const NOTEBOOK_DIGEST_AURA_ANIMATION = continuousUiAnimation("owllm-aura-spin 4s linear infinite");
@@ -80,6 +81,13 @@ export type NotebookState = {
   /// edits freely. Steps are the feedable units cut from it.
   plan: string;
   steps: NotebookStep[];
+  /// Whether a live chain CONTINUES at each clean run end. Defaults to ON for a
+  /// notebook nobody has decided about — walking the list is the whole point of
+  /// the queue, and requiring the user to find and tick a box first left both
+  /// surfaces sitting on a full step list doing nothing. The stored blob is
+  /// tri-state (see loadNotebook): absent = never chosen = ON, a stored boolean
+  /// is the user's explicit word and is obeyed in both directions.
+  /// This is NOT permission to START a chain — that remains autoFeedArmed.
   autoFeed: boolean;
   /// Which surface DRIVES auto-feed — the notebook blob is shared per project,
   /// so without an owner every open page on the project popped the queue at
@@ -116,6 +124,22 @@ export type NotebookState = {
   /// not synchronized, so a stale/skewed stamp must never be able to block a
   /// user from starting their own queue.
   runningOn?: { deviceId: string; deviceName: string; at: number };
+  /// Stable identity of THIS project's queue document, minted on first save and
+  /// carried across devices. Two PCs comparing notebooks need to know they are
+  /// looking at the same queue and not at two that merely share a project id
+  /// (a project restored from a backup, say).
+  queueId?: string;
+  /// MONOTONIC document revision — a Lamport counter, not a clock. Every save
+  /// bumps it, and an adopted remote copy raises it to max(local, remote) so it
+  /// only ever moves forward on either machine. `updatedAt` below cannot do this
+  /// job alone: device clocks are not synchronized, so a peer can legitimately
+  /// publish a NEWER queue carrying an OLDER wall-clock stamp, and ordering by
+  /// the stamp then rolls a finished job back to pending.
+  queueRev?: number;
+  /// Which job the queue is on: the index of the running step, else the next
+  /// pending one, else steps.length when the queue is drained. Derived on every
+  /// save so a peer can render "job 3 of 7" without replaying the whole list.
+  currentIndex?: number;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// Content stamp, rewritten by every saveNotebook. This is what lets two PCs
   /// order their copies of THIS notebook. The vault blob's single `syncedAt`
@@ -138,7 +162,22 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
-const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [], deletedSteps: [] };
+/// Fired ONLY by queue-lifecycle writes (start, job transition, sequence end),
+/// never by note/plan typing. vaultSync listens and publishes to the user's
+/// GitHub vault immediately, so device B sees a queue the moment device A
+/// starts it instead of up to ~9s later (a 5s snapshot poll feeding a 4s
+/// debounce) — or never, if the window closed before either timer fired.
+/// An event rather than a direct import: the runtime layer must not depend on
+/// a page module, which is why vaultSync already keeps these names as local
+/// literals rather than importing them from here.
+export const NOTEBOOK_QUEUE_EVENT = "owllm:notebook-queue-changed";
+/// Fired when a notebook surface OPENS. vaultSync answers with a pull, so the
+/// user sees the queue as it stands on their other PC rather than whatever this
+/// machine last cached — mid-session adoption previously only happened on a
+/// timer or a window-focus change, so opening the notebook straight after
+/// launch showed a stale queue.
+export const NOTEBOOK_PULL_EVENT = "owllm:notebook-pull-request";
+const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: true, digest: [], deletedSteps: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 // The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
 // they live IN this blob so tabs on THIS PC coordinate the queue through it, but
@@ -186,18 +225,128 @@ function describeThisDeviceRun(at: number): NotebookState["runningOn"] {
   return _selfDevice ? { ..._selfDevice, at } : undefined;
 }
 
-/// The advisory is informational ONLY — it never disables anything. Device
-/// clocks are not synchronized (this vault's own history shows peers writing
-/// out-of-order timestamps), so treating a peer stamp as a lock could lock the
-/// user out of their own queue. A generous window keeps it from claiming a
-/// long-finished run is still going.
-const RUNNING_ON_STALE_MS = 30 * 60_000;
-export function peerRunningQueue(nb: NotebookState): { deviceName: string; at: number } | null {
+// ---- Cross-device queue lock ---------------------------------------------
+// `autoFeedOwner` locks the queue between WINDOWS on one PC. It is deliberately
+// device-local (vaultSync strips it), so until now a second machine had no lock
+// at all: both PCs saw the same in-progress queue and both would happily feed
+// job 1, running the same job twice.
+//
+// `runningOn` is the cross-device half, and it is now a real lock rather than a
+// caption. The owner republishes it every PEER_HEARTBEAT_MS while its queue is
+// live; a peer holds the queue read-only until that beat stops changing for
+// PEER_LEASE_TTL_MS, then releases it so a crashed PC never strands the queue.
+// The TTL tolerates several missed beats plus the pull interval, because a beat
+// only becomes visible after the peer's next pull.
+const PEER_HEARTBEAT_MS = 30_000;
+const PEER_LEASE_TTL_MS = 120_000;
+
+/// When THIS device first saw the peer's current beat, on THIS device's clock.
+///
+/// This indirection is the whole point. The obvious rule — `Date.now() - r.at
+/// < TTL` — subtracts a peer's clock from ours, and these clocks are not
+/// synchronized (this vault's own history shows peers writing out-of-order
+/// stamps). A peer an hour behind reads as permanently expired, and one an hour
+/// ahead as permanently live: the first double-drives the queue, the second
+/// locks the user out of it. So `at` is used ONLY as an opaque change detector
+/// — did the beat differ from the last one we saw? — while every elapsed-time
+/// comparison happens entirely on the local clock, where skew cannot reach.
+///
+/// Device-local and in-memory: a reload simply re-observes, which grants the
+/// peer one fresh TTL. That errs toward locked (never toward two devices
+/// feeding at once) and the explicit takeover is the way out.
+const _peerLeaseSeen = new Map<string, { deviceId: string; beat: number; seenAt: number }>();
+
+export type PeerQueueLock = {
+  deviceId: string;
+  deviceName: string;
+  /// Zero-based position in the step list, for "job N of M".
+  jobIndex: number;
+  jobTotal: number;
+  /// False once the owner's beat has gone stale — the queue is claimable.
+  live: boolean;
+};
+
+/// Is another DEVICE driving this queue? Null when nobody is, when we are the
+/// owner, or when the queue has nothing left to run.
+///
+/// Safe to call during render: the observation it records is idempotent — a
+/// beat we have already seen never restarts its own timer.
+export function peerQueueLock(projectId: string | null | undefined, nb: NotebookState): PeerQueueLock | null {
   const r = nb.runningOn;
   if (!r || !_selfDevice || r.deviceId === _selfDevice.deviceId) return null;
-  if (Date.now() - r.at > RUNNING_ON_STALE_MS) return null;
   if (!nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null))) return null;
-  return { deviceName: r.deviceName, at: r.at };
+  const key = projectId ?? "";
+  const now = Date.now();
+  const seen = _peerLeaseSeen.get(key);
+  if (!seen || seen.deviceId !== r.deviceId || seen.beat !== r.at) {
+    _peerLeaseSeen.set(key, { deviceId: r.deviceId, beat: r.at, seenAt: now });
+  }
+  const since = _peerLeaseSeen.get(key)!.seenAt;
+  return {
+    deviceId: r.deviceId,
+    deviceName: r.deviceName,
+    jobIndex: typeof nb.currentIndex === "number" ? nb.currentIndex : currentJobIndex(nb.steps),
+    jobTotal: nb.steps.length,
+    live: now - since < PEER_LEASE_TTL_MS,
+  };
+}
+
+/// Republish this device's claim so peers keep seeing the lock held. No-op
+/// unless we own the run AND it still has work — otherwise a finished queue
+/// would keep committing a heartbeat to the vault forever.
+export function renewQueueLease(projectId: string | null | undefined, surfaceId: string): void {
+  const nb = loadNotebook(projectId);
+  if (nb.autoFeedOwner !== surfaceId) return;
+  if (!nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null))) return;
+  const now = Date.now();
+  nb.autoFeedHeartbeat = now;
+  nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
+  saveNotebook(projectId, nb, { publish: true });
+}
+
+/// Explicit user takeover: drive the queue from THIS device from now on,
+/// keeping its progress. Deliberately does not touch the step list — taking
+/// over a queue must never restart it from job 1.
+export function takeOverQueueHere(projectId: string | null | undefined, surfaceId: string): void {
+  const nb = loadNotebook(projectId);
+  const now = Date.now();
+  nb.autoFeedOwner = surfaceId;
+  nb.autoFeedHeartbeat = now;
+  // Undefined when identity has not warmed yet, which CLEARS the claim rather
+  // than leaving the peer's — an explicit takeover must not silently no-op.
+  nb.runningOn = describeThisDeviceRun(now);
+  _peerLeaseSeen.delete(projectId ?? "");
+  saveNotebook(projectId, nb, { publish: true });
+}
+
+/// Cancel the queue: hand every in-flight card back as `pending` so the
+/// sequence is restartable on the spot, and drop the run lock on both scopes.
+/// Serves BOTH the Stop shown while a queue runs and the Reset offered when a
+/// crashed window — or a whole PC — left a card `sent` forever.
+///
+/// This cancels the QUEUE, not the agent. A run already in flight keeps going
+/// (the dock's Stop is what aborts a run); it simply no longer owns the card,
+/// and its late run-end stamp is refused by stepLeftTheRun.
+export function queueReleasePatch(prev: NotebookState, at: number = Date.now()): NotebookState {
+  return {
+    ...prev,
+    steps: prev.steps.map((s) => (s.status === "sent" && s.finishedAt == null)
+      ? { ...s, status: "pending" as const, startedAt: undefined, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: at, failureReason: undefined }
+      : s),
+    autoFeedArmed: false,
+    autoFeedOwner: undefined,
+    autoFeedHeartbeat: undefined,
+    runningOn: undefined,
+    ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
+      ? { autoFeedFinishedAt: at, autoFeedStopped: true }
+      : {}),
+  };
+}
+
+/// Reset a queue that no live device is driving, from outside the component.
+export function releaseQueueOwnership(projectId: string | null | undefined): void {
+  _peerLeaseSeen.delete(projectId ?? "");
+  saveNotebook(projectId, queueReleasePatch(loadNotebook(projectId)), { publish: true });
 }
 
 export function isLegacyWslRedirectorFalseFailure(step: NotebookStep): boolean {
@@ -252,7 +401,12 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
             };
           })
         : [],
-      autoFeed: p.autoFeed === true,
+      // Tri-state, deliberately not `=== true`: that coercion made "never
+      // chosen" indistinguishable from "the user switched it off", so the
+      // default could only ever be OFF. Absent = ON; a stored boolean is the
+      // user's choice and survives restart, navigation and a peer's sync
+      // (mergeNotebookLease keeps the LOCAL value of every run-lease field).
+      autoFeed: typeof p.autoFeed === "boolean" ? p.autoFeed : true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       autoFeedHeartbeat: typeof p.autoFeedHeartbeat === "number" ? p.autoFeedHeartbeat : undefined,
       autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
@@ -263,6 +417,9 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
         ? { deviceId: p.runningOn.deviceId, deviceName: typeof p.runningOn.deviceName === "string" ? p.runningOn.deviceName : p.runningOn.deviceId.slice(0, 8), at: p.runningOn.at }
         : undefined,
       updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
+      queueId: typeof p.queueId === "string" && p.queueId ? p.queueId : undefined,
+      queueRev: typeof p.queueRev === "number" && Number.isFinite(p.queueRev) ? p.queueRev : undefined,
+      currentIndex: typeof p.currentIndex === "number" && Number.isFinite(p.currentIndex) ? p.currentIndex : undefined,
       deletedSteps: Array.isArray(p.deletedSteps)
         ? p.deletedSteps.filter((d: unknown): d is { id: string; ts: number } =>
             !!d && typeof (d as any).id === "string" && typeof (d as any).ts === "number")
@@ -291,19 +448,93 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
 /// dead weight, so an unbounded list would grow forever in the synced blob.
 const MAX_STEP_TOMBSTONES = 200;
 
-export function saveNotebook(projectId: string | null | undefined, nb: NotebookState): void {
+const newQueueId = () => `q${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/// Which job the queue is on. A step that was fed and has not finished is the
+/// live one; otherwise the next pending card is up next; a drained queue points
+/// one past the end so "job N of N" reads as complete rather than wrapping to 0.
+function currentJobIndex(steps: NotebookStep[]): number {
+  const running = steps.findIndex((s) => s.status === "sent" && s.finishedAt == null);
+  if (running >= 0) return running;
+  const pending = steps.findIndex((s) => s.status === "pending");
+  return pending >= 0 ? pending : steps.length;
+}
+
+/// OPTIMISTIC CONCURRENCY. `queueRev` is the etag: the copy the caller is
+/// about to write carries the revision it was READ at. If storage has since
+/// moved past that revision, we lost the race and a plain write would silently
+/// destroy the winner's work.
+///
+/// The loser can be a peer PC (a pull adopted its progress while a run-end
+/// handler held an older copy) or simply another surface on this machine. Both
+/// arrive the same way — as a higher `queueRev` in localStorage — so both are
+/// handled here rather than only on the sync path.
+///
+/// Reconcile, don't overwrite: the step lists are unioned by the SAME rule the
+/// cross-device merge uses (newest lifecycle wins, tombstones buried), so a job
+/// the other side finished stays finished while this write's own transition —
+/// which carries a fresh `stepUpdatedAt` — still lands. Scalars the local user
+/// is actively editing (notes, plan, digest) stay local; converging those
+/// across devices remains mergeNotebookLease's job on pull.
+function reconcileLostUpdate(projectId: string, nb: NotebookState): NotebookState {
+  let stored: any = null;
+  try {
+    const raw = localStorage.getItem(keyFor(projectId));
+    if (raw) stored = JSON.parse(raw);
+  } catch { return nb; }
+  const storedRev = typeof stored?.queueRev === "number" && Number.isFinite(stored.queueRev) ? stored.queueRev : null;
+  const baseRev = typeof nb.queueRev === "number" && Number.isFinite(nb.queueRev) ? nb.queueRev : null;
+  // Uncontended (the common case): our copy is at or ahead of storage.
+  if (storedRev === null || (baseRev !== null && baseRev >= storedRev)) return nb;
+  const tombstones = unionTombstones(nb.deletedSteps, stored.deletedSteps);
+  const buried = new Set(tombstones.map((d) => d.id));
+  return {
+    ...nb,
+    steps: mergeSteps(nb.steps, Array.isArray(stored.steps) ? stored.steps : [], buried),
+    deletedSteps: tombstones,
+    // Re-base onto the winner so our +1 lands ahead of it instead of colliding.
+    queueRev: storedRev,
+    queueId: nb.queueId || stored.queueId,
+    // The run lock belongs to whoever storage says it does — losing the race
+    // must never hand ownership to the losing copy's stale idea of it.
+    runningOn: stored.runningOn,
+  };
+}
+
+/// Persist the notebook.
+///
+/// `publish` marks a QUEUE-lifecycle write (start, job transition, sequence
+/// end) as opposed to the user typing in the notes. Only the former is pushed
+/// to the vault immediately — publishing every keystroke would mean a git
+/// commit per character. Content edits still reach the vault through the
+/// existing snapshot poll.
+export function saveNotebook(
+  projectId: string | null | undefined,
+  nb: NotebookState,
+  opts?: { publish?: boolean },
+): void {
   if (!projectId) return;
   try {
-    const deletedSteps = (nb.deletedSteps ?? []).slice().sort((a, b) => b.ts - a.ts).slice(0, MAX_STEP_TOMBSTONES);
+    const next = reconcileLostUpdate(projectId, nb);
+    const deletedSteps = (next.deletedSteps ?? []).slice().sort((a, b) => b.ts - a.ts).slice(0, MAX_STEP_TOMBSTONES);
     localStorage.setItem(keyFor(projectId), JSON.stringify({
-      ...nb,
-      digest: nb.digest.slice(-12),
+      ...next,
+      digest: next.digest.slice(-12),
       deletedSteps,
+      queueId: next.queueId || newQueueId(),
+      // Strictly increasing, and never reset by an adopted copy: mergeNotebook
+      // raises the stored value to max(local, remote) first, so +1 here is
+      // always ahead of anything either PC has published.
+      queueRev: (typeof next.queueRev === "number" && Number.isFinite(next.queueRev) ? next.queueRev : 0) + 1,
+      currentIndex: currentJobIndex(next.steps),
       // Stamp EVERY write: this is the only per-notebook ordering signal two
       // PCs have when deciding whose copy of a field is newer.
       updatedAt: Date.now(),
     }));
     window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT, { detail: { projectId } }));
+    // Fire-and-forget: the listener pushes asynchronously, so the queue helper
+    // that called us (often inside a run-end finally block) never waits on git.
+    if (opts?.publish) window.dispatchEvent(new CustomEvent(NOTEBOOK_QUEUE_EVENT, { detail: { projectId } }));
   } catch { /* best effort */ }
 }
 
@@ -316,6 +547,10 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return null;
   if (leaseHeldByOtherSurface(nb, surfaceId)) return null;
+  // Another DEVICE is driving this queue. Feeding here would run the same job
+  // twice — two agents, two sets of commits, from one list. The lock expires on
+  // its own if that PC goes quiet, and the user can take over explicitly.
+  if (peerQueueLock(projectId, nb)?.live) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   const now = Date.now();
@@ -342,14 +577,17 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   // this queue owns, so the one-shot arm has done its job.
   nb.autoFeedArmed = false;
   nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return next;
 }
 
 /// Convert the ordered `## Plan` in BRIEF.md into feedable implementation
 /// steps. Brainstormer is required to write this section, but the fallback
 /// still gives the team one useful job instead of ending at a dead-end CTA.
-export function briefImplementationSteps(brief: string): string[] {
+/// Pass `{ fallback: false }` to get the real steps only — the brainstorm
+/// board needs to know when a brief genuinely has no plan yet, and must not
+/// display the placeholder step as if the agent had written it.
+export function briefImplementationSteps(brief: string, opts?: { fallback?: boolean }): string[] {
   const lines = brief.replace(/\r\n/g, "\n").split("\n");
   const steps: string[] = [];
   let inPlan = false;
@@ -366,9 +604,9 @@ export function briefImplementationSteps(brief: string): string[] {
     const text = (numbered?.[1] ?? task?.[1] ?? "").trim();
     if (text) steps.push(text);
   }
-  return steps.length
-    ? steps.slice(0, 12)
-    : ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
+  if (steps.length) return steps.slice(0, 12);
+  if (opts?.fallback === false) return [];
+  return ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
 }
 
 /// Finish an in-project brainstorm by preparing that SAME project's Notebook.
@@ -408,7 +646,7 @@ export function markNotebookAutoFeedStarted(projectId: string | null | undefined
   nb.autoFeedStartedAt = startedAt;
   nb.autoFeedFinishedAt = undefined;
   nb.autoFeedStopped = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// Freeze the whole-sequence timer only after the owner finishes the final
@@ -421,7 +659,7 @@ export function markNotebookAutoFeedFinished(projectId: string | null | undefine
   if (stillActive) return false;
   nb.autoFeedFinishedAt = finishedAt;
   nb.autoFeedStopped = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return true;
 }
 
@@ -441,7 +679,7 @@ export function consumeAutoFeedArm(projectId: string | null | undefined, surface
   if (!nb.autoFeedArmed) return false;
   if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
   nb.autoFeedArmed = false;
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
   return true;
 }
 
@@ -480,7 +718,17 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
   nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: startedAt, failureReason: undefined };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
+}
+
+/// True once a card is no longer the one this run is carrying. A run holds a
+/// step id from dispatch to its `finally`, so it still stamps an outcome after
+/// the user has stopped or reset the queue — and that late stamp would archive
+/// (or fail) a card the user had deliberately handed back to `pending`,
+/// silently undoing the cancellation. Also keeps the stampers idempotent: a
+/// second call finds the card already settled and leaves it alone.
+function stepLeftTheRun(s: NotebookStep): boolean {
+  return s.status !== "sent" || s.finishedAt != null;
 }
 
 /// Stamp when the run that processed a notebook step finished. Idempotent.
@@ -488,9 +736,9 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   if (!projectId || !stepId) return;
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
-  if (idx < 0) return;
+  if (idx < 0 || stepLeftTheRun(nb.steps[idx])) return;
   nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, stepUpdatedAt: finishedAt, failureReason: undefined };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// A stopped/errored run did not complete its notebook card. Keep the card in
@@ -504,7 +752,7 @@ export function markNotebookStepFailed(
   if (!projectId || !stepId) return;
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
-  if (idx < 0) return;
+  if (idx < 0 || stepLeftTheRun(nb.steps[idx])) return;
   nb.steps[idx] = {
     ...nb.steps[idx],
     status: "failed",
@@ -513,7 +761,7 @@ export function markNotebookStepFailed(
     stepUpdatedAt: finishedAt,
     failureReason: reason.trim() || "The run did not complete.",
   };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// A filesystem preflight failed before an agent started. The card remains
@@ -535,7 +783,7 @@ export function markNotebookStepPending(
     stepUpdatedAt: Date.now(),
     failureReason: undefined,
   };
-  saveNotebook(projectId, nb);
+  saveNotebook(projectId, nb, { publish: true });
 }
 
 /// How a run that was carrying notebook cards ended.
@@ -792,10 +1040,17 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     setQueueNotice(null);
   }, [projectId]);
 
-  const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
+  /// `publish` forwards to saveNotebook and marks a QUEUE-lifecycle write, so
+  /// it reaches the other PCs inside this click rather than on the snapshot
+  /// poll. The exported helpers below already do this; the component's own
+  /// handlers drive the SAME transitions from the buttons, so they must too.
+  const updateNotebook = (
+    makeNext: (prev: NotebookState) => NotebookState,
+    opts?: { publish?: boolean },
+  ) => {
     setNb((prev) => {
       const next = makeNext(prev);
-      saveNotebook(projRef.current, next);
+      saveNotebook(projRef.current, next, opts);
       return next;
     });
   };
@@ -836,7 +1091,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       steps: prev.steps.map((s) => (s.id === id
         ? { ...s, ...patch, ...(stepUpdatedAt != null ? { stepUpdatedAt } : {}) }
         : s)),
-    }));
+    // A lifecycle patch IS a per-job state transition (Archive → "done" is the
+    // one users click), so publish on exactly that condition. Renaming a step
+    // is a content edit and still rides the poll.
+    }), { publish: changesLifecycle });
   };
   /// Deleting records a TOMBSTONE as well as dropping the step. Steps merge
   /// across PCs as a union by id (so a peer's completion can't be clobbered by
@@ -881,7 +1139,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
         ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
         : {}),
-    }));
+    // THE start action: ▶ Start queue lands here, and so does feeding a single
+    // card. Both move a job pending → sent and claim the run, so the peers must
+    // see it inside the click — waiting on the snapshot poll is what let a queue
+    // run to completion on this PC while the others still showed it idle.
+    }), { publish: true });
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -1034,14 +1296,67 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   useTick(queueActive && nb.autoFeedOwner !== surfaceId && nb.autoFeedHeartbeat != null);
   const lockedElsewhere = queueActive && nb.autoFeedOwner !== surfaceId && leaseLive;
   const takeOverQueue = () => updateNotebook((prev) => ({ ...prev, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
-  // Cross-PC ADVISORY. The run-lease deliberately never syncs, so until now a
-  // second machine had no way to know a queue was already running and could
-  // start the same steps again. This only informs — it must not disable, since
-  // peer clocks are unsynchronized and a skewed stamp would lock the user out
-  // of their own queue.
+  // ---- The queue control's state machine ----------------------------------
+  // One button, four states, all derived from the QUEUE DOCUMENT rather than a
+  // local "I pressed start" flag. The in-flight test reads the step records —
+  // the part of the notebook that actually syncs — so a job dispatched by a
+  // window that has since closed, or by another PC, still reads as in flight.
+  //
+  // What this replaces: the button was rendered only when `pendingCount > 0`
+  // and was labelled/enabled off the caller's device-local `running` prop. So
+  // it stayed green and pressable while this very window drove the queue, it
+  // DISAPPEARED entirely while the last card was in flight (nothing left to
+  // stop with), and a card left `sent` by a window that crashed mid-job
+  // stranded the queue behind no control at all.
+  const inFlight = useMemo(() => nb.steps.some((s) => s.status === "sent" && s.finishedAt == null), [nb.steps]);
+  // Our own lease only counts while we are actually beating for it, which is
+  // what separates "this window is driving" from "a dead window left its name".
+  const leaseLiveHere = nb.autoFeedOwner === surfaceId && leaseLive;
+  // The same exclusion one level up: another DEVICE holding the run. Re-read on
+  // every tick so the lock releases by itself once the owner stops beating.
+  const peerLock = peerQueueLock(projectId, nb);
+  const peerLocked = !!peerLock?.live;
+  // `peerLocked` is tested FIRST: a peer PC between two jobs still owns the run,
+  // and `locked` next for the same reason one window down. A queue that is
+  // merely between cards must not be startable from here (it would double-drive
+  // the one team — or, across devices, run the same job twice).
+  const queueStatus: "empty" | "idle" | "running" | "locked" | "peerLocked" | "stale" =
+    peerLocked ? "peerLocked"
+      : lockedElsewhere ? "locked"
+        : inFlight ? ((running || leaseLiveHere) ? "running" : "stale")
+          : (pendingCount > 0 ? "idle" : "empty");
+  /// Stop the queue here, and the Reset offered when a crashed or closed window
+  /// left a card `sent` forever — one recovery, named for what the user meant
+  /// in each state. See queueReleasePatch for what it does and why.
+  const releaseQueue = () => updateNotebook((prev) => queueReleasePatch(prev), { publish: true });
+  // Label, colour and action per state. `running` and `locked` are indicators:
+  // they render disabled, and stopping is a separate, explicit affordance so a
+  // stray click on the status can never cancel a live queue.
+  const queueControl = {
+    idle: { label: "Start queue", icon: "play" as const, background: "var(--ok)", onClick: startQueue, disabled: false,
+      title: nb.autoFeed
+        ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+        : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)" },
+    running: { label: "Running", icon: "loader" as const, background: "var(--warn)", onClick: () => {}, disabled: true,
+      title: "A job from this queue is in flight. Stop the queue to hand its card back and start again." },
+    locked: { label: "Running elsewhere", icon: "monitor" as const, background: "var(--bg-surface)", onClick: () => {}, disabled: true,
+      title: "The queue is already running in another window on this project. Take over from the header to drive it here." },
+    // Another DEVICE owns the run. Disabled rather than merely captioned: the
+    // caption alone let both PCs start the same list, which ran every job twice.
+    peerLocked: { label: `Running on ${peerLock?.deviceName ?? "another PC"}`, icon: "monitor" as const, background: "var(--bg-surface)", onClick: () => {}, disabled: true,
+      title: `This queue is running on ${peerLock?.deviceName ?? "another of your PCs"} — job ${(peerLock?.jobIndex ?? 0) + 1} of ${peerLock?.jobTotal ?? 0}. Starting it here would run the same jobs a second time. Take over from the header if that PC is off or stuck.` },
+    stale: { label: "Reset queue", icon: "rotate" as const, background: "var(--warn)", onClick: releaseQueue, disabled: false,
+      title: "This queue still has a job marked as running, but nothing is driving it — the window that started it was closed or crashed. Reset hands the card back as pending so you can start again." },
+    // `empty` renders no control at all, so it has no entry here — it falls back
+    // to the idle shape purely to keep this lookup total.
+  }[queueStatus === "empty" ? "idle" : queueStatus];
   useEffect(() => { warmNotebookDeviceIdentity(); }, []);
-  useTick(nb.runningOn != null);
-  const peerRun = peerRunningQueue(nb);
+  // Pull-on-open: ask the runtime layer for the peer's copy as the surface
+  // mounts. Fire-and-forget — the pull is async and repaints through
+  // NOTEBOOK_EVENT, so opening the notebook is never gated on the network.
+  useEffect(() => {
+    try { window.dispatchEvent(new CustomEvent(NOTEBOOK_PULL_EVENT, { detail: { projectId } })); } catch { /* non-browser */ }
+  }, [projectId]);
   // While THIS window owns an active queue, beat the heartbeat so peers keep
   // seeing the lease held. Stops when the queue ends or ownership moves away.
   useEffect(() => {
@@ -1052,6 +1367,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nb.autoFeedOwner, surfaceId, queueActive]);
+  // The same beat, republished to the OTHER PCs — much slower, because each one
+  // is a commit to the vault repo. Without it a peer's lock would expire in the
+  // middle of a long job and both machines would feed the queue; with it the
+  // lock is renewed for as long as this device is genuinely driving. Only the
+  // owner of a live queue publishes, so an idle notebook commits nothing.
+  useEffect(() => {
+    if (nb.autoFeedOwner !== surfaceId || !queueActive) return;
+    const t = window.setInterval(() => renewQueueLease(projRef.current, surfaceId), PEER_HEARTBEAT_MS);
+    return () => window.clearInterval(t);
+  }, [nb.autoFeedOwner, surfaceId, queueActive]);
+  // Re-render while a peer's lock is being watched so its expiry lands on its
+  // own, instead of the button staying disabled until something else repaints.
+  useTick(peerLocked);
   // Human-readable INHERITED digest model (the default when no override is
   // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
@@ -1103,16 +1431,26 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
-          {peerRun && !lockedElsewhere && (
-            <span
-              data-ui="NotebookPeerRunning"
-              title={`Another of your PCs started this queue at ${formatClock(peerRun.at)}. This is informational only — you can still run it here, but both machines would work the same steps.`}
-              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700, color: "var(--warn)" }}
-            >
-              <ActionIcon name="monitor" size={12} />queue started on {peerRun.deviceName}
-            </span>
-          )}
-          {lockedElsewhere ? (
+          {peerLocked ? (
+            // Another PC owns the run. Same treatment as a second window on this
+            // machine — read-only here, with an explicit takeover — because the
+            // failure it prevents is worse: two machines feeding one list runs
+            // every job twice.
+            <div data-ui="NotebookQueueLockedPeer" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                title={`Started on ${peerLock!.deviceName} at ${formatClock(nb.runningOn?.at ?? Date.now())} (that PC's clock). Its run controls are read-only here so the same jobs are not run twice.`}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: "var(--warn)" }}
+              >
+                <ActionIcon name="monitor" size={13} />
+                Queue is running on {peerLock!.deviceName} — job {peerLock!.jobIndex + 1} of {peerLock!.jobTotal}
+              </span>
+              <button
+                onClick={() => takeOverQueueHere(projRef.current, surfaceId)}
+                title="Take over driving this queue on this PC (use only if the other machine is off or stuck). The queue keeps its progress — it does not restart from the first job."
+                style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >Take over here</button>
+            </div>
+          ) : lockedElsewhere ? (
             // This window is a spectator: another window owns the running queue.
             // Ghost the toggle and offer an explicit takeover (for when the
             // owning window — e.g. on another PC — is gone) instead of letting
@@ -1373,19 +1711,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               {incompleteCount > 0 && (
                 <span style={{ fontSize: 10, fontWeight: 700, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 8px" }}>{incompleteCount} incomplete</span>
               )}
-              {pendingCount > 0 && (
+              {queueStatus !== "empty" && (
                 <button
-                  onClick={startQueue}
-                  disabled={lockedElsewhere}
-                  title={lockedElsewhere
-                    ? "The queue is already running in another window on this project. Take over from the header to drive it here."
-                    : running
-                      ? "Queue is waiting for the current run to finish before starting"
-                      : nb.autoFeed
-                        ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
-                        : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
-                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: lockedElsewhere ? "var(--bg-surface)" : running ? "var(--warn)" : "var(--ok)", color: lockedElsewhere ? "var(--fg-muted)" : "#ffffff", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.6 : 1, textTransform: "none", letterSpacing: 0 }}
-                ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
+                  data-ui="NotebookQueueControl"
+                  data-queue-status={queueStatus}
+                  onClick={queueControl.onClick}
+                  disabled={queueControl.disabled}
+                  title={queueControl.title}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: queueControl.background, color: queueStatus === "locked" ? "var(--fg-muted)" : "#ffffff", fontSize: 11, fontWeight: 700, cursor: queueControl.disabled ? "not-allowed" : "pointer", opacity: queueControl.disabled ? 0.6 : 1, textTransform: "none", letterSpacing: 0 }}
+                ><ActionIcon name={queueControl.icon} size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />{queueControl.label}</button>
+              )}
+              {queueStatus === "running" && (
+                <button
+                  data-ui="NotebookQueueStop"
+                  onClick={releaseQueue}
+                  aria-label="Stop queue"
+                  title="Stop the queue: its in-flight card goes back to pending so you can start again. The run already in flight keeps going — use the dock's Stop to abort that."
+                  style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--error-rgb),0.5)", borderRadius: 6, background: "rgba(var(--error-rgb),0.12)", color: "var(--error)", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                ><ActionIcon name="close" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Stop</button>
               )}
               {queueNotice && (
                 <span style={{
@@ -1504,12 +1847,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       {s.status !== "done" && (
                         <button
                           onClick={() => feedStep(s)}
-                          disabled={lockedElsewhere}
+                          disabled={lockedElsewhere || peerLocked}
                           aria-label={s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}
-                          title={lockedElsewhere
-                            ? "The queue is running in another window on this project — feeding is read-only here. Take over from the header to feed from this window."
-                            : running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
-                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.5 : 1 }}
+                          title={peerLocked
+                            ? `The queue is running on ${peerLock!.deviceName} — feeding is read-only here so the same job is not run twice. Take over from the header to feed from this PC.`
+                            : lockedElsewhere
+                              ? "The queue is running in another window on this project — feeding is read-only here. Take over from the header to feed from this window."
+                              : running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
+                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere || peerLocked ? "not-allowed" : "pointer", opacity: lockedElsewhere || peerLocked ? 0.5 : 1 }}
                         ><ActionIcon name="bolt" size={12} />{s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (

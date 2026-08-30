@@ -25,12 +25,13 @@ const crypt = read("crypt.rs");
 const accounts = fs.readFileSync(path.join(HERE, "../advanced/AccountsPage.tsx"), "utf8");
 
 let checks = 0;
+// Report EVERY failure rather than exiting on the first — one run should show
+// the whole picture, which is also what makes the discrimination test against
+// the previous sources measurable rather than a single early bail-out.
+const failures = [];
 function must(cond, what) {
   checks += 1;
-  if (!cond) {
-    console.error(`FAIL browser credential vault gate: ${what}`);
-    process.exit(1);
-  }
+  if (!cond) failures.push(what);
 }
 
 // ---- 1. cross-platform at-rest encryption (crypt.rs) -----------------------
@@ -44,20 +45,87 @@ must(!/pub fn protect\(plain: &\[u8\]\) -> Result<Vec<u8>, String> \{\s*Ok\(plai
 must(crypt.includes("fn seal_open_roundtrip") && crypt.includes("fn wrong_key_and_tamper_fail"),
   "crypt unit tests were removed");
 
-// ---- 2. capture reliability (BRIDGE_JS in browser.rs) ----------------------
+// ---- 2. capture reliability -----------------------------------------------
+// The scanner and the transport are deliberately SPLIT:
+//   * FRAME_CRED_JS  — the scanner, injected into EVERY frame.
+//   * BRIDGE_JS      — the transport, main-frame-only (Tauri hardcodes
+//                      for_main_frame_only:true on initialization_script).
+// An iframe's document.title never reaches the window, so a sub-frame cannot
+// use the EVT channel itself; it postMessages its find to the top frame. Before
+// the split the scanner lived in BRIDGE_JS alone, so an iframed login (Google's
+// identity iframe, most embedded OAuth) was never captured at all.
 const bridgeStart = browser.indexOf("const BRIDGE_JS");
 const bridge = browser.slice(bridgeStart, browser.indexOf('"##;', bridgeStart));
-must(bridge.includes('document.addEventListener("submit", reportCred, true)'), "submit capture trigger missing");
-must(bridge.includes('window.addEventListener("pagehide", reportCred)'), "pagehide capture trigger missing");
-must(bridge.includes("__owllmProv"), "provisional login buffer missing — SPA form clears lose the login");
-must(bridge.includes('grabCred() || window.__owllmProv'), "reportCred does not fall back to the provisional buffer");
-must(/addEventListener\("input"/.test(bridge), "input listener (provisional tracking) missing");
-must(/addEventListener\("click"/.test(bridge), "submit-click capture trigger missing");
-must(/e\.key === "Enter"/.test(bridge), "Enter-key capture trigger missing");
-must(/visibilitychange/.test(bridge), "tab-hide capture trigger missing");
-must(bridge.includes("scheduleCredReport") && /setTimeout\([^]*?reportCred\(\)[^]*?700\)/.test(bridge),
-  "typed credentials are not persisted before fast OAuth navigation destroys the form");
-must(bridge.includes("__owllmLoginUser"), "multi-step login does not retain the non-secret username");
+const frameStart = browser.indexOf("const FRAME_CRED_JS");
+const frameJs = frameStart < 0 ? "" : browser.slice(frameStart, browser.indexOf('"##;', frameStart));
+must(frameJs.length > 0, "FRAME_CRED_JS (the all-frames credential scanner) is missing");
+
+// 2a. The scanner reaches every frame — the whole point of the split.
+must(
+  (browser.match(/\.initialization_script_for_all_frames\(FRAME_CRED_JS\)/g) || []).length === 2,
+  "FRAME_CRED_JS is not injected for ALL FRAMES in both webview builders — iframed logins would go uncaptured again",
+);
+must(
+  !/\.initialization_script\(FRAME_CRED_JS\)/.test(browser),
+  "FRAME_CRED_JS injected main-frame-only — that is the exact bug the split exists to fix",
+);
+
+// 2b. Every capture trigger still exists (was in BRIDGE_JS, now in the scanner).
+must(frameJs.includes('document.addEventListener("submit", emit, true)'), "submit capture trigger missing");
+must(frameJs.includes('window.addEventListener("pagehide", emit)'), "pagehide capture trigger missing");
+must(/addEventListener\("input"/.test(frameJs), "input listener (provisional tracking) missing");
+must(/addEventListener\("click"/.test(frameJs), "submit-click capture trigger missing");
+must(/e\.key === "Enter"/.test(frameJs), "Enter-key capture trigger missing");
+must(/visibilitychange/.test(frameJs), "tab-hide capture trigger missing");
+must(
+  /timer = setTimeout\(function \(\) \{ timer = 0; emit\(\); \}, 700\)/.test(frameJs),
+  "typed credentials are not persisted before fast OAuth navigation destroys the form",
+);
+must(frameJs.includes("__owllmLoginUser"), "multi-step login does not retain the non-secret username");
+
+// 2c. Provisional buffer — an SPA that clears the form must not lose the login.
+must(/var prov = null/.test(frameJs), "provisional login buffer missing — SPA form clears lose the login");
+must(/scan\(\) \|\| prov/.test(frameJs), "emit does not fall back to the provisional buffer");
+
+// 2d. Shadow DOM — a plain querySelectorAll cannot cross a shadow boundary, so
+// a login built as a web component was invisible.
+must(/shadowRoot/.test(frameJs), "scanner does not pierce shadow roots — web-component logins go uncaptured");
+must(
+  /function deepPw/.test(frameJs) && /input\[type=password\]/.test(frameJs),
+  "shadow-root password search (deepPw) missing",
+);
+// The deep walk must stay OFF the hot path: it runs only when the cheap
+// top-level query finds nothing, and the result is cached while still connected.
+must(
+  /pwEl && pwEl\.isConnected/.test(frameJs),
+  "password element is not cached — the shadow walk would run on every keystroke",
+);
+// Events RETARGET to the shadow host at the document level, so e.target is a
+// <div> and every listener bails out. This was measured, not assumed.
+must(
+  /composedPath\(\)/.test(frameJs),
+  "listeners use e.target instead of composedPath()[0] — shadow-DOM logins never trigger a capture",
+);
+
+// 2e. Sub-frame -> top relay, and the origin must be the FRAME's own.
+must(
+  /window\.top\.postMessage\(\{ __owllmCred: c \}, "\*"\)/.test(frameJs),
+  "sub-frame scanner does not relay its find to the top frame",
+);
+must(
+  /d\.__owllmCred && d\.__owllmCred\.password/.test(bridge),
+  "BRIDGE_JS does not accept relayed sub-frame credentials",
+);
+must(
+  /origin: location\.origin/.test(frameJs),
+  "credential is not filed under the FRAME's own origin — an embedded provider login would be filed under the framing site",
+);
+
+// 2f. Dedupe must be a SET. With a single last-seen slot two logins on one page
+// ping-pong and re-report each other forever, rewriting the vault on a loop.
+must(/var credSeen = \{\}/.test(bridge), "credential dedupe is not a set — repeated vault rewrites");
+must(!/var credSent = ""/.test(bridge), "single-slot credential dedupe reintroduced");
+
 must(browser.includes('if action == "cred"'), "private provider login credentials are not captured for encrypted saving");
 
 // ---- 3. automatic autofill -------------------------------------------------
@@ -101,4 +169,9 @@ const credMeta = /pub struct CredMeta \{[\s\S]*?\n\}/.exec(vault);
 must(credMeta && !credMeta[0].includes("password"),
   "CredMeta grew a password field — passwords must never reach the frontend");
 
+if (failures.length) {
+  console.error(`FAIL browser credential vault gate: ${failures.length} of ${checks} checks failed`);
+  for (const f of failures) console.error(`  x ${f}`);
+  process.exit(1);
+}
 console.log(`browser credential vault gate: ${checks} checks passed`);

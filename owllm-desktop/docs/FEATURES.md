@@ -20,7 +20,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Core** (always) | Home, Server, Info | hardware probe, llama-server lifecycle, sandbox-disk care |
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
-| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe |
+| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe. Presence is event-driven — the socket opening IS the sign-in and its close IS the sign-off, no polling: `ui/src/pages/gamify/worldPresence.ts` + the Cloudflare Durable Object in `services/world-presence/`. One installation is one dot forever, keyed by an opaque hash of its device key derived in Rust (`remote_devices::identity::presence_id`); a device that cannot identify itself connects with NO id and is shown live but never recorded. Each dot shows OS family, coarse city and app release; gold = online, purple = recorded but offline. **World Chat** (on by default — every identity on the map is already anonymous; one click turns it off and that choice sticks across restarts) rides the same socket. Its card sits over the **top-right of the globe canvas**, not in the side rail, so clicking a dot and typing to it are one gesture — selecting a dot puts the caret straight in the message box. The client proves it owns a dot by signing a server nonce with the device key the dot's id is derived from (`remote_devices::world_chat`, `services/world-presence/src/chat.js`), so a public id cannot be claimed by anyone else. Messages are `crypto::seal` envelopes the relay only stores and forwards — 1:1 after an explicit accept, group rooms addressed by hash of an invite code that never leaves the client, with block, report, per-day first-contact quotas and an offline queue. Requests from this user's own fleet devices auto-accept. UI: `ui/src/pages/gamify/WorldChatPanel.tsx` — a conversation surface, not a settings form: nickname, reachability and group invites fold behind a ⚙ toggle, the thread keeps real height with an empty-state prompt, and the composer is a multi-line textarea (Enter sends, Shift+Enter continues) whose button always reads **Send**. The card folds to its header (▾): it floats over the globe and takes pointer events, so while open it is also a hole in the map and dots behind it cannot be clicked — picking a new dot re-opens it. A message that lands while the user is on any other page pops a **💬 Got a message from ‹sender›** speech bubble beside the owl at the top-centre of the frame (`AppShell.tsx`). It is derived from the per-thread **unread counts** and NOT from a dwell timer — it names the sender, carries a count when more than one is waiting, survives a restart, and stays until the conversation is actually opened; clicking it jumps to the World Map and opens that exact thread (`openWorldChatThread` → the `owllm:world-chat:open` event). Unread is raised once per line — never for our own echoes, never for a relay replay — persisted at `owllm:world-chat:unread`, and cleared only by looking at the thread (or **Mark all read**). On first use the panel **asks** whether to use the connected GitHub account's name and picture (`WorldChat:github-ask`) — the alternative is talking to a dot labelled `OW-3F91A2`, and nobody opens a settings pane to name themselves. It is asked once, only when a GitHub account is connected, and either answer is remembered (`owllm:world-chat:github`, tri-state so *unanswered* is distinct from *no*) and reversible from the ⚙ row. "Yes" publishes the login and `https://avatars.githubusercontent.com/<login>` with the profile; pictures are drawn on inbox rows, thread titles, every message and the chrome notice. A picture URL is **pinned to GitHub's avatar CDN** on both sides (`sanitizeChatAvatar`, relay `sanitizeAvatar`) — an arbitrary URL rendered by another user's renderer is a beacon, not an avatar. The panel opens on an **inbox**: every conversation ever had, newest first, with the sender, the last line, its time and an unread badge, so a message is reachable without hunting for its dot on the globe. Every line in a thread is stamped with who said it and when (clock today, date + clock older). Conversation history **survives a restart** (`owllm:world-chat:threads` in localStorage, capped at `MAX_THREAD_MESSAGES`, sanitized on restore) because the relay only replays what it still holds *undelivered*; it must never go to the shared state mirror, which replicates every write to every window and device. **The relay half must be deployed for any of this to work** — `npm run deploy` in `services/world-presence/` (needs Cloudflare auth). Against a Worker built before the chat commit no `chat_challenge` is ever issued, so the card sits on "Connecting…" forever |
 | **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference
@@ -39,10 +39,48 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
   cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
   downloads keep their `.partial` and resume via HTTP Range — the Downloaded
-  card shows ⏬ Resume download (no quant re-pick, no restart from 0%).
+  card shows ⏬ Resume download (no quant re-pick, no restart from 0%). A failed
+  row in the Downloads banner offers **↻ Retry** (resumes the remaining queue)
+  and **Dismiss**; Resume with nothing half-written on disk says so instead of
+  silently reopening the picker.
+- **The weight picker names what each file IS** (`weightRoles.ts`). GGUF repos
+  mix runnable weights with companions — `mmproj-*` (vision projector, fetched
+  automatically), `dflash*`/`draft*` (speculative-decoding draft), `*-lora-*`.
+  They are listed under **COMPANION FILES — cannot run on their own**, and a
+  selection with no primary weights is refused with the reason, instead of
+  downloading something that can never load.
+- **A model the engine can't run says so in one second**, not after a 3-minute
+  wait. `server_status` classifies llama-server's stderr and quotes its own
+  fatal line; `unknown model architecture` is reported as *engine too old — the
+  file is NOT corrupt* (not "re-download the GGUF"). `startupFailureReason`
+  (`agentic/localServerFailure.ts`) makes every local-model wait loop — agentic
+  dock, team dispatch, fine-tuning chat — stop the moment the child dies and
+  show that reason. Guarded by `localModelStartFailure.verify.run.mjs`.
+- **Linux/macOS crashes are named too, not just Windows ones.** A child killed
+  by a signal reports *no* exit code, so every Unix crash used to collapse into
+  "Process ended unexpectedly" while Windows got full NTSTATUS decoding.
+  `signal_hint_for` (`server.rs`) is the Unix counterpart — SIGKILL is reported
+  as the kernel OOM killer *with the `dmesg` command to confirm it*, SIGSEGV /
+  SIGBUS / SIGILL / SIGABRT / SIGTERM each get their own cause, and none of them
+  blames the model file. Every death path now also quotes llama-server's own
+  fatal line. The gate compiles and runs the shipped Rust on a Unix builder
+  against a **real** SIGKILL; it reports SKIP on Windows rather than passing
+  silently.
+- **A parked message is never destroyed.** The dock clears the composer when it
+  accepts a draft for load→send; if the load fails, aborts, times out or throws,
+  the text is handed back (`owllm:dock:restore-draft`, restored in `finally`).
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
+- **One line per model, effort chosen inline.** A model that exposes reasoning
+  -effort tiers (Claude / GPT) is **one row** whose right edge carries a
+  `Low · Med · High · Max` strip — clicking a segment selects
+  `<variant>/<id>:<tier>`, the same id the dispatch has always parsed. Tiers are
+  normalised to cheapest→deepest whatever order the catalogue lists them in, a
+  disconnected account disables the whole strip, and the section header counts
+  **rows**, not tier entries. Grouping lives in `groupRows()` in
+  `ModelPicker.tsx`, so every surface gets it from the one shared picker.
+  Guarded by `modelPickerEffortRow.verify.run.mjs`.
 - **No surface ever auto-picks a model.** With nothing saved the picker reads
   **“Select model”** (`SELECT_MODEL_LABEL`) and Send/Generate/Run is blocked by
   the rule-based `components/ModelRequiredDialog` — so a run can't use (or bill)
@@ -72,6 +110,20 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   studio (product_owner design sub-team → whitepaper.json → parallel FE/BE
   lanes). Custom multi-specialist teams (Studio/Brainstorm) still dispatch
   through the same graph machinery.
+- **Per-agent skills picker**: the skill ribbon on every agent card (bottom
+  right, rendered even when empty) opens a searchable 4-column popup of ALL
+  installed skill packs, deduped across skills homes and split into
+  Equipped/Available sections sorted by display name — icon tile, real name
+  (frontmatter name or acronym-aware prettified slug: PDF, MCP Builder…),
+  short description, namespace chip, `~Xk ctx` size — and clicking a card
+  equips/unequips it live for this project. Unequips of role/template skills
+  persist as `-id` DENY entries in the graph_json `agentSkills` grant; ONE
+  resolver (`resolveEquippedSkillIds` in `skillRuntime.ts`) backs the badge,
+  the picker, and every dispatch injection site, and ONE pure organizer
+  (`organizeSkillPacks`) shapes the popup. Same-id packs in multiple homes
+  resolve user > legacy > bundled (`skills_dirs_read` precedence +
+  `list_skill_packs` dedup), so a user-edited pack shadows the bundled copy
+  everywhere (gate: `dispatchSkillBlock.verify.run.mjs`).
 - **Auto-skill selection**: before the first model token, the goal text is
   matched against installed skills' `triggers:`/keywords and the best 1–2 are
   injected automatically (Solo, team orchestrator, and bridge paths;
@@ -80,6 +132,17 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   log (`📦 Auto-loaded skill(s): …`).
 - **Solo-Loop vs Team**: header toggle; Solo = one coder in an edit→verify→fix
   loop with Critic + Publisher; Team = full orchestration.
+- **🍄 Psychedelic-effect preference** (`psychedelicMode.ts`): the running-card
+  aura has two settings, switched by the 🍄 button immediately left of the
+  model-selection tab in every agent card header. `full` (the default) keeps
+  the spinning rainbow frame plus the violet/cyan halo that breathes with the
+  dispatch pulse; `reduced` keeps only the frame, with the Coding-page
+  chatbox's constant soft halo. One page-wide preference stored in the synced
+  `pageSettings` document (global scope, key `agenticPsychedelic`), so it
+  survives navigation, restart and follows the user across machines. Both chat
+  tiles and graph node cards take their active style from the single
+  `psychedelicActiveStyle()` helper, and both modes still go still under
+  `prefers-reduced-motion` (gate: `npm run test:psychedelic`).
 - **Lean prompt profile**: solo and ≤3-agent runs get the trimmed injection
   stack — short memory hint instead of the tutorial, halved snapshot/RAG
   budgets (`setLeanRun` in `localTools.ts`, `lean` param on both
@@ -90,7 +153,10 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Project Card** (`.owllm/project.json`): committed per-repo config — goal,
   verify command(s), release config, solo/team default. Steward role lints it
   (rule-based, `cardLint.ts`). Releases run **deterministically on the host**
-  (bump → commit → tag → build → sign → publish → verify updater).
+  (bump → commit → tag → build → sign → publish → verify updater). The
+  Publisher card surfaces tracked app scratch such as `.tmp_wheels/` and can
+  de-track only those known runtime roots with `git rm --cached`, preserving
+  bytes on disk and avoiding model-invented cleanup shell.
 - **Job-specific project environments** (`projectEnvironment.ts`): new-project
   intent cards now persist a versioned workspace recipe, not only a team name.
   Web/React work opens a localhost preview beside OwLLM; responsive work uses a
@@ -107,23 +173,128 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   sending, publishing, deleting and other consequential browser actions.
 - **Multi-page**: tab strip opens several Agents pages at once, each with its
   own project + run; tabs stay alive (runs keep going), green ● = running.
+- **Code-page layout** (2026-08-14, first step toward merging the two pages):
+  the Agents page reuses the Code page's column building blocks
+  (`CodeSidePanel.tsx` `SideColumnShell`/`UsagePanel`/`BrowserToggleButton`/
+  `sideTabStyle`, `CodeColumnRails.tsx`, `TreeDir` from `CodePage.tsx`).
+  **Left column** = 🧠 Project Memory + the lazy file tree (a clicked file
+  lands as an `@path` reference in the composer) + the **Producer card** docked
+  at the bottom, where the Code page carries its GitHub cards; collapses to the
+  pink rail (🧠 📁 🚀). The Producer *is* the publish card: the WHOLE
+  `AgentChatTile` (identity + per-agent model picker + `PublisherTilePanel`'s
+  Commit / Merge / Publish + ⚙ Set up repo), a fixed agent for every way of
+  working (team, solo-loop, single coder) — so it is no longer also tiled on
+  the ▦ canvas grid. **Right column** = the Code panel's resizable shell + tab
+  style carrying 📋 Rules / 🏷 Team + the always-visible chat host, **plus the
+  Code panel's 📓 Notebook page** (the shared `RunNotebook` mounted `inline`,
+  kept mounted across tab flips), with the bottom **Usage** + 🌐 Browser
+  container; collapses to the orange rail (📓 📊 ⚡ 🌐). The focused agent's
+  page has **no tab of its own** — the chat/log host below *is* that page and
+  never hides, so the old 📜 Orchestrator tab was redundant; the per-agent
+  Model + Voice it carried moved into the agent editor popup (click the agent's
+  name). The FlowHeader's duplicate 📓 Notebook and 🧠 Memory buttons are gone —
+  both features live in the columns.
+  **Composer** = the same `ChatInputDock` now at the
+  bottom of the canvas column (the Code page's composer position), out of the
+  right column; slash commands still switch the pane's sub-tabs via a ref
+  bridge. Directly above its textarea, `RunToggleRow` puts the three run
+  switches on **one line** — ⚡ auto-approve · critic decides for me ·
+  parallel dispatch — the controls that used to sit in the right column's
+  Super User container (which is gone; auto-approve is no longer *also* a
+  Composer toolbar toggle). Every 🌐 browser control opens the popup **and** splits app +
+  browser side by side (`openWelcomeBrowserSplit`). Gated by
+  `agentsCodeLayoutMerge.verify.run.mjs`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
+- **Auto mode** (⚡ next to the composer, or `/auto`): auto-accepts the agents'
+  tool calls. **ON by default** — `claude -p` is non-interactive, so a tool that
+  needs approval has no prompt anyone can answer and the turn ends having run
+  zero tools. Per project, persisted in localStorage; only an explicit untick
+  turns it off. When a CLI does refuse a tool anyway, `runBlockers.ts` turns its
+  prose ("permission … hasn't been granted") into the real cause plus the one
+  step that clears it, in the thread and as a toast — detected once for every
+  backend inside `withCliAuthRetry`, since a refusal arrives as a normal reply,
+  not an error.
+- **Silent-death diagnostics** (`detectRunFailure` in `runBlockers.ts`): a CLI
+  that is KILLED writes nothing, so it used to surface only as
+  `claude CLI exited 1 — no stdout or stderr`. Two causes now get named instead,
+  on the error side of the same `withCliAuthRetry` funnel:
+  * **Linux out-of-memory.** A WSL-isolated project runs the CLI *inside* the
+    distro, whose default cap is 50% of host RAM; the kernel SIGKILLs the
+    biggest process. `sandbox::wsl_oom_report` reads `/var/log/kern.log` +
+    `dmesg` (ignoring any kill older than 10 min, so a stale OOM is never
+    blamed) and reports the process and the sizes. The notice carries a
+    one-click **⬆ Raise WSL memory** button → `sandbox_raise_memory`, which
+    merges `[wsl2] memory`/`swap` into `%USERPROFILE%\.wslconfig` (75% of host
+    RAM, never lowering a higher value the user set) and deliberately does NOT
+    run `wsl --shutdown`, which would kill every running agent.
+  * **You pressed Stop.** Kills we perform are recorded per-pid, so the run
+    reports "you cancelled this run" rather than a fault.
+  A real diagnostic — especially an auth envelope — still wins, so the
+  token-refresh retry keeps firing.
+- **Stop is scoped**: the agentic page's per-run Cancel calls `cli_cancel_scope`
+  with the project dir instead of `cli_cancel_all`, so stopping one run no
+  longer tree-kills every other project's live CLI (each survivor then reported
+  a bare non-zero exit). Children register under their `cwd` automatically; the
+  dock's Stop stays global. MCP-gateway tool results are capped at 60k chars
+  with an explicit truncation notice, so OwLLM's own tools can't be what blows
+  up an agent's context.
+- **Project Brainstorm** (`BrainstormPanel.tsx` + `brainstormModes.ts`): 🧠 on
+  the Agents page. The user picks the KIND of brainstorm first — 🎯 Auto (the
+  role's own STEP 0 decides), 🚀 New product, 🛠 Improve this app, 🔬 Research,
+  💬 Open — and that choice selects the TRACK the brainstormer follows
+  (`resources/agents/roles/brainstormer.yaml`, tracks A–D) instead of framing
+  every session as a product/market exercise. Only the tracks that call
+  `web_search` mention the Brave key. Co-founder chat → `BRIEF.md` → the
+  project's Notebook (seeded whether the team already existed or was assembled
+  here). The 📋 Board shows the Feature Priority table for a new-product brief
+  and the ordered `## Plan` for every other kind. The conversation is
+  checkpointed to `.owllm/brainstorm.json` + localStorage; the streamed
+  transcript is dropped from the checkpoint past a size budget (it is
+  rebuilt from the saved history) and disk writes are rate-limited, with
+  forced flushes on close, unmount and end of turn.
+  Guarded by `npm run test:brainstorm`.
 - **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane +
   NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
   steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue
   feeds the first pending step and auto-feed walks the rest at each clean run
-  end. Mounted inline on the Code page and as a modal on the Agents page —
+  end. Auto-feed is **ON by default** on both surfaces (absent flag = never
+  chosen = on); an explicit off/on is the user's word and persists across
+  restart, navigation and sync. It still only decides whether a live chain
+  CONTINUES — starting one is always a deliberate ▶ Start queue.
+  The queue control is a **state machine over the queue document** (a card
+  `sent` with no `finishedAt` = in flight), never a local "I pressed start"
+  flag: ▶ Start queue when idle → ⏳ Running (disabled) with a ✕ Stop beside
+  it → pressable again the moment the job finishes, fails or is stopped.
+  Stop/↺ Reset hand every in-flight card back as `pending` and release the
+  lease, so a window that crashed or was closed mid-job leaves a queue that
+  **recovers** (heartbeat expiry turns Running into ↺ Reset queue) instead of
+  one the user can never restart. Stop cancels the QUEUE, not the agent — the
+  run in flight keeps going, and its late run-end stamp is refused because the
+  card has left the run.
+  Mounted inline on the Code page and as a modal on the Agents page —
   ONE blob per project, so both surfaces are views of the same notebook.
   The Kanban plan board (NOW/NEXT/LATER) and its ⚡ Start batch action are
   built but **hidden** behind `SHOW_KANBAN = false`; the digest stops asking
   for a PLAN block while it is off.
   Cross-device: content syncs through the vault and merges per step
-  (union by id, most-advanced-status wins, tombstones for deletions) so a
-  step another PC finished can never come back as pending. The run-lease
-  (who drives the queue) stays device-local; a synced `runningOn` field is
-  advisory only and never blocks a second machine.
+  (union by id, most-advanced-status wins, tombstones for deletions — the
+  shared rules live in `runtime/notebookMerge.ts`) so a step another PC
+  finished can never come back as pending.
+  **Exactly one device drives a queue.** `autoFeedOwner` locks it between
+  windows on one PC (device-local, stripped before sync); the synced
+  `runningOn` is the cross-device lock. Its owner republishes a heartbeat
+  every 30s while the queue is live, and a peer holds the queue read-only —
+  *"Queue is running on \<PC\> — job N of M"*, Start disabled, Feed disabled,
+  with an explicit **Take over here** that keeps the queue's progress — until
+  that beat stops changing for 120s, then the lock releases so a crashed PC
+  never strands the list. Liveness is judged by whether the beat VALUE changed
+  and how long ago THIS device saw it change, never by subtracting a peer's
+  clock from the local one (device clocks are not synchronized).
+  Writes use optimistic concurrency on the monotonic `queueRev`: a save whose
+  base revision has been overtaken in storage reconciles against the winner
+  (same step-union rules) instead of overwriting the other device's progress.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
@@ -137,8 +308,8 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
-  prompt (and every Code-page coder turn). Editable from the Super User card
-  (Agents) and the Code page's right column.
+  prompt (and every Code-page coder turn). Editable from the right column's
+  📋 Rules page (Agents) and the Code page's right column.
 - **Skills**: skill packs auto-equipped by role, badges on agent cards,
   cross-provider self-load (any model reads `.owllm/skills/<id>` from disk).
 - **Personal agents + rule cards**: Studio provides an editor for reusable,
@@ -160,21 +331,90 @@ Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
 Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
-divided composer). The chat pane carries its own header — model picker +
+divided composer). The second agent works in **its own worktree** (`code-2`,
+cut from the project alongside the page's), so the two never overwrite each
+other's files; its header carries **⤵ Merge into agent 1**, which commits its
+work, seals the primary's uncommitted edits first, then merges into the page
+branch and names any conflicting files. A non-git folder can't be split, so
+both share it — the pane says so rather than implying isolation. The page's
+Chat mode governs **both** panes (the second used to keep write tools in
+"discuss only" mode), and closing/switching the project is blocked while
+*either* agent runs — it deletes the checkouts. Both agents' runs live in
+`chatRuntime`, so navigating away
+mid-turn keeps them streaming and the tab keeps glowing; closing the tab stops
+them. **Each pane's Stop is independent**: a run registers its own cancel scope
+(`setCliCancelScope`, keyed by the run's AbortSignal) before dispatching, so
+Stop kills that agent's spawned CLI via `cli_cancel_scope` and leaves the other
+agent running. The second agent's Stop used to only abort the JS controller —
+which a spawned `claude`/`codex`/`kimi` never sees — so on every subscription
+model it did nothing at all. The chat pane carries its own header — model picker +
 `Clear` (run state) + `Clear history` (chat window **and** saved threads) —
 and the composer lives in the same column as the chat, so input and window
 stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.
+Opening a workspace also sweeps the **parked** page worktrees of that project
+(`fleet_reclaim_page_caches`, background): git-ignored `target/`/`node_modules/`
+untouched for 24 h are removed rename-first, so a page you navigated away from
+stops hoarding gigabytes. Never the page you just opened, never `dist/` (that
+holds the downloaded module payloads), never source, a branch or a worktree.
+Both outer columns shrink independently to a 46px rail (`CodeColumnRails.tsx`)
+that keeps one large icon per feature the column holds — left 🧠 memory /
+📁 files / 🐙 GitHub, right 📓 notebook / 📊 usage / ⚡ rules / 🌐 browser.
+Notebook and rules open the column straight onto their page; the 🌐 icon works
+**while shrunk** — it opens the browser on its welcome page and arranges OwLLM
+and the browser half/half, the same split the personal-assistant recipe uses.
+**Background-work continuity** (`cli_orphans.rs` + `orphanContinuation.ts`):
+a turn that ends while a process it started is still running (a build, a test
+matrix, a deploy) no longer loses that work. The backend samples every CLI
+child's descendants while it lives (all OSes, every CLI — claude/codex/kimi/
+gemini/grok), adopts the survivors when the turn exits naturally, announces
+them in the transcript ("still running — I'll continue when it finishes"), and
+when the last one exits the page auto-sends a continuation turn that tells the
+agent to verify the result from the process's own logs and finish what it
+promised. Stop and watchdog kills never arm a continuation (the tree died with
+the turn); the chain is capped at 3 automatic turns and the watch at 2 h.
+Finished events that land while the page is unmounted are held and delivered
+on the next mount. The descendant walk validates every candidate against the
+root's own start time: an OS keeps a dead parent's PID on its children forever,
+so a CLI spawned onto a recycled PID would otherwise inherit that PID's original
+subtree — session-1 `csrss`/`winlogon`/`dwm` were once adopted as a turn's
+background work and, being unkillable OS processes, could never finish.
 
 ## Isolation & sandboxing
 
 - **Folder-sealed sandbox**: bubblewrap inside WSL2 (Windows), Lima (macOS
   beta), bwrap (Linux beta). Agents see ONLY the project folder — the real
   folder, no copy. Cloud CLIs run inside too; logins/API keys auto-mirror in.
-- Graduated trust: isolated by default, per-project Full-access opt-out,
-  write-jail + dangerous-command guard when not isolated.
+- Graduated trust: isolated by default, per-project Full-access opt-out (all
+  three OSes since the 2026-08-16 isolation audit — it was Windows-only before,
+  so Linux/macOS users could not opt out at all), write-jail +
+  dangerous-command guard when not isolated.
+- **SSH keys reach WSL agents** (`sandbox::sync_logins_impl`, gate
+  `wslSshMirror.verify.run.mjs`): the login mirror also copies `~/.ssh` from the
+  Windows home into the distro home — keys at 600 in a 700 dir, `config` with CR
+  stripped (a CRLF config makes ssh misparse Host blocks under Linux), and
+  `known_hosts` MERGED so host keys accepted inside the distro survive a
+  re-sync. Before this, `ssh <host>` worked from a host project (cmd.exe
+  inherits `USERPROFILE`) but failed inside WSL with "Could not resolve
+  hostname" — the distro home had no key and no config. The bwrap jail is
+  deliberately NOT given `~/.ssh`: keeping the agent away from the rest of the
+  home is the jail's purpose, so the supported route to an SSH-capable agent is
+  marking that project **Full-access**, which runs it outside the jail.
+- The jail also binds a fleet worktree's git common dir (a worktree's `.git` is
+  a pointer into the main repo), so `git` works inside the sandbox without
+  exposing the main checkout — only `.git` is visible, not its working files.
+- **Availability is probed, never assumed**: `bwrap`/`limactl --version` only
+  proves the binary exists. OwLLM spawns a real throwaway jail and reports the
+  engine unavailable — with the reason — if that fails, rather than claiming an
+  isolation it does not have.
+  - **Linux one-time setup**: Ubuntu 24.04+ blocks unprivileged user namespaces
+    (`kernel.apparmor_restrict_unprivileged_userns=1`), so bubblewrap cannot
+    build a sandbox until an AppArmor profile grants it `userns`. **Harden**
+    installs `/etc/apparmor.d/bwrap` — **once per machine** (it attaches to the
+    binary, so it covers every user, project, worktree and agent, and survives
+    reboots), asking for a password once. Verified on aarch64 Ubuntu 24.04.
 - Sandbox disk card: usage view, cache clear, WSL disk reclaim, plus
   **anti-inflation** so the WSL `.vhdx` doesn't balloon unattended:
   - **Safe default — automatic cache-trim** (`sandbox_trim` / `auto_housekeep`):
@@ -187,6 +427,32 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
     **modern WSL disables sparse by default due to a potential data-corruption
     risk** — never auto-applied. One-click, clearly labelled advanced.
   - No-op on Linux/macOS (bwrap = host FS; Lima manages its own disk).
+- **Leaky host services card** (`host_guard.rs`, Windows only — hidden
+  elsewhere): the disk janitor bounds what OwLLM *writes*; this bounds memory a
+  Windows service leaks because of what OwLLM *does*. Measured 2026-08-26 on a
+  14-day session: `PcaSvc` (Program Compatibility Assistant, which grows with
+  the process-creation rate — a CLI per agent turn, plus cargo/rustc/npm/git by
+  the thousand) held **2,994 MB of private bytes backing 1 MB of data**;
+  restarting it returned it to 3.9 MB doing the same job.
+  - A normal user **cannot** stop it (`sc sdshow` grants Interactive Users
+    start, not stop), and a background sweep must never raise a UAC dialog — so
+    **Install guard** asks once and registers a SYSTEM scheduled task that
+    re-checks every 6 hours and after boot, unattended, forever. The task is
+    explicitly granted read to built-in Users (a default-DACL task is invisible
+    to the non-elevated app, which made every status read say "not installed").
+  - A reclaim is authorised by one function behind a **safety triad**: the
+    svchost must host that service *alone*, the process must not be
+    kernel-critical, and its failure action must not be REBOOT. Anything
+    unreadable counts against reclaiming. Graceful stop first, always; the
+    terminate exists only because a bloated service **wedges its own shutdown**
+    (measured: STOP_PENDING with a frozen checkpoint for 8 minutes), and the
+    service restarts on demand with a fresh heap.
+  - The janitor pass (`auto_note`) only reports. The card shows each service's
+    footprint against its threshold plus the task's own log, so "installed" can
+    be told apart from "has actually run".
+  - Gate: `hostGuard.verify.run.mjs` — runs the shipped verdict and
+    failure-action parsers against truth tables and the whole shipped script
+    against an unreachable threshold.
 - GitHub connect for clone/push from inside the sandbox.
 
 ## Browser control (`browser.rs`, `browser_vault.rs`, `browser_import.rs`)
@@ -200,6 +466,28 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
+- **Self-healing session + honest failures**: a wedged session still creates
+  tabs and still accepts `navigate()` without error, but no webview ever
+  commits a document — so every action times out and an agent reading a generic
+  "the page may still be loading" invents a network cause (2026-08-17: a
+  reachable WSL dev server reported as unreachable). Timeouts are now diagnosed
+  by whether the tab holds a live document, and the tools **repair the session
+  themselves**: `browser_open_tab` gives a new tab a 3 s commit budget and
+  `browser_cmd` re-checks after a timeout, then the browser is restarted and the
+  work replayed (`heal_if_tab_never_loaded` / `recover_wedged_action`), handing
+  back the new tab id plus `"restarted": true`. The restart needs POSITIVE
+  evidence, because the two obvious tests are both wrong (measured): a webview
+  pointed at an unresponsive host reports `about:blank` while the request hangs,
+  exactly like a wedged one, and tabs that loaded *before* the wedge keep
+  reporting their old URL — so "is any tab alive?" stays silent through the real
+  failure. `browser_engine_is_dead` instead opens a background tab on the app's
+  own start page, which cannot be slow; only if *that* never commits is the
+  engine judged broken. Bounded further: the cooldown is stamped before the
+  teardown so a failed restart cannot loop, an automatic restart does not mark
+  the session closed, and only `navigate`/`open` is replayed — replaying a
+  content read against the fresh blank tab would answer about a page that never
+  loaded. `browser_screenshot` likewise refuses a minimized window instead of
+  returning a picture of nothing.
 - **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
   window that looks like the app, not a stock OS window — an OwLLM chrome-bar
   webview (`ui/public/browser-chrome.html`: launcher app icon + title, tab
@@ -235,6 +523,18 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   (`browser_vault::store_typed_login`), so anything the user types to log in
   autofills next time. Blank passwords are ignored; dedupe is per (origin,
   username), same merge path as manual and imported creds.
+  The SCANNER is `FRAME_CRED_JS`, injected with
+  `initialization_script_for_all_frames` so it reaches **iframes** — Tauri's
+  plain `initialization_script` is main-frame-only, which is why an embedded
+  identity provider (Google's iframe, most OAuth) used to be uncapturable. It
+  pierces **shadow roots** for web-component logins, and reads
+  `composedPath()[0]` rather than `e.target`, since events retarget to the
+  shadow host and a document-level listener would otherwise see a `<div>`.
+  `BRIDGE_JS` keeps the transport alone: an iframe's `document.title` never
+  reaches the window, so a sub-frame `postMessage`s its find to the top frame.
+  The credential is filed under the FRAME's origin, so an embedded provider
+  login belongs to the provider, not the framing site. QR/passwordless logins
+  (WhatsApp Web) are still not captured — no password ever exists to read.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they
@@ -270,6 +570,26 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - **Reachable by ALL agent kinds**: local + API agents call `browser_*` through
   `executeToolCall`; subscription-CLI agents (Claude, Codex and Kimi) reach the
   SAME browser natively via the MCP gateway below. No per-tool harvest hack.
+
+## Subscription sign-in — Connect opens the provider's page (`PtyTerminal.tsx`)
+
+- **Flow**: Accounts → Connect spawns the provider CLI in an embedded PTY,
+  auto-sends `/login`, and opens the authorization URL the CLI prints in a
+  private Agent Browser tab (`browser_open_auth_tab`), so provider OAuth never
+  inherits the user's ordinary cookies. Opt-in per terminal via
+  `autoOpenAuthUrls`; general-purpose terminals never hijack the browser.
+- **The URL is read from the terminal buffer, not the byte stream**
+  (`unwrapTerminalLines.ts`). A CLI's URL is hard-wrapped across rows, and
+  re-deriving that wrap from bytes is ambiguous: a URL ending exactly on the
+  last column is indistinguishable from one that continues. xterm records per
+  row whether it is a continuation, so read that flag. `authUrlCapture.ts`
+  additionally refuses any URL whose END has not been observed — Claude puts
+  `state` last, so a cut inside it used to yield a URL that passed every
+  "required parameter present" check and was silently truncated.
+- **Always a manual route**: once a complete authorization URL has been seen,
+  the terminal header shows **⧉ Open sign-in page**, so a failed or missed
+  automatic open can never leave sign-in with no way through.
+- Guarded by `pages/advanced/authLoginBrowserOpen.verify.run.mjs`.
 
 ## MCP gateway — OWLLM tools for subscription-CLI agents (`mcp_gateway.rs`)
 
@@ -339,6 +659,13 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
 - **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
   wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
+  The default name comes from `hardware::machine_name()`, which asks the OS via
+  `sysinfo` — NOT from `COMPUTERNAME`/`HOSTNAME`, a Windows-only and a *shell*
+  variable that a GUI-launched app never inherits, so every Linux/macOS install
+  used to be named the identical placeholder "This OwLLM PC". A trailing
+  `.local`/`.lan` is trimmed and a bare `localhost` is rejected. An identity
+  still stamped with the old placeholder is healed on load (exact match only,
+  so a name the user typed themselves is never rewritten).
 - **Sealed transport (WAN-capable)**: every command AND its reply is an
   end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
   ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`
@@ -490,7 +817,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
   diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
   merging — real overlapping edits return a Conflict with both sides
-  preserved; only disposable app runtime files auto-resolve.
+  preserved; only disposable app runtime files auto-resolve. Cleanup never
+  deletes a branch whose work HEAD does not contain (ancestry or
+  squash-equivalent tree, `branch_work_contained`): the worktree directory is
+  reclaimed but the branch ref survives and the run announces it — an agent
+  that committed its own work can never be orphaned by teardown. Only the
+  Code page's explicitly confirmed close passes `discardUnmerged` to really
+  drop one. Gate: `fleetWorktreeWorkLoss.verify.run.mjs`.
 
 ## Support & UX
 
@@ -538,12 +871,134 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+  A report is sent with the *reporter's own* GitHub token (never an embedded
+  one), so it has **two destinations**: OwLLM team members land in the private
+  intake `OwLLM/bug-reports` (redacted bundle committed under `reports/<stamp>/`
+  + an `auto-report` issue); everyone else has no access to that repo at all —
+  GitHub masks it as 404 — so their report is filed as an issue on the public
+  `OwLLM/owllm` instead. That repo is public, so the payload is **sealed to the
+  OwLLM team's key** first (`support_seal.rs`): a fresh ephemeral X25519 key per
+  report, ECDH against the embedded team public key, `SHA-256(context ‖ shared ‖
+  eph_pub ‖ team_pub)` keying AES-256-GCM with the whole header bound in as AAD.
+  The issue carries a generic `Encrypted bug report — <stamp>` title and one
+  armored block; the description, paths, projects and machine details are not
+  readable by anyone but the team. **Only the public key ships** — it can seal a
+  report and cannot open one; the secret never enters the repo or a build, and
+  the team opens reports with `scripts/decrypt-report.mjs` (dependency-free
+  node:crypto). The screenshot is never uploaded on this route and the Watcher
+  keeps it locally rather than telling the user to publish it. The composer says
+  which destination applies *before* the send click. Only 401/403/404 trigger the
+  fallback — a 5xx must never turn a private report into a public issue.
+  Gate: `ui/src/pages/agentic/bugReportIntake.verify.run.mjs`, which pins the
+  wire format on both sides and *executes* the Node decryptor against a block
+  sealed by the shipped Rust (`src-tauri/seal-harness`, a standalone `cargo run`
+  binary that includes `support_seal.rs` via `#[path]` — lib tests cannot launch
+  in this dev environment).
+- **Crash / unclean-shutdown detection** (`session_health.rs`): every process
+  writes a marker on startup and deletes it on the way out. Cleanup runs on
+  `WindowEvent::CloseRequested` (the X), `RunEvent::ExitRequested`, and
+  `RunEvent::Exit` because Tauri does not guarantee the later events fire on
+  every path (Windows shutdown skips them, and some close paths have been seen
+  to skip `Exit`). A marker whose owner is gone means that session never reached
+  its exit path — the only way to detect a SIGKILL, an OOM kill, or a power cut,
+  none of which leave anything in-process. Markers are per-process (OwLLM is
+  multi-instance) and matched on pid **plus** process start time, so a recycled
+  pid cannot make a dead session look alive. The next launch shows one toast and
+  the records ride along on every support report
+  (`SupportSnapshot.unclean_shutdowns` + `crash_log_tail`). Showing the notice
+  never deletes the records — only an explicit `session_health_dismiss` does.
+  The auto-updater is a legitimate death outside the exit path — `install()`
+  never returns on Windows, it hands the NSIS installer to the shell and calls
+  `std::process::exit(0)` — so `UpdatePrompt` declares it via
+  `session_health_expect_replacement` between `download()` and `install()`, and
+  re-arms with `session_health_rearm` if the install fails instead of replacing
+  us. The Linux AppImage path does the same before launching its helper, whose
+  deferred swap also exits outside `RunEvent::Exit`. Without that, every
+  auto-update made the newly installed build open by accusing the previous one
+  of crashing.
+- **Exit-path breadcrumbs** (`log_exit_path` in `lib.rs`): `CloseRequested`,
+  window `Destroyed`, `ExitRequested` (with a backtrace when a code is present,
+  naming whoever called `app.exit`) and `Exit` are all recorded to stderr and
+  `owllm-crash.log`. Added because a normal Tauri shutdown used to log nothing,
+  so a spurious quit and a crash were indistinguishable from outside.
+- **Native webview process recovery** (`lib.rs`, both engines): every platform
+  runs the page in a process the OS can take away — WebKitGTK kills its web
+  process, WebView2 sheds its render process under host memory pressure. The
+  native window survives with nothing painting into it, which reads as a solid
+  black window that only a restart clears. Linux listens on
+  `connect_web_process_terminated`; Windows subscribes to WebView2's
+  `ProcessFailed` and reloads on `RENDER_PROCESS_EXITED`. Both append the native
+  kind/reason to the user-data dir (`linux-webkit.log` / `windows-webview2.log`,
+  TEMP fallback) before recovering, and durable state is restored by main.tsx.
+  Three things the mechanism forces: the Windows handler **re-arms itself**
+  (webview2-com builds callbacks from a `FnOnce`, so one subscription would
+  recover exactly one death and then go silent); the subscription is **per
+  webview**, so the overlay frame is armed where it is built — an unarmed view
+  stays black while its sibling recovers; and a reload burst limit (3/60 s)
+  keeps a page that kills its own renderer on load from spinning forever. An
+  unresponsive-but-alive renderer is never reloaded, and a dead *browser*
+  process is logged but not reloadable — `Reload` cannot revive one.
+  Measured on Windows: killing both render processes left the unpatched build
+  with zero renderers and no `Chrome_RenderWidgetHostHWND` for 30 s, while the
+  patched build had a fresh render process within 1 s.
+  **Every agent-browser view is armed too** (`browser.rs`): each tab in both
+  window shapes, plus the browser's own chrome bar. Tabs use
+  `Webview2Recovery::ReloadThenNotice` — one reload, then the shared
+  `TAB_PROCESS_STOPPED_HTML` notice via `NavigateToString`, the same
+  one-retry-then-local-page rule the Linux tab path has always had, because a
+  tab shows an arbitrary site that may kill its own renderer on load. The chrome
+  bar is app UI, so it reloads like `main`. Measured on an isolated instance
+  driven over WebView2 CDP: with the bar unarmed, killing all 4 render processes
+  of a browser window recovered 3 and left the bar's renderer gone; armed, all 4
+  came back, each logging its own label (`owllm-browser-page-1`, `browser chrome
+  bar`, …). A second kill inside the burst window left the tab on `about:blank`
+  showing the notice while the app surfaces reloaded again.
+  Gate: `ui/src/webviewCrashRecovery.verify.run.mjs` (dependency-free).
+  Not covered: the Linux chrome bar has no `connect_web_process_terminated`
+  handler (Linux tabs and `main` do), and macOS has no recovery on any view.
 - **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
   the main window is transparent (`tauri.linux.conf.json`) and the see-through
   headroom band above the frame is click-through via GTK input-shape
   (`frame_shape.rs`), mirroring the Windows overlay behaviour.
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
+- **How an update is offered** (`ui/src/UpdatePrompt.tsx` +
+  `ui/src/runtime/updateAvailability.ts` + `ui/src/runtime/updateSchedule.ts`):
+  the updater checks 2.5 s after launch, **then every 5 min**, and again as soon
+  as the machine comes back **online**, the window is **focused**, or the webview
+  becomes **visible** (floored at 60 s so alt-tabbing is not a storm). The short
+  period exists because a release is published as a *pre-release* and promoted to
+  Latest only once every platform is up: for that whole window
+  `releases/latest/download/latest.json` still resolves to the PREVIOUS release,
+  so the client is told — correctly — that it is up to date, resets its failure
+  count, and sleeps the full period. A 30-min period therefore hid v1.0.29 from
+  an already-running app for 22 min after the promote. The next check is
+  scheduled by the one that just finished, never by a fixed `setInterval`, because a check that
+  lands inside a multi-OS publish window does not get "no update" — it gets
+  `TargetNotFound` for whichever platforms `finish-multihost.sh` has not merged
+  into `latest.json` yet (tauri-plugin-updater resolves the platform URL before
+  it compares versions). Those failures back off 1 → 2 → 4 → 8 → 15 min instead
+  of waiting out the period, so a Linux/macOS install picks the release up
+  within ~15 min of the manifest completing rather than hours later; the
+  "unavailable for this platform" notice is withheld until 4 failures in a row
+  and clears itself on the next answered check. Finding one no longer opens a
+  modal. It publishes to the `updateAvailability` store, and the owl at the
+  top-centre of the frame says so in a **manga speech balloon** on its LEFT (so
+  it can never collide with the World Chat bubble on its right) — *"Please,
+  update your app! We fixed a few bugs and added cool features!"* — clickable,
+  for `UPDATE_NOTICE_MS` (10 s), once per version per session. After that the
+  offer **rests** in a small **⬆ Update available** badge under the OWLLM mark
+  (bottom-right of the wordmark) and stays there until the update is installed;
+  the Info page's Application card carries the same badge. The install modal
+  opens only on demand (`OPEN_UPDATE_EVENT`), so "Later" hides a dialog instead
+  of losing the update — the previous design recorded a dismissal and left no
+  other surface anywhere. Gate: `ui/src/updateNotice.verify.run.mjs`.
+- **World presence always reports the release.** The version is a query
+  parameter the client puts on its own socket (`worldPresence.ts` → `?v=`), so a
+  VPN cannot strip it; blank versions on the map are installs older than v1.0.7.
+  The identity-failure path in `WorldPresenceRunner` (`AppShell.tsx`) now still
+  sends `appVersion` from `getVersion()` — it used to connect with no arguments
+  at all, the one path that could show an ONLINE dot as "Version unknown".
 - Frameless HybridFrame window (transparent — NEVER make it opaque),
   sticky-scroll chats (`useStickyScroll`), shared `ChatBubble` renderer,
   shared `LogBox` for all logs.
@@ -554,7 +1009,7 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 |---|---|
 | local chat + tool loop | `ui/src/pages/agentic/dispatch.ts` (`streamLocalChat`) |
 | tool specs + MCP | `ui/src/pages/agentic/localTools.ts` |
-| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (own copy of cloud dispatch!) |
+| team dispatch (desktop) | `ui/src/pages/agentic/AgentsPage.tsx` (run loop; model calls via shared `dispatch.ts`) |
 | team dispatch (bridges) | `ui/src/pages/agentic/dispatch.ts` |
 | solo coder page | `ui/src/pages/agentic/CodePage.tsx` + `CodeSidePanel.tsx` |
 | notebook | `ui/src/pages/agentic/RunNotebook.tsx` |
@@ -564,7 +1019,14 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 | vault sync | `src-tauri/src/vault.rs` |
 | worktrees/fleet | `src-tauri/src/fleet.rs` |
 | user-facing page docs | `ui/src/support/WatcherDrawer.tsx` (`PAGE_DOCS`) |
+| "why did the app close?" | `src-tauri/src/session_health.rs`, `log_exit_path` in `lib.rs` |
 
-**Known trap for agents**: `AgentsPage.tsx` duplicates parts of `dispatch.ts`
-(prompt builders + cloud dispatch). A fix in one usually needs the other —
-grep BOTH before declaring a dispatch bug fixed.
+**Known trap for agents (updated 2026-08-14)**: `AgentsPage.tsx` used to carry
+its own ~1000-line copy of the cloud dispatch stack (router + provider
+streams); it drifted from `dispatch.ts` 19 documented ways and was collapsed
+onto the shared stack — `streamChatCompletion` and every provider stream now
+live ONLY in `dispatch.ts`, and `teamRunContinuity.verify.run.mjs` fails if a
+page-local CLI invoke ever comes back. The PROMPT BUILDERS
+(`buildOrchestratorPrompt`/`buildSpecialistPrompt`) are still duplicated
+(AgentsPage's richer copy vs dispatch.ts's bridge copy) — a prompt fix still
+needs BOTH until that half is unified.

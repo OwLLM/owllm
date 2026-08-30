@@ -181,7 +181,6 @@ impl Drop for TempWorktree {
     fn drop(&mut self) {
         let path = self.path.to_string_lossy().to_string();
         let _ = git(&self.repo, &["worktree", "remove", "--force", &path]);
-        let _ = git(&self.repo, &["worktree", "prune"]);
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }

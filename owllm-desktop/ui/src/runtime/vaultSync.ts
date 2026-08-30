@@ -12,24 +12,34 @@
 //       { syncedAt: <ms>, device: <id>, data: { <key>: <value>, … } }
 //   • On launch (vault cloned): read the REMOTE blob; if it's newer than what
 //     this device last adopted/pushed, write its keys into localStorage,
-//     fast-forward the clone (vault_align), and reload so every store repaints.
+//     fast-forward the clone (vault_align), and repaint in place — drop the few
+//     module caches that hold a synced key, and fire the refresh events
+//     (repaintAfterAdopt). This deliberately does NOT reload the WebView.
 //   • On change/idle/close: snapshot localStorage → vault_write_state (commit
 //     + push). We bump our adopted-marker so our own push doesn't look "new".
 //
 // Secrets never touch this — they live in the Rust accounts store, not
 // localStorage. Device-local keys (sync markers, one-time wizard flags,
-// regenerable caches, machine-specific workspace paths) are denied below.
+// regenerable caches, machine-specific workspace paths, per-screen appearance)
+// are denied below.
 
 import { invoke } from "@tauri-apps/api/core";
 import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMirror";
+import { mergeSteps, unionTombstones } from "./notebookMerge";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
-import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
+// The three module-level caches that hold a SYNCABLE localStorage key and would
+// otherwise keep serving their pre-sync copy after an adoption. Every other
+// consumer re-reads storage on render (pageSettings.get() hits localStorage on
+// every call) or re-probes the backend, so navigating to a page is already
+// enough. See repaintAfterAdopt.
+import { invalidateProfileCache } from "../pages/agentic/modelProfiles";
+import { invalidateCloudCatalogueCache } from "../pages/agentic/cloudCatalogue";
+import { invalidateProgress } from "../pages/world/worldState";
 
 // Device-local marker of the newest blob we've adopted OR pushed. Compared
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
 const LAST_KEY = "owllm:sync-last";
 const DEVICE_KEY = "owllm:sync-device";
-const USER_INTERACTED_KEY = "owllm:session:user-interacted";
 
 // Keys that must NOT sync (device-local / regenerable / machine-specific).
 const DENY_EXACT = new Set<string>([
@@ -54,6 +64,13 @@ const DENY_EXACT = new Set<string>([
 const DENY_PREFIX = [
   "owllm:code:",
   "owllm:agents:page:",
+  // Appearance is a property of the SCREEN, not of the account: mode, GUI
+  // colour and text colour (owllm:theme:*). Syncing them meant a second PC
+  // repainted the first one behind the user's back — and because adoption
+  // lands during startVaultSync, i.e. after bootstrapTheme has already painted
+  // the first frame, it arrived as a visible flash. A prefix rather than three
+  // literals so a future theme key is device-local by default.
+  "owllm:theme:",
 ];
 
 // The notebook blob (owllm:agents:notebook:<pid>) DOES sync — its notes, plan
@@ -66,6 +83,13 @@ const NOTEBOOK_KEY_PREFIX = "owllm:agents:notebook:";
 // Mirrors RunNotebook's NOTEBOOK_EVENT. Kept as a local literal rather than an
 // import so this runtime module stays free of page-level dependencies.
 const NOTEBOOK_EVENT_NAME = "owllm:notebook-changed";
+// Mirrors RunNotebook's NOTEBOOK_QUEUE_EVENT — fired only by queue-lifecycle
+// writes (start, job transition, sequence end), never by note typing. See
+// publishQueueNow: this is what makes a started queue visible on the user's
+// other PCs immediately instead of after the poll+debounce.
+const NOTEBOOK_QUEUE_EVENT_NAME = "owllm:notebook-queue-changed";
+// Mirrors RunNotebook's NOTEBOOK_PULL_EVENT — a notebook surface just opened.
+const NOTEBOOK_PULL_EVENT_NAME = "owllm:notebook-pull-request";
 const NOTEBOOK_RUN_LEASE_FIELDS = [
   "autoFeed", "autoFeedOwner", "autoFeedHeartbeat", "autoFeedStartedAt", "autoFeedFinishedAt", "autoFeedStopped",
   // One-shot "start the queue when the current run ends", set by a click on THIS
@@ -86,57 +110,6 @@ export function stripNotebookLease(key: string, value: string): string {
   } catch {
     return value; // not JSON we understand — never corrupt it
   }
-}
-
-/// How far a step has progressed. This is only the tie-breaker when two copies
-/// have the same lifecycle timestamp; a newer explicit Reopen must be allowed
-/// to move a step from archived back to pending.
-function stepProgress(s: any): number {
-  if (!s || typeof s !== "object") return 0;
-  if (s.status === "done") return 4;
-  if (s.status === "sent" && s.finishedAt != null) return 3;
-  if (s.status === "failed") return 2;
-  if (s.status === "sent") return 1;
-  return 0; // pending
-}
-
-function stepLifecycleAt(s: any): number {
-  if (!s || typeof s !== "object") return 0;
-  for (const value of [s.stepUpdatedAt, s.archivedAt, s.finishedAt, s.startedAt, s.ts]) {
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return 0;
-}
-
-/// Union two step lists by id, newest-lifecycle-wins, with deleted ids buried.
-/// Order follows the newer side, then any ids only the older side still has,
-/// so a reordering on the newer device survives without dropping the other's
-/// additions.
-function mergeSteps(newer: any[], older: any[], buried: Set<string>): any[] {
-  const byId = new Map<string, any>();
-  for (const s of older) if (s?.id && !buried.has(s.id)) byId.set(s.id, s);
-  for (const s of newer) {
-    if (!s?.id || buried.has(s.id)) continue;
-    const prev = byId.get(s.id);
-    const currentAt = stepLifecycleAt(s);
-    const previousAt = stepLifecycleAt(prev);
-    const winner = !prev
-      || currentAt > previousAt
-      || (currentAt === previousAt && stepProgress(s) >= stepProgress(prev))
-      ? s
-      : prev;
-    byId.set(s.id, winner);
-  }
-  const out: any[] = [];
-  const emitted = new Set<string>();
-  for (const src of [newer, older]) {
-    for (const s of src) {
-      if (!s?.id || emitted.has(s.id) || !byId.has(s.id)) continue;
-      emitted.add(s.id);
-      out.push(byId.get(s.id));
-    }
-  }
-  return out;
 }
 
 /// Merge an adopted notebook blob with the local one.
@@ -165,19 +138,23 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
 
     if (local && typeof local === "object") {
       // Tombstones are a union: a delete on EITHER device is authoritative.
-      const tombstones = new Map<string, { id: string; ts: number }>();
-      for (const src of [local.deletedSteps, remote.deletedSteps]) {
-        if (!Array.isArray(src)) continue;
-        for (const d of src) {
-          if (d && typeof d.id === "string" && typeof d.ts === "number") tombstones.set(d.id, d);
-        }
-      }
-      const buried = new Set(tombstones.keys());
+      const tombstones = unionTombstones(local.deletedSteps, remote.deletedSteps);
+      const buried = new Set(tombstones.map((d) => d.id));
       const localAt = typeof local.updatedAt === "number" ? local.updatedAt : 0;
       const remoteAt = typeof remote.updatedAt === "number" ? remote.updatedAt : 0;
+      // Order by the MONOTONIC revision when both sides have one, and only fall
+      // back to the wall clock when they don't (legacy blobs, or a tie). Device
+      // clocks are not synchronized — this vault's own history shows peers
+      // writing out-of-order stamps — so a peer's newer queue could carry an
+      // older `updatedAt` and roll a finished job back to pending. The revision
+      // is a Lamport counter and cannot be skewed that way.
+      const localRev = typeof local.queueRev === "number" && Number.isFinite(local.queueRev) ? local.queueRev : null;
+      const remoteRev = typeof remote.queueRev === "number" && Number.isFinite(remote.queueRev) ? remote.queueRev : null;
       // Legacy blobs (written before updatedAt existed) score 0 on both sides;
       // preferring remote there preserves the previous adopt-the-peer behaviour.
-      const remoteIsNewer = remoteAt >= localAt;
+      const remoteIsNewer = localRev !== null && remoteRev !== null && localRev !== remoteRev
+        ? remoteRev > localRev
+        : remoteAt >= localAt;
       const newer = remoteIsNewer ? remote : local;
       const localSteps = Array.isArray(local.steps) ? local.steps : [];
       const remoteSteps = Array.isArray(remote.steps) ? remote.steps : [];
@@ -187,13 +164,32 @@ export function mergeNotebookLease(key: string, remoteValue: string): string {
         else delete remote[f];
       }
       remote.steps = mergeSteps(remoteIsNewer ? remoteSteps : localSteps, remoteIsNewer ? localSteps : remoteSteps, buried);
-      remote.deletedSteps = [...tombstones.values()].sort((a, b) => b.ts - a.ts).slice(0, 200);
+      remote.deletedSteps = tombstones.sort((a, b) => b.ts - a.ts).slice(0, 200);
       remote.updatedAt = Math.max(localAt, remoteAt);
-      // Advisory only (never a lock) — keep whichever device started a queue
-      // most recently so each PC can say where the run is happening.
-      const runs = [local.runningOn, remote.runningOn].filter((r: any) => r && typeof r.at === "number");
-      remote.runningOn = runs.sort((a: any, b: any) => b.at - a.at)[0] ?? undefined;
-      if (remote.runningOn === undefined) delete remote.runningOn;
+      // Queue identity + position follow the side that won the ordering above,
+      // so "job 3 of 7" always describes the copy whose steps we just adopted.
+      if (newer.queueId !== undefined) remote.queueId = newer.queueId;
+      else if (local.queueId !== undefined) remote.queueId = local.queueId;
+      if (newer.currentIndex !== undefined) remote.currentIndex = newer.currentIndex;
+      else delete remote.currentIndex;
+      // Raise the counter to the highest either PC has seen. The next local save
+      // does +1 on this, so our own writes always land ahead of the peer's and
+      // the counter never moves backwards on either machine.
+      const highestRev = Math.max(localRev ?? 0, remoteRev ?? 0);
+      if (localRev !== null || remoteRev !== null) remote.queueRev = highestRev;
+      // Who owns the RUN. This is the cross-device queue lock (see RunNotebook →
+      // peerQueueLock), so it follows the side that won the revision ordering
+      // above — the same authority that decided the steps we just adopted.
+      //
+      // It used to take whichever copy carried the larger `runningOn.at`, which
+      // is a straight clock comparison between two machines: the PC whose clock
+      // runs fast keeps winning the field regardless of who is actually
+      // driving, so an explicit takeover on the slow PC was silently undone by
+      // the next pull and both devices could feed the same queue. The revision
+      // is a Lamport counter and cannot be skewed that way.
+      const ownerSide = newer.runningOn !== undefined ? newer : (remoteIsNewer ? local : remote);
+      if (ownerSide.runningOn !== undefined) remote.runningOn = ownerSide.runningOn;
+      else delete remote.runningOn;
     }
 
     for (const f of NOTEBOOK_RUN_LEASE_FIELDS) {
@@ -302,7 +298,7 @@ function setLast(ts: number): void {
 }
 
 /// Pull the remote blob and adopt it if newer than what we last saw.
-/// Returns true when localStorage was changed (caller should reload).
+/// Returns true when localStorage was changed (caller should repaint).
 async function pullAndAdopt(): Promise<boolean> {
   let raw: string | null = null;
   try { raw = await invoke<string | null>("vault_read_remote_state"); } catch { return false; }
@@ -328,9 +324,8 @@ async function pullAndAdopt(): Promise<boolean> {
   }
   setLast(blob.syncedAt);
   try { await invoke("vault_align"); } catch { /* best effort */ }
-  // When we DON'T do a full reload (the user has already interacted), open
-  // notebook surfaces hold stale in-memory steps even though localStorage now
-  // has the adopted copy. Tell them to reload so the queue reflects work a
+  // Open notebook surfaces hold stale in-memory steps even though localStorage
+  // now has the adopted copy. Tell them to reload so the queue reflects work a
   // peer PC already completed instead of showing done steps as pending.
   for (const pid of adoptedNotebookPids) {
     try { window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT_NAME, { detail: { projectId: pid } })); } catch { /* non-browser */ }
@@ -357,6 +352,30 @@ function sameNotebookJson(a: string | null, b: string): boolean {
   if (a === b) return true;
   if (a == null) return false;
   try { return stableJson(JSON.parse(a)) === stableJson(JSON.parse(b)); } catch { return false; }
+}
+
+// How often we pull notebooks from the vault. A running queue is a live
+// two-machine conversation, so it needs a tight loop; an idle notebook does not
+// justify polling a git remote that often.
+const NOTEBOOK_ACTIVE_PULL_MS = 10_000;
+const NOTEBOOK_IDLE_PULL_MS = 60_000;
+
+/// Does THIS device have a queue in flight? A step that was fed and has not
+/// finished is the live one — the same rule RunNotebook uses for currentIndex.
+/// Read straight from storage rather than tracked in a variable so a queue
+/// started before this module loaded (or in another tab) still counts.
+function localQueueIsRunning(): boolean {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(NOTEBOOK_KEY_PREFIX)) continue;
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      const steps = JSON.parse(raw)?.steps;
+      if (Array.isArray(steps) && steps.some((s: any) => s?.status === "sent" && s.finishedAt == null)) return true;
+    }
+  } catch { /* private mode / unparseable blob */ }
+  return false;
 }
 
 /// Mid-session NOTEBOOK refresh.
@@ -399,19 +418,100 @@ export async function pullNotebooksNow(): Promise<boolean> {
 
 /// Snapshot + push localStorage to the vault. No-op if nothing changed since
 /// the last push (cheap dedupe via the serialized snapshot).
+///
+/// ONE push in flight at a time. The 5-second poll used to stack a fresh
+/// `vault_write_state` on top of every push still waiting on git, and each one
+/// pinned a tokio blocking thread on the native side; once the pool hit its
+/// 512-thread ceiling every other `spawn_blocking` in the app — chat
+/// persistence, engine start — queued behind vault sync and the app stopped
+/// doing anything at all. Concurrent requests collapse into a single trailing
+/// re-run instead, so the newest state still goes out but never as a queue.
+let _pushing = false;
+let _pushAgain: { force: boolean } | null = null;
+
+/// Take the pending trailing request and clear it.
+///
+/// A function rather than an inline read: control-flow analysis narrows
+/// `_pushAgain` to `null` from the assignment above the `await` — it cannot see
+/// that a coalescing caller reassigns it while the push is suspended — and the
+/// truthy branch of an inline read is therefore typed `never`.
+function takePendingPush(): { force: boolean } | null {
+  const pending = _pushAgain;
+  _pushAgain = null;
+  return pending;
+}
+
 export async function pushNow(force = false): Promise<void> {
   if (!_enabled) return;
+  if (_pushing) {
+    // Keep `force` sticky: a queue publish that lands mid-push must not be
+    // downgraded to a dedupe-able tick by the trailing re-run.
+    _pushAgain = { force: force || _pushAgain?.force || false };
+    return;
+  }
+  _pushing = true;
+  try {
+    let next: boolean | null = force;
+    while (next !== null) {
+      const thisForce: boolean = next;
+      takePendingPush(); // anything queued before this run is carried BY it
+      await pushOnce(thisForce);
+      const pending = takePendingPush();
+      next = pending ? pending.force : null;
+    }
+  } finally {
+    _pushing = false;
+    _pushAgain = null;
+  }
+}
+
+async function pushOnce(force: boolean): Promise<void> {
   const data = snapshot();
   const dataJson = JSON.stringify(data);
   if (!force && dataJson === _lastSnapshotJson) return;
   const syncedAt = Date.now();
   const blob: Blob = { syncedAt, device: await deviceId(), data };
   try {
-    await invoke("vault_write_state", { json: JSON.stringify(blob) });
+    const written = await invoke<boolean>("vault_write_state", { json: JSON.stringify(blob) });
+    // An explicit `false` means the native side coalesced this tick into a sync
+    // that was already running, so NOTHING was written. Leave the dedupe marker
+    // alone so the next poll retries — advancing it here would record unsaved
+    // state as published. (Test harnesses stub this command as `null`, which is
+    // deliberately not `false` and still counts as written.)
+    if (written === false) return;
     _lastSnapshotJson = dataJson;
     setLast(syncedAt); // our own push isn't "newer" to us next launch
   } catch (e) {
     console.warn("[vaultSync] push failed", e);
+  }
+}
+
+/// Publish a QUEUE-lifecycle change to the vault right now.
+///
+/// The notebook is meant to be one shared object, but the only routes to the
+/// vault were a 5-second snapshot poll feeding a 4-second debounce. So a queue
+/// started on device A was invisible on device B for up to ~9 seconds — and not
+/// at all if the run ended or the window closed before both timers elapsed,
+/// which is exactly the "started it here, the other PC never knew" report.
+///
+/// Fully asynchronous: callers dispatch an event and return, so a run-end
+/// handler never waits on git. Overlapping transitions coalesce into one
+/// trailing push rather than queueing a commit per job.
+let _queuePublishing = false;
+let _queuePublishAgain = false;
+export async function publishQueueNow(): Promise<void> {
+  if (!_enabled) return;
+  if (_queuePublishing) { _queuePublishAgain = true; return; }
+  _queuePublishing = true;
+  try {
+    do {
+      _queuePublishAgain = false;
+      // force: a queue transition must go out even when the snapshot dedupe
+      // would call it unchanged (the lease fields it touches are stripped).
+      await pushNow(true);
+    } while (_queuePublishAgain);
+  } finally {
+    _queuePublishing = false;
   }
 }
 
@@ -500,25 +600,27 @@ export async function syncSigningNow(): Promise<boolean> {
   }
 }
 
-/// A vault adoption rewrites localStorage/SQLite under every store's feet, so
-/// a full reload is the blunt-but-reliable repaint. But each reload re-runs
-/// main.tsx — including the update prompt's fresh check() — and two devices
-/// converging can report "changed" for SEVERAL successive sync cycles, so the
-/// update dialog flashed in and out 3-4 times at launch. Allow ONE reload per
-/// launch (sessionStorage survives reloads); after that, repaint in place via
-/// the refresh event and let the next launch pick up any residual diff.
-function reloadOnce(): boolean {
-  try {
-    // Once the user has clicked or typed, a full reload would cancel their
-    // work just because a background sync finished. Components that own data
-    // receive their normal refresh events below instead; a complete repaint is
-    // only acceptable during an untouched initial boot.
-    if (sessionStorage.getItem(USER_INTERACTED_KEY) === "1") return false;
-    if (sessionStorage.getItem("owllm:vault:reloaded")) return false;
-    sessionStorage.setItem("owllm:vault:reloaded", "1");
-  } catch { return false; /* storage blocked → never risk a reload loop */ }
-  location.reload();
-  return true;
+/// Repaint in place after an adoption wrote synced keys under the running UI.
+///
+/// This used to be `location.reload()` — the "blunt-but-reliable" repaint. It
+/// was reliable and it was also the app's visible double start: the window is
+/// already on screen when the launch sync lands, so the user watched the whole
+/// UI reboot. Worse, each reload re-ran main.tsx including the update prompt's
+/// check(), so a converging pair of devices flashed the update dialog in and
+/// out several times.
+///
+/// A reload is not needed. Auditing every reader of a syncable key found only
+/// three module-level caches that hold one across a navigation; everything else
+/// either re-reads localStorage on each get (pageSettings, mcpSettings), lives
+/// in a page that unmounts on tab switch, or re-probes the backend for its real
+/// truth (accountsStore, readinessStore both boot with cacheIsStale = true).
+/// So: drop those three caches, and fire the refresh events that the
+/// already-mounted surfaces listen for.
+function repaintAfterAdopt(): void {
+  invalidateProfileCache();
+  invalidateCloudCatalogueCache();
+  invalidateProgress();
+  try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
 }
 
 /// Start the sync engine once at app launch. Safe to call when logged out /
@@ -549,12 +651,9 @@ export async function startVaultSync(): Promise<void> {
   }
   _enabled = true;
 
-  // 1) Adopt newer remote state, then reload (once) so every store repaints.
-  if (await pullAndAdopt()) {
-    if (reloadOnce()) return;
-    // Already reloaded this launch — repaint what we can in place and carry on.
-    try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
-  }
+  // 1) Adopt newer remote state, then repaint in place (no reload — see
+  //    repaintAfterAdopt for why the full reload was removed).
+  if (await pullAndAdopt()) repaintAfterAdopt();
   // 2) Seed/refresh the vault with our current state (covers a fresh device
   //    that has nothing remote yet).
   _lastSnapshotJson = JSON.stringify(snapshot());
@@ -571,11 +670,10 @@ export async function startVaultSync(): Promise<void> {
   void syncSigningNow();
 
   // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
-  //     If we pulled in newer projects/chats from another device, reload (once)
-  //     so the whole UI repaints from the freshly-synced database.
-  //     syncProjectsNow already fired owllm:projects:refresh as the in-place
-  //     fallback when the reload budget is spent.
-  if (await syncProjectsNow() && reloadOnce()) return;
+  //     syncProjectsNow fires owllm:projects:refresh itself when it changed
+  //     anything, and every other list_projects caller refetches on mount, so
+  //     the freshly-synced rows are on screen without a reload.
+  await syncProjectsNow();
 
   // 3) Keep pushing on the moments that matter.
   wireListeners();
@@ -593,7 +691,7 @@ export async function onVaultConnected(): Promise<void> {
   invoke("vault_sync_teams").catch(() => {});
   void syncDevicesNow();
   void syncSigningNow();
-  if (await syncProjectsNow()) reloadOnce();
+  await syncProjectsNow();
 }
 
 /// Push on tab-hidden, app-close, and a debounced diff poll (localStorage's
@@ -621,15 +719,29 @@ function wireListeners(): void {
   // reconcile projects/facts as a backstop for native memory writes and abrupt
   // exits; event-driven writes normally sync after the 4-second debounce.
   window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
+  // A queue-lifecycle write publishes immediately — see publishQueueNow.
+  window.addEventListener(NOTEBOOK_QUEUE_EVENT_NAME, () => { void publishQueueNow(); });
+  // A notebook surface opening asks for the peer's copy before the user acts on
+  // a stale queue.
+  window.addEventListener(NOTEBOOK_PULL_EVENT_NAME, () => { void pullNotebooksNow(); });
   // Notebook queues are the one localStorage store that must converge WITHOUT
   // waiting for the next launch — otherwise a step a peer already completed
   // keeps being re-fed here. Safe mid-session: see pullNotebooksNow.
-  window.setInterval(() => { if (_enabled) void pullNotebooksNow(); }, 60_000);
-  // Fleet liveness heartbeat: republish OUR device record (fresh published_at)
-  // and ingest peers' heartbeats. Without this the record was published once at
-  // launch, so isDeviceOnline's 5-minute freshness window was unhittable for
-  // any idle machine and every fleet count went stale.
-  window.setInterval(() => { if (_enabled) void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS);
+  //
+  // Self-rescheduling rather than a flat interval: while a queue is actually
+  // running the two PCs are both writing, so a minute of blindness is long
+  // enough to re-feed a card the peer already finished. Idle notebooks keep the
+  // cheap cadence — this polls a git remote, so it is not free.
+  const scheduleNotebookPull = () => {
+    // `window.` like every other timer armed by wireListeners, NOT the bare
+    // global used by schedulePush: these fire at startup, so harnesses stub
+    // them out to keep a test process from being held open by a live timer.
+    window.setTimeout(() => {
+      if (!_enabled) { scheduleNotebookPull(); return; }
+      void pullNotebooksNow().finally(scheduleNotebookPull);
+    }, localQueueIsRunning() ? NOTEBOOK_ACTIVE_PULL_MS : NOTEBOOK_IDLE_PULL_MS);
+  };
+  scheduleNotebookPull();
 }
 
 // githubDisconnect emits this after the native credential scrub completes.

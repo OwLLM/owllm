@@ -1,0 +1,28 @@
+# Standalone harness for the bug-report seal.
+# NOT a workspace member of the app: Rust *test* binaries fail to launch in this
+# dev environment (STATUS_ENTRYPOINT_NOT_FOUND), so the proof runs as a normal
+# `cargo run` binary that includes src/support_seal.rs via #[path].
+# It seals a known plaintext with the EXACT code the app ships, so the Node
+# decryptor the team uses is checked against the real implementation.
+# Run it with: node owllm-desktop/ui/src/pages/agentic/bugReportIntake.verify.run.mjs --live
+[package]
+name = "seal-harness"
+version = "0.1.0"
+authors = ["Far island Corporation Ltd."]
+publish = false
+license-file = "../../../LICENSE"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "seal-harness"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
+serde_json = "1"
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

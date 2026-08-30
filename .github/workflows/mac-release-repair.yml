@@ -246,7 +246,9 @@ jobs:
           set -euo pipefail
           have="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
-          for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+          for name in OwLLM.Desktop.Setup.exe \
+                      OwLLM.Desktop.AppImage OwLLM.Desktop.deb OwLLM.Desktop.x86_64.rpm \
+                      OwLLM.Desktop.aarch64.AppImage OwLLM.Desktop.arm64.deb OwLLM.Desktop.aarch64.rpm; do
             printf '%s\n' "$have" | grep -qxF "$name" && continue
             src="$(gh api "repos/$RELEASE_REPO/releases?per_page=30" \
               --jq "[.[] | select(.draft|not) | select(.tag_name != \"$TAG\") | select(any(.assets[]; .name == \"$name\"))] | first | .tag_name")"
@@ -285,7 +287,8 @@ jobs:
           set -euo pipefail
           fail=0
           for name in OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg \
-                      OwLLM.Desktop.AppImage OwLLM.Desktop.deb; do
+                      OwLLM.Desktop.AppImage OwLLM.Desktop.deb OwLLM.Desktop.x86_64.rpm \
+                      OwLLM.Desktop.aarch64.AppImage OwLLM.Desktop.arm64.deb OwLLM.Desktop.aarch64.rpm; do
             url="https://github.com/$RELEASE_REPO/releases/latest/download/$name"
             code="$(curl -s -o /dev/null -w '%{http_code}' -L "$url")"
             echo "  $name -> HTTP $code"

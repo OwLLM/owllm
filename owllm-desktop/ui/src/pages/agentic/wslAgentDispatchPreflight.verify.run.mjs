@@ -27,7 +27,9 @@ check(
   "the exact non-zero help-banner regression is covered by a Rust unit test",
 );
 check(
-  /pub fn wsl_isolation_get\(\)[\s\S]{0,400}normalize_isolation_distro\(cfg\)/.test(wsl)
+  // The probe moved off the UI thread into spawn_blocking, so the read that
+  // normalizes is now wsl_isolation_get_blocking; the invariant is unchanged.
+  /pub fn wsl_isolation_get_blocking\(\)[\s\S]{0,400}normalize_isolation_distro\(cfg\)/.test(wsl)
     && /fn normalize_isolation_distro[\s\S]{0,900}eq_ignore_ascii_case/.test(wsl),
   "corrupt persisted distro preferences are normalized against the live list",
 );
@@ -39,5 +41,130 @@ check(
     && /data-ui="AgentRunError"[\s\S]{0,900}\{runError\}/.test(agents),
   "agent preflight failures are visibly rendered instead of silently stopping",
 );
+
+const sandbox = read("src-tauri/src/sandbox.rs");
+check(
+  sandbox.includes("pub struct WarmCheckResult")
+    && sandbox.includes("host_fallback: Option<String>")
+    && sandbox.includes("reason: Option<String>"),
+  "sandbox_warm_and_check returns diagnostics plus a host fallback path",
+);
+check(
+  sandbox.includes("fn wsl_unc_to_host_path")
+    && sandbox.includes("Folder not reachable through WSL distro")
+    && sandbox.includes("WSL command failed:"),
+  "WSL failures expose a precise reason instead of a generic WSL-starting message",
+);
+// WarmCheckResult crosses the Tauri boundary through serde. It is
+// `#[serde(rename_all = "camelCase")]`, so the fallback field arrives as
+// `hostFallback` — and the UI read `host_fallback` for two releases, making the
+// host-fallback branch permanently `undefined`. Every WSL start failure
+// (0x800705aa CreateVm on a resource-starved host) therefore BLOCKED the run
+// instead of degrading to the real Windows folder. `reachable`/`reason` are
+// single words, so they survived the mismatch and the banner still looked
+// informative — which is exactly why this hid for so long. Pin the casing
+// contract itself, not a literal type line: assert the Rust rename attribute
+// and that the UI reads the camelCase spelling and NEVER the snake_case one.
+check(
+  /#\[serde\(rename_all = "camelCase"\)\]\s*pub struct WarmCheckResult/.test(sandbox),
+  "WarmCheckResult declares the camelCase wire contract it is read through",
+);
+check(
+  /type WarmCheckResult = \{[^}]*hostFallback: string \| null[^}]*\}/.test(agents)
+    && /check\?\.hostFallback/.test(agents)
+    && !/host_fallback/.test(agents)
+    && /effectiveRunCwd = fallback/.test(agents)
+    && /projectCwd = effectiveRunCwd/.test(agents),
+  "UI reads the camelCase fallback field and runs the rest of dispatch from it",
+);
+// A WEDGED WSL must degrade like a failed one — the timeout arm returning
+// host_fallback: None was the last path that could still block a run outright.
+check(
+  /timed out — the distro may be starting/.test(sandbox)
+    && /host_fallback: wsl_unc_to_host_path\(&cwd_for_timeout\)/.test(sandbox),
+  "a timed-out WSL warm/check still offers the host folder instead of blocking",
+);
+check(
+  agents.includes("WSL isolation path not reachable — running on the host folder")
+    && /sync_project_skills.*cwd: effectiveRunCwd/.test(agents),
+  "fallback is announced to the user and skill sync uses the host cwd",
+);
+
+// ── In-distro scripts are BOUNDED (2026-08-14 audit) ────────────────────────
+// run_in_distro_script_user used wait_with_output() with no ceiling, so a
+// wedged wsl.exe (cold-start hang, dead 9P server) stalled CLI prepare /
+// sandbox probes / login sync forever — the invisible half of the historical
+// "wsl exited 1" run-killer family. Every caller now inherits a ceiling, the
+// child is KILLED at the deadline, and the error names the remedy.
+check(
+  wsl.includes("const WSL_SCRIPT_TIMEOUT: Duration")
+    && /pub fn run_in_distro_script_user\([\s\S]{0,300}run_in_distro_script_user_with_timeout\(distro, user, script, WSL_SCRIPT_TIMEOUT\)/.test(wsl),
+  "every in-distro script inherits the shared liveness ceiling",
+);
+check(
+  /Instant::now\(\) >= deadline[\s\S]{0,300}child\.kill\(\)/.test(wsl)
+    && wsl.includes("wsl script timed out after"),
+  "a wedged wsl.exe is killed at the deadline with an actionable error",
+);
+check(
+  /read_to_end/.test(wsl.slice(wsl.indexOf("pub fn run_in_distro_script_user_with_timeout"))),
+  "both pipes are drained on threads so a chatty script can't dead-lock the poll",
+);
+{
+  const setup = read("src-tauri/src/wsl_setup.rs");
+  check(
+    setup.includes("run_in_distro_script_user_with_timeout")
+      && setup.includes("60 * 60"),
+    "guided-setup installs opt into an explicit longer ceiling, not no bound",
+  );
+}
+
+// An interrupted dpkg wedges EVERY later apt-get with exit 100 --
+// `E: dpkg was interrupted, you must manually run 'dpkg --configure -a'` -- so
+// accounts_prepare_cli_for_cwd fails before the agent's CLI ever runs. Reported
+// live as `wsl exited 100: E: dpkg was interrupted ...`. Proven in an isolated
+// chroot: SIGKILL dpkg mid-transaction and the next `apt-get install` exits 100;
+// with the repair in front of it, the same command exits 0 and dpkg audits clean.
+// The gate does not run `cargo test`, so the contract is pinned here.
+{
+  const accounts = read("src-tauri/src/accounts.rs");
+  check(
+    accounts.includes("pub(crate) const DPKG_REPAIR_SNIPPET"),
+    "an interrupted dpkg has a named self-heal, like npm's ENOTEMPTY one",
+  );
+  const snippet = accounts.slice(
+    accounts.indexOf("pub(crate) const DPKG_REPAIR_SNIPPET"),
+    accounts.indexOf("/// Ensure the selected subscription CLI exists"),
+  );
+  check(
+    snippet.includes("dpkg --audit") && snippet.includes("/var/lib/dpkg/updates"),
+    "the repair tests BOTH of apt's own interrupted-dpkg triggers",
+  );
+  check(
+    snippet.includes("dpkg --configure -a")
+      && snippet.includes("apt-get install -f -y")
+      && snippet.includes("apt-get install --reinstall -y"),
+    "reinstall-required packages are reinstalled, not merely re-configured",
+  );
+  check(
+    snippet.includes("command -v dpkg") && snippet.trimEnd().endsWith('fi; true; ";'),
+    "the repair no-ops off dpkg systems and can never abort the install",
+  );
+  const provision = accounts.slice(
+    accounts.indexOf("pub async fn accounts_prepare_cli_for_cwd"),
+    accounts.indexOf("pub async fn codex_cli_upgrade_for_cwd"),
+  );
+  check(
+    provision.includes("repair = DPKG_REPAIR_SNIPPET,")
+      && provision.indexOf("{repair}") > -1
+      && provision.indexOf("{repair}") < provision.indexOf("{install}"),
+    "WSL CLI provisioning repairs dpkg BEFORE its apt-get install runs",
+  );
+  check(
+    sandbox.includes("{repair} {inst}")
+      && sandbox.includes("repair = crate::accounts::DPKG_REPAIR_SNIPPET,"),
+    "Linux host provisioning repairs dpkg before its apt-get too",
+  );
+}
 
 console.log(`wsl agent-dispatch preflight verification: ${passed}/${passed} passed`);

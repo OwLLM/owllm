@@ -87,6 +87,15 @@ impl DeviceSecrets {
     pub fn device_id(&self) -> String {
         device_id_from_ed_pub(&self.ed25519_public())
     }
+
+    /// Sign an arbitrary message with this device's identity key.
+    ///
+    /// Used to prove ownership of a challenge nonce. Callers MUST domain-separate
+    /// what they sign, so a signature produced for one purpose can never be
+    /// replayed as a valid signature for another.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key().sign(message).to_bytes()
+    }
 }
 
 /// `device_id = hex(SHA-256(ed25519_public_key))`. Deterministic and bound to

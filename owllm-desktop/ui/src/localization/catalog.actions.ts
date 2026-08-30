@@ -99,6 +99,7 @@ export const ACTION_CATALOG: string[][] = [
   ["Hide", "隐藏", "숨기기", "非表示", "إخفاء", "Nascondi", "छिपाएँ", "Ocultar"],
   ["Unknown country", "未知国家/地区", "알 수 없는 국가", "不明な国", "بلد غير معروف", "Paese sconosciuto", "अज्ञात देश", "País desconhecido"],
   ["Unknown city", "未知城市", "알 수 없는 도시", "不明な都市", "مدينة غير معروفة", "Città sconosciuta", "अज्ञात शहर", "Cidade desconhecida"],
+  ["Version unknown", "版本未知", "버전 알 수 없음", "バージョン不明", "إصدار غير معروف", "Versione sconosciuta", "संस्करण अज्ञात", "Versão desconhecida"],
   ["Server", "服务器", "서버", "サーバー", "خادم", "Server", "सर्वर", "Servidor"],
   ["connection details", "连接详情", "연결 세부정보", "接続の詳細", "تفاصيل الاتصال", "dettagli connessione", "कनेक्शन विवरण", "detalhes da conexão"],
   ["Click the flag for connection details", "点击国旗查看连接详情", "연결 세부정보를 보려면 국기를 클릭하세요", "接続の詳細は国旗をクリック", "انقر على العلم لعرض تفاصيل الاتصال", "Fai clic sulla bandiera per i dettagli", "कनेक्शन विवरण के लिए झंडे पर क्लिक करें", "Clique na bandeira para ver os detalhes"],

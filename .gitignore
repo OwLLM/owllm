@@ -30,6 +30,7 @@ build/
 logs/
 tmp/
 temp/
+.tmp_wheels/
 
 # Agent runtime — local-only state (DB, agent secret keys).
 LLM/data/owllm_state.db
@@ -211,3 +212,8 @@ id_ed25519
 browser_profile/
 EBWebView/
 Login Data
+
+# Disk-janitor quarantine: a build cache renamed aside before deletion
+# (fleet.rs QUARANTINE_PREFIX). Applies to EVERY subproject, not just
+# owllm-desktop/ — see is_app_scratch.
+.owllm-reclaimed-*/

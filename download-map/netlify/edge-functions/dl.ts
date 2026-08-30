@@ -20,14 +20,17 @@ import { getStore } from "@netlify/blobs";
 import { resolveDownloadTarget } from "./resolve.mjs";
 
 // Best-effort static fallbacks, used only if the live release scan fails
-// (GitHub API down/rate-limited). Windows keeps its stable-name direct link;
-// the others fall back to the releases page so the user can still grab a build
-// rather than hitting a 404.
+// (GitHub API down/rate-limited). Every fallback is a stable, direct installer
+// URL. A download button must never dump a user into GitHub's raw asset list.
 const FALLBACK: Record<string, string> = {
   win: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe",
-  mac: "https://github.com/OwLLM/owllm/releases/latest",
-  linux: "https://github.com/OwLLM/owllm/releases/latest",
-  deb: "https://github.com/OwLLM/owllm/releases/latest",
+  mac: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg",
+  linux: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage",
+  deb: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb",
+  rpm: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.x86_64.rpm",
+  "linux-arm64": "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.AppImage",
+  "deb-arm64": "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.arm64.deb",
+  "rpm-arm64": "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.rpm",
 };
 const DEFAULT_PLATFORM = "win";
 

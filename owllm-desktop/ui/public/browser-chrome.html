@@ -175,12 +175,22 @@
       }
       #url::placeholder { color: var(--fg-muted); }
       #url:focus { border-color: rgba(255,255,255,0.55); }
+      #downloadToast {
+        display: none; position: fixed; right: 12px; bottom: 7px; z-index: 1100;
+        max-width: min(620px, calc(100vw - 24px)); padding: 6px 12px;
+        border-radius: 999px; background: #166534; color: #fff;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.42); box-sizing: border-box;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font-size: 12px; font-weight: 650; pointer-events: none;
+      }
+      #downloadToast.error { background: #991b1b; }
       #drag { flex: 1; height: 100%; min-width: 10px; }
       .winbtns { display: flex; gap: 2px; margin-left: 4px; }
     </style>
   </head>
   <body>
     <div id="windowFrame" aria-hidden="true"></div>
+    <div id="downloadToast" role="status" aria-live="polite"></div>
     <div id="grips" aria-hidden="true">
       <div class="grip n" data-dir="n"></div>
       <div class="grip s" data-dir="s"></div>
@@ -404,6 +414,26 @@
           if (i.url != null) renderSite(i.url);
         } catch (e) {}
       };
+      var downloadToastTimer = 0;
+      window.__owllmDownloadSet = function (info) {
+        try {
+          var i = typeof info === "string" ? JSON.parse(info) : (info || {});
+          var language = localStorage.getItem("owllm:language") || "en";
+          var copy = CHROME_COPY[language] || CHROME_COPY.en;
+          var message = i.success
+            ? (i.filename && i.folder
+                ? copy[10].replace("{file}", i.filename).replace("{folder}", i.folder)
+                : copy[11])
+            : copy[12];
+          var toast = $("downloadToast");
+          toast.textContent = message;
+          toast.title = message;
+          toast.className = i.success ? "" : "error";
+          toast.style.display = "block";
+          clearTimeout(downloadToastTimer);
+          downloadToastTimer = setTimeout(function () { toast.style.display = "none"; }, 6000);
+        } catch (e) {}
+      };
       // Rust → tab strip: the live tab list [{id, title, active}]. One pill per
       // open page; click selects, × closes, + asks Rust for a fresh tab.
       var closeTabTitle = "Close tab";
@@ -527,6 +557,14 @@
         "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें", "बंद टैब फिर से खोलें"],
         "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba", "Reabrir aba fechada"]
       };
+      CHROME_COPY.en.push("Saved {file} to {folder}", "Download saved", "Download failed. Try again.");
+      CHROME_COPY["zh-CN"].push("已将 {file} 保存到 {folder}", "下载已保存", "下载失败，请重试。");
+      CHROME_COPY.ko.push("{file}을(를) {folder}에 저장했습니다", "다운로드를 저장했습니다", "다운로드에 실패했습니다. 다시 시도하세요.");
+      CHROME_COPY.ja.push("{file} を {folder} に保存しました", "ダウンロードを保存しました", "ダウンロードに失敗しました。もう一度お試しください。");
+      CHROME_COPY.ar.push("تم حفظ {file} في {folder}", "تم حفظ التنزيل", "فشل التنزيل. حاول مرة أخرى.");
+      CHROME_COPY.it.push("{file} salvato in {folder}", "Download salvato", "Download non riuscito. Riprova.");
+      CHROME_COPY.hi.push("{file} को {folder} में सहेजा गया", "डाउनलोड सहेजा गया", "डाउनलोड विफल रहा। फिर से कोशिश करें।");
+      CHROME_COPY.pt.push("{file} salvo em {folder}", "Download salvo", "Falha no download. Tente novamente.");
       function applyLanguage(language) {
         var copy = CHROME_COPY[language] || CHROME_COPY.en;
         document.documentElement.lang = language in CHROME_COPY ? language : "en";

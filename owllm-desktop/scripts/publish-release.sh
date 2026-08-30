@@ -28,6 +28,11 @@ else
   have_gh() { command -v gh >/dev/null 2>&1; }
 fi
 
+# Release-body composition: protects a hand-written changelog while always
+# rewriting the platform-coverage disclosure. Defines compose_release_body().
+# shellcheck source=lib/release-body.sh
+. "$_SCRIPT_DIR/lib/release-body.sh"
+
 # Target GitHub repo for `gh release` — resolution order:
 #   1. $OWLLM_RELEASE_REPO (exported by finish-and-publish.sh from the Project
 #      Card's release.repo, or set by the caller)
@@ -179,14 +184,34 @@ assert_installer_version() {
 # ---- per-platform artifact map -------------------------------------------
 # One script, three OSes. INSTALLER = the human-download asset (stable name),
 # UPDATER_ARTIFACT = what minisign signs and latest.json points at.
-# Windows keeps its historical /latest/ URL (unchanged behaviour); macOS and
-# Linux use VERSIONED URLs so a later Windows-only publish can never leave a
-# platform key pointing at an asset that no longer matches its signature.
+# EVERY platform uses a VERSIONED (tag-pinned) URL so a later publish can never
+# leave a platform key pointing at an asset that no longer matches its
+# signature. Windows kept a floating /releases/latest/download/ URL until
+# v1.0.18 and that is exactly how it broke: a client that fetched the v1.0.17
+# manifest before the v1.0.18 tag was promoted then downloaded the exe AFTER
+# promotion, so it checked the 1.0.18 binary against the 1.0.17 signature and
+# reported "The signature verification failed" — permanently, because retrying
+# re-downloads the binary but not the manifest.
 case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
   Darwin)               HOST_OS="macos" ;;
+  # WSL defaults to "windows" because this script is normally invoked from the
+  # WSL sandbox to drive a WINDOWS build through Windows tooling (signtool,
+  # node.exe — see find_signtool/to_windows_path). The SAME distro also builds
+  # the native linux-x86_64 AppImage, and that run was mis-typed as windows: it
+  # looked for dist/OwLLM Desktop Setup.exe, so the Linux host could never
+  # publish itself and its artifact had to be signed and uploaded by hand.
   *)                    if [ "$is_wsl_windows" = 1 ]; then HOST_OS="windows"; else HOST_OS="linux"; fi ;;
 esac
+# Explicit override for the ambiguous WSL case above. Only the two values this
+# script can genuinely be ambiguous about are accepted, so a typo fails loudly
+# instead of silently selecting the wrong artifact set.
+if [ -n "${OWLLM_HOST_OS:-}" ]; then
+  case "$OWLLM_HOST_OS" in
+    linux|windows) HOST_OS="$OWLLM_HOST_OS" ;;
+    *) echo "OWLLM_HOST_OS must be 'linux' or 'windows' (got '$OWLLM_HOST_OS')" >&2; exit 2 ;;
+  esac
+fi
 ARCH="$(uname -m)"
 case "$ARCH" in arm64|aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
 # Extra latest.json keys served by the SAME updater artifact (macOS universal).
@@ -196,7 +221,7 @@ case "$HOST_OS" in
     PLATFORM_KEY="windows-x86_64"
     INSTALLER="dist/OwLLM Desktop Setup.exe"
     UPDATER_ARTIFACT="$INSTALLER"
-    URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop.Setup.exe"
     ;;
   macos)
     # macOS ships ONE universal (arm64 + x86_64) bundle, so both Apple platform
@@ -243,6 +268,15 @@ preflight_host_disk "$APP"
 # because commit subjects can contain quotes that broke the inner bash -c.
 [ -n "${OWLLM_RELEASE_NOTES:-}" ] && [ -z "$NOTES" ] && NOTES="$OWLLM_RELEASE_NOTES"
 
+# Supplied notes that are just the title are worse than none: NOTES is also
+# latest.json's "notes", which the in-app update popup renders, so v1.0.16 and
+# v1.0.17 told every user their update was called "OwLLM Desktop 1.0.16" and
+# nothing else. Treat a title-shaped value as absent and derive the real thing.
+if [ -n "$NOTES" ] && body_is_placeholder "$NOTES" "$TAG" "$VERSION"; then
+  echo "⚠ supplied release notes are a placeholder ($(printf '%s' "$NOTES" | head -n1)) — deriving from git history instead"
+  NOTES=""
+fi
+
 # No --notes → derive them from git history. Version-bump commits (the ones
 # touching tauri.conf.json) mark release boundaries, and commit subjects in
 # this repo are written as release notes ("vX.Y.Z: what shipped"), so the
@@ -288,6 +322,7 @@ command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
 # dated. BODY is the GitHub release body; NOTES stays clean for latest.json,
 # whose text renders in the in-app update popup.
 BODY="$NOTES"
+COVERAGE_TEXT=""
 COVERAGE_MD="dist/platform-coverage.md"
 COVERAGE_JSON="dist/platform-coverage.json"
 RELEASES_JSON="dist/releases.json"
@@ -324,9 +359,10 @@ else
       fail "platform coverage check errored (rc=$COVERAGE_RC)"
     fi
     # Disclosure rides in the release body for every publish, acknowledged or not.
-    [ -s "$COVERAGE_MD" ] && BODY="$NOTES
-
-$(cat "$COVERAGE_MD")"
+    if [ -s "$COVERAGE_MD" ]; then
+      COVERAGE_TEXT="$(cat "$COVERAGE_MD")"
+      BODY="$(compose_release_body "$NOTES" "$COVERAGE_TEXT")"
+    fi
   fi
 fi
 
@@ -475,6 +511,24 @@ case "$HOST_OS" in
       # updater path is the AppImage).
       cp -f "$BUNDLE"/deb/*.deb "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" 2>/dev/null || true
       cp -f "$BUNDLE"/rpm/*.rpm "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" 2>/dev/null || true
+
+      # Human-facing stable names. The versioned files remain the signed,
+      # tag-pinned updater artifacts; these aliases let the installation guide
+      # link one understandable package per distro/architecture without ever
+      # exposing GitHub's raw asset list.
+      if [ "$ARCH" = "aarch64" ]; then
+        cp -f "$INSTALLER" "dist/OwLLM.Desktop.aarch64.AppImage"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop.arm64.deb"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" "dist/OwLLM.Desktop.aarch64.rpm"
+      else
+        cp -f "$INSTALLER" "dist/OwLLM.Desktop.AppImage"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop.deb"
+        [ ! -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" ] || \
+          cp -f "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" "dist/OwLLM.Desktop.x86_64.rpm"
+      fi
     fi
     ;;
 esac
@@ -589,7 +643,15 @@ step "3/5 latest.json (merge platform keys)"
 # same version (coordinated multi-OS publish of one tag). A stale entry from
 # an older version would make that platform's updater "install" an update
 # that leaves the app on the old version — an infinite update loop.
-EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)"
+# Seed from THIS TAG's manifest, not from `releases/latest`: until the tag is
+# promoted (every prerelease, and every multi-OS publish before promotion)
+# `releases/latest` still serves an OLDER version, the version guard below
+# rejects it, and each host's run wipes the sibling platforms it just merged.
+EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/download/$TAG/latest.json" 2>/dev/null || true)"
+case "$EXISTING_LATEST" in
+  '{'*) : ;;
+  *) EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)" ;;
+esac
 SIG="$SIG" NOTES="$NOTES" VERSION="$VERSION" URL="$URL" \
 PLATFORM_KEY="$PLATFORM_KEY" EXTRA_PLATFORM_KEYS="$EXTRA_PLATFORM_KEYS" \
 EXISTING_LATEST="$EXISTING_LATEST" node -e '
@@ -613,17 +675,26 @@ step "4/5 gh release ($TAG, $_chan)"
 LATEST_FLAG="--latest"; [ "$PRERELEASE" = 1 ] && LATEST_FLAG="--prerelease"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
 UPLOADS=("$INSTALLER" "$LATEST")
 [ "$UPDATER_ARTIFACT" = "$INSTALLER" ] || UPLOADS+=("$UPDATER_ARTIFACT")
-for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm"; do
+for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" \
+             "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" \
+             "dist/OwLLM.Desktop.AppImage" \
+             "dist/OwLLM.Desktop.deb" \
+             "dist/OwLLM.Desktop.x86_64.rpm" \
+             "dist/OwLLM.Desktop.aarch64.AppImage" \
+             "dist/OwLLM.Desktop.arm64.deb" \
+             "dist/OwLLM.Desktop.aarch64.rpm"; do
   [ -f "$extra" ] && UPLOADS+=("$extra")
 done
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "${UPLOADS[@]}" --repo "$REPO" --clobber
-  # Refresh the body too — but never clobber notes a human wrote by hand:
-  # only overwrite when the existing body is empty or just the tag/version.
-  EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null | tr -d ' \r\n')"
-  if [ -z "$EXISTING_BODY" ] || [ "$EXISTING_BODY" = "$TAG" ] || [ "$EXISTING_BODY" = "$VERSION" ] || [ "$EXISTING_BODY" = "Release$VERSION" ]; then
-    gh release edit "$TAG" --repo "$REPO" --notes "$BODY"
-  fi
+  # Refresh the body. The changelog half is still protected — a hand-written one
+  # survives — but the platform-coverage table is a disclosure of what this
+  # release actually ships, so it is rewritten unconditionally. It used to ride
+  # inside the protected half, so publishing into a pre-created release object
+  # (v1.0.19, body "OwLLM Desktop 1.0.19") silently dropped it.
+  EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null || true)"
+  gh release edit "$TAG" --repo "$REPO" \
+    --notes "$(compose_release_body "$NOTES" "$COVERAGE_TEXT" "$EXISTING_BODY" "$TAG" "$VERSION")"
   if [ "$DRAFT" = 1 ]; then :
   elif [ "$PRERELEASE" = 1 ]; then gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
   else gh release edit "$TAG" --repo "$REPO" --draft=false --latest
@@ -639,14 +710,26 @@ fi
 # So after this tag is Latest, copy forward the newest existing stable-named
 # installer for any OS this build didn't produce. Purely additive and
 # failure-tolerant — a hiccup here never fails the publish.
+#
+# EXCEPT during a coordinated multi-host release, where the sibling platform is
+# not missing — it is still building. Carrying an older version's binary into
+# the new tag there publishes a STALE installer under a version that never
+# contained it, and the real upload then has to win a race against it. v1.0.12
+# shipped a v1.0.11 dmg for exactly this reason: the Windows host finished
+# first, carried the old dmg forward, and the Mac's later upload collided with
+# the name it had just created. OWLLM_PENDING_PLATFORMS lists the stable asset
+# names still to come, and this skips them.
 carry_forward_assets() {
   local repo="$1" tag="$2"
-  local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb"
+  local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb OwLLM.Desktop.x86_64.rpm OwLLM.Desktop.aarch64.AppImage OwLLM.Desktop.arm64.deb OwLLM.Desktop.aarch64.rpm"
   local have tmp src name
   have="$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
   tmp="$(mktemp -d)"
   for name in $names; do
     printf '%s\n' "$have" | grep -qxF "$name" && continue   # already on this tag
+    case " ${OWLLM_PENDING_PLATFORMS:-} " in
+      *" $name "*) echo "  pending on another host, not carrying forward: $name"; continue ;;
+    esac
     # per_page=100, not 30: GitHub's list endpoint returns DRAFTS first
     # regardless of date, so a short page can be consumed entirely by drafts and
     # find no published release to carry from.
@@ -704,4 +787,26 @@ if [ "$SERVED" != "$VERSION" ]; then
   fail "updater serves '$SERVED', expected '$VERSION' (after ~6min; API Latest is '$API_TAG')"
 fi
 [ "$HTTP" = "200" ] || fail "installer HTTP $HTTP (expected 200)"
+
+# A coordinated publish merges entries produced on several hosts. Checking only
+# this host's $URL allowed a stale Windows entry with a space-containing filename
+# to ship in v1.0.30 even though GitHub uploaded the dotted stable asset name.
+# Probe every URL the public manifest actually advertises before reporting OK.
+MANIFEST="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")" \
+  || fail "could not download the public updater manifest for link verification"
+BROKEN_PLATFORM_URLS=0
+while IFS=$'\t' read -r platform url; do
+  [ -n "$platform" ] && [ -n "$url" ] || continue
+  status="$(curl -s -o /dev/null -w "%{http_code}" -L "$url")"
+  echo "  updater target: $platform HTTP $status"
+  if [ "$status" != "200" ]; then
+    echo "  broken updater target: $platform -> $url" >&2
+    BROKEN_PLATFORM_URLS=1
+  fi
+done < <(MANIFEST="$MANIFEST" node -e '
+  const manifest=JSON.parse(process.env.MANIFEST);
+  for(const [platform,entry] of Object.entries(manifest.platforms||{})) {
+    process.stdout.write(`${platform}\t${entry.url||""}\n`);
+  }')
+[ "$BROKEN_PLATFORM_URLS" = 0 ] || fail "one or more public updater URLs are broken"
 echo "PUBLISH_OK: $TAG live — updater serves $VERSION, installer 200."

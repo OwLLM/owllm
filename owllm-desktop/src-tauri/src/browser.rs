@@ -33,15 +33,17 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::webview::{Color, NewWindowResponse, Webview, WebviewBuilder};
+use tauri::webview::{Color, DownloadEvent, NewWindowResponse, Webview, WebviewBuilder};
 use tauri::{
-    LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
+    Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
 
 /// OwLLM dark base (matches the UI `--bg-panel` floor `#0e1117`), so the agent
@@ -66,6 +68,13 @@ const BROWSER_LABEL: &str = "owllm-browser";
 const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
 const CHROME_EVENT_PATH: &str = "/__owllm_browser_event__";
+
+/// Shown in a tab whose page process keeps dying, on either engine. A tab that
+/// kills its own renderer on load must not be reloaded forever, and a webview
+/// left unreloaded paints solid black — so the last recovery step is a readable
+/// local page. WebKitGTK loads it with `load_html`, WebView2 with
+/// `NavigateToString` (see `crate::Webview2Recovery::ReloadThenNotice`).
+pub(crate) const TAB_PROCESS_STOPPED_HTML: &str = r#"<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>body{margin:0;background:#0e1117;color:#e7eaf0;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{max-width:40rem;padding:2rem}h1{font-size:1.2rem}p{color:#aeb6c5;line-height:1.5}</style><main><h1>This page’s browser process stopped</h1><p>OwLLM kept the app and your other work running. Reload the tab to try the page again.</p></main>"#;
 
 /// Height of the OwLLM chrome bar (logical px) in the framed window:
 /// a 58px identity strip (30px taller than a plain tab bar) that carries the
@@ -115,13 +124,15 @@ fn frame_t() -> f64 {
 const PARK_X: f64 = -20000.0;
 
 /// Open tabs of the framed browser window, strip order + the active id.
-/// Each tab is its own content webview. Ordinary tabs share the persistent
-/// profile; provider-auth tab ids are tracked separately and stay private.
+/// Each tab is its own content webview. Ordinary tabs share one persistent
+/// profile; provider-auth tabs use persistent provider-isolated profiles and
+/// are excluded from ordinary browser restore/history.
 struct Tabs {
     order: Vec<u64>,
     active: u64,
     titles: HashMap<u64, String>,
-    /// OAuth tabs must not inherit or persist ordinary browser credentials.
+    /// OAuth tabs must not inherit ordinary browser credentials or be restored
+    /// as ordinary browsing tabs. Their own provider session remains durable.
     private_tabs: HashSet<u64>,
 }
 
@@ -141,6 +152,19 @@ static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
 static BROWSER_SUSPENDED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "linux")]
 static RETIRED_LINUX_TABS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// How long a freshly opened tab is given to commit a document before the
+/// session is judged wedged. A healthy tab records its URL as soon as the
+/// navigation commits — measured live, a new tab already reported both its URL
+/// and its title on the very next call — so this budget is only ever spent by a
+/// session that is actually broken.
+const TAB_COMMIT_BUDGET: Duration = Duration::from_secs(3);
+
+/// At most one automatic restart per window. A wedge that survives a restart is
+/// an environment problem; restarting again would destroy the user's tabs on a
+/// loop while telling the agent nothing new.
+const AUTO_RESTART_COOLDOWN: Duration = Duration::from_secs(120);
+static LAST_AUTO_RESTART: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn tab_label(id: u64) -> String {
     format!("{CONTENT_LABEL}-{id}")
@@ -285,6 +309,39 @@ fn apply_chrome(win: &Window) {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn apply_chrome(_win: &Window) {}
 
+/// Run `f` against `win` on the UI (event-loop) thread and wait for it.
+///
+/// Native window mutation is main-thread-only: AppKit tears down and rebuilds
+/// the window's NSThemeFrame inside `setStyleMask:`, and GTK owns its widget
+/// tree the same way. Every window built here is built by a
+/// `#[tauri::command(async)]`, which Tauri runs on a tokio worker — so doing
+/// that work inline is off-thread by construction. It crashed OwLLM three times
+/// on 2026-08-09: twice trapping immediately inside `NSWMWindowCoordinator`
+/// (v1.0.7, v1.0.10) and once as a delayed main-thread SIGSEGV in
+/// `NSViewUpdateVibrancyForSubtree` on the next display cycle, from a
+/// half-swapped view tree (v1.0.7). A standalone AppKit probe of the same call
+/// sequence crashed 5/5 off-thread and survived 5/5 on the main thread.
+///
+/// Waits, because callers depend on the window being set up before they add
+/// child webviews. Runs inline when we already are the UI thread, so a
+/// UI-thread caller can never deadlock waiting on its own dispatch.
+fn on_ui_thread(win: &Window, f: impl FnOnce(&Window) + Send + 'static) -> Result<(), String> {
+    if crate::is_ui_thread() {
+        f(win);
+        return Ok(());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let window = win.clone();
+    win.run_on_main_thread(move || {
+        f(&window);
+        let _ = tx.send(());
+    })
+    .map_err(|e| format!("ui thread dispatch: {e}"))?;
+    // Bounded: a wedged event loop must surface as an error, never as a hang.
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "native window setup did not run on the UI thread".to_string())
+}
+
 /// macOS: keep the undecorated window natively resizable.
 ///
 /// tao maps `decorations(false)` to an NSWindow styleMask of
@@ -335,7 +392,7 @@ pub fn browser_set_chrome(app: tauri::AppHandle, bg: String) -> Result<(), Strin
     let rgb = parse_hex_rgb(&bg).ok_or_else(|| format!("bad chrome colour {bg:?}"))?;
     *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) = Some(rgb);
     if let Some(win) = get_window(&app) {
-        apply_chrome(&win);
+        on_ui_thread(&win, apply_chrome)?;
     }
     Ok(())
 }
@@ -493,6 +550,53 @@ const DEVICES: &[Device] = &[
         height: 1180.0,
     },
 ];
+
+/// WKWebView deliberately omits Safari's `Version/... Safari/...` tokens from
+/// its default user agent. Sites such as WhatsApp therefore mistake a current
+/// embedded WebKit for Safari < 15 and send the user into an update loop that
+/// no macOS update can fix. Read the installed Safari compatibility version so
+/// the embedded browser reports the engine actually present on this Mac. The
+/// privacy-reduced macOS token matches WKWebView's own default UA.
+#[cfg(target_os = "macos")]
+fn macos_desktop_user_agent() -> Option<&'static str> {
+    static USER_AGENT: OnceLock<Option<String>> = OnceLock::new();
+    USER_AGENT
+        .get_or_init(|| {
+            use objc2_foundation::{NSBundle, NSString};
+
+            let version = NSBundle::bundleWithPath(objc2_foundation::ns_string!(
+                "/Applications/Safari.app"
+            ))
+            .and_then(|bundle| {
+                bundle.objectForInfoDictionaryKey(objc2_foundation::ns_string!(
+                    "CFBundleShortVersionString"
+                ))
+            })
+            .and_then(|value| value.downcast::<NSString>().ok())
+            .map(|value| value.to_string())
+            .filter(|value| {
+                !value.is_empty()
+                    && value
+                        .chars()
+                        .all(|character| character.is_ascii_digit() || character == '.')
+            })?;
+            Some(format!(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                 AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+            ))
+        })
+        .as_deref()
+}
+
+fn device_user_agent(device: &Device) -> Option<Cow<'static, str>> {
+    #[cfg(target_os = "macos")]
+    if device.name == "desktop" {
+        if let Some(user_agent) = macos_desktop_user_agent() {
+            return Some(Cow::Borrowed(user_agent));
+        }
+    }
+    device.ua.map(Cow::Borrowed)
+}
 
 /// Currently selected device preset — used by browser_start so a device chosen
 /// before the window opens (or after a stop) sticks.
@@ -980,73 +1084,36 @@ const BRIDGE_JS: &str = r##"
       }
     } catch (e) { report(reqId, "ERROR: " + (e && e.message ? e.message : e)); }
   };
-  // --- typed-login capture → OwLLM vault ---------------------------------
-  // When the user submits a form with a filled password field (or leaves the
-  // page with one still filled), report origin+username+password to Rust on
-  // the EVT title channel; Rust upserts it into the encrypted browser vault
-  // (browser_vault.rs) so the login autofills next time. Same transient
-  // base64 title mechanics as every other message on this channel.
-  var credSent = "";
-  function grabCred() {
-    var pws = document.querySelectorAll("input[type=password]");
-    var pw = null;
-    for (var i = 0; i < pws.length; i++) if (pws[i].value) { pw = pws[i]; break; }
-    if (!pw) return null;
-    var user = "";
-    try { user = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
-    var ins = document.querySelectorAll("input");
-    for (var j = 0; j < ins.length; j++) {
-      if (ins[j] === pw) break;
-      var ty = (ins[j].type || "text").toLowerCase();
-      if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) user = ins[j].value;
-    }
-    try { if (user) sessionStorage.setItem("__owllmLoginUser", user); } catch (e) {}
-    return { origin: location.origin, username: user, password: pw.value };
-  }
-  function reportCred() {
-    var c = grabCred() || window.__owllmProv || null;
-    if (!c) return;
-    var key = c.origin + "" + c.username + "" + c.password;
-    if (key === credSent) return; // same login already reported on this page
-    credSent = key;
+  // --- typed-login capture: TRANSPORT ONLY -------------------------------
+  // The SCANNER lives in FRAME_CRED_JS, injected into EVERY frame. This script
+  // is main-frame-only -- Tauri hardcodes for_main_frame_only:true on
+  // initialization_script -- which is exactly why an iframed login (the Google
+  // identity iframe, most embedded OAuth) was never captured at all.
+  //
+  // Split so there is one scanner and one transport: a sub-frame postMessages
+  // its find up here and the top frame writes it to the EVT title channel. A
+  // sub-frame cannot report for itself -- an iframe document's title never
+  // reaches the window, so the channel simply does not exist down there. Rust
+  // upserts into the encrypted vault (browser_vault.rs) for next-time autofill.
+  // A SET, not a last-seen slot: a page can now report from several frames at
+  // once (top form + embedded provider), and with a single slot two logins
+  // ping-pong and re-report each other forever, rewriting the vault on a loop.
+  var credSeen = {};
+  window.__owllmSendCred = function (c) {
+    if (!c || !c.password) return;
+    var key = c.origin + "" + c.username + "" + c.password;
+    if (credSeen[key]) return; // this exact login already reported on this page
+    credSeen[key] = 1;
     if (document.title.indexOf(SENT) !== 0) window.__owllmTitle0 = document.title;
     document.title = SENT + "EVT" + Z + "cred" + Z + b64(JSON.stringify(c));
     setTimeout(function () { try { document.title = window.__owllmTitle0 || ""; } catch (e) {} }, 60);
-  }
-  document.addEventListener("submit", reportCred, true);
-  window.addEventListener("pagehide", reportCred);
-  // SPA logins often clear the form without navigating, so submit/pagehide
-  // alone lose the values. Keep a provisional copy of the last complete login
-  // while the user types, and also report on submit-ish clicks, Enter, and
-  // tab-hide — the report itself dedupes via credSent.
-  var credReportTimer = 0;
-  function scheduleCredReport() {
-    if (credReportTimer) clearTimeout(credReportTimer);
-    credReportTimer = setTimeout(function () {
-      credReportTimer = 0;
-      reportCred();
-    }, 700);
-  }
-  document.addEventListener("input", function (e) {
-    var t = e.target;
-    if (t && t.tagName === "INPUT") {
-      var ty = (t.type || "text").toLowerCase();
-      if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
-        try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e) {}
-      }
-      var c = grabCred();
-      if (c) { window.__owllmProv = c; scheduleCredReport(); }
-    }
-  }, true);
-  document.addEventListener("click", function (e) {
-    var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
-    if (el) setTimeout(reportCred, 0);
-  }, true);
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") setTimeout(reportCred, 0);
-  }, true);
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "hidden") reportCred();
+  };
+  // The origin travels in the payload -- it is the FRAME's origin, not the top
+  // page's -- so a login typed into an embedded identity provider is filed
+  // under the site that actually owns it.
+  window.addEventListener("message", function (e) {
+    var d = e && e.data;
+    if (d && d.__owllmCred && d.__owllmCred.password) window.__owllmSendCred(d.__owllmCred);
   });
   // --- vault autofill (Rust → page) --------------------------------------
   // Rust evals __owllmAutofill(user, pass) after a page finishes loading when
@@ -1087,6 +1154,142 @@ const BRIDGE_JS: &str = r##"
 })();
 "##;
 
+/// Injected at document-start into EVERY frame (`initialization_script_for_all_frames`).
+///
+/// Tauri's plain `initialization_script` hardcodes `for_main_frame_only: true`,
+/// so BRIDGE_JS has never run inside an iframe — which is why an iframed login
+/// (Google's identity iframe, most embedded OAuth) produced no vault entry at
+/// all. This is the whole credential SCANNER, kept deliberately small because
+/// it runs in every frame of every page:
+///
+///   * pierces shadow roots, so a login built as a web component is seen (a
+///     plain `document.querySelectorAll` cannot cross a shadow boundary);
+///   * caches the password element, so the deep walk happens once per form and
+///     not on every keystroke;
+///   * reports through the top frame — an iframe's `document.title` never
+///     reaches the window, so the EVT channel does not exist in a sub-frame.
+const FRAME_CRED_JS: &str = r##"
+(function () {
+  if (window.__owllmCredScan) return;
+  window.__owllmCredScan = true;
+  var TOP = window.top === window;
+
+  // Cached password field. Re-finding it costs a full shadow walk, so hold on
+  // to it while it is still in the document.
+  var pwEl = null;
+  function livePw() {
+    if (pwEl && pwEl.isConnected && (pwEl.type || "").toLowerCase() === "password") return pwEl;
+    pwEl = null;
+    return null;
+  }
+  // Cheap first: the ordinary top-level query covers almost every site. Only
+  // when that finds nothing do we pay for the shadow-root walk.
+  function findPw() {
+    var live = livePw();
+    if (live) return live;
+    var shallow = document.querySelectorAll("input[type=password]");
+    for (var i = 0; i < shallow.length; i++) { pwEl = shallow[i]; return pwEl; }
+    var found = deepPw(document, 0);
+    if (found) pwEl = found;
+    return found;
+  }
+  function deepPw(root, depth) {
+    if (!root || depth > 8 || !root.querySelectorAll) return null;
+    var hosts = root.querySelectorAll("*");
+    for (var i = 0; i < hosts.length; i++) {
+      var sr = hosts[i].shadowRoot;
+      if (!sr) continue;
+      var p = sr.querySelector("input[type=password]");
+      if (p) return p;
+      var deeper = deepPw(sr, depth + 1);
+      if (deeper) return deeper;
+    }
+    return null;
+  }
+  // The username is the last filled text/email/tel input BEFORE the password
+  // field, in the same root. Two-step logins (Google, Microsoft) put the two on
+  // separate pages, so the typed value is also remembered in sessionStorage —
+  // which survives a same-origin navigation within this tab.
+  function userFor(pw) {
+    var u = "";
+    try { u = sessionStorage.getItem("__owllmLoginUser") || ""; } catch (e) {}
+    var root = pw.getRootNode ? pw.getRootNode() : document;
+    var ins = (root.querySelectorAll ? root : document).querySelectorAll("input");
+    for (var j = 0; j < ins.length; j++) {
+      if (ins[j] === pw) break;
+      var ty = (ins[j].type || "text").toLowerCase();
+      if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) u = ins[j].value;
+    }
+    return u;
+  }
+  function scan() {
+    var pw = findPw();
+    if (!pw || !pw.value) return null;
+    var u = userFor(pw);
+    try { if (u) sessionStorage.setItem("__owllmLoginUser", u); } catch (e) {}
+    // location.origin of THIS frame: an embedded identity provider's login
+    // belongs to the provider, not to the page that framed it.
+    return { origin: location.origin, username: u, password: pw.value };
+  }
+
+  var prov = null; // last complete login seen while typing
+  function emit() {
+    var c = scan() || prov;
+    if (!c) return;
+    if (TOP) {
+      // Both scripts are document-start; if the transport has not defined
+      // itself yet, come back on the next tick rather than dropping the login.
+      if (window.__owllmSendCred) window.__owllmSendCred(c);
+      else setTimeout(function () { if (window.__owllmSendCred) window.__owllmSendCred(c); }, 50);
+    } else {
+      try { window.top.postMessage({ __owllmCred: c }, "*"); } catch (e) {}
+    }
+  }
+  var timer = 0;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function () { timer = 0; emit(); }, 700);
+  }
+
+  // SPA logins often clear the form without ever navigating, so submit/pagehide
+  // alone lose the values. Keep a provisional copy while the user types and
+  // also report on submit-ish clicks, Enter and tab-hide; the transport dedupes.
+  document.addEventListener("submit", emit, true);
+  window.addEventListener("pagehide", emit);
+  // e.target is RETARGETED to the shadow HOST once an event crosses a shadow
+  // boundary, so a document-level listener sees a <div>, not the <input> the
+  // user typed into. composedPath()[0] is the real originating element — without
+  // it these listeners silently never fire for a web-component login.
+  function src(e) {
+    if (e && e.composedPath) { var p = e.composedPath(); if (p && p.length) return p[0]; }
+    return e ? e.target : null;
+  }
+  document.addEventListener("input", function (e) {
+    var t = src(e);
+    if (!t || t.tagName !== "INPUT") return;
+    var ty = (t.type || "text").toLowerCase();
+    if ((ty === "text" || ty === "email" || ty === "tel") && t.value) {
+      try { sessionStorage.setItem("__owllmLoginUser", t.value); } catch (e2) {}
+    }
+    if (ty === "password") pwEl = t; // cheapest possible find
+    var c = scan();
+    if (c) { prov = c; schedule(); }
+  }, true);
+  document.addEventListener("click", function (e) {
+    var t = src(e);
+    var el = t && t.closest ? t.closest("button, input[type=submit], [role=button]") : null;
+    if (el) setTimeout(emit, 0);
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    var t = src(e);
+    if (e.key === "Enter" && t && t.tagName === "INPUT") setTimeout(emit, 0);
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") emit();
+  });
+})();
+"##;
+
 /// Stable data directory so cookies/logins in the agent browser persist across
 /// runs and are isolated from the app UI's own webview storage.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -1104,11 +1307,49 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
+/// Stable bucket for one provider's authorization cookies. Keep providers
+/// separate from each other and from ordinary agent-browser state without
+/// throwing the selected provider's login away after every Connect.
+fn provider_auth_profile_key(url: &tauri::Url) -> String {
+    let host = url.host_str().unwrap_or("provider").to_ascii_lowercase();
+    let is = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    if is("claude.ai") || is("claude.com") || is("anthropic.com") {
+        return "anthropic".to_string();
+    }
+    if is("openai.com") {
+        return "openai".to_string();
+    }
+    if is("google.com") || is("googleapis.com") {
+        return "google".to_string();
+    }
+    if is("kimi.com") || is("moonshot.cn") {
+        return "kimi".to_string();
+    }
+    host.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' })
+        .collect()
+}
+
 #[cfg(any(windows, target_os = "linux"))]
-fn private_auth_data_dir(id: u64) -> std::path::PathBuf {
-    std::env::temp_dir()
-        .join("owllm-provider-auth")
-        .join(format!("{}-{id}", std::process::id()))
+fn provider_auth_data_dir(url: &tauri::Url) -> Option<std::path::PathBuf> {
+    browser_data_dir().map(|root| {
+        root.join("provider-auth")
+            .join(provider_auth_profile_key(url))
+    })
+}
+
+/// WKWebView has no data-directory API. macOS 14+ instead accepts a stable
+/// data-store identifier; older macOS falls back to WebKit's persistent
+/// per-app store, which still remembers the login across restarts.
+#[cfg(target_os = "macos")]
+fn provider_auth_store_identifier(url: &tauri::Url) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(
+        format!("owllm-provider-auth:{}", provider_auth_profile_key(url)).as_bytes(),
+    );
+    let mut identifier = [0_u8; 16];
+    identifier.copy_from_slice(&digest[..16]);
+    identifier
 }
 
 /// Enable WebView2 password autosave + general autofill on an agent-browser
@@ -1203,7 +1444,7 @@ fn linux_expand_page(pw: tauri::webview::PlatformWebview) {
 fn linux_configure_browser_webview(
     pw: tauri::webview::PlatformWebview,
     requested_url: String,
-    private_session: bool,
+    _private_session: bool,
 ) {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -1218,9 +1459,7 @@ fn linux_configure_browser_webview(
         #[allow(deprecated)]
         context.set_process_model(webkit2gtk::ProcessModel::MultipleSecondaryProcesses);
     }
-    if !private_session {
-        linux_enable_web_credentials(&pw);
-    }
+    linux_enable_web_credentials(&pw);
 
     // A browser-page failure is recoverable and must remain local to that tab.
     // Retry once for a transient WebKit/network-process failure; if the same
@@ -1255,10 +1494,7 @@ fn linux_configure_browser_webview(
             if attempts == 0 {
                 webview.reload();
             } else {
-                webview.load_html(
-                    r#"<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>body{margin:0;background:#0e1117;color:#e7eaf0;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{max-width:40rem;padding:2rem}h1{font-size:1.2rem}p{color:#aeb6c5;line-height:1.5}</style><main><h1>This page’s browser process stopped</h1><p>OwLLM kept the app and your other work running. Reload the tab to try the page again.</p></main>"#,
-                    Some("about:blank"),
-                );
+                webview.load_html(TAB_PROCESS_STOPPED_HTML, Some("about:blank"));
             }
         }
     });
@@ -1814,6 +2050,19 @@ enum BrowserUiEvent {
         id: u64,
         url: String,
     },
+    /// Claude's manual OAuth callback contains the one-time code and PKCE
+    /// state that the waiting login PTY expects as `code#state`. Keep it off
+    /// the WebView callback thread and never persist or log it.
+    ClaudeAuthCode {
+        code: String,
+    },
+    /// A native WebView download finished. The engine owns the save operation,
+    /// so forward its otherwise-silent result to the OwLLM browser UI.
+    DownloadFinished {
+        id: u64,
+        path: Option<std::path::PathBuf>,
+        success: bool,
+    },
     /// A page requested a separate browsing context (`target=_blank` or
     /// `window.open`). The native callback denies the engine-owned popup and
     /// queues this event so the URL becomes a managed OwLLM tab instead.
@@ -1843,6 +2092,8 @@ struct BrowserUiBatch {
     push_tabs: bool,
     creds: Vec<String>,
     autofills: HashMap<u64, String>,
+    claude_auth_codes: Vec<String>,
+    downloads: Vec<(u64, Option<std::path::PathBuf>, bool)>,
     open_tabs: Vec<(String, bool, bool)>,
     legacy_close_requested: Vec<u64>,
     legacy_destroyed: Vec<u64>,
@@ -1868,6 +2119,10 @@ impl BrowserUiBatch {
             BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
             BrowserUiEvent::AutofillPage { id, url } => {
                 self.autofills.insert(id, url);
+            }
+            BrowserUiEvent::ClaudeAuthCode { code } => self.claude_auth_codes.push(code),
+            BrowserUiEvent::DownloadFinished { id, path, success } => {
+                self.downloads.push((id, path, success));
             }
             BrowserUiEvent::OpenTab {
                 url,
@@ -1907,6 +2162,61 @@ fn queue_browser_ui(app: &tauri::AppHandle, event: BrowserUiEvent) {
     }
 }
 
+/// Download callbacks run on the shared WebView UI thread. Queue the finished
+/// result and return immediately; `true` preserves the engine's normal save.
+fn handle_download_event(app: &tauri::AppHandle, id: u64, event: DownloadEvent<'_>) -> bool {
+    if let DownloadEvent::Finished { path, success, .. } = event {
+        queue_browser_ui(app, BrowserUiEvent::DownloadFinished { id, path, success });
+    }
+    true
+}
+
+fn show_download_result(
+    app: &tauri::AppHandle,
+    id: u64,
+    path: Option<&std::path::Path>,
+    success: bool,
+) {
+    let info = json!({
+        "success": success,
+        "filename": path
+            .and_then(|value| value.file_name())
+            .map(|value| value.to_string_lossy().into_owned()),
+        "folder": path
+            .and_then(|value| value.parent())
+            .map(|value| value.to_string_lossy().into_owned()),
+    });
+    let payload = serde_json::to_string(&info).unwrap_or_else(|_| "{}".into());
+
+    if let Some(chrome) = app.get_webview(CHROME_LABEL) {
+        let _ = chrome.eval(&format!(
+            "try{{window.__owllmDownloadSet&&window.__owllmDownloadSet({payload})}}catch(e){{}}"
+        ));
+        return;
+    }
+
+    // The Linux safety layout can use a top-level content WebView without the
+    // separate chrome WebView. Give it the same accessible result.
+    if let Some(content) = app.get_webview(&tab_label(id)) {
+        let _ = content.eval(&format!(
+            r#"try{{(function(i){{
+                var old=document.getElementById('__owllmDownloadToast');
+                if(old) old.remove();
+                var el=document.createElement('div');
+                el.id='__owllmDownloadToast';
+                el.setAttribute('role','status');
+                el.setAttribute('aria-live','polite');
+                el.textContent=i.success
+                  ? ('Saved '+(i.filename||'download')+(i.folder?' to '+i.folder:''))
+                  : 'Download failed. Try again.';
+                el.style.cssText='position:fixed;right:18px;top:18px;z-index:2147483647;padding:12px 16px;border-radius:8px;background:'+(i.success?'#166534':'#991b1b')+';color:#fff;font:600 13px system-ui;box-shadow:0 4px 18px #0008;max-width:min(560px,calc(100vw - 36px));overflow-wrap:anywhere';
+                (document.body||document.documentElement).appendChild(el);
+                setTimeout(function(){{try{{el.remove()}}catch(e){{}}}},6000);
+            }})({payload})}}catch(e){{}}"#
+        ));
+    }
+}
+
 fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) {
     while let Ok(first) = rx.recv() {
         let mut batch = BrowserUiBatch::default();
@@ -1931,6 +2241,14 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                     let _ = wv.eval(&script);
                 }
             }
+        }
+        for code in batch.claude_auth_codes {
+            // Send only to the trusted application WebView. Browser tabs must
+            // never receive another tab's one-time authorization code.
+            let _ = app.emit_to("main", "owllm:claude-auth-code", json!({ "code": code }));
+        }
+        for (id, path, success) in batch.downloads {
+            show_download_result(&app, id, path.as_deref(), success);
         }
         for (url, activate, private_session) in batch.open_tabs {
             if let Err(e) = new_tab(&app, &url, activate, private_session) {
@@ -2160,7 +2478,8 @@ fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
 
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
 /// under the chrome bar; inactive ones are parked offscreen. Ordinary tabs
-/// share the persistent profile; provider-auth tabs get a private profile.
+/// share the persistent profile; provider-auth tabs get a separate persistent
+/// profile per provider.
 fn attach_tab(
     app: &tauri::AppHandle,
     win: &Window,
@@ -2171,9 +2490,17 @@ fn attach_tab(
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
+    let download_app = app.clone();
+    let auth_profile_url = url.clone();
+    #[cfg(target_os = "macos")]
+    let auth_store_identifier = provider_auth_store_identifier(&auth_profile_url);
     #[allow(unused_mut)]
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
+        // Credential scanning must reach IFRAMES too — the plain
+        // initialization_script above is main-frame-only.
+        .initialization_script_for_all_frames(FRAME_CRED_JS)
+        .on_download(move |_webview, event| handle_download_event(&download_app, id, event))
         .on_new_window(move |url, _features| {
             // Opener-dependent OAuth popups must stay engine-owned so
             // `window.opener` / `window.close` keep working; everything else
@@ -2226,6 +2553,14 @@ fn attach_tab(
                 );
             }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if private_session {
+                    if let Some(code) = claude_auth_code_from_callback(payload.url()) {
+                        queue_browser_ui(
+                            &wv.app_handle().clone(),
+                            BrowserUiEvent::ClaudeAuthCode { code },
+                        );
+                    }
+                }
                 let url = payload.url().to_string();
                 if !private_session && url.starts_with("http") {
                     queue_browser_ui(
@@ -2235,11 +2570,12 @@ fn attach_tab(
                 }
             }
         });
+    #[cfg(target_os = "macos")]
     if private_session {
-        content = content.incognito(true);
+        content = content.data_store_identifier(auth_store_identifier);
     }
-    if let Some(ua) = dev.ua {
-        content = content.user_agent(ua);
+    if let Some(ua) = device_user_agent(dev) {
+        content = content.user_agent(&ua);
     }
     // A stable, isolated data dir so agent-browser logins persist across runs.
     // The builder method is only present on Windows/Linux; macOS WKWebView uses
@@ -2247,9 +2583,10 @@ fn attach_tab(
     #[cfg(any(windows, target_os = "linux"))]
     {
         if private_session {
-            let dir = private_auth_data_dir(id);
-            let _ = std::fs::create_dir_all(&dir);
-            content = content.data_directory(dir);
+            if let Some(dir) = provider_auth_data_dir(&auth_profile_url) {
+                let _ = std::fs::create_dir_all(&dir);
+                content = content.data_directory(dir);
+            }
         } else if let Some(dir) = browser_data_dir() {
             let _ = std::fs::create_dir_all(&dir);
             content = content.data_directory(dir);
@@ -2272,6 +2609,24 @@ fn attach_tab(
             ),
         )
         .map_err(|e| format!("page webview: {e}"))?;
+    // WebView2 sheds render processes under host memory pressure, and a tab
+    // whose renderer is gone paints solid black for the rest of the session.
+    // The subscription is per view, so every tab needs its own — the main
+    // window being armed does nothing for these. Linux gets the same recovery
+    // from linux_configure_browser_webview.
+    #[cfg(windows)]
+    {
+        let label = tab_label(id);
+        let _ = _webview.with_webview(move |platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                label,
+                crate::Webview2Recovery::ReloadThenNotice {
+                    html: TAB_PROCESS_STOPPED_HTML,
+                },
+            )
+        });
+    }
     // GTK packs child webviews into the window's vbox, where set_position is a
     // no-op (see layout_children), so a tiled bar cannot park a tab offscreen —
     // inactive tabs are hidden instead and the vbox gives their space to the
@@ -2284,13 +2639,9 @@ fn attach_tab(
         let _ = _webview.hide();
     }
     #[cfg(windows)]
-    if !private_session {
-        let _ = _webview.with_webview(win_enable_web_credentials);
-    }
+    let _ = _webview.with_webview(win_enable_web_credentials);
     #[cfg(target_os = "linux")]
-    if !private_session {
-        let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
-    }
+    let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
     Ok(())
 }
 
@@ -2687,9 +3038,9 @@ fn build_window(
 }
 
 /// The app-styled browser: frameless Window + chrome-bar webview + page webview.
-/// Windows/macOS only — build_window() routes Linux to build_legacy() because
-/// stacked child webviews are broken on WebKitGTK/Jetson (see build_window).
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+/// Every platform uses this shape; build_legacy() is only the fallback when it
+/// fails to build. On Linux the bar is TILED above the page rather than stacked
+/// over it, because Tauri packs child webviews into a GtkBox (see build_window).
 fn build_framed(
     app: &tauri::AppHandle,
     url: tauri::Url,
@@ -2727,9 +3078,9 @@ fn build_framed(
     // its edges. Both of these run before the webviews exist so the very first
     // frame is already resizable.
     #[cfg(target_os = "macos")]
-    mac_enable_native_resize(&win);
+    on_ui_thread(&win, mac_enable_native_resize)?;
     #[cfg(target_os = "linux")]
-    linux_expose_resize_edges(&win);
+    on_ui_thread(&win, linux_expose_resize_edges)?;
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
     // buttons/drag/URL box/tab strip use a reserved same-origin navigation as
@@ -2771,6 +3122,21 @@ fn build_framed(
             ),
         )
         .map_err(|e| format!("chrome bar webview: {e}"))?;
+    // The bar is the browser window's own UI, so it reloads like the app's other
+    // surfaces rather than showing the page-failure notice. Measured unarmed:
+    // killing every render process of the browser window brought back the main
+    // view, the overlay frame and the tab, and left the bar's renderer gone —
+    // a black strip where the tab strip and URL box should be.
+    #[cfg(windows)]
+    {
+        let _ = _chrome_webview.with_webview(|platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                "browser chrome bar".to_string(),
+                crate::Webview2Recovery::Reload,
+            )
+        });
+    }
     // GTK ignores the geometry above (see layout_children), so pin the bar's
     // height in the box itself — otherwise the box splits the window evenly
     // between the bar and the page.
@@ -2817,7 +3183,7 @@ fn build_framed(
         }
     });
 
-    apply_chrome(&win);
+    on_ui_thread(&win, apply_chrome)?;
     update_chrome_bar(app, Some(&public_browser_url(&start_url)), None);
     sync_tabs(app);
     Ok(())
@@ -2915,6 +3281,10 @@ fn attach_legacy_tab(
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
+    let download_app = app.clone();
+    let auth_profile_url = url.clone();
+    #[cfg(target_os = "macos")]
+    let auth_store_identifier = provider_auth_store_identifier(&auth_profile_url);
     #[cfg(target_os = "linux")]
     let requested_url = url.to_string();
     #[cfg(target_os = "linux")]
@@ -2930,6 +3300,10 @@ fn attach_legacy_tab(
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
+        // Credential scanning must reach IFRAMES too — the plain
+        // initialization_script above is main-frame-only.
+        .initialization_script_for_all_frames(FRAME_CRED_JS)
+        .on_download(move |_webview, event| handle_download_event(&download_app, id, event))
         .on_new_window(move |url, _features| {
             // Same opener-preserving OAuth popup rule as the framed shape.
             if is_opener_dependent_popup(&url) {
@@ -2968,6 +3342,14 @@ fn attach_legacy_tab(
         .on_page_load(move |win, payload| {
             // Vault autofill works in this top-level-window shape too.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if private_session {
+                    if let Some(code) = claude_auth_code_from_callback(payload.url()) {
+                        queue_browser_ui(
+                            &win.app_handle().clone(),
+                            BrowserUiEvent::ClaudeAuthCode { code },
+                        );
+                    }
+                }
                 let url = payload.url().to_string();
                 if !private_session && url.starts_with("http") {
                     queue_browser_ui(
@@ -2982,11 +3364,12 @@ fn attach_legacy_tab(
         .decorations(true)
         .resizable(true)
         .visible(active);
+    #[cfg(target_os = "macos")]
     if private_session {
-        builder = builder.incognito(true);
+        builder = builder.data_store_identifier(auth_store_identifier);
     }
-    if let Some(ua) = dev.ua {
-        builder = builder.user_agent(ua);
+    if let Some(ua) = device_user_agent(dev) {
+        builder = builder.user_agent(&ua);
     }
     if let Ok(Some(m)) = app.primary_monitor() {
         let ls = m.size().to_logical::<f64>(m.scale_factor());
@@ -2997,9 +3380,10 @@ fn attach_legacy_tab(
     #[cfg(any(windows, target_os = "linux"))]
     {
         if private_session {
-            let dir = private_auth_data_dir(id);
-            let _ = std::fs::create_dir_all(&dir);
-            builder = builder.data_directory(dir);
+            if let Some(dir) = provider_auth_data_dir(&auth_profile_url) {
+                let _ = std::fs::create_dir_all(&dir);
+                builder = builder.data_directory(dir);
+            }
         } else if let Some(dir) = browser_data_dir() {
             let _ = std::fs::create_dir_all(&dir);
             builder = builder.data_directory(dir);
@@ -3008,10 +3392,24 @@ fn attach_legacy_tab(
     let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    // Same per-view WebView2 recovery as the framed shape: this fallback is
+    // reachable on Windows whenever build_framed fails, so it cannot be left
+    // with tabs that go black permanently.
     #[cfg(windows)]
-    if !private_session {
-        let _ = _ww.with_webview(win_enable_web_credentials);
+    {
+        let label = tab_label(id);
+        let _ = _ww.with_webview(move |platform| {
+            crate::arm_windows_platform_webview(
+                platform,
+                label,
+                crate::Webview2Recovery::ReloadThenNotice {
+                    html: TAB_PROCESS_STOPPED_HTML,
+                },
+            )
+        });
     }
+    #[cfg(windows)]
+    let _ = _ww.with_webview(win_enable_web_credentials);
     #[cfg(target_os = "linux")]
     {
         let _ = _ww.with_webview(move |platform| {
@@ -3019,7 +3417,7 @@ fn attach_legacy_tab(
         });
     }
     if let Some(win) = app.get_window(&tab_label(id)) {
-        apply_chrome(&win);
+        let _ = on_ui_thread(&win, apply_chrome);
         let handle = app.clone();
         win.on_window_event(move |event| {
             match event {
@@ -3192,6 +3590,39 @@ fn parse_navigation_url(raw_url: &str) -> Result<tauri::Url, String> {
     Ok(parsed)
 }
 
+/// Turn Claude's browser callback into the exact line requested by
+/// `claude auth login`: `<code>#<state>`. The callback is accepted only from
+/// Anthropic's fixed HTTPS origin/path and only for bounded base64url-like
+/// values, so an ordinary page cannot type arbitrary text into a login PTY.
+fn claude_auth_code_from_callback(url: &tauri::Url) -> Option<String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("platform.claude.com")
+        || url.path().trim_end_matches('/') != "/oauth/code/callback"
+    {
+        return None;
+    }
+    let mut code = None;
+    let mut state = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let valid = |value: &str| {
+        (16..=1024).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    let (code, state) = (code?, state?);
+    if !valid(&code) || !valid(&state) {
+        return None;
+    }
+    Some(format!("{code}#{state}"))
+}
+
 #[tauri::command(async)]
 pub fn browser_open_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
     open_web_url(&app, &url)
@@ -3210,9 +3641,9 @@ pub fn browser_open_tab(
     let parsed = parse_navigation_url(&url)?;
     let activate = activate.unwrap_or(false);
     let id = if browser_is_suspended() && get_window(&app).is_some() {
-        resume_normal_browser(&app, parsed)?
+        resume_normal_browser(&app, parsed.clone())?
     } else if get_window(&app).is_none() {
-        build_window(&app, parsed, false)?;
+        build_window(&app, parsed.clone(), false)?;
         BROWSER_SUSPENDED.store(false, Ordering::SeqCst);
         active_tab_id().unwrap_or(0)
     } else if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
@@ -3222,14 +3653,80 @@ pub fn browser_open_tab(
         // single-page build. New framed and Linux-safe sessions both own TABS.
         content_webview(&app)
             .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
-            .navigate(parsed)
+            .navigate(parsed.clone())
             .map_err(|e| format!("navigate failed: {e}"))?;
         0
     };
-    Ok(
-        json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
-            .to_string(),
-    )
+    // A wedged session still hands back a tab id for a webview that will never
+    // load anything. This is the earliest point where that can be caught AND
+    // the URL is still in hand, so recovery here is invisible to the caller
+    // instead of surfacing three calls later as a mystery timeout.
+    let (id, restarted, note) = heal_if_tab_never_loaded(&app, id, &parsed);
+    let mut opened = json!({
+        "tab_id": id,
+        "url": url,
+        "active": id == active_tab_id().unwrap_or(0),
+    });
+    if restarted {
+        opened["restarted"] = json!(true);
+    }
+    if let Some(note) = note {
+        opened["note"] = json!(note);
+    }
+    Ok(opened.to_string())
+}
+
+/// Give a just-opened tab its commit budget; if it never loads AND no other tab
+/// in the session holds a document either, restart the browser and re-open the
+/// same URL in the healthy session. Returns the tab to use, whether a restart
+/// happened, and a note for anything the caller must be told honestly.
+///
+/// Never errors: the tab was created, and failing an open that previously
+/// succeeded would break the user-facing callers (panel "+", session reopen).
+/// When recovery is not possible the dead tab is handed back WITH the reason,
+/// so nothing reads as a healthy tab that is not one.
+fn heal_if_tab_never_loaded(
+    app: &tauri::AppHandle,
+    id: u64,
+    url: &tauri::Url,
+) -> (u64, bool, Option<String>) {
+    if id == 0 || tab_committed_document(app, id, TAB_COMMIT_BUDGET) || !browser_engine_is_dead(app)
+    {
+        return (id, false, None);
+    }
+    let fresh = match auto_restart_browser(app) {
+        Ok(fresh) => fresh,
+        Err(why) => {
+            return (
+                id,
+                false,
+                Some(format!(
+                    "this tab has not loaded a document — the browser session is wedged and {why}. \
+                     Nothing was fetched from this URL, so do not report it as unreachable."
+                )),
+            )
+        }
+    };
+    let navigated = content_webview_for_tab(app, Some(fresh))
+        .ok_or_else(|| "the restarted browser produced no usable tab".to_string())
+        .and_then(|wv| {
+            wv.navigate(url.clone())
+                .map_err(|e| format!("navigate failed after the restart: {e}"))
+        });
+    match navigated {
+        Ok(()) if tab_committed_document(app, fresh, TAB_COMMIT_BUDGET) => (fresh, true, None),
+        Ok(()) => (
+            fresh,
+            true,
+            Some(
+                "the browser session was wedged and was restarted automatically, but the fresh \
+                 tab has not loaded a document either — the browser engine itself is failing, not \
+                 this destination."
+                    .to_string(),
+            ),
+        ),
+        Err(why) => (fresh, true, Some(why)),
+    }
 }
 
 /// Open a new tab on the OwLLM start page — the chrome bar's "+" as a command
@@ -3298,12 +3795,12 @@ pub fn browser_session_reopen(app: tauri::AppHandle) -> Result<String, String> {
     .to_string())
 }
 
-/// Open a provider authorization page without the persistent browser profile.
+/// Open a provider authorization page in that provider's persistent profile.
 ///
-/// Subscription OAuth must never inherit the account used by Gmail, Calendar,
-/// Claude Web, or another ordinary browser tab. The user may explicitly select
-/// one identity from the encrypted local vault, but no ordinary browser cookie
-/// or implicit first-account autofill is allowed into this flow.
+/// Subscription OAuth never inherits the account used by ordinary browser
+/// tabs, nor another provider's cookies. It does keep this provider's own
+/// session across Connect attempts and app restarts, while explicit encrypted-
+/// vault account selection remains available.
 #[tauri::command(async)]
 pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let _operation = lock_browser_operation();
@@ -3328,7 +3825,7 @@ pub fn browser_open_auth_tab(app: tauri::AppHandle, url: String) -> Result<Strin
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
-    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true }).to_string())
+    Ok(json!({ "tab_id": id, "url": url, "active": true, "private": true, "persistent": true }).to_string())
 }
 
 #[tauri::command(async)]
@@ -3380,7 +3877,7 @@ fn apply_linux_device(app: &tauri::AppHandle, dev: &'static Device) -> Result<()
         .unwrap_or_default();
     for id in ids {
         if let Some(webview) = app.get_webview(&tab_label(id)) {
-            let user_agent = dev.ua.map(str::to_string);
+            let user_agent = device_user_agent(dev).map(Cow::into_owned);
             webview
                 .with_webview(move |platform| {
                     use webkit2gtk::{SettingsExt, WebViewExt};
@@ -4129,7 +4626,6 @@ pub fn browser_read_capture(app: tauri::AppHandle, path: String) -> Result<Strin
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let _operation = lock_browser_operation();
-    let req = REQ.fetch_add(1, Ordering::SeqCst);
     let screenshot_scope = params
         .get("scope")
         .and_then(Value::as_str)
@@ -4137,6 +4633,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         .trim()
         .to_ascii_lowercase();
     if action == "screenshot" {
+        let req = REQ.fetch_add(1, Ordering::SeqCst);
         match screenshot_scope.as_str() {
             "desktop" => return capture_desktop(&app, None, req),
             "app" | "application" | "owllm" => return capture_app(&app, req),
@@ -4151,7 +4648,76 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
         Some(id) => format!("browser tab {id} does not exist"),
         None => "browser did not start".to_string(),
     })?;
-    match action.as_str() {
+    let outcome = run_browser_action(&app, &win, &action, &params, &screenshot_scope, tab_id);
+    let Err(error) = outcome else { return outcome };
+    recover_wedged_action(&app, &action, &params, &screenshot_scope, error)
+}
+
+/// Heal a wedged session instead of handing the agent a chore.
+///
+/// Telling an agent to "run browser_close and retry" was still the tool blaming
+/// the caller for a fault the tool can fix, and an agent that reads a browser
+/// failure tends to invent an explanation for it (2026-08-17: a reachable WSL
+/// dev server reported as unreachable). So the recovery is done here.
+///
+/// Two things this deliberately does NOT do:
+/// * It never restarts on a timeout alone. The user is watching this window, so
+///   a restart needs positive evidence that the engine itself is broken —
+///   `browser_engine_is_dead`, which is a probe, not a guess.
+/// * It only replays `navigate`/`open`, whose URL is in `params`. Replaying a
+///   content read against the fresh blank tab would hand back an answer about a
+///   page that was never loaded, which is exactly the fabrication this whole
+///   fix exists to prevent.
+fn recover_wedged_action(
+    app: &tauri::AppHandle,
+    action: &str,
+    params: &Value,
+    screenshot_scope: &str,
+    error: String,
+) -> Result<String, String> {
+    if !error.contains("timed out") || !browser_engine_is_dead(app) {
+        return Err(error);
+    }
+    let fresh = match auto_restart_browser(app) {
+        Ok(id) => id,
+        Err(why) => return Err(format!("{error} ({why})")),
+    };
+    let Some(win) = content_webview_for_tab(app, Some(fresh)) else {
+        return Err(format!("{error} (the restarted browser produced no usable tab)"));
+    };
+    if !matches!(action, "navigate" | "open") {
+        return Err(format!(
+            "browser action '{action}' could not run: this tab had never loaded a document, so \
+             the browser session was wedged. It has been restarted automatically and tab {fresh} \
+             is a fresh blank tab — re-open the page with browser_open, then retry. Nothing was \
+             ever fetched, so do not report the URL, its host or its network as unreachable."
+        ));
+    }
+    let replayed = run_browser_action(app, &win, action, params, screenshot_scope, Some(fresh))
+        .map_err(|retry| {
+            format!(
+                "{retry} The session was already restarted automatically, so the browser engine \
+                 itself is failing to load pages — not this destination."
+            )
+        })?;
+    Ok(format!(
+        "{replayed}\n\n(the browser session was wedged and has been restarted automatically; \
+         this page is now tab {fresh} — use that tab_id from here on)"
+    ))
+}
+
+/// One action against one tab. Separate from `browser_cmd` so a wedged session
+/// can be restarted and the same action replayed against the fresh tab.
+fn run_browser_action(
+    app: &tauri::AppHandle,
+    win: &Webview,
+    action: &str,
+    params: &Value,
+    screenshot_scope: &str,
+    tab_id: Option<u64>,
+) -> Result<String, String> {
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
+    match action {
         "navigate" | "open" => {
             let url_s = params
                 .get("url")
@@ -4167,30 +4733,30 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             // Give the new document a moment to begin, then await its load via
             // the (re-injected) bridge. Evaled every poll tick until it reports.
             std::thread::sleep(Duration::from_millis(200));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
         "back" => {
             let _ = win.eval("history.back()");
             std::thread::sleep(Duration::from_millis(300));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
         "reload" => {
             let _ = win.eval("location.reload()");
             std::thread::sleep(Duration::from_millis(300));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+            eval_until_reply(win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
-        "screenshot" => match screenshot_scope.as_str() {
-            "viewport" | "window" | "visible" => capture_browser_window(&app, tab_id, req),
-            "app" | "application" | "owllm" => capture_app(&app, req),
+        "screenshot" => match screenshot_scope {
+            "viewport" | "window" | "visible" => capture_browser_window(app, tab_id, req),
+            "app" | "application" | "owllm" => capture_app(app, req),
             "full_page" | "full-page" | "page" => {
-                capture_browser_full_page(&app, &win, tab_id.or_else(active_tab_id), req)
+                capture_browser_full_page(app, win, tab_id.or_else(active_tab_id), req)
             }
             other => Err(format!(
                 "unknown screenshot scope {other:?}; use viewport, full_page, or desktop"
             )),
         },
-        "upload_file" => upload_file_to_page(&win, req, &params),
-        _ => eval_until_reply(&win, req, &action, &params, Duration::from_secs(12)),
+        "upload_file" => upload_file_to_page(win, req, params),
+        _ => eval_until_reply(win, req, action, params, Duration::from_secs(12)),
     }
 }
 
@@ -4199,6 +4765,122 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 /// still-loading document (where the bridge isn't defined yet) is retried
 /// until ready. Runs on a threadpool thread (commands are `async`), so the
 /// waiting never touches the main event loop.
+/// The live document URL of a tab, or `None` when its webview never committed
+/// one. A wedged browser session still creates tabs, still accepts `navigate()`
+/// without error and still answers state queries — this is the only signal that
+/// separates "the page is slow" from "this tab never loaded anything at all".
+fn live_document_url(win: &Webview) -> Option<String> {
+    let url = win.url().ok()?.to_string();
+    let url = url.trim();
+    if url.is_empty() || url == "about:blank" {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// Tell a broken browser engine apart from a destination that is merely slow.
+///
+/// A tab that holds no document proves neither on its own. Both of these were
+/// MEASURED on 2026-08-17, and they are why the obvious tests do not work:
+///
+/// * A webview pointed at an unresponsive host reports `about:blank` for as
+///   long as the request hangs — byte-identical to a wedged tab. Restarting on
+///   that signal alone would tear the window down over a dev server that is
+///   still compiling.
+/// * Scanning the rest of the strip does not separate them either. Tabs that
+///   loaded BEFORE the session wedged keep reporting their old URL, so the
+///   session still looks healthy while every newly created tab is dead. That is
+///   exactly what the incident looked like: the user's localhost tab still read
+///   as loaded while three consecutive agent tabs committed nothing.
+///
+/// So ask the engine for something that CANNOT be slow: a background tab on the
+/// app's own start page, served locally with no network involved. If even that
+/// never commits, the engine is broken and a restart is the only remedy.
+fn browser_engine_is_dead(app: &tauri::AppHandle) -> bool {
+    let Ok(home) = browser_home_url(app) else {
+        return false;
+    };
+    let probe = match new_tab(app, home.as_str(), false, false) {
+        Ok(id) => id,
+        // A session that can no longer even open a tab will not run an action.
+        Err(_) => return true,
+    };
+    let committed = tab_committed_document(app, probe, TAB_COMMIT_BUDGET);
+    close_tab(app, probe);
+    !committed
+}
+
+/// Restart a wedged browser session in place and hand back the tab the caller
+/// should use afterwards.
+///
+/// Measured 2026-08-17: once a session wedges, every NEW tab created inside it
+/// is dead too — three consecutive `browser_open` calls produced tabs that never
+/// committed a document. Only a full teardown healed it, so recovery cannot be
+/// done per-tab. Tab ids therefore do not survive; callers must report the new
+/// one rather than leave the agent holding a dead id.
+///
+/// Linux tears down to a suspended window instead of destroying it (destroying a
+/// WebKitGTK top-level aborts the process with `BadDrawable` on NVIDIA/Tegra),
+/// so recovery there is a blank-and-resume rather than a rebuild.
+fn auto_restart_browser(app: &tauri::AppHandle) -> Result<u64, String> {
+    {
+        let mut last = LAST_AUTO_RESTART.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(at) = *last {
+            if at.elapsed() < AUTO_RESTART_COOLDOWN {
+                return Err(format!(
+                    "an automatic browser restart {}s ago did not clear it, so it was not \
+                     restarted again",
+                    at.elapsed().as_secs()
+                ));
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    stop_browser_inner(app, false)?;
+    browser_start_inner(app)?;
+    active_tab_id().ok_or_else(|| "the restarted browser produced no tab".to_string())
+}
+
+/// Wait for a freshly opened tab to commit a document. `false` means it never
+/// did — the signature of a wedged session, which still creates tabs and still
+/// accepts `navigate()` without error.
+fn tab_committed_document(app: &tauri::AppHandle, id: u64, budget: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if app
+            .get_webview(&tab_label(id))
+            .and_then(|wv| live_document_url(&wv))
+            .is_some()
+        {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Explain an action timeout by what the tab actually holds. The old text
+/// ("the page may still be loading; try again") was identical for both cases,
+/// so an agent whose tab had never loaded ANY document blamed the destination —
+/// reporting a perfectly reachable dev server as unreachable. Name the real
+/// state, and say what clears it.
+fn action_timeout_error(win: &Webview, action: &str) -> String {
+    match live_document_url(win) {
+        Some(url) => format!(
+            "browser action '{action}' timed out on {url} — the document is loaded but did not \
+             answer; try again or browser_reload"
+        ),
+        None => format!(
+            "browser action '{action}' timed out because this tab never loaded a document — the \
+             browser session is wedged, NOT the destination. Run browser_close (the next \
+             browser_open restarts it), then retry. Nothing was ever fetched, so do not report \
+             the URL, its host or its network as unreachable."
+        ),
+    }
+}
+
 fn eval_until_reply(
     win: &Webview,
     req: u64,
@@ -4255,28 +4937,37 @@ fn eval_until_reply(
             }
         }
         if start.elapsed() > timeout {
-            return Err(format!(
-                "browser action '{action}' timed out — the page may still be loading; try again or browser_reload"
-            ));
+            return Err(action_timeout_error(win, action));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 /// Close the agent-browser window. Safe when nothing is open.
+/// Tear the browser down. `user_initiated` also marks the session closed so it
+/// does not reopen by itself next boot — an automatic restart must NOT do that,
+/// because the window is coming straight back.
+fn stop_browser_inner(app: &tauri::AppHandle, user_initiated: bool) -> Result<(), String> {
+    // Record the pages BEFORE the teardown: once the windows are gone there is
+    // nothing left to read them from. A wedged session reports no urls at all,
+    // and `persist_session` keeps the previous record rather than blanking it.
+    persist_session(app);
+    if user_initiated {
+        mark_session_closed();
+    }
+    #[cfg(target_os = "linux")]
+    suspend_linux_browser(app)?;
+    #[cfg(not(target_os = "linux"))]
+    destroy_browser_windows(app)?;
+    Ok(())
+}
+
 #[tauri::command(async)]
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
     match (get_window(&app), browser_is_suspended()) {
         (_, true) => Ok("browser was not running".to_string()),
         (Some(_), false) => {
-            // Record the pages BEFORE the teardown: once the windows are gone
-            // there is nothing left to read them from.
-            persist_session(&app);
-            mark_session_closed();
-            #[cfg(target_os = "linux")]
-            suspend_linux_browser(&app)?;
-            #[cfg(not(target_os = "linux"))]
-            destroy_browser_windows(&app)?;
+            stop_browser_inner(&app, true)?;
             Ok("browser stopped".to_string())
         }
         (None, false) => Ok("browser was not running".to_string()),
@@ -4571,6 +5262,25 @@ mod tests {
     }
 
     #[test]
+    fn provider_authorization_profiles_are_stable_and_isolated() {
+        let key = |url: &str| provider_auth_profile_key(&tauri::Url::parse(url).unwrap());
+        assert_eq!(key("https://claude.ai/oauth/authorize"), "anthropic");
+        assert_eq!(
+            key("https://platform.claude.com/oauth/code/callback"),
+            "anthropic"
+        );
+        assert_eq!(key("https://auth.openai.com/codex/device"), "openai");
+        assert_eq!(key("https://accounts.google.com/o/oauth2/auth"), "google");
+        assert_eq!(key("https://www.kimi.com/code/authorize_device"), "kimi");
+        assert_ne!(
+            key("https://claude.ai/oauth/authorize"),
+            key("https://auth.openai.com/codex/device")
+        );
+        // A lookalike suffix must never join a trusted provider's cookie jar.
+        assert_eq!(key("https://evilclaude.ai/login"), "evilclaude_ai");
+    }
+
+    #[test]
     fn reply_channel_round_trip() {
         use base64::Engine as _;
         let payload = base64::engine::general_purpose::STANDARD.encode("hello page");
@@ -4775,9 +5485,42 @@ mod tests {
         assert_eq!(device_by_name("ipad").unwrap().name, "tablet");
         assert_eq!(device_by_name("default").unwrap().name, "desktop");
         assert!(device_by_name("watch").is_none());
-        // mobile presets carry a UA override; desktop uses the engine default
+        // Mobile presets carry an explicit UA override. Desktop uses the native
+        // engine default except on macOS, where bare WKWebView needs Safari's
+        // compatibility tokens for sites that enforce a minimum Safari version.
         assert!(device_by_name("iphone").unwrap().ua.is_some());
         assert!(device_by_name("desktop").unwrap().ua.is_none());
+        #[cfg(target_os = "macos")]
+        {
+            let desktop = device_user_agent(device_by_name("desktop").unwrap()).unwrap();
+            assert!(desktop.contains("Version/"));
+            assert!(desktop.contains(" Safari/"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(device_user_agent(device_by_name("desktop").unwrap()).is_none());
+    }
+
+    #[test]
+    fn claude_callback_returns_only_the_bounded_code_and_state() {
+        let callback = tauri::Url::parse(
+            "https://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+        )
+        .unwrap();
+        assert_eq!(
+            claude_auth_code_from_callback(&callback).as_deref(),
+            Some("abcdefghijklmnopqrstuvwxyz012345#ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789")
+        );
+        for rejected in [
+            "http://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://evil.example/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://platform.claude.com/oauth/code/callback?code=short&state=ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789",
+            "https://platform.claude.com/oauth/code/callback?code=abcdefghijklmnopqrstuvwxyz012345&state=bad%23input________________",
+        ] {
+            assert_eq!(
+                claude_auth_code_from_callback(&tauri::Url::parse(rejected).unwrap()),
+                None
+            );
+        }
     }
 
     #[test]

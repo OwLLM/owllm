@@ -10,6 +10,67 @@ use std::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Every git this app spawns runs unattended: a 30s readiness probe, a vault
+/// sync, an agent's commit. None of them has a console to answer a prompt, and
+/// none has anyone watching the instant it asks.
+///
+/// `GIT_TERMINAL_PROMPT=0` only silences git's OWN terminal prompt. A GUI
+/// credential helper — Git Credential Manager, which ships with git on every
+/// desktop OS and is the default `credential.helper` on Windows — ignores it
+/// and opens a modal dialog instead, then blocks the child until a human
+/// answers. A polling probe then stacks one blocked git plus one orphan dialog
+/// per tick, without bound, until the machine is unusable.
+///
+/// Set process-wide before anything can spawn git, so every child inherits it
+/// (including the ones CLI agents spawn — they cannot answer a dialog either).
+/// Terminal prompts are deliberately left alone: a PTY the user is looking at
+/// CAN be answered, and a missing credential there should still be askable.
+pub fn forbid_gui_credential_prompts() {
+    // GCM's own switch, and the git-config form every GCM-derived helper reads.
+    std::env::set_var("GCM_INTERACTIVE", "never");
+    std::env::set_var("GIT_CONFIG_COUNT", "1");
+    std::env::set_var("GIT_CONFIG_KEY_0", "credential.interactive");
+    std::env::set_var("GIT_CONFIG_VALUE_0", "false");
+}
+
+/// `-c` arguments that keep an unattended git's credential I/O inside a store
+/// this app owns.
+///
+/// Not prompting is only half of it. When a server rejects a credential that
+/// came from a helper, git runs `credential reject`, which broadcasts **erase**
+/// to EVERY configured helper — the OS vault (Windows Credential Manager, the
+/// macOS keychain) and `~/.git-credentials` alike. Those are shared surfaces:
+/// `gh`, VS Code and the user's own terminal read them. So one 401 from a
+/// cosmetic 30s readiness poll can silently delete the user's GitHub login for
+/// every tool on the machine — with the prompt suppressed, without even a
+/// dialog to notice. Observed: an emptied store on Linux, where there is no GUI
+/// helper at all and nothing ever appeared on screen.
+///
+/// Git has no switch to accept `get` but refuse `erase`, so instead the helper
+/// list is reset and replaced with an app-owned file. An erase then costs a
+/// file `github::background_credentials_file` rewrites on the next call, and
+/// nothing outside the app is reachable.
+///
+/// Empty when no GitHub account is connected — there is nothing to substitute,
+/// and reducing an unattended git to no credentials at all would only turn a
+/// working probe into a failing one.
+pub fn app_owned_credential_args() -> Vec<String> {
+    let Some(store) = crate::github::background_credentials_file() else {
+        return Vec::new();
+    };
+    // git hands a multi-word helper value to the shell, so the path is quoted
+    // and slash-separated — a Windows `C:\Users\…` would otherwise arrive with
+    // its separators eaten as escapes.
+    let path = store.to_string_lossy().replace('\\', "/");
+    vec![
+        "-c".into(),
+        // An empty value resets the inherited helper list (system + global).
+        "credential.helper=".into(),
+        "-c".into(),
+        format!("credential.helper=store --file=\"{path}\""),
+    ]
+}
+
 fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(Path::new(dir));
@@ -75,6 +136,43 @@ pub struct GitStatus {
 /// Cap on the per-poll `files` payload (see GitStatus::total).
 const MAX_STATUS_FILES: usize = 2000;
 
+const TRACKED_RUNTIME_PATHS: &[&str] = &[
+    ".owllm-inbox",
+    ".owllm/brainstorm.json",
+    ".owllm/eval-traces.jsonl",
+    ".tmp_wheels",
+];
+
+fn is_tracked_runtime_path(path: &str) -> bool {
+    let p = path.trim().replace('\\', "/");
+    crate::fleet::is_app_scratch(&p)
+        || p == ".tmp_wheels"
+        || p.starts_with(".tmp_wheels/")
+}
+
+fn compact_tracked_runtime_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut has_tmp_wheels = false;
+    for path in paths {
+        let p = path.trim().replace('\\', "/");
+        if p.is_empty() || !is_tracked_runtime_path(&p) {
+            continue;
+        }
+        if p == ".tmp_wheels" || p.starts_with(".tmp_wheels/") {
+            has_tmp_wheels = true;
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &p) {
+            out.push(p);
+        }
+    }
+    if has_tmp_wheels {
+        out.push(".tmp_wheels".to_string());
+    }
+    out.sort();
+    out
+}
+
 /// `git status --porcelain=v1 -b` parsed into a compact summary.
 #[tauri::command]
 pub async fn git_status(dir: String) -> Result<GitStatus, String> {
@@ -137,27 +235,15 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
         }
         // Query only known runtime paths; scanning every tracked file on the
         // Code page's five-second status poll is wasteful on large repos.
-        let nuisance_files = git(
-            &dir,
-            &[
-                "ls-files",
-                "--",
-                ".owllm-inbox",
-                ".owllm/brainstorm.json",
-                ".owllm/eval-traces.jsonl",
-            ],
-        )
-        .ok()
-        .filter(|(ok, _, _)| *ok)
-        .map(|(_, tracked, _)| {
-            tracked
-                .lines()
-                .map(str::trim)
-                .filter(|path| crate::fleet::is_app_scratch(path))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+        let mut args = vec!["ls-files", "--"];
+        args.extend_from_slice(TRACKED_RUNTIME_PATHS);
+        let nuisance_files = git(&dir, &args)
+            .ok()
+            .filter(|(ok, _, _)| *ok)
+            .map(|(_, tracked, _)| {
+                compact_tracked_runtime_paths(tracked.lines().map(str::to_string))
+            })
+            .unwrap_or_default();
         Ok(GitStatus {
             is_repo: true,
             branch,
@@ -172,9 +258,51 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
     .map_err(|e| format!("join: {e}"))?
 }
 
+/// Remove only app-generated runtime paths from Git tracking while preserving
+/// their working-tree bytes. The cleanup is root-based and argument-based, so
+/// it cannot collapse a full `git ls-files` listing into one overlong pathspec.
+#[tauri::command]
+pub async fn git_untrack_runtime_files(dir: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        match git(&dir, &["rev-parse", "--is-inside-work-tree"]) {
+            Ok((true, out, _)) if out.trim() == "true" => {}
+            _ => return Err("not a Git worktree".to_string()),
+        }
+
+        let mut ls_args = vec!["ls-files", "--"];
+        ls_args.extend_from_slice(TRACKED_RUNTIME_PATHS);
+        let (ok, tracked, err) = git(&dir, &ls_args)?;
+        if !ok {
+            return Err(format!("git ls-files: {}", err.trim()));
+        }
+        let paths = compact_tracked_runtime_paths(tracked.lines().map(str::to_string));
+        if paths.is_empty() {
+            return Ok("No tracked OWLLM runtime files found.".to_string());
+        }
+
+        let mut rm_args = vec!["rm", "--cached", "-r", "--"];
+        rm_args.extend(paths.iter().map(String::as_str));
+        let (rm_ok, out, rm_err) = git(&dir, &rm_args)?;
+        if !rm_ok {
+            return Err(format!("git rm --cached: {}", rm_err.trim()));
+        }
+        Ok(format!(
+            "Removed from Git tracking, kept on disk:\n{}{}",
+            paths.join("\n"),
+            if out.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{}", out.trim())
+            }
+        ))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{git_status, truncate_on_char_boundary};
+    use super::{compact_tracked_runtime_paths, git_status, truncate_on_char_boundary};
     use std::{fs, process::Command};
 
     #[tokio::test]
@@ -231,6 +359,24 @@ mod tests {
         let s = format!("{}💥", "x".repeat(199_999));
         let t = truncate_on_char_boundary(&s, 200_000);
         assert_eq!(t.len(), 199_999); // backed off past the 4-byte emoji start
+    }
+
+    #[test]
+    fn tracked_runtime_paths_are_compacted_before_cleanup() {
+        let paths = compact_tracked_runtime_paths([
+            ".tmp_wheels/browser-verify/package.json".to_string(),
+            ".tmp_wheels/browser-verify/node_modules/playwright/package.json".to_string(),
+            ".owllm/brainstorm.json".to_string(),
+            ".owllm/project.json".to_string(),
+            "src/main.rs".to_string(),
+        ]);
+        assert_eq!(
+            paths,
+            vec![
+                ".owllm/brainstorm.json".to_string(),
+                ".tmp_wheels".to_string(),
+            ]
+        );
     }
 }
 

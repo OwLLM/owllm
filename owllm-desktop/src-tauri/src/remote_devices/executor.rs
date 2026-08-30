@@ -434,9 +434,7 @@ fn diagnostics(req: &CommandRequest, started: Instant) -> CommandResult {
 }
 
 fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
+    crate::hardware::machine_name().unwrap_or_else(|| "unknown".to_string())
 }
 
 fn wsl_summary() -> String {

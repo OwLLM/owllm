@@ -267,11 +267,26 @@ const unsupportedPlan = nextHandoffs(
   new Map([["frontend", 1]]),
 );
 check(
-  "unsupported explicit handoff emits a diagnostic and does not run",
-  unsupportedPlan.hands.length === 0
+  "unsupported worker handoff emits a diagnostic and still runs the wired reviewer",
+  unsupportedPlan.hands.length === 1
+    && unsupportedPlan.hands[0].name === "red_team"
+    && unsupportedPlan.hands[0].explicit === false
     && unsupportedPlan.diagnostics.length === 1
     && unsupportedPlan.diagnostics[0].includes("Unsupported handoff")
     && unsupportedPlan.diagnostics[0].includes("@orchestrator"),
+);
+const unresolvedPlan = nextHandoffs(
+  REVIEW_TEAM,
+  "frontend",
+  "Work complete.\n@user: let me know if you need anything else",
+  new Map([["frontend", 1]]),
+);
+check(
+  "unknown worker handoff emits a diagnostic and still runs the wired reviewer",
+  unresolvedPlan.hands.length === 1
+    && unresolvedPlan.hands[0].name === "red_team"
+    && unresolvedPlan.diagnostics.length === 1
+    && unresolvedPlan.diagnostics[0].includes("unknown agent @user"),
 );
 const unsupportedReviewPlan = nextHandoffs(
   REVIEW_TEAM,

@@ -121,7 +121,11 @@ export function nextHandoffs(
         }
       }
     }
-    return { hands, capped, diagnostics };
+    if (hands.length > 0 || capped.length > 0 || isReviewAgent(reviewer)) {
+      return { hands, capped, diagnostics };
+    }
+    // A worker's invalid or unresolved @handoff must not suppress the wired
+    // auto-flow below. Preserve the diagnostic and continue to its reviewer.
   }
 
   if (isReviewAgent(reviewer)) {

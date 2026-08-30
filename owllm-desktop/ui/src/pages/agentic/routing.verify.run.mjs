@@ -35,6 +35,7 @@ const {
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
   toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
   soloGeneralistForTeam, normalizeRoleToolAllowlist, SOLO_GENERALIST_BASE,
+  isReviewAgent, reviewRequiresRepair, reviewRepairTargets, shouldRepeatReview,
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
@@ -188,6 +189,41 @@ check("no verdict + refusal → concluded (deferred, not vetoed)", criticConclud
 check("no verdict + substantive critique → NOT concluded", criticConcluded("You should also handle the empty-input case.") === false);
 check("criticIsSatisfied lgtm", criticIsSatisfied("lgtm") === true);
 check("criticRefused 'I won't'", criticRefused("I won't generate that dataset.") === true);
+
+// 3b) review repair loop — old behavior made the reviewer a terminal node, so
+// P0/P1 findings were merely included in the user's final report. The runtime
+// must derive reviewer→worker from the authored worker→review edge and send the
+// repaired work through the reviewer again, with the existing cap as backstop.
+section("3b) Review findings trigger repair + re-review");
+const REVIEW_TEAM = {
+  agents: [
+    { name: "orchestrator", base: "orchestrator" },
+    { name: "frontend", base: "coder" },
+    { name: "red_team", base: "critic" },
+  ],
+  edges: [
+    { source: "orchestrator", target: "frontend" },
+    { source: "frontend", target: "red_team" },
+  ],
+};
+check("custom red_team is recognized as a reviewer", isReviewAgent(REVIEW_TEAM.agents[2]) === true);
+check("P1 finding requires repair", reviewRequiresRepair("P1: external URLs can escape the import boundary") === true);
+check("REVISE verdict requires repair", reviewRequiresRepair("VERDICT: REVISE — cancellation is broken") === true);
+check("plain-language found issues require repair", reviewRequiresRepair("I found 2 issues in the import path.") === true);
+check("plain-language no issues remains clean", reviewRequiresRepair("I found no issues in the import path.") === false);
+check("clean review does not fabricate repair", reviewRequiresRepair("No concerns.\nVERDICT: SHIP") === false);
+const firstReviewCounts = new Map([["frontend", 1], ["red_team", 1]]);
+check(
+  "negative review derives the reverse red_team→frontend repair path (was terminal)",
+  JSON.stringify(reviewRepairTargets(REVIEW_TEAM, "red_team", "P1: fix the URL fallback", firstReviewCounts)) === JSON.stringify(["frontend"]),
+);
+check(
+  "clean review returns to integration without rerunning the worker",
+  reviewRepairTargets(REVIEW_TEAM, "red_team", "APPROVE — no issues", firstReviewCounts).length === 0,
+);
+const repairCounts = new Map([["frontend", 2], ["red_team", 1]]);
+check("repaired frontend is sent through red_team again", shouldRepeatReview(REVIEW_TEAM, "frontend", "red_team", repairCounts, 3) === true);
+check("review re-run remains bounded by the cap", shouldRepeatReview(REVIEW_TEAM, "frontend", "red_team", new Map([["frontend", 3], ["red_team", 3]]), 3) === false);
 
 // 4) done-gate — a code/ops goal with zero write tools is NOT done; design/docs/
 //    general are done regardless (they don't have to mutate the world).

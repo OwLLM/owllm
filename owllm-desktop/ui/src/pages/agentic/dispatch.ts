@@ -70,7 +70,10 @@ import {
   bestAgentForGoal,
   agentDomain,
   normalizeRoleToolAllowlist,
+  isReviewAgent,
+  reviewRepairTargets,
   roleCanWrite,
+  shouldRepeatReview,
 } from "./teamConfig";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
@@ -767,7 +770,14 @@ export const MAX_AGENT_RERUNS = 3;
 /// stays a leaf: do its work and return (exactly today's behavior).
 export function routingHint(team: Team, spec: AgentSpec): string {
   const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
-  const allowed = downstreamTargets(team, spec.name, orchName);
+  const downstream = downstreamTargets(team, spec.name, orchName);
+  // A reviewer may return actionable findings to the worker that feeds it even
+  // when the canvas only authors the natural worker→review edge. The runtime
+  // enforces the same reverse path below; this hint lets the model be explicit.
+  const repair = isReviewAgent(spec)
+    ? team.edges.filter((edge) => edge.target === spec.name && edge.source !== orchName).map((edge) => edge.source)
+    : [];
+  const allowed = [...new Set([...downstream, ...repair])];
   if (allowed.length === 0) {
     return [
       "The orchestrator has dispatched the task below. Reply concisely and directly with your work.",
@@ -780,7 +790,7 @@ export function routingHint(team: Team, spec: AgentSpec): string {
     "  - To hand work to a teammate you're connected to, END your reply with a line:  @<name>: <exactly what they should do>.",
     `  - You may route ONLY to: ${targets}.`,
     "  - If your work is complete and no teammate needs it, just give your answer — it returns to whoever dispatched you.",
-    "  - Reviewer/critic: when NOT satisfied, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
+    "  - Reviewer/critic/red team: when you find any actionable defect, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
     "  - Loops are capped — be decisive, don't ping-pong without making progress.",
   ].join("\n");
 }
@@ -809,7 +819,9 @@ export function nextHandoffs(
   runCount: Map<string, number>,
 ): HandoffPlan {
   const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
-  const allowed = downstreamTargets(team, agentName, orchName);
+  const downstream = downstreamTargets(team, agentName, orchName);
+  const repairs = reviewRepairTargets(team, agentName, agentOutput, runCount);
+  const allowed = [...new Set([...downstream, ...repairs])];
   if (allowed.length === 0) return { hands: [], capped: [] };
   const dispatched = parseDispatches(agentOutput, team, agentName).filter((d) =>
     allowed.includes(d.agentName),
@@ -827,10 +839,32 @@ export function nextHandoffs(
     }
     return { hands, capped };
   }
+  // Prompt compliance is not a completion gate. If a reviewer/red-team agent
+  // reports a P0/P1, REVISE/REJECT/CONCERN, or failed verification without an
+  // explicit @handoff, deterministically send the exact findings back to the
+  // worker that produced the reviewed work. A clean/ambiguous review remains a
+  // terminal result and returns to integration.
+  if (isReviewAgent(team.agents.find((agent) => agent.name === agentName) ?? { name: agentName, base: "" })) {
+    const hands: Handoff[] = [];
+    const capped: string[] = [];
+    for (const target of repairs) {
+      if ((runCount.get(target) ?? 0) < MAX_AGENT_RERUNS) {
+        hands.push({
+          name: target,
+          input: `Review found defects that must be fixed before completion. Fix every actionable finding below, add/run regression coverage, verify the result, then return it for re-review.\n\n${agentOutput}`,
+          explicit: true,
+        });
+      } else {
+        capped.push(target);
+      }
+    }
+    return { hands, capped };
+  }
   // Legacy auto-flow: each downstream runs ONCE (run-once == today's behavior).
   const handoff = `You are continuing a team workflow. @${agentName} produced the following — build on it for YOUR part of the task:\n\n${agentOutput}`;
   const hands = allowed
-    .filter((t) => (runCount.get(t) ?? 0) === 0)
+    .filter((t) => (runCount.get(t) ?? 0) === 0
+      || shouldRepeatReview(team, agentName, t, runCount, MAX_AGENT_RERUNS))
     .map((t) => ({ name: t, input: handoff, explicit: false }));
   return { hands, capped: [] };
 }

@@ -27,6 +27,7 @@ const check = (ok, message) => {
 };
 
 const fleet = read(path.join(DESKTOP, "src-tauri", "src", "fleet.rs"));
+const fleetScratch = read(path.join(DESKTOP, "src-tauri", "src", "fleet_scratch.rs"));
 const sandbox = read(path.join(DESKTOP, "src-tauri", "src", "sandbox.rs"));
 const lib = read(path.join(DESKTOP, "src-tauri", "src", "lib.rs"));
 const card = read(path.join(DESKTOP, "ui", "src", "pages", "core", "SandboxDiskCard.tsx"));
@@ -159,7 +160,10 @@ for (const t of [
 // a real throwaway git repo — the same pattern as the CLI-failure gate.
 {
   const constLine = (name) => {
-    const m = new RegExp(`const ${name}: [^=]+= [^;]+;`).exec(fleet);
+    // QUARANTINE_PREFIX lives in the dependency-free scratch module so its
+    // model-run/commit filter can be compiled and executed on Windows. The
+    // remaining janitor constants stay in fleet.rs.
+    const m = new RegExp(`const ${name}: [^=]+= [^;]+;`).exec(`${fleet}\n${fleetScratch}`);
     check(!!m, `sliceable const ${name}`);
     return m[0];
   };

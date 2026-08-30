@@ -231,37 +231,10 @@ pub(crate) fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// App-managed runtime files that must NEVER wedge the worktree workflow. These
-/// are tracked in some repos and the app
-/// rewrites them, so a `git status` on the source is perpetually "dirty" through
-/// no fault of the user — which used to make EVERY `fleet_worktree_create` bounce
-/// with DirtyWorkingTree. Deliberately do not classify the whole `.owllm/`
-/// directory as scratch: Project Cards, verify config, skills, and media assets
-/// are durable project data which users must be able to commit and share.
-pub(crate) fn is_app_scratch(path: &str) -> bool {
-    let p = path.trim().trim_start_matches("./").replace('\\', "/");
-    p == ".owllm-inbox"
-        || p.starts_with(".owllm-inbox/")
-        || p == ".owllm/brainstorm.json"
-        || p == ".owllm/eval-traces.jsonl"
-        // npm staged-install scratch: external tooling stages packages in
-        // `node_modules.partial/` before renaming into `node_modules/`. A run
-        // caught mid-install left it behind as `??` and the refresh gate then
-        // refused every model run as "pending edits" (it even got committed
-        // once by a Sync — see a0936085). Never user work; also gitignored.
-        || p.split('/').any(|seg| seg == "node_modules.partial")
-}
-
-/// Extract the file path from one `git status --porcelain` line, resolving the
-/// rename form (`R  old -> new`) to the new path. Returns "" for a malformed line.
-fn porcelain_path(line: &str) -> &str {
-    // Format: two status columns + a space, then the path (columns 3..).
-    let rest = line.get(3..).unwrap_or("").trim();
-    match rest.rsplit_once(" -> ") {
-        Some((_, new)) => new.trim(),
-        None => rest,
-    }
-}
+// The scratch predicate lives in its own dependency-free module so its guard can
+// actually be executed: the lib-test binary cannot launch on Windows
+// (STATUS_ENTRYPOINT_NOT_FOUND), which left every test in this file unrun.
+pub(crate) use crate::fleet_scratch::{is_app_scratch, porcelain_path, QUARANTINE_PREFIX};
 
 fn user_conflict_files(conflicts: &str) -> Vec<String> {
     conflicts
@@ -692,11 +665,6 @@ fn safe_seg(s: &str) -> String {
 /// hours. The rest of a `dist/` is a few hundred MB, so excluding the whole name
 /// gives up almost nothing and removes any chance of eating that download cache.
 const BUILD_CACHE_DIR_NAMES: &[&str] = &["target", "node_modules"];
-
-/// Name given to a cache directory that has been renamed out of the way but not
-/// yet fully deleted. Deliberately not a build-cache name, so no build ever
-/// mistakes it for one, and deliberately dot-prefixed so it sorts out of sight.
-const QUARANTINE_PREFIX: &str = ".owllm-reclaimed-";
 
 /// Remove a build-cache directory RENAME-FIRST, so the caller can never leave a
 /// half-deleted one behind. `remove_dir_all` walks and unlinks in place: if any
@@ -3132,49 +3100,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn app_scratch_is_ignored_but_source_is_not() {
-        // The perpetually-"dirty" app-managed paths that used to wedge creates.
-        assert!(is_app_scratch(".owllm-inbox/image_1.png"));
-        assert!(is_app_scratch(".owllm-inbox"));
-        assert!(is_app_scratch(".owllm/brainstorm.json"));
-        assert!(is_app_scratch(".owllm/eval-traces.jsonl"));
-        assert!(is_app_scratch("./.owllm-inbox/x.png"));
-        assert!(is_app_scratch(".owllm-inbox\\image_1.png")); // porcelain can emit backslashes
-        // npm staged-install scratch left behind mid-install must never read as
-        // "pending edits" (regression: blocked all Coding-page runs, 2026-08-25).
-        assert!(is_app_scratch("owllm-desktop/node_modules.partial/"));
-        assert!(is_app_scratch(
-            "owllm-desktop/node_modules.partial/esbuild/package.json"
-        ));
-        assert!(is_app_scratch("node_modules.partial"));
-        assert!(!is_app_scratch("owllm-desktop/node_modules.partial.md")); // sibling file, not the dir
-                                                              // Real source changes must STILL block (branch cuts from HEAD).
-        assert!(!is_app_scratch("src/main.rs"));
-        assert!(!is_app_scratch("owllm-desktop/ui/src/App.tsx"));
-        assert!(!is_app_scratch(".owllm/project.json"));
-        assert!(!is_app_scratch(".owllm/verify.json"));
-        assert!(!is_app_scratch(".owllm/skills/example/SKILL.md"));
-        assert!(!is_app_scratch(".owllm/assets/mockup.png"));
-        assert!(!is_app_scratch(".owllm-inbox-notes.md")); // sibling file, not the dir
-        assert!(!is_app_scratch(".github/workflows/ci.yml"));
-    }
-
-    #[test]
-    fn porcelain_path_parsing() {
-        assert_eq!(
-            porcelain_path(" M .owllm-inbox/image_1.png"),
-            ".owllm-inbox/image_1.png"
-        );
-        assert_eq!(porcelain_path("A  src/new.rs"), "src/new.rs");
-        assert_eq!(
-            porcelain_path("R  old/path.rs -> new/path.rs"),
-            "new/path.rs"
-        );
-        assert_eq!(porcelain_path("?? untracked.txt"), "untracked.txt");
-        // A source file next to a scratch change is still seen as source.
-        assert!(!is_app_scratch(porcelain_path("M  Cargo.toml")));
-    }
 
     #[test]
     fn staged_app_scratch_is_removed_before_commit() {

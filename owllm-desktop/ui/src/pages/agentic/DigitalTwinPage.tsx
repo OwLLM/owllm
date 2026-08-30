@@ -647,27 +647,27 @@ export default function DigitalTwinPage() {
 
           {!parts.length && !loading && (
             <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 24, pointerEvents: "none" }}>
-              <div style={{ width: "min(520px, 90%)", padding: "28px 30px", border: "1px solid #334150", borderRadius: 12, background: "rgba(17, 22, 29, 0.94)", textAlign: "center", pointerEvents: "auto" }}>
-                <div style={{ color: "#f4f7fb", fontSize: 21, fontWeight: 850 }}>Build a digital twin from your 3D parts</div>
-                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "#a8b3c1", fontSize: 13, lineHeight: 1.55 }}>Import GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
+              <div style={{ width: "min(520px, 90%)", padding: "28px 30px", border: "1px solid var(--border-strong)", borderRadius: 12, background: "color-mix(in srgb, var(--bg-card) 94%, transparent)", textAlign: "center", pointerEvents: "auto" }}>
+                <div style={{ color: "var(--fg-strong)", fontSize: 21, fontWeight: 850 }}>Build a digital twin from your 3D parts</div>
+                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.55 }}>Import GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
                 <button type="button" style={{ ...buttonStyle, background: "var(--accent)", color: "var(--accent-fg)", borderColor: "var(--accent)" }} onClick={() => fileInputRef.current?.click()}>Choose 3D files</button>
-                <div style={{ marginTop: 10, color: "#7f8c9c", fontSize: 10 }}>For GLTF, select the .gltf, .bin, and texture files together.</div>
+                <div style={{ marginTop: 10, color: "var(--fg-subtle)", fontSize: 10 }}>For GLTF, select the .gltf, .bin, and texture files together.</div>
               </div>
             </div>
           )}
 
           {loading && (
-            <div aria-live="polite" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "rgba(17, 22, 29, 0.92)" }}>
+            <div aria-live="polite" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--bg-panel) 92%, transparent)" }}>
               <div style={{ width: "min(480px, 70%)" }}>
-                <div style={{ color: "#e8edf4", fontWeight: 750, marginBottom: 12 }}>Preparing geometry on this device…</div>
+                <div style={{ color: "var(--fg-strong)", fontWeight: 750, marginBottom: 12 }}>Preparing geometry on this device…</div>
                 {[100, 83, 92, 64].map((width, index) => <div key={width} style={{ height: index === 0 ? 70 : 12, width: `${width}%`, marginBottom: 9, borderRadius: 6, background: "rgba(var(--accent-rgb), 0.14)", border: "1px solid rgba(var(--accent-rgb), 0.18)" }} />)}
               </div>
             </div>
           )}
 
           {parts.length > 0 && (
-            <div style={{ position: "absolute", left: 12, bottom: 12, width: 210, padding: "8px 10px", borderRadius: 8, background: "rgba(17,22,29,0.88)", border: "1px solid #334150" }}>
-              <label htmlFor="digital-twin-explode" style={{ display: "flex", justifyContent: "space-between", color: "#d7dee8", fontSize: 11, fontWeight: 700 }}><span>Exploded view</span><span>{Math.round(explode * 100)}%</span></label>
+            <div style={{ position: "absolute", left: 12, bottom: 12, width: 210, padding: "8px 10px", borderRadius: 8, background: "color-mix(in srgb, var(--bg-card) 88%, transparent)", border: "1px solid var(--border-strong)" }}>
+              <label htmlFor="digital-twin-explode" style={{ display: "flex", justifyContent: "space-between", color: "var(--fg-strong)", fontSize: 11, fontWeight: 700 }}><span>Exploded view</span><span>{Math.round(explode * 100)}%</span></label>
               <input id="digital-twin-explode" type="range" min="0" max="1" step="0.01" value={explode} onChange={(event) => setExplode(Number(event.target.value))} style={{ width: "100%", accentColor: "var(--accent)" }} />
             </div>
           )}

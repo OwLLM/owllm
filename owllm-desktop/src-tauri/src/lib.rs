@@ -56,6 +56,7 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod fleet_scratch;
 mod gguf;
 mod git;
 mod github;

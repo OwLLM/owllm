@@ -11,12 +11,18 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 // @ts-ignore: bundled Three.js example module
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import {
+  actionableImportFailure,
+  aggregateImportError,
+  formatImportBytes as formatBytes,
+  parseGltfScene,
+  resolveLinkedAssetUrl,
+  yieldToMainThread,
+} from "./digitalTwinImport";
 
 const ACCEPTED_EXTENSIONS = new Set(["glb", "gltf", "obj", "stl"]);
 const IMPORT_ACCEPT = ".glb,.gltf,.obj,.stl,.bin,.png,.jpg,.jpeg,.webp";
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
-const MAX_TOTAL_IMPORT_BYTES = 250 * 1024 * 1024;
-const BLOCKED_ASSET_URL = "data:application/octet-stream;base64,";
 
 type Vector3Tuple = [number, number, number];
 
@@ -55,24 +61,8 @@ function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? path.toLowerCase();
 }
 
-function linkedAssetName(url: string): string {
-  let decoded = url;
-  try { decoded = decodeURIComponent(url); } catch { /* Keep the original URL for the error message. */ }
-  return basename(decoded.split(/[?#]/, 1)[0]);
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function uniqueId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function yieldToMainThread(): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function disposeObject(root: any) {
@@ -104,9 +94,7 @@ function prepareObject(root: any, fallbackName: string) {
 function loadModel(file: File, companions: File[]): Promise<any> {
   const extension = extensionOf(file.name);
   return new Promise((resolve, reject) => {
-    const fail = (reason: unknown) => reject(new Error(
-      typeof reason === "string" ? reason : (reason as { message?: string })?.message ?? `Could not parse ${file.name}`,
-    ));
+    const fail = (reason: unknown) => reject(actionableImportFailure(file.name, reason));
 
     if (extension === "obj") {
       file.text().then((source) => {
@@ -134,34 +122,14 @@ function loadModel(file: File, companions: File[]): Promise<any> {
     for (const asset of related) urls.set(basename(asset.name), URL.createObjectURL(asset));
     const missingAssets = new Set<string>();
     const manager = new THREE.LoadingManager();
-    manager.setURLModifier((url: string) => {
-      if (/^(data|blob):/i.test(url)) return url;
-      const assetName = linkedAssetName(url);
-      const localUrl = urls.get(assetName);
-      if (localUrl) return localUrl;
-      missingAssets.add(assetName || url);
-      return BLOCKED_ASSET_URL;
-    });
+    manager.setURLModifier((url: string) => resolveLinkedAssetUrl(url, urls, missingAssets));
     const release = () => urls.forEach((url) => URL.revokeObjectURL(url));
     const missingAssetError = () => missingAssets.size
       ? `Missing linked asset${missingAssets.size === 1 ? "" : "s"}: ${Array.from(missingAssets).join(", ")}. Select the GLTF, its .bin file, and all referenced textures together, then retry.`
       : null;
     const loader = new GLTFLoader(manager);
     file.arrayBuffer().then((buffer) => {
-      loader.parse(buffer, "", (result: any) => {
-        release();
-        const scene = result.scene ?? result.scenes?.[0];
-        const missingError = missingAssetError();
-        if (missingError) {
-          disposeObject(scene);
-          fail(missingError);
-          return;
-        }
-        resolve(scene);
-      }, (error: unknown) => {
-        release();
-        fail(missingAssetError() ?? error);
-      });
+      parseGltfScene(loader, buffer, release, missingAssetError, disposeObject).then(resolve, fail);
     }, (error) => {
       release();
       fail(error);
@@ -481,9 +449,9 @@ export default function DigitalTwinPage() {
       setError(`${oversized.name} is larger than the 100 MB interactive import limit. Reduce or split the model before importing so the UI remains responsive.`);
       return;
     }
-    const totalImportBytes = files.reduce((sum, file) => sum + file.size, 0);
-    if (totalImportBytes > MAX_TOTAL_IMPORT_BYTES) {
-      setError(`The selected files total ${formatBytes(totalImportBytes)}, above the 250 MB aggregate import limit. Choose a smaller set or import the assembly in batches so the UI remains responsive.`);
+    const aggregateError = aggregateImportError(files);
+    if (aggregateError) {
+      setError(aggregateError);
       return;
     }
 

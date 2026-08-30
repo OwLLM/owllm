@@ -92,7 +92,10 @@ import {
   MAX_AGENT_RERUNS,
   routingHint,
   nextHandoffs,
+  handoffStopReason,
+  handoffSupplementalResults,
   loopExhaustedNotice,
+  runsAsSubLeader,
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
   TEAM_MEMORY_HINT_LEAN,
@@ -119,7 +122,7 @@ import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
-  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish,
+  goalRequiresWrite, runDelivered, normalizeRunOutput, goalRequiresPublish,
   normalizeRoleToolAllowlist, soloGeneralistForTeam } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
@@ -12113,39 +12116,39 @@ export function AgentsPage({
               if (v) rt.criticVerdict = v;
             }
           }
-          // No-progress / oscillation guard (harness, deterministic): if this agent
-          // just repeated its previous output, stop its chain — that's a stuck loop
-          // (e.g. critic<->coder ping-pong), not progress.
-          {
-            const cur = normalizeRunOutput(out.text);
-            const prevOut = lastOutput.get(name);
-            lastOutput.set(name, cur);
-            if (isNoProgress(prevOut, cur)) {
-              if (runTraceRef.current) runTraceRef.current.oscillationStops++;
-              appendThought(name, { role: "system", color: "#ffb74d", text: `⚠ @${name} repeated its previous output — no progress; stopping this chain to avoid a loop.` });
-              return [out];
-            }
-          }
           // A sub-leader already ran its members inside runLeaderUnit — treat it as
           // a leaf so we don't ALSO handoff to (and double-run) those same members.
-          const ranAsLeader =
-            (spec.role === "leader" || !!roleByName.get(spec.base)?.canDispatch) && name !== orch.name &&
-            (wiredDispatchTargets(runTeam, name)?.size ?? 0) > 0;
-          if (ranAsLeader) return [out];
+          const ranAsLeader = runsAsSubLeader(
+            spec,
+            !!roleByName.get(spec.base)?.canDispatch,
+            orch.name,
+            wiredDispatchTargets(runTeam, name)?.size ?? 0,
+          );
+          const cur = normalizeRunOutput(out.text);
+          const stopReason = handoffStopReason(lastOutput.get(name), cur, ranAsLeader);
+          lastOutput.set(name, cur);
+          if (stopReason === "no-progress") {
+            if (runTraceRef.current) runTraceRef.current.oscillationStops++;
+            appendThought(name, { role: "system", color: "#ffb74d", text: `⚠ @${name} repeated its previous output — no progress; stopping this chain to avoid a loop.` });
+            return [out];
+          }
+          if (stopReason === "leader") return [out];
           // Agent-decided routing: the agent's reply picks where its output goes next
           // (explicit @target among its allowed edges), else legacy run-once auto-flow.
-          const { hands, capped } = nextHandoffs(runTeam, name, out.text, runCount);
+          const { hands, capped, diagnostics } = nextHandoffs(runTeam, name, out.text, runCount);
           const results: { name: string; text: string }[] = [];
           if (hands.length > 0) {
             appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
             for (const h of hands) results.push(...await runFrom(h.name, h.input));
           }
           if (capped.length > 0) {
-            // P2 supervision: exhausted loop → surface a digest the orchestrator integrates.
-            const notice = loopExhaustedNotice(name, capped, runCount);
-            appendThought(name, { role: "dispatch", color: "#ffb45a", text: notice });
-            results.push({ name, text: notice });
+            appendThought(name, { role: "dispatch", color: "#ffb45a",
+              text: loopExhaustedNotice(name, capped, runCount) });
           }
+          for (const diagnostic of diagnostics) {
+            appendThought(name, { role: "system", color: "#ffb74d", text: diagnostic });
+          }
+          results.push(...handoffSupplementalResults(out, { capped, diagnostics }, runCount));
           return results.length ? results : [out];
         }
         const replies = await runFrom(startSpec.name, d.instruction);

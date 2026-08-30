@@ -71,10 +71,30 @@ import {
   agentDomain,
   normalizeRoleToolAllowlist,
   isReviewAgent,
-  reviewRepairTargets,
+  normalizeRunOutput,
   roleCanWrite,
-  shouldRepeatReview,
 } from "./teamConfig";
+import {
+  MAX_AGENT_RERUNS,
+  MAX_CHAIN_HOPS,
+  downstreamTargets,
+  handoffStopReason,
+  handoffSupplementalResults,
+  loopExhaustedNotice,
+  nextHandoffs,
+  runsAsSubLeader,
+} from "./handoffRouting";
+export {
+  MAX_AGENT_RERUNS,
+  MAX_CHAIN_HOPS,
+  downstreamTargets,
+  handoffStopReason,
+  handoffSupplementalResults,
+  loopExhaustedNotice,
+  nextHandoffs,
+  runsAsSubLeader,
+} from "./handoffRouting";
+export type { Handoff, HandoffPlan } from "./handoffRouting";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -700,6 +720,7 @@ export type AgentSpec = {
   /// disclosure), not function calls. Sourced from the team's agentSkills blob
   /// and/or a template's per-agent `extra_skills`.
   extraSkills?: string[];
+  role?: "leader" | "agent";
 };
 export type Edge = { source: string; target: string };
 
@@ -731,37 +752,6 @@ export function wiredDispatchTargets(
 /// agent is a chain SINK → its output returns to the orchestrator to integrate.
 /// An arrow `coder → critic` makes the critic receive the coder's output; an
 /// arrow back to the orchestrator just ends the chain. Pure + unit-tested.
-export function downstreamTargets(
-  team: { edges?: Edge[] },
-  agentName: string,
-  orchName: string,
-): string[] {
-  const edges = Array.isArray(team.edges) ? team.edges : [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const e of edges) {
-    if (
-      e && e.source === agentName && typeof e.target === "string" &&
-      e.target !== orchName && e.target !== agentName && !seen.has(e.target)
-    ) {
-      seen.add(e.target);
-      out.push(e.target);
-    }
-  }
-  return out;
-}
-
-/// Global backstop: the maximum TOTAL agent runs a single handoff chain may make
-/// before it stops — guards against runaway loops no matter how the graph is
-/// drawn. Combined with the per-agent re-run cap below this guarantees
-/// termination even with intentional cycles (critic→coder→critic→…).
-export const MAX_CHAIN_HOPS = 12;
-
-/// How many times ONE agent may run within a single chain. Lets a critic↔coder
-/// loop iterate a few rounds, then forces a stop. The per-agent cap (not a
-/// run-once visited set) is what makes real loops possible while staying finite.
-export const MAX_AGENT_RERUNS = 3;
-
 /// Routing instruction appended to a specialist's prompt. THIS is what turns the
 /// edges into an allow-list the agent CHOOSES from, instead of a forced pipe.
 /// If the agent has arrows to other (non-orchestrator) teammates it MAY hand off
@@ -792,97 +782,6 @@ export function routingHint(team: Team, spec: AgentSpec): string {
     "  - If your work is complete and no teammate needs it, just give your answer — it returns to whoever dispatched you.",
     "  - Reviewer/critic/red team: when you find any actionable defect, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
     "  - Loops are capped — be decisive, don't ping-pong without making progress.",
-  ].join("\n");
-}
-
-export type Handoff = { name: string; input: string; explicit: boolean };
-export type HandoffPlan = {
-  /// Targets to actually run next.
-  hands: Handoff[];
-  /// Targets the agent EXPLICITLY tried to route to but which were blocked by
-  /// the per-agent re-run cap — i.e. a loop that did NOT converge. The chain
-  /// surfaces these to the orchestrator (P2 supervision) instead of silently
-  /// dropping them.
-  capped: string[];
-};
-
-/// Decide where an agent's OUTPUT goes next — the heart of agent-decided routing.
-/// Edges are an ALLOW-LIST. If the agent explicitly @-routed to allowed targets,
-/// honor that (and let those targets re-run up to MAX_AGENT_RERUNS, enabling
-/// loops). Otherwise fall back to LEGACY auto-flow along every arrow, run-once —
-/// so teams that don't @-route behave exactly as before. `runCount` bounds it.
-/// Pure + unit-tested.
-export function nextHandoffs(
-  team: Team,
-  agentName: string,
-  agentOutput: string,
-  runCount: Map<string, number>,
-): HandoffPlan {
-  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
-  const downstream = downstreamTargets(team, agentName, orchName);
-  const repairs = reviewRepairTargets(team, agentName, agentOutput, runCount);
-  const allowed = [...new Set([...downstream, ...repairs])];
-  if (allowed.length === 0) return { hands: [], capped: [] };
-  const dispatched = parseDispatches(agentOutput, team, agentName).filter((d) =>
-    allowed.includes(d.agentName),
-  );
-  if (dispatched.length > 0) {
-    // Agent-decided routing. Split into runnable vs cap-blocked (exhausted loop).
-    const hands: Handoff[] = [];
-    const capped: string[] = [];
-    for (const d of dispatched) {
-      if ((runCount.get(d.agentName) ?? 0) < MAX_AGENT_RERUNS) {
-        hands.push({ name: d.agentName, input: d.instruction, explicit: true });
-      } else {
-        capped.push(d.agentName);
-      }
-    }
-    return { hands, capped };
-  }
-  // Prompt compliance is not a completion gate. If a reviewer/red-team agent
-  // reports a P0/P1, REVISE/REJECT/CONCERN, or failed verification without an
-  // explicit @handoff, deterministically send the exact findings back to the
-  // worker that produced the reviewed work. A clean/ambiguous review remains a
-  // terminal result and returns to integration.
-  if (isReviewAgent(team.agents.find((agent) => agent.name === agentName) ?? { name: agentName, base: "" })) {
-    const hands: Handoff[] = [];
-    const capped: string[] = [];
-    for (const target of repairs) {
-      if ((runCount.get(target) ?? 0) < MAX_AGENT_RERUNS) {
-        hands.push({
-          name: target,
-          input: `Review found defects that must be fixed before completion. Fix every actionable finding below, add/run regression coverage, verify the result, then return it for re-review.\n\n${agentOutput}`,
-          explicit: true,
-        });
-      } else {
-        capped.push(target);
-      }
-    }
-    return { hands, capped };
-  }
-  // Legacy auto-flow: each downstream runs ONCE (run-once == today's behavior).
-  const handoff = `You are continuing a team workflow. @${agentName} produced the following — build on it for YOUR part of the task:\n\n${agentOutput}`;
-  const hands = allowed
-    .filter((t) => (runCount.get(t) ?? 0) === 0
-      || shouldRepeatReview(team, agentName, t, runCount, MAX_AGENT_RERUNS))
-    .map((t) => ({ name: t, input: handoff, explicit: false }));
-  return { hands, capped: [] };
-}
-
-/// P2 SUPERVISION: when an agent tried to loop work back to teammate(s) that hit
-/// the re-run cap, the chain emits THIS as a result instead of silently dying.
-/// The orchestrator integrates it (and, in director mode, the Critical Thinker
-/// reviews it) and decides the next step — ship, re-scope, or ask the user.
-/// Pure + unit-tested.
-export function loopExhaustedNotice(
-  agentName: string,
-  capped: string[],
-  runCount: Map<string, number>,
-): string {
-  const who = capped.map((t) => `@${t} (ran ${runCount.get(t) ?? 0}×)`).join(", ");
-  return [
-    `⚠ SUPERVISOR — loop did not converge: @${agentName} tried to route back to ${who}, but they reached the ${MAX_AGENT_RERUNS}-round per-agent cap.`,
-    `Orchestrator: decide the next step — ship what we have, give the agent fresh direction, or ask the user. Do NOT silently re-loop.`,
   ].join("\n");
 }
 
@@ -4828,7 +4727,11 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   hooks.onPhase("dispatching");
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
   // Run ONE agent on `instruction`; returns {name, text} (or an error reply).
-  const runOneAgent = async (spec: AgentSpec, instruction: string): Promise<{ name: string; text: string }> => {
+  const runOneAgent = async (
+    spec: AgentSpec,
+    instruction: string,
+    runOptions?: { emitReply?: boolean; promptFor?: (skillBlock: string) => string },
+  ): Promise<{ name: string; text: string }> => {
     hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
@@ -4843,7 +4746,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       runtimeSkillIds(spec, legacySkills),
       !!spec.runtimePersonal,
     );
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
+    const specPrompt = runOptions?.promptFor?.(skillBlock)
+      ?? buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
     const specModel = effectiveModelFor(spec);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path
@@ -4890,16 +4794,16 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         const pub = await harvestPublishRequest(cleaned, projectCwd);
         if (pub) cleaned = `${cleaned}\n\n[host publish result]\n${pub.slice(-1600)}`;
       }
-      if (specMemKey) {
+      if (specMemKey && runOptions?.emitReply !== false) {
         await appendAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name, instruction, cleaned);
         await logScopedTeamWork(specMemKey, spec.name, instruction, cleaned);
       }
-      hooks.onAgentReply(spec.name, cleaned);
+      if (runOptions?.emitReply !== false) hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {
       const errMsg = `(error: ${String(e?.message ?? e)})`;
       hooks.onLogDelta(spec.name, "\n\n" + errMsg);
-      hooks.onAgentReply(spec.name, errMsg);
+      if (runOptions?.emitReply !== false) hooks.onAgentReply(spec.name, errMsg);
       return { name: spec.name, text: errMsg };
     } finally {
       hooks.onAgentEnd(spec.name);
@@ -4916,32 +4820,100 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // last cleanly); leaves (no non-orchestrator arrow) are the terminal results
   // the orchestrator integrates. A per-tree `ran` set (claimed synchronously
   // before each await) + MAX_CHAIN_HOPS dedupe fan-in and guarantee termination.
-  const runFrom = async (name: string, input: string, runCount: Map<string, number>): Promise<Array<{ name: string; text: string }>> => {
+  async function runFrom(
+    name: string,
+    input: string,
+    runCount: Map<string, number>,
+    lastOutput: Map<string, string>,
+  ): Promise<Array<{ name: string; text: string }>> {
     const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
     if (total >= MAX_CHAIN_HOPS) return [];                      // global backstop
     if ((runCount.get(name) ?? 0) >= MAX_AGENT_RERUNS) return []; // per-agent cap
     runCount.set(name, (runCount.get(name) ?? 0) + 1);
     const spec = team.agents.find(a => a.name === name);
     if (!spec) return [];
-    const out = await runOneAgent(spec, input);
+    const shouldRunAsLeader = runsAsSubLeader(
+      spec,
+      !!roleByName.get(spec.base)?.canDispatch,
+      orch?.name ?? "orchestrator",
+      wiredDispatchTargets(team, name)?.size ?? 0,
+    );
+    const out = shouldRunAsLeader
+      ? await runBridgeLeaderUnit(spec, input, runCount, lastOutput)
+      : await runOneAgent(spec, input);
+    const ranAsLeader = shouldRunAsLeader;
+    const cur = normalizeRunOutput(out.text);
+    const stopReason = handoffStopReason(lastOutput.get(name), cur, ranAsLeader);
+    lastOutput.set(name, cur);
+    if (stopReason === "no-progress") {
+      hooks.onThought(name, { role: "system", color: "#ffb74d",
+        text: `⚠ @${name} repeated its previous output — no progress; stopping this chain to avoid a loop.` });
+      return [out];
+    }
+    if (stopReason === "leader") return [out];
     // Agent-decided routing: the agent's reply picks where its output goes next
     // (explicit @target among its allowed edges), else legacy run-once auto-flow.
-    const { hands, capped } = nextHandoffs(team, name, out.text, runCount);
+    const { hands, capped, diagnostics } = nextHandoffs(team, name, out.text, runCount);
     const results: Array<{ name: string; text: string }> = [];
     if (hands.length > 0) {
       hooks.onThought(name, { role: "dispatch", color: "#a578ff",
         text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
-      for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount));
+      for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount, lastOutput));
     }
     if (capped.length > 0) {
-      // P2 supervision: exhausted loop → surface a digest the orchestrator integrates.
-      const notice = loopExhaustedNotice(name, capped, runCount);
-      hooks.onThought(name, { role: "dispatch", color: "#ffb45a", text: notice });
-      results.push({ name, text: notice });
+      hooks.onThought(name, { role: "dispatch", color: "#ffb45a",
+        text: loopExhaustedNotice(name, capped, runCount) });
     }
+    for (const diagnostic of diagnostics) {
+      hooks.onThought(name, { role: "system", color: "#ffb74d", text: diagnostic });
+    }
+    results.push(...handoffSupplementalResults(out, { capped, diagnostics }, runCount));
     return results.length ? results : [out];
-  };
-  const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Map<string, number>())));
+  }
+
+  async function runBridgeLeaderUnit(
+    leader: AgentSpec,
+    instruction: string,
+    runCount: Map<string, number>,
+    lastOutput: Map<string, string>,
+  ): Promise<{ name: string; text: string }> {
+    const members = wiredDispatchTargets(team, leader.name) ?? new Set<string>();
+    const promptFor = (skillBlock: string) => buildOrchestratorPrompt(
+      team, roleByName, leader, directives, false, undefined, projectCwd, skillBlock,
+    );
+    const plan = (await runOneAgent(leader, instruction, { emitReply: false, promptFor })).text;
+    const parsed = parseDispatchesDetailed(plan, team, leader.name);
+    const memberInstructions = new Map<string, string[]>();
+    for (const dispatch of parsed.dispatches) {
+      if (!members.has(dispatch.agentName)) continue;
+      const instructions = memberInstructions.get(dispatch.agentName) ?? [];
+      if (!instructions.includes(dispatch.instruction)) instructions.push(dispatch.instruction);
+      memberInstructions.set(dispatch.agentName, instructions);
+    }
+    const replies: Array<{ name: string; text: string }> = [];
+    for (const [member, instructions] of memberInstructions) {
+      replies.push(...await runFrom(member, instructions.join("\n\n"), runCount, lastOutput));
+    }
+    if (replies.length === 0) {
+      hooks.onAgentReply(leader.name, plan);
+      return { name: leader.name, text: plan };
+    }
+    const integrationInput = [
+      `Your sub-team handled this task:\n${instruction}`,
+      "",
+      "Their replies:",
+      ...replies.map((reply) => `\n— ${displayLabel(reply.name)} —\n${reply.text}`),
+      "",
+      "Consolidate this into ONE result to hand back to the orchestrator. Be concise; quote what matters.",
+    ].join("\n");
+    return runOneAgent(leader, integrationInput, { promptFor });
+  }
+  const settled = await Promise.allSettled(dispatches.map(d => runFrom(
+    d.agentName,
+    d.instruction,
+    new Map<string, number>(),
+    new Map<string, string>(),
+  )));
   const specialistReplies: Array<{ name: string; text: string }> = [];
   for (const r of settled) {
     if (r.status === "fulfilled" && r.value) specialistReplies.push(...r.value);

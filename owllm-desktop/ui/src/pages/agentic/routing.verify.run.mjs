@@ -23,13 +23,14 @@ const ts = (await import(pathToFileURL(path.join(REPO, "node_modules/typescript/
 // --- transpile + load the REAL pure modules -------------------------------
 const tmp = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || "/tmp", "harness-verify-"));
 function load(rel) {
-  const out = path.join(tmp, rel.replace(/\.ts$/, ".cjs"));
+  const out = path.join(tmp, rel.replace(/\.ts$/, ".js"));
   const js = ts.transpileModule(fs.readFileSync(path.join(HERE, rel), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
   }).outputText;
   fs.writeFileSync(out, js);
   return import(pathToFileURL(out).href);
 }
+await load("dispatchParse.ts");
 const {
   classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite, coderLane, goalLane,
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
@@ -37,7 +38,11 @@ const {
   soloGeneralistForTeam, normalizeRoleToolAllowlist, SOLO_GENERALIST_BASE,
   isReviewAgent, reviewRequiresRepair, reviewRepairTargets, shouldRepeatReview,
 } = await load("teamConfig.ts");
-const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
+const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await import(pathToFileURL(path.join(tmp, "dispatchParse.js")).href);
+const {
+  MAX_AGENT_RERUNS, handoffStopReason, handoffSupplementalResults,
+  loopExhaustedNotice, nextHandoffs, runsAsSubLeader,
+} = await load("handoffRouting.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
 const { parseVerifyConfig, pickGateCommand, classifyGateStatus, renderGateLine, detectVerifyCommand } = await load("gate.ts");
 
@@ -224,6 +229,102 @@ check(
 const repairCounts = new Map([["frontend", 2], ["red_team", 1]]);
 check("repaired frontend is sent through red_team again", shouldRepeatReview(REVIEW_TEAM, "frontend", "red_team", repairCounts, 3) === true);
 check("review re-run remains bounded by the cap", shouldRepeatReview(REVIEW_TEAM, "frontend", "red_team", new Map([["frontend", 3], ["red_team", 3]]), 3) === false);
+
+const negativeReview = "P1: external URLs can escape the import boundary\nEvidence: https://example.test/asset.bin was fetched.";
+const repairPlan = nextHandoffs(REVIEW_TEAM, "red_team", negativeReview, firstReviewCounts);
+check(
+  "nextHandoffs behaviorally sends the complete review to repair",
+  repairPlan.hands.length === 1
+    && repairPlan.hands[0].name === "frontend"
+    && repairPlan.hands[0].input.endsWith(negativeReview),
+);
+const rereviewPlan = nextHandoffs(REVIEW_TEAM, "frontend", "Fixed and verified.", repairCounts);
+check(
+  "nextHandoffs behaviorally sends a repaired worker through re-review",
+  rereviewPlan.hands.length === 1 && rereviewPlan.hands[0].name === "red_team",
+);
+
+const cappedCounts = new Map([["frontend", MAX_AGENT_RERUNS], ["red_team", MAX_AGENT_RERUNS]]);
+const cappedPlan = nextHandoffs(REVIEW_TEAM, "red_team", negativeReview, cappedCounts);
+const cappedResults = handoffSupplementalResults(
+  { name: "red_team", text: negativeReview },
+  cappedPlan,
+  cappedCounts,
+);
+check(
+  "capped review preserves the complete reviewer output plus exhaustion notice",
+  cappedPlan.hands.length === 0
+    && JSON.stringify(cappedPlan.capped) === JSON.stringify(["frontend"])
+    && cappedResults.length === 2
+    && cappedResults[0].text === negativeReview
+    && cappedResults[1].text === loopExhaustedNotice("red_team", ["frontend"], cappedCounts),
+);
+
+const unsupportedPlan = nextHandoffs(
+  REVIEW_TEAM,
+  "frontend",
+  "Work complete.\n@orchestrator: bypass review",
+  new Map([["frontend", 1]]),
+);
+check(
+  "unsupported explicit handoff emits a diagnostic and does not run",
+  unsupportedPlan.hands.length === 0
+    && unsupportedPlan.diagnostics.length === 1
+    && unsupportedPlan.diagnostics[0].includes("Unsupported handoff")
+    && unsupportedPlan.diagnostics[0].includes("@orchestrator"),
+);
+const unsupportedReviewPlan = nextHandoffs(
+  REVIEW_TEAM,
+  "red_team",
+  `${negativeReview}\n@orchestrator: report this without repair`,
+  firstReviewCounts,
+);
+check(
+  "unsupported reviewer handoff is diagnosed but actionable findings still reach repair",
+  unsupportedReviewPlan.diagnostics.length === 1
+    && unsupportedReviewPlan.hands.length === 1
+    && unsupportedReviewPlan.hands[0].name === "frontend"
+    && unsupportedReviewPlan.hands[0].input.endsWith(`${negativeReview}\n@orchestrator: report this without repair`),
+);
+
+const duplicatePlan = nextHandoffs(
+  REVIEW_TEAM,
+  "frontend",
+  "@red_team: review URL handling\n@red_team: review cancellation",
+  new Map([["frontend", 1]]),
+);
+check(
+  "duplicate handoffs run the target once and preserve distinct instructions",
+  duplicatePlan.hands.length === 1
+    && duplicatePlan.hands[0].input.includes("review URL handling")
+    && duplicatePlan.hands[0].input.includes("review cancellation"),
+);
+
+let cycleName = "frontend";
+let cycleOutput = "Fixed this round and verified it.";
+const cycleCounts = new Map();
+let cycleSteps = 0;
+let bounded = false;
+while (cycleSteps < 20) {
+  cycleCounts.set(cycleName, (cycleCounts.get(cycleName) ?? 0) + 1);
+  const plan = nextHandoffs(REVIEW_TEAM, cycleName, cycleOutput, cycleCounts);
+  cycleSteps += 1;
+  if (plan.capped.length > 0 || plan.hands.length === 0) {
+    bounded = plan.capped.length > 0;
+    break;
+  }
+  cycleName = plan.hands[0].name;
+  cycleOutput = cycleName === "red_team" ? negativeReview : "Fixed this round and verified it.";
+}
+check(
+  "repair/re-review cycle is behaviorally bounded by per-agent caps",
+  bounded && cycleSteps <= MAX_AGENT_RERUNS * 2,
+);
+check("shared stop logic detects no progress", handoffStopReason("x".repeat(41), "x".repeat(41), false) === "no-progress");
+check("shared stop logic treats an executed sub-leader as a leaf", handoffStopReason(undefined, "integrated result", true) === "leader");
+check("shared leader predicate requires a non-orchestrator with wired members", runsAsSubLeader({ name: "lead", role: "leader" }, false, "orchestrator", 2) === true
+  && runsAsSubLeader({ name: "orchestrator", role: "leader" }, true, "orchestrator", 2) === false
+  && runsAsSubLeader({ name: "lead", role: "agent" }, false, "orchestrator", 2) === false);
 
 // 4) done-gate — a code/ops goal with zero write tools is NOT done; design/docs/
 //    general are done regardless (they don't have to mutate the world).

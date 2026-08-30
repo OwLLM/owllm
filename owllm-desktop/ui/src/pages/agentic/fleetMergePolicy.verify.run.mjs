@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, "../../../..");
 const fleet = fs.readFileSync(path.join(APP, "src-tauri/src/fleet.rs"), "utf8");
+const fleetScratch = fs.readFileSync(path.join(APP, "src-tauri/src/fleet_scratch.rs"), "utf8");
 const wsl = fs.readFileSync(path.join(APP, "src-tauri/src/wsl.rs"), "utf8");
 
 function fail(message) {
@@ -78,9 +79,10 @@ if (!fleet.includes('["diff", "--cached", "--name-only"]') ||
     !fleet.includes("git_failure_message_uses_stdout_when_stderr_is_empty")) {
   fail("worktree finalize can still treat unstaged OWLLM scratch as a committable change or return blank commit diagnostics");
 }
-if (!fleet.includes('p == ".owllm/brainstorm.json"') ||
-    !fleet.includes('!is_app_scratch(".owllm/project.json")') ||
-    !fleet.includes('!is_app_scratch(".owllm/verify.json")')) {
+if (!fleet.includes("crate::fleet_scratch::{is_app_scratch, porcelain_path, QUARANTINE_PREFIX}") ||
+    !fleetScratch.includes('p == ".owllm/brainstorm.json"') ||
+    !fleetScratch.includes('!is_app_scratch(".owllm/project.json")') ||
+    !fleetScratch.includes('!is_app_scratch(".owllm/verify.json")')) {
   fail("runtime cleanup can still hide durable .owllm project metadata from commits");
 }
 

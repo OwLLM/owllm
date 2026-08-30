@@ -28,6 +28,7 @@ const check = (ok, message) => {
 };
 
 const fleet = read(path.join(DESKTOP, "src-tauri", "src", "fleet.rs"));
+const fleetScratch = read(path.join(DESKTOP, "src-tauri", "src", "fleet_scratch.rs"));
 const lib = read(path.join(DESKTOP, "src-tauri", "src", "lib.rs"));
 const codePage = read(path.join(HERE, "CodePage.tsx"));
 
@@ -81,9 +82,10 @@ const renameIdx = evict.indexOf("std::fs::rename(path, &quarantine)");
 const unlinkIdx = evict.indexOf("remove_dir_all(&quarantine)");
 check(renameIdx >= 0 && unlinkIdx > renameIdx,
   "nothing is unlinked until AFTER the rename has succeeded");
-check(/const QUARANTINE_PREFIX: &str = "\.owllm-reclaimed-";/.test(fleet) &&
+check(/const QUARANTINE_PREFIX: &str = "\.owllm-reclaimed-";/.test(fleetScratch) &&
+      fleet.includes("crate::fleet_scratch::{is_app_scratch, porcelain_path, QUARANTINE_PREFIX}") &&
       !names.some((n) => ".owllm-reclaimed-".startsWith(n)),
-  "the quarantine name can never be mistaken for a build cache by a later build");
+  "the shared quarantine name can never be mistaken for a build cache by a later build");
 
 // ---------------------------------------------------- the new page-cache sweep
 const sweep = bodyOf(fleet, "pub async fn fleet_reclaim_page_caches(");

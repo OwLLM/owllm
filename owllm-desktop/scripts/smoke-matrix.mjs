@@ -330,6 +330,11 @@ function runHarnesses() {
     "claudeCliConnection.verify.run.mjs",
     "isolatedWorktreeSync.verify.run.mjs",
     "codePageWorktreeFreshness.verify.run.mjs",
+    // Compiles src-tauri/src/fleet_scratch.rs alone with `rustc --test`. It is
+    // the ONLY executable coverage of the predicate that decides whether a page
+    // may run a model at all (cargo test cannot launch its binary on Windows),
+    // so it must never be parked behind the TypeScript-dependent SKIP.
+    "fleetScratchGate.verify.run.mjs",
     // Source-text assertions over wsl.rs/sandbox.rs — no transpile needed, so
     // it must not be parked behind the TypeScript-dependent SKIP.
     "sandboxNetPreflight.verify.run.mjs",

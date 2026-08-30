@@ -5,6 +5,9 @@ node_modules/
 node_modules.partial/
 dist/
 ui/dist/
+# Browser-mode bundle the website stages into public/app-demo. Kept out of
+# ui/dist so a demo build can never overwrite tauri.conf.json's frontendDist.
+ui/dist-app-demo/
 target/
 *.log
 .DS_Store

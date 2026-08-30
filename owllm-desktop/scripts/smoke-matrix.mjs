@@ -265,6 +265,13 @@ const TRIPWIRES = [
   ["../.github/workflows/mac-release-repair.yml", /Preserve signed macOS release files[\s\S]{0,240}actions\/upload-artifact@v4[\s\S]*Publish Mac assets and manifest/, "signed macOS files survive a public-repository credential failure"],
   ["../.github/workflows/mac-release-repair.yml", /Restore Apple Silicon Rust build cache[\s\S]{0,180}shared-key: tauri-aarch64-apple-darwin/, "macOS-only releases reuse the existing Apple Silicon build cache"],
   ["../.github/workflows/sign-local-macos-updater.yml", /workflow_dispatch:[\s\S]{0,500}sha256:[\s\S]{0,500}runs-on: macos-latest[\s\S]{0,1200}Download locally-built archive[\s\S]{0,1200}signer sign/, "local Mac releases sign the checksum-pinned prebuilt archive without another application build"],
+  // The website embeds the real UI as a browser-mode bundle. That build must
+  // never land in ui/dist — tauri.conf.json's frontendDist is embedded at
+  // compile time, so a --base=/app-demo/ bundle sitting there would ship as a
+  // blank app to anyone whose cargo build skipped `npm run build`.
+  ["../owllm-website/scripts/build-app-demo.mjs", /--outDir \$\{DEMO_OUT\}/, "the website's demo bundle builds into its own out dir, never Tauri's frontendDist"],
+  ["../owllm-website/scripts/build-app-demo.mjs", /const DEMO_OUT = "dist-app-demo"[\s\S]{0,200}path\.join\(desktopDir, "ui", DEMO_OUT\)/, "the demo staging source is the demo out dir, not ui/dist"],
+  [".gitignore", /ui\/dist-app-demo\//, "the demo out dir is gitignored so a website build cannot dirty the app worktree"],
 ];
 
 function runStatic() {

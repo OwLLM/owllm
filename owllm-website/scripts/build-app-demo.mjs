@@ -26,7 +26,13 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const websiteDir = path.resolve(here, "..");
 const desktopDir = path.resolve(websiteDir, "..", "owllm-desktop");
-const distDir = path.join(desktopDir, "ui", "dist");
+// NOT ui/dist: that is tauri.conf.json's `frontendDist`, embedded into the
+// binary at compile time. Building the demo there would leave the shipping
+// bundle rewritten for --base=/app-demo/, and the next `cargo build` that
+// skipped `npm run build` would embed it — a blank app whose asset URLs all
+// point at /app-demo/. The demo gets its own out dir.
+const DEMO_OUT = "dist-app-demo";
+const distDir = path.join(desktopDir, "ui", DEMO_OUT);
 const publicDir = path.join(websiteDir, "public");
 const demoDir = path.join(publicDir, "app-demo");
 
@@ -51,7 +57,7 @@ if (!fs.existsSync(path.join(desktopDir, "node_modules"))) {
   run("npm install --no-audit --no-fund", desktopDir);
 }
 
-run("npx vite build --config ui/vite.config.ts --base=/app-demo/", desktopDir);
+run(`npx vite build --config ui/vite.config.ts --base=/app-demo/ --outDir ${DEMO_OUT} --emptyOutDir`, desktopDir);
 
 // Stage: dist → public/app-demo, except the icon packs which must live at the
 // site root because the app references them root-relatively (/Page_icons/…).

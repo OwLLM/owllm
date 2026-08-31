@@ -21,6 +21,7 @@ import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { continuousUiAnimation } from "../../runtime/renderingPolicy";
+import { PSYCHEDELIC_AURA_DOT } from "./psychedelicMode";
 import { useChatSession } from "../../runtime/useChatSession";
 import { readHotBlob, writeHotBlob, deleteHotBlob, hotBlobStorage } from "../../runtime/stateMirror";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
@@ -348,7 +349,6 @@ function savedPageMetasForLocalProject(project: Pick<ProjectCatalogRow, "locatio
 
 const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
 const PSYCHEDELIC_AURA_RING = `conic-gradient(from var(--owllm-aura-angle), ${PSYCHEDELIC_AURA_STOPS}) border-box`;
-const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${PSYCHEDELIC_AURA_STOPS})`;
 // A solid colour followed by `padding-box` is not a valid multi-layer CSS
 // background, so WebView dropped the rainbow layer and showed only the pale
 // shadow. Wrap the colour in a gradient, matching AgentChatTile's valid shape.

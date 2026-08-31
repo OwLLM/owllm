@@ -48,9 +48,14 @@ const code = src
 check("the second agent's checkout is a persisted CodeState field",
   /secondaryWorkspace\?: string;/.test(code) && /secondaryBranch\?: string;/.test(code));
 
-check("it gets its OWN worktree, under a different agent name to the primary's",
+check("it gets its OWN worktree from the first pane, under a different agent name",
   /agentName: "code-2"/.test(code)
-  && /fleet_worktree_create[\s\S]{0,200}?agentName: "code-2"/.test(code));
+  && /fleet_worktree_create[\s\S]{0,240}?projectCwd: cur\.workspace[\s\S]{0,160}?agentName: "code-2"/.test(code)
+  && /checkpointDirty: true/.test(code));
+
+check("the second pane is refreshed against the first pane, never canonical main",
+  /ensureWorktreeCurrent\(secondaryRunCwd, true, cur\.workspace\)/.test(code)
+  && !/ensureWorktreeCurrent\(secondaryRunCwd\)/.test(code));
 
 check("the second agent dispatches against ITS cwd, not the primary's workspace",
   /projectCwd: cwd,/.test(code)
@@ -159,9 +164,11 @@ if (ensureSrc) {
     const cwd = await ensure();
     check("the second agent is handed a DIFFERENT directory to the first",
       cwd === "C:/fleet/page/code-2" && cwd !== read().workspace);
-    check("that checkout is cut from the project, under its own agent name",
+    check("that checkout is cut from the FIRST PANE, including its completed edits",
       calls.length === 1 && calls[0][0] === "fleet_worktree_create"
-      && calls[0][1].projectCwd === "C:/proj" && calls[0][1].agentName === "code-2");
+      && calls[0][1].projectCwd === "C:/fleet/page/code"
+      && calls[0][1].agentName === "code-2"
+      && calls[0][1].checkpointDirty === true);
     check("the path + branch are persisted so a remount reuses them",
       read().secondaryWorkspace === "C:/fleet/page/code-2"
       && read().secondaryBranch === "owllm-page/p1/code-2");
@@ -199,8 +206,8 @@ if (ensureSrc) {
       notify: (m) => { told += m; }, DEFAULT_CODE_STATE: {},
     });
     const cwd = await ensure();
-    check("a failed create falls back to the shared folder AND tells the user",
-      cwd === "C:/fleet/page/code" && /sharing the 1st agent's files/i.test(told));
+    check("a failed isolated create stops the second agent AND tells the user",
+      cwd === "" && /did not run/i.test(told));
     check("a failed create does not persist a phantom second checkout",
       !read().secondaryWorkspace);
   }

@@ -144,6 +144,21 @@ check(agentsPage.includes('data-ui="NewProjectBtn"')
   && /data-ui="NewProjectBtn"[\s\S]{0,400}?>\+ New Project<\/button>/.test(agentsPage),
   'the project strip\'s create button reads "+ New Project", not a bare "+ New"');
 
+// ---- 2f. Project entry and tab activity match Coding -----------------------
+check(agentsPage.includes("async function openLocalFolder()")
+  && agentsPage.includes('invoke<string | null>("pick_folder", { title: "Pick a project folder" })')
+  && agentsPage.includes('const rows = await invoke<ProjectRow[]>("list_projects")')
+  && agentsPage.includes('rows.find((project) => project.location')
+  && agentsPage.includes('create_location: false')
+  && agentsPage.includes('setProjectHubOpen(false)'),
+  "Agents can open any local folder immediately through Coding's folder-binding flow");
+check(/actions=\{\[[\s\S]{0,900}label: "Local folder"[\s\S]{0,250}openLocalFolder/.test(agentsPage),
+  "the Agents launchpad exposes the same direct Local folder action as Coding");
+check(agentsPage.includes("animation: busy ? pageTabWorkingAnimation() : undefined")
+  && agentsPage.includes("background: PSYCHEDELIC_AURA_DOT")
+  && !agentsPage.includes('style={{ color: "#7ff0c5", fontSize: 9, lineHeight: 1 }}'),
+  "Agents running tabs use Coding's aura dot and pulse instead of the green glyph");
+
 // ---- 3. Left column = Code project rail with the Publisher card ----
 check(agentsPage.includes('data-ui="AgentsProjectRail"')
   && agentsPage.includes('data-state={agentsProjectRailOpen ? "expanded" : "collapsed"}')

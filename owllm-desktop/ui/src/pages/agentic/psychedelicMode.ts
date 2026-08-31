@@ -69,6 +69,13 @@ export function usePsychedelicMode(): [PsychedelicMode, () => void] {
 // declared once per page (AgentsPage + CodePage each emit the @property block).
 const AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
 export const PSYCHEDELIC_RING = `conic-gradient(from var(--owllm-aura-angle), ${AURA_STOPS}) border-box`;
+/** Compact activity signal used by the Coding and Agents page tabs. */
+export const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${AURA_STOPS})`;
+
+/** Coding-compatible page-tab pulse, still honoring reduced motion. */
+export function pageTabWorkingAnimation(): string | undefined {
+  return continuousUiAnimation("owllm-tab-working 1.4s ease-in-out infinite");
+}
 
 /** The Coding page chatbox's halo: constant, soft, no pulse.
  *  Mirrors PSYCHEDELIC_AURA_HALO in CodePage.tsx — keep the two in step. */

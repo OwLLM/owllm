@@ -49,6 +49,8 @@ import {
   usePsychedelicMode,
   psychedelicActiveStyle,
   psychedelicToggleLabel,
+  PSYCHEDELIC_AURA_DOT,
+  pageTabWorkingAnimation,
 } from "./psychedelicMode";
 import ModelRequiredDialog from "../../components/ModelRequiredDialog";
 import {
@@ -8308,6 +8310,62 @@ export function AgentsPage({
       return [] as ProjectRow[];
     }
   };
+  // Match Coding's direct "Local folder" entry: select a folder, reuse its
+  // existing portable project identity when it has one, otherwise create the
+  // minimum local binding Agents needs for transcripts, rules and team state.
+  // No recipe wizard and no folder creation are involved.
+  async function openLocalFolder() {
+    if (projectMaterializing) return;
+    setProjectMaterializing(true);
+    setProjectMaterializeError("");
+    try {
+      const dir = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
+      if (!dir) return;
+      const normalize = (value: string) => {
+        const clean = value.trim().replace(/[\\/]+$/, "").replace(/\\/g, "/");
+        const windowsPath = /^[a-z]:\//i.test(clean) || clean.startsWith("//");
+        return windowsPath ? clean.toLowerCase() : clean;
+      };
+      // A failed catalog read is not an empty catalog: let it surface through
+      // the catch below instead of creating a duplicate binding on uncertainty.
+      const rows = await invoke<ProjectRow[]>("list_projects");
+      setProjects(rows);
+      let target = rows.find((project) => project.location && normalize(project.location) === normalize(dir));
+      if (!target) {
+        const clean = dir.replace(/[\\/]+$/, "");
+        const name = clean.split(/[\\/]/).pop() || "Agent project";
+        const repoUrl = await invoke<string>("github_repo_url", { cwd: dir }).catch(() => "");
+        const created = await invoke<ProjectRow>("create_project", {
+          input: {
+            name,
+            description: "Agent workspace",
+            location: dir,
+            repo_url: repoUrl,
+            create_location: false,
+            project_kind: "custom",
+            team: [],
+            graph_json: "",
+            team_default_model_id: "",
+            trust_writes: true,
+            auto_approve_all: false,
+          },
+        });
+        setProjects((current) => [created, ...current.filter((project) => project.id !== created.id)]);
+        target = created;
+      }
+      setSelectedProjectId(target.id);
+      setProjectLocationDraft(target.location || dir, target.id);
+      setPickedTeamId(null);
+      setTrustWritesOverride(null);
+      setProjectHubOpen(false);
+    } catch (e: any) {
+      const message = `Couldn't open that folder: ${String(e?.message ?? e)}`;
+      setProjectMaterializeError(message);
+      notify(message, "error");
+    } finally {
+      setProjectMaterializing(false);
+    }
+  }
   const cloneSelectedProjectHere = async () => {
     if (!selectedProject?.repo_url || projectMaterializing) return;
     setProjectMaterializing(true);
@@ -13179,6 +13237,7 @@ export function AgentsPage({
               { id: "assistant", icon: "✦", label: "Personal assistant", detail: "A lasting workspace for plans, drafts and follow-up" },
             ]}
             actions={[
+              { icon: "⌁", label: "Local folder", detail: "Open an existing folder on this computer", onClick: () => { void openLocalFolder(); } },
               { icon: "⌁", label: "Custom project", detail: "See every project recipe and team", onClick: onNewProject },
               { icon: "⌘", label: "Coding", detail: "Open the focused Coding workspace", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "code" } })) },
               { icon: "◫", label: "Teams", detail: "Browse and customize agent teams", onClick: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "studio" } })) },
@@ -13992,7 +14051,7 @@ export default function AgentsPages() {
   useEffect(() => {
     if (active) setVisited((v) => (v.has(active.id) ? v : new Set(v).add(active.id)));
   }, [active]);
-  // Busy dot per tab — reported up by each instance (dispatch running).
+  // Per-tab activity — reported up by each instance (dispatch running).
   const [busyById, setBusyById] = useState<Map<string, boolean>>(new Map());
   const [newPageMenuOpen, setNewPageMenuOpen] = useState(false);
   // The tab strip scrolls horizontally (overflowX:auto), which per CSS also
@@ -14055,6 +14114,23 @@ export default function AgentsPages() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      {/* Coding's exact running-tab pulse; reduced-motion handling is shared. */}
+      <style>{`
+        @keyframes owllm-tab-working {
+          0%, 100% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.08),
+              0 0 8px rgba(176,124,255,0.28),
+              0 0 12px rgba(127,212,255,0.18);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.20),
+              0 0 18px rgba(176,124,255,0.90),
+              0 0 28px rgba(127,212,255,0.55);
+          }
+        }
+      `}</style>
       {/* Tab strip — same look as the Code page's. */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "5px 6px 0", flexShrink: 0, overflowX: "auto" }}>
         {pages.map((p) => {
@@ -14071,9 +14147,10 @@ export default function AgentsPages() {
                 background: on ? "var(--bg-input)" : "transparent",
                 border: "1px solid", borderColor: on ? "var(--border-strong)" : "transparent", borderBottom: "none",
                 color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
+                animation: busy ? pageTabWorkingAnimation() : undefined,
               }}
             >
-              {busy && <span style={{ color: "#7ff0c5", fontSize: 9, lineHeight: 1 }} title="Team run in progress">●</span>}
+              {busy && <span title="Team run in progress" style={{ flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: PSYCHEDELIC_AURA_DOT, boxShadow: "0 0 0 1px rgba(255,255,255,0.20), 0 0 8px rgba(176,124,255,0.85), 0 0 12px rgba(127,212,255,0.45)" }} />}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "Agents"}</span>
               <span
                 onClick={(e) => { e.stopPropagation(); closePage(p.id); }}

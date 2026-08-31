@@ -13,6 +13,7 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import {
   actionableImportFailure,
+  applySourceUnit,
   aggregateImportError,
   defaultModelUnit,
   formatImportBytes as formatBytes,
@@ -113,12 +114,6 @@ function prepareObject(root: any, fallbackName: string) {
 function measureObject(root: any): Vector3Tuple {
   const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
   return [size.x, size.y, size.z];
-}
-
-function applySourceUnit(root: any, unit: ModelUnit) {
-  const factor = metresPerModelUnit(unit);
-  root.scale.multiplyScalar(factor);
-  root.position.multiplyScalar(factor);
 }
 
 function loadModel(file: File, companions: File[]): Promise<any> {

@@ -16,6 +16,10 @@ const METRES_PER_UNIT: Record<ModelUnit, number> = {
 };
 
 type FileSize = { size: number };
+type UnitTransform = {
+  scale: { multiplyScalar: (factor: number) => unknown };
+  position: { multiplyScalar: (factor: number) => unknown };
+};
 type GltfResult = { scene?: unknown; scenes?: unknown[] };
 type GltfLoaderLike = {
   parse: (
@@ -41,6 +45,12 @@ export function defaultModelUnit(extension: string): ModelUnit {
 
 export function metresPerModelUnit(unit: ModelUnit): number {
   return METRES_PER_UNIT[unit];
+}
+
+export function applySourceUnit(root: UnitTransform, unit: ModelUnit): void {
+  const factor = metresPerModelUnit(unit);
+  root.scale.multiplyScalar(factor);
+  root.position.multiplyScalar(factor);
 }
 
 export function formatModelDimensions(dimensionsMetres: readonly number[], unit: ModelUnit): string {

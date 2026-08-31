@@ -31,6 +31,7 @@ const {
   BLOCKED_ASSET_URL,
   MAX_TOTAL_IMPORT_BYTES,
   actionableImportFailure,
+  applySourceUnit,
   aggregateImportError,
   defaultModelUnit,
   formatModelDimensions,
@@ -55,6 +56,7 @@ const checks = [
   [page.includes('aria-label="Assembly parts"') && page.includes('aria-label="Digital twin inspector"'), "the workspace regions expose accessible labels"],
   [page.includes("new THREE.OrthographicCamera") && page.includes('aria-pressed={projection === mode}') && page.includes('"Orthographic"'), "a true, keyboard-accessible orthographic projection is available"],
   [page.includes('id="digital-twin-import-unit"') && page.includes('id="digital-twin-part-unit"') && page.includes("applySourceUnit(object, unit)"), "source units are explicit at import and correctable per part"],
+  [page.includes("  applySourceUnit,") && !page.includes("function applySourceUnit"), "the production importer uses the shared source-unit helper exercised by fixtures"],
   [page.includes("Math.max(sphere.radius, 1e-9)") && page.includes("controls.minDistance = 1e-9") && page.includes("controls.maxDistance = 1e12"), "camera fitting preserves tiny and very large normalized CAD scales"],
 ];
 
@@ -116,15 +118,19 @@ const fixturesLoadAtKnownDimensions = closeTo(gltfRawDimensions, [0.1, 0.2, 0.3]
 console.log(`${fixturesLoadAtKnownDimensions ? "✓" : "✗"} GLTFLoader and STLLoader decode the committed known-dimension fixtures`);
 if (fixturesLoadAtKnownDimensions) passed += 1;
 
-gltfScene.scale.multiplyScalar(metresPerModelUnit(defaultModelUnit("gltf")));
-stlMesh.scale.multiplyScalar(metresPerModelUnit(defaultModelUnit("stl")));
+gltfScene.position.set(1, 2, 3);
+stlMesh.position.set(1000, 2000, 3000);
+applySourceUnit(gltfScene, defaultModelUnit("gltf"));
+applySourceUnit(stlMesh, defaultModelUnit("stl"));
 const gltfDimensionsMetres = dimensionsOf(gltfScene);
 const stlDimensionsMetres = dimensionsOf(stlMesh);
 const fixturesNormalizeToSameMetres = closeTo(gltfDimensionsMetres, [0.1, 0.2, 0.3])
   && closeTo(stlDimensionsMetres, gltfDimensionsMetres)
+  && closeTo(gltfScene.position.toArray(), [1, 2, 3])
+  && closeTo(stlMesh.position.toArray(), gltfScene.position.toArray())
   && formatModelDimensions(gltfDimensionsMetres, "m") === "0.1 × 0.2 × 0.3 m"
   && formatModelDimensions(stlDimensionsMetres, "mm") === "100 × 200 × 300 mm";
-console.log(`${fixturesNormalizeToSameMetres ? "✓" : "✗"} Auto source units normalize GLTF metres and STL millimetres to identical physical dimensions`);
+console.log(`${fixturesNormalizeToSameMetres ? "✓" : "✗"} production source-unit normalization gives GLTF and STL identical dimensions and placement`);
 if (fixturesNormalizeToSameMetres) passed += 1;
 
 let scheduled = null;

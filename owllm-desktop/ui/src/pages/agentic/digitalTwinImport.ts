@@ -5,7 +5,21 @@
 export const MAX_TOTAL_IMPORT_BYTES = 250 * 1024 * 1024;
 export const BLOCKED_ASSET_URL = "data:application/octet-stream;base64,";
 
+export type ModelUnit = "mm" | "cm" | "m" | "in" | "ft";
+
+const METRES_PER_UNIT: Record<ModelUnit, number> = {
+  mm: 0.001,
+  cm: 0.01,
+  m: 1,
+  in: 0.0254,
+  ft: 0.3048,
+};
+
 type FileSize = { size: number };
+type UnitTransform = {
+  scale: { multiplyScalar: (factor: number) => unknown };
+  position: { multiplyScalar: (factor: number) => unknown };
+};
 type GltfResult = { scene?: unknown; scenes?: unknown[] };
 type GltfLoaderLike = {
   parse: (
@@ -20,6 +34,42 @@ export function formatImportBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function defaultModelUnit(extension: string): ModelUnit {
+  // glTF defines metres as its linear unit. OBJ and STL do not carry unit
+  // metadata, so use the conventional mechanical-CAD default and keep the
+  // choice visible/correctable in the inspector.
+  return extension.toLowerCase() === "glb" || extension.toLowerCase() === "gltf" ? "m" : "mm";
+}
+
+export function metresPerModelUnit(unit: ModelUnit): number {
+  return METRES_PER_UNIT[unit];
+}
+
+export function applySourceUnit(root: UnitTransform, unit: ModelUnit): void {
+  const factor = metresPerModelUnit(unit);
+  root.scale.multiplyScalar(factor);
+  root.position.multiplyScalar(factor);
+}
+
+export function formatModelDimensions(dimensionsMetres: readonly number[], unit: ModelUnit): string {
+  const factor = metresPerModelUnit(unit);
+  const values = dimensionsMetres.map((metres) => {
+    const value = metres / factor;
+    const digits = Math.abs(value) >= 100 ? 1 : Math.abs(value) >= 10 ? 2 : 3;
+    return String(Number(value.toFixed(digits)));
+  });
+  return `${values.join(" × ")} ${unit}`;
+}
+
+export function modelSizeWarning(dimensionsMetres: readonly number[]): string | null {
+  const positive = dimensionsMetres.filter((value) => Number.isFinite(value) && value > 0);
+  if (!positive.length) return "No measurable geometry was found. Confirm the export contains visible CAD bodies.";
+  const largest = Math.max(...positive);
+  if (largest > 1000) return "This model is over 1 km across. Confirm that the selected source unit matches the CAD export.";
+  if (largest < 0.00001) return "This model is under 0.01 mm across. Confirm that the selected source unit matches the CAD export.";
+  return null;
 }
 
 export function aggregateImportError(files: FileSize[]): string | null {

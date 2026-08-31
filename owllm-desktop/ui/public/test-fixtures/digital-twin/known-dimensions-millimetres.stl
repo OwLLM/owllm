@@ -1,0 +1,86 @@
+solid known_dimensions_100x200x300_mm
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 0 0
+      vertex 100 200 0
+      vertex 100 0 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 0 0
+      vertex 0 200 0
+      vertex 100 200 0
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 0 0 300
+      vertex 100 0 300
+      vertex 100 200 300
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 0 0 300
+      vertex 100 200 300
+      vertex 0 200 300
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 0
+      vertex 100 0 0
+      vertex 100 0 300
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 0
+      vertex 100 0 300
+      vertex 0 0 300
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 0 200 0
+      vertex 0 200 300
+      vertex 100 200 300
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 0 200 0
+      vertex 100 200 300
+      vertex 100 200 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 0
+      vertex 0 0 300
+      vertex 0 200 300
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 0
+      vertex 0 200 300
+      vertex 0 200 0
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 100 0 0
+      vertex 100 200 0
+      vertex 100 200 300
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 100 0 0
+      vertex 100 200 300
+      vertex 100 0 300
+    endloop
+  endfacet
+endsolid known_dimensions_100x200x300_mm

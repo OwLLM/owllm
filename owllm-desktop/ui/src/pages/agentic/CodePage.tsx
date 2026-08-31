@@ -223,7 +223,7 @@ function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
 // Rust enum for fleet_worktree_create, reused AS-IS for the Code page.
 type WtCreate =
-  | { status: "ready"; path: string; branch: string; baseSha: string }
+  | { status: "ready"; path: string; branch: string; baseSha: string; checkpointSha?: string; checkpointFiles?: string[] }
   | { status: "notAGitRepo" }
   | { status: "dirtyWorkingTree"; details: string }
   | { status: "error"; message: string };
@@ -1226,13 +1226,17 @@ function CodeWorkspace({ pageId, onTitle }: {
     onTitle(folder ? (rename ? `${folder}(${rename})` : folder) : "New page");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot, workspace, stx.pageRename]);
-  const ensureWorktreeCurrent = async (cwd: string, announceRefresh = true): Promise<boolean> => {
-    if (!isolated || !projectRoot || !cwd) return true;
+  const ensureWorktreeCurrent = async (
+    cwd: string,
+    announceRefresh = true,
+    referenceCwd = projectRoot,
+  ): Promise<boolean> => {
+    if (!isolated || !referenceCwd || !cwd) return true;
     let outcome: WtRefresh;
     try {
       outcome = await invoke<WtRefresh>("fleet_worktree_refresh", {
         worktreePath: cwd,
-        projectCwd: projectRoot,
+        projectCwd: referenceCwd,
         // Without this the backend cannot tell which branch the page owns, so a
         // workspace someone left on a foreign branch has nothing to be healed TO.
         expectedBranch:
@@ -1266,9 +1270,14 @@ function CodeWorkspace({ pageId, onTitle }: {
       }
       return true;
     }
-    const reason = outcome.status === "stale" ? outcome.details : outcome.message;
-    const message = `This page is not current with the project, so no model was allowed to run. ${reason}`;
-    setWorktreeStaleSyncAdvice(outcome.status === "stale");
+    const secondary = cwd !== workspace;
+    const reason = outcome.status === "stale" && secondary
+      ? `${outcome.details}\nMerge the second agent into the first pane before either continues.`
+      : outcome.status === "stale" ? outcome.details : outcome.message;
+    const message = secondary
+      ? `The second agent is not current with the first pane, so no model was allowed to run. ${reason}`
+      : `This page is not current with the project, so no model was allowed to run. ${reason}`;
+    setWorktreeStaleSyncAdvice(outcome.status === "stale" && !secondary);
     setWorktreeStaleNotice(message);
     notify(message, "error");
     return false;
@@ -1596,9 +1605,10 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   /// The second agent's private checkout, created on first use.
   ///
-  /// Cut from the project's HEAD exactly like the primary's, so both panes start
-  /// from the same committed state and then diverge without touching each
-  /// other's files. Created LAZILY: a page whose second pane is never used must
+  /// Cut from the FIRST PANE'S HEAD, so both panes start from the same page
+  /// state and then diverge without touching each other's files. Canonical main
+  /// is deliberately not the source: it can advance while this page owns
+  /// unfinished work. Created LAZILY: a page whose second pane is never used must
   /// not pay for (or leave behind) a second checkout. Returns the cwd the second
   /// agent should run in — the shared folder when the project isn't a git repo,
   /// which is the only case where the two panes still share a tree.
@@ -1611,7 +1621,16 @@ function CodeWorkspace({ pageId, onTitle }: {
     let outcome: WtCreate;
     try {
       outcome = await invoke<WtCreate>("fleet_worktree_create", {
-        projectCwd: cur.projectRoot, agentName: "code-2", runId: pageId, branchPrefix: "owllm-page",
+        // The second pane belongs to THIS page, not canonical main. Cutting it
+        // from projectRoot let main advance underneath the first pane, so both
+        // agents worked from different snapshots and later merges looked like
+        // unexplained project commits. Checkpoint completed first-pane edits,
+        // then branch from that exact page HEAD.
+        projectCwd: cur.workspace,
+        agentName: "code-2",
+        runId: pageId,
+        branchPrefix: "owllm-page",
+        checkpointDirty: true,
       });
     } catch (e: any) {
       outcome = { status: "error", message: String(e?.message ?? e) };
@@ -1620,14 +1639,17 @@ function CodeWorkspace({ pageId, onTitle }: {
       const why = outcome.status === "dirtyWorkingTree"
         ? `"${cur.projectRoot.replace(/^.*[\\/]/, "")}" has uncommitted changes — commit or stash them, then send again.`
         : outcome.status === "notAGitRepo" ? "not a git repo" : outcome.message;
-      notify(`Second agent couldn't get its own copy (${why}) — it is sharing the 1st agent's files for now.`, "error");
-      return cur.workspace;
+      notify(`Second agent did not run: its isolated copy could not be created (${why}). The 1st agent's files were left untouched.`, "error");
+      return "";
     }
     chatRuntime.setPayload(SID, (p) => ({
       ...((p as CodeState) ?? DEFAULT_CODE_STATE),
       secondaryWorkspace: outcome.path, secondaryBranch: outcome.branch,
     }));
-    notify(`Second agent works on its own copy (${outcome.branch}) — use "⇩ Merge into 1st" to bring its work over.`);
+    const checkpoint = outcome.checkpointSha
+      ? ` Saved ${outcome.checkpointFiles?.length ?? 0} completed first-pane edit(s) first (${outcome.checkpointSha.slice(0, 8)}).`
+      : "";
+    notify(`Second agent works on its own copy (${outcome.branch}).${checkpoint} Use "⇩ Merge into 1st" to bring its work over.`);
     return outcome.path;
   };
 
@@ -2563,6 +2585,15 @@ function CodeWorkspace({ pageId, onTitle }: {
     return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, cwd, history, true, onSecondaryThought, runtimeTools, imgs.length ? imgs : undefined, undefined, undefined, undefined, () => "");
   };
 
+  // If the second pane is already running, it aligned itself to this page
+  // before it became busy. Do not move the first branch underneath that live
+  // run. An idle second pane is aligned when IT starts; forcing it here would
+  // block ordinary first-pane work whenever the second pane has pending edits.
+  const ensurePrimaryWorktreesCurrent = async (): Promise<boolean> => {
+    if (isSecondaryBusyNow()) return true;
+    return ensureWorktreeCurrent(workspace);
+  };
+
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
   // bypassing the composer draft. Composer sends pass nothing.
   const send = async (textOverride?: string) => {
@@ -2600,7 +2631,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       blockSend("No model selected — pick one in the Coder header.");
       return;
     }
-    if (!(await ensureWorktreeCurrent(workspace))) return;
+    if (!(await ensurePrimaryWorktreesCurrent())) return;
     // This Kanban is the execution state of one Plan & Build run, not a durable
     // backlog. A new manual Auto/Chat turn supersedes it. Programmatic Notebook
     // turns leave it alone because that queue owns separate persistent state.
@@ -2818,8 +2849,33 @@ function CodeWorkspace({ pageId, onTitle }: {
       notify("No model for the second agent — pick one in the second-agent pane (or select a primary model).");
       return;
     }
+    const before = (chatRuntime.getSnapshot(SID).payload as CodeState | null) ?? DEFAULT_CODE_STATE;
+    if (before.isolated && !before.secondaryWorkspace && busySendRef.current) {
+      notify("Second agent did not run: wait for the first agent to finish once so OWLLM can snapshot its page branch safely.", "error");
+      return;
+    }
     const secondaryRunCwd = await ensureSecondaryWorktree();
-    if (!(await ensureWorktreeCurrent(secondaryRunCwd))) return;
+    if (!secondaryRunCwd) return;
+    const cur = (chatRuntime.getSnapshot(SID).payload as CodeState | null) ?? DEFAULT_CODE_STATE;
+    if (cur.isolated && !busySendRef.current) {
+      // An existing second checkout may predate completed first-pane edits.
+      // Commit those edits on the PAGE branch (never main), then refresh the
+      // second checkout from that exact commit. This is the same reversible
+      // checkpoint used when the checkout is created for the first time.
+      const checkpoint = await invoke<WtFinalize>("fleet_worktree_finalize", {
+        worktreePath: cur.workspace,
+        agentName: "code",
+        summary: "checkpoint before second agent run",
+      }).catch((e: any) => ({ status: "error", message: String(e?.message ?? e) } as WtFinalize));
+      if (checkpoint.status === "error") {
+        notify(`Second agent did not run: the first pane could not be checkpointed (${checkpoint.message}).`, "error");
+        return;
+      }
+      if (checkpoint.status === "committed") {
+        notify(`Saved ${checkpoint.filesChanged} completed first-pane edit(s) before starting the second agent (${checkpoint.commitSha.slice(0, 8)}).`);
+      }
+      if (!(await ensureWorktreeCurrent(secondaryRunCwd, true, cur.workspace))) return;
+    }
     if (fromComposer) { setSecondaryDraft(""); setSecondaryAttachments([]); autoFeedHopsRef.current = 0; orphanHopsRef.current = 0; }
     // A new second-agent turn supersedes its pending clear-undo (see setBusy).
     setSecondaryUndo(null);
@@ -3154,7 +3210,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!goal || busy) return;
     if (!workspace) { notify(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
-    if (!(await ensureWorktreeCurrent(workspace))) return;
+    if (!(await ensurePrimaryWorktreesCurrent())) return;
     setDraft("");
     setBusy(true);
     setTasks([]);
@@ -3209,7 +3265,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (busy || tasks.every((t) => t.status === "done" || t.status === "failed")) return;
     if (!workspace) { notify("Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setModelRequired({ where: "the Coder header" }); notify("No model selected — pick one in the Coder header."); return; }
-    if (!(await ensureWorktreeCurrent(workspace))) return;
+    if (!(await ensurePrimaryWorktreesCurrent())) return;
     const marker = "📋 Plan & build: ";
     const savedGoal = [...messages].reverse().find((m) => m.role === "user" && m.content.startsWith(marker));
     const goal = (stx.planGoal || savedGoal?.content.slice(marker.length) || "").trim();

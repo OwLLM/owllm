@@ -163,8 +163,15 @@ try {
     fleet.includes("if !checkpoint_dirty.unwrap_or(false) {"));
   check("Agent runs opt in to the checkpoint",
     page.match(/checkpointDirty: true/g)?.length >= 3);
+  const codePage = read("pages/agentic/CodePage.tsx");
+  const codeOpenStart = codePage.indexOf("const openWorkspace = async");
+  const codeOpenEnd = codePage.indexOf("const removeWorktree = async", codeOpenStart);
+  const codeOpen = codeOpenStart >= 0 && codeOpenEnd > codeOpenStart
+    ? codePage.slice(codeOpenStart, codeOpenEnd) : "";
   check("Opening a Code page never opts in",
-    !read("pages/agentic/CodePage.tsx").includes("checkpointDirty"));
+    !!codeOpen && !codeOpen.includes("checkpointDirty"));
+  check("An explicit second-agent run checkpoints the first pane before branching",
+    /agentName: "code-2"[\s\S]{0,160}?checkpointDirty: true/.test(codePage));
   check("The native suite proves both the run and page-open behaviours",
     fleet.includes("agent_run_checkpoints_uncommitted_work_instead_of_deadlocking")
       && fleet.includes("opening_a_page_never_commits_on_the_users_behalf"));

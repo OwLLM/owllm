@@ -95,6 +95,12 @@ check(page.includes("const secondaryRunCwd = await ensureSecondaryWorktree()") &
 check(page.includes('data-ui="CodeWorktreeStaleGuard"') &&
       page.includes("so no model was allowed to run"),
   "a blocked stale page stays visibly explained instead of silently dropping the task");
+check(page.includes('window.addEventListener("focus", recheckStaleWorktree)') &&
+      page.includes('window.addEventListener("owllm:projects:refresh", recheckStaleWorktree)') &&
+      page.includes("window.setInterval(recheckStaleWorktree, 5_000)") &&
+      /if \(!worktreeStaleNotice[\s\S]{0,1200}?ensureWorktreeCurrent\(workspace, false, projectRoot, false\)/.test(page) &&
+      page.includes('if (reportBlocked) notify(message, "error")'),
+  "a visible stale warning revalidates after Sync/project refresh, focus, and while it remains actionable");
 
 const createStart = fleet.indexOf("pub async fn fleet_worktree_create");
 const createEnd = fleet.indexOf("/// Outcome of trying to put a page worktree", createStart);
@@ -195,7 +201,7 @@ check(lockedForeignRegistrationSurvived,
   "controlled experiment proves Git's worktree lock preserves the same foreign-host registration");
 
 if (process.exitCode) {
-  console.error(`\n${passed}/26 page worktree freshness checks passed.`);
+  console.error(`\n${passed}/27 page worktree freshness checks passed.`);
   process.exit(process.exitCode);
 }
-console.log(`\n${passed}/26 page worktree freshness checks passed.`);
+console.log(`\n${passed}/27 page worktree freshness checks passed.`);

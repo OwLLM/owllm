@@ -38,6 +38,10 @@ check("halo constant exists", !!haloMatch);
 const alphas = haloMatch ? [...haloMatch[1].matchAll(/rgba\([^)]*,\s*(\.?\d*\.?\d+)\)/g)].map((m) => parseFloat(m[1])) : [];
 check("halo alphas are low-intensity (<= 0.25)", alphas.length > 0 && alphas.every((a) => a <= 0.25));
 check("both chat panes use the soft halo", (src.match(/PSYCHEDELIC_AURA_HALO : undefined/g) || []).length === 2);
+check("primary pane aura follows only the primary coder", /const primaryAuraActive = busy;/.test(src));
+check("second pane aura follows the persisted second-agent run", /background: secondaryBusy \? PSYCHEDELIC_AURA_BACKGROUND[\s\S]{0,350}?animation: secondaryBusy \? PSYCHEDELIC_AURA_ANIMATION/.test(src));
+check("Coding tab stays active for either agent across page changes", /return !!snap\?\.busy \|\| !!snap\?\.secondaryBusy \|\| pageActivity\.extraBusy\(id\);/.test(src));
+check("second-agent completion produces the same unseen-page feedback", /if \(was && !now && p\.id !== active\?\.id\) pageActivity\.markDone\(p\.id\);/.test(src));
 
 // The page-title/tab pulse must remain exactly as shipped.
 check("tab working pulse keyframes untouched", src.includes("@keyframes owllm-tab-working") && src.includes('0 0 18px rgba(176,124,255,0.90)'));

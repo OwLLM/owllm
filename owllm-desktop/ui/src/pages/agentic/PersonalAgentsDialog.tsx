@@ -4,6 +4,7 @@ import ModelPicker, { type AccountsStatusLite, type ModelInfo } from "./ModelPic
 import { LOCAL_TOOL_SPECS } from "./localTools";
 import { parseAgentPrompt, serializeAgentPrompt, type AgentPromptSections } from "./agentPrompt";
 import PersonalAgentTeamsPanel from "./PersonalAgentTeamsPanel";
+import RuleSetsPanel from "./RuleSetsPanel";
 import {
   emptyAgentProfile,
   emptyPersonalSkill,
@@ -45,7 +46,7 @@ type ImportResult = {
   projectConfigs?: number;
   validationErrors?: string[];
 };
-type Tab = "profiles" | "skills" | "rules" | "project" | "teams" | "transfer";
+type Tab = "profiles" | "skills" | "rules" | "rulesets" | "project" | "teams" | "transfer";
 
 const KINDS: RuleCardKind[] = ["fact", "preference", "constraint", "workflow", "conditional"];
 const KIND_COLOR: Record<RuleCardKind, string> = {
@@ -542,6 +543,7 @@ export default function PersonalAgentsDialog({
             {nav("profiles", "Profiles")}
             {nav("skills", "Skills")}
             {nav("rules", "Rule cards")}
+            {nav("rulesets", "Rule sets")}
             {nav("project", "Project config + preview")}
             {nav("teams", "Teams + runs")}
             {nav("transfer", "Import / export")}
@@ -959,6 +961,14 @@ export default function PersonalAgentsDialog({
                 {effective ? <EffectivePreview effective={effective} project={projectDraft} /> : <div style={{ color: "var(--fg-subtle)", fontSize: 11.5 }}>Resolve to see deterministic precedence, provenance, validation, attached rules, and the final fail-closed permission set.</div>}
               </div>
             </div>
+          ) : null}
+
+          {tab === "rulesets" ? (
+            <RuleSetsPanel
+              projectId={projectId}
+              onProjectIdChange={setProjectId}
+              profiles={profiles}
+            />
           ) : null}
 
           {tab === "teams" ? (

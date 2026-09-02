@@ -52,6 +52,15 @@ pub struct DevicePublic {
     /// this unknown JSON field when they read records written by newer builds.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// Stable per-MACHINE id (`identity::machine_key`) — a domain-separated hash
+    /// of the OS installation uid, so it survives the re-pairing that mints a
+    /// new `device_id`. This is what makes one PC one row in the Devices list
+    /// and one satellite on the World Map instead of one per re-pair; see
+    /// `canonical.rs`. Metadata only, exactly like the fields above: it groups
+    /// records, it never authorizes anything. None on records published before
+    /// it existed (those are collapsed by `name|os|arch` instead).
+    #[serde(default)]
+    pub machine_key: Option<String>,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is

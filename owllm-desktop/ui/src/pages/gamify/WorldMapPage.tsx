@@ -7,7 +7,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
 import { isDeviceOnline } from "../advanced/deviceLiveness";
-import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
+import { forgetDeviceEverywhere, getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
 import WorldChatPanel from "./WorldChatPanel";
 import { isClickGesture, nodeSignature } from "./globeStability";
 import {
@@ -1034,6 +1034,8 @@ export default function WorldMapPage() {
   const [selected, setSelected] = useState<GlobeNode | null>(null);
   const [expandedCountry, setExpandedCountry] = useState<string | null>(null);
   const [fleetError, setFleetError] = useState("");
+  /** device_id currently being removed, so the button can't be double-fired. */
+  const [forgetting, setForgetting] = useState("");
   // Solar System explorer: which planet the camera is focused on, the imperative
   // focus bridge into the Globe scene, and per-planet texture health for the
   // selector's loading/fallback affordances.
@@ -1198,6 +1200,21 @@ export default function WorldMapPage() {
   useEffect(() => {
     if (mode === "fleet") void loadFleet(false);
   }, [mode]);
+
+  const forgetFleetDevice = async (deviceId: string) => {
+    if (deviceId === selfId) return;
+    setForgetting(deviceId);
+    setFleetError("");
+    try {
+      await forgetDeviceEverywhere(deviceId);
+      setSelected(null);
+      await loadFleet(false);
+    } catch (reason) {
+      setFleetError(String(reason));
+    } finally {
+      setForgetting("");
+    }
+  };
 
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
     ? publicNodes.map((node) => ({
@@ -1572,6 +1589,16 @@ export default function WorldMapPage() {
                 <div style={{ color: "var(--fg-strong)", fontWeight: 800 }}>{selected.label}</div>
                 <div style={{ marginTop: 4, color: "var(--fg-muted)", fontSize: 11.5 }}>{selected.detail}</div>
                 <div style={{ marginTop: 9, color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700 }}>{selected.kind === "fleet" ? t("Private fleet orbit · not a location") : t("Approximate city only")}</div>
+                {/* Same deletion as the Devices list ✕ — both views render the
+                    one canonical collection, so removing a stale satellite here
+                    removes the row there (and on the user's other PCs). */}
+                {selected.kind === "fleet" && selected.id !== selfId && (
+                  <button
+                    onClick={() => void forgetFleetDevice(selected.id)}
+                    disabled={forgetting === selected.id}
+                    style={{ marginTop: 11, padding: "4px 10px", borderRadius: 7, border: "1px solid var(--border)", background: "var(--bg-elevated)", color: "var(--error)", fontSize: 11, cursor: forgetting === selected.id ? "default" : "pointer", opacity: forgetting === selected.id ? 0.6 : 1 }}
+                  >{forgetting === selected.id ? t("Removing…") : t("Remove this device")}</button>
+                )}
               </div>
             )}
           </aside>

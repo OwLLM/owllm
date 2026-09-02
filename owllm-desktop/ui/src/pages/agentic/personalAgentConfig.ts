@@ -1,3 +1,5 @@
+import type { RuleSetResolution } from "./agentRuleSets";
+
 export const PERSONAL_AGENT_SCHEMA_VERSION = 1 as const;
 
 export type MemoryScope = "none" | "project" | "global";
@@ -75,6 +77,9 @@ export type ProfileOverride = {
   skillIds?: string[];
   personalSkillRefs?: RevisionRef[];
   ruleCardRefs?: RevisionRef[];
+  /// Per-agent rule-set assignment — the high-precedence layer. Project-scoped
+  /// by construction: it lives on the project config, not on the global profile.
+  ruleSetRefs?: RevisionRef[];
 };
 
 export type ProjectAgentConfigDoc = {
@@ -83,6 +88,8 @@ export type ProjectAgentConfigDoc = {
   revision: number;
   profileRefs: RevisionRef[];
   ruleCardRefs: RevisionRef[];
+  /// Project-wide rule-set assignment — the low-precedence layer.
+  ruleSetRefs: RevisionRef[];
   profileOverrides: Record<string, ProfileOverride>;
   createdAt: string;
   updatedAt: string;
@@ -98,13 +105,18 @@ export type EffectiveAgentConfig = AgentProfileDoc & {
   provenance: Record<string, ProvenanceEntry>;
   attachedRules: EffectiveRule[];
   attachedSkills: PersonalSkillDoc[];
+  /// The resolved rule-set stack. Its winning rules are already inside
+  /// attachedRules; this carries the order and everything a higher-precedence
+  /// set overruled, so a superseded rule is visible rather than just absent.
+  ruleSets: RuleSetResolution;
   validationErrors: string[];
 };
-export type BackendEffectiveAgentConfig = Omit<EffectiveAgentConfig, "attachedRules" | "attachedSkills"> & {
+export type BackendEffectiveAgentConfig = Omit<EffectiveAgentConfig, "attachedRules" | "attachedSkills" | "ruleSets"> & {
   profile?: AgentProfileDoc;
   attachedRules?: EffectiveRule[];
   attachedRuleCards?: EffectiveRule[];
   attachedSkills?: PersonalSkillDoc[];
+  ruleSets?: RuleSetResolution;
 };
 
 export type PersonalAgentExportBundle = {
@@ -258,6 +270,7 @@ export function emptyProjectAgentConfig(projectId: string, now = new Date().toIS
     revision: 1,
     profileRefs: [],
     ruleCardRefs: [],
+    ruleSetRefs: [],
     profileOverrides: {},
     createdAt: now,
     updatedAt: now,
@@ -448,6 +461,7 @@ export function normalizeEffectiveAgentConfig(raw: BackendEffectiveAgentConfig):
     provenance: raw.provenance ?? {},
     attachedRules: raw.attachedRuleCards ?? raw.attachedRules ?? [],
     attachedSkills: raw.attachedSkills ?? [],
+    ruleSets: raw.ruleSets ?? { sets: [], applied: [], superseded: [], errors: [] },
     validationErrors: raw.validationErrors ?? [],
   };
 }

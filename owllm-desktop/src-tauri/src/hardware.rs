@@ -766,6 +766,92 @@ pub fn machine_name() -> Option<String> {
     Some(name.to_string())
 }
 
+/// The OS installation's own machine uid — the same value across every OwLLM
+/// reinstall, app-data move and device re-pairing on one physical machine.
+///
+/// `remote_devices` keys a device by `hex(SHA-256(ed25519_pub))`, which is
+/// stable per KEYPAIR: re-pairing mints a new one, so one PC accumulated one
+/// row per re-pair in the Devices list and the World Map fleet. This is the
+/// per-machine anchor those rows are collapsed onto (hashed before it leaves
+/// this process — see `remote_devices::identity::machine_key`).
+///
+/// Read once and cached: the Windows/macOS lookups shell out, and this is on
+/// the device-record publish path that runs on every vault beat.
+///
+/// None when the OS gives us nothing — callers must treat "no machine id" as
+/// "cannot be deduplicated", never as "same as another None".
+pub fn machine_uid() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(read_machine_uid).clone()
+}
+
+fn read_machine_uid() -> Option<String> {
+    let raw = read_machine_uid_os()?;
+    let trimmed = raw.trim().trim_matches('"').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_lowercase())
+}
+
+#[cfg(target_os = "windows")]
+fn read_machine_uid_os() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    // Set at Windows install time and untouched by app installs/uninstalls.
+    // `reg.exe` is a console program — CREATE_NO_WINDOW keeps it from flashing
+    // a Command Prompt frame (same reason autostart.rs sets it).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("MachineGuid"))
+        .and_then(|l| l.split_whitespace().last())
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "linux")]
+fn read_machine_uid_os() -> Option<String> {
+    // systemd's /etc/machine-id, with the older D-Bus location as the fallback
+    // for images that ship only that one.
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+#[cfg(target_os = "macos")]
+fn read_machine_uid_os() -> Option<String> {
+    let out = std::process::Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("IOPlatformUUID"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|v| v.trim().trim_matches('"').to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn read_machine_uid_os() -> Option<String> {
+    None
+}
+
 /// The GPU UUIDs the user selected in gpu_config.json (authoritative).
 /// Empty = no explicit selection → callers should leave the backend's
 /// default GPU behaviour untouched. Used by the model-server spawn to pin

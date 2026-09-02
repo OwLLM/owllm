@@ -1,10 +1,14 @@
-// AccountsPage v2 — one unified container per provider (subscription
-// route on top + API key route below, sharing the same brand header,
-// logo, and column slot). Right-rail dock streams cli_install output
+// AccountsPage v3 — TWO pages, one per access route: Subscription (CLI
+// login / web portal) and API key. Every provider appears on the page(s)
+// it supports, with the same brand header, logo, and column slot. The
+// opening page follows how the user actually works (accountRouteTab.ts);
+// clicking a tab pins it. Right-rail dock streams cli_install output
 // in-app so the user never has to chase a pop-out CMD window to read
 // npm's progress.
 //
 // Visual contract:
+//   * route tab bar above the grid: Subscription | API key, each with its
+//     own connected count
 //   * left flex column: provider containers (auto-fit grid, max 480px each)
 //   * right docked rail (340px wide): persistent install / login log
 //   * inline SVG logos per brand (no emoji fallback)
@@ -42,6 +46,13 @@ import {
   isKimiLoginSuccess,
   type AccountRemediation,
 } from "./accountHealth";
+import {
+  ACCOUNT_ROUTE_TAB_KEY,
+  isAccountRouteTab,
+  pickAccountRouteTab,
+  type AccountRouteTab,
+  type AccountRouteUsage,
+} from "./accountRouteTab";
 
 /// Which accounts_status flag says "this CLI's binary exists on this machine".
 /// Connect reads it fresh before signing in, so a first run installs the CLI
@@ -748,10 +759,13 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, highlighted, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
+  provider, kind, cards, highlighted, hostLabel, claudeAccounts, selectedClaudeAccount, onSelectClaudeAccount,
   onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
+  /// Route page being shown. The card renders only this provider's routes of
+  /// that kind, so the Subscription page never shows a "Set key" row.
+  kind: AccountRouteTab;
   cards: Record<string, CardState>;
   highlighted?: boolean;
   hostLabel: string;
@@ -764,9 +778,11 @@ function ProviderCard({
   onTest: (route: RouteSpec) => void;
 }) {
   const Logo = provider.Logo;
+  const routes = provider.routes.filter((route) => route.kind === kind);
   return (
     <div
       data-provider-key={provider.key}
+      data-route-kind={kind}
       data-onboarding-highlighted={highlighted ? "true" : undefined}
       style={{
         background: `linear-gradient(180deg, ${provider.accentTop} 0%, ${PAGE_BG} 60%, ${PAGE_BG} 100%)`,
@@ -777,7 +793,9 @@ function ProviderCard({
           ? `0 0 0 3px color-mix(in srgb, ${provider.accent} 22%, transparent), 0 8px 30px rgba(0,0,0,0.52)`
           : "0 4px 24px rgba(0,0,0,0.47)",
         display: "flex", flexDirection: "column",
-        minHeight: 220,
+        // One route row per card now that the page is split by route kind —
+        // the old 220 floor was sized for two stacked rows and left a gap.
+        minHeight: 170,
       }}
     >
       <div style={{ display: "flex", alignItems: "flex-start", gap: 14, marginBottom: 10 }}>
@@ -789,7 +807,7 @@ function ProviderCard({
           <div style={{ color: "var(--fg-muted)", fontSize: 11 }}>{provider.tagline}</div>
         </div>
       </div>
-      {provider.routes.map((route, i) => (
+      {routes.map((route, i) => (
         <div key={route.key} style={{ borderTop: i === 0 ? "none" : "1px solid rgba(255,255,255,0.06)" }}>
           <RouteRow
             provider={provider}
@@ -1018,14 +1036,90 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
 }
 
 // -----------------------------------------------------------------------
+// accounts_status → card state. Pure so the FIRST render can already use
+// the persisted snapshot (accountsStore serves one synchronously): the
+// route tab is chosen from real connection state instead of flashing the
+// default page for a frame and then jumping.
+// -----------------------------------------------------------------------
+function reconcileCards(
+  prev: Record<string, CardState>,
+  status: AccountsStatus,
+): Record<string, CardState> {
+  const next = { ...prev };
+  const flag = (key: string, connected: boolean, reauthRequired = false, installed = true) => {
+    const cur = next[key];
+    if (!cur) return;
+    if (cur.connected !== connected || cur.reauthRequired !== reauthRequired || cur.installed !== installed) {
+      next[key] = {
+        ...cur,
+        connected,
+        installed,
+        reauthRequired,
+        remediation: reauthRequired ? "reauth" : cur.remediation,
+        ...(reauthRequired
+          ? {
+              testText: "✗  Kimi sign-in expired. Click Reconnect and complete login again.",
+              testOk: false,
+            }
+          : connected
+            ? {}
+            : { testText: "", testOk: null }),
+      };
+    }
+  };
+  flag("anthropic_api",         status.anthropic_api_key);
+  flag("openai_api",            status.openai_api_key);
+  flag("moonshot_api",          status.moonshot_api_key);
+  flag("deepseek_api",          status.deepseek_api_key);
+  flag("xai_api",               status.xai_api_key);
+  flag("groq_api",              status.groq_api_key);
+  flag("perplexity_api",        status.perplexity_api_key);
+  flag("mistral_api",           status.mistral_api_key);
+  flag("together_api",          status.together_api_key);
+  flag("gemini_api",            status.gemini_api_key);
+  flag("claude_subscription",   status.claude_cli, false, status.claude_cli_installed);
+  flag("codex_subscription",    status.codex_cli, false, status.codex_cli_installed);
+  flag("kimi_subscription",     status.kimi_cli, status.kimi_cli_reauth_required, status.kimi_cli_installed);
+  flag("gemini_subscription",   status.gemini_cli, false, status.gemini_cli_installed);
+  flag("xai_subscription",      status.grok_cli, false, status.grok_cli_installed);
+  return next;
+}
+
+/// How the user works today: connected subscriptions vs saved API keys.
+/// Feeds pickAccountRouteTab — the ONLY evidence it uses beyond an explicit
+/// choice, so it must be read from the same card state the grid renders.
+function countRouteUsage(cards: Record<string, CardState>): AccountRouteUsage {
+  let subscriptions = 0;
+  let apiKeys = 0;
+  for (const provider of PROVIDERS) {
+    for (const route of provider.routes) {
+      if (!cards[route.key]?.connected) continue;
+      if (route.kind === "subscription") subscriptions += 1;
+      else apiKeys += 1;
+    }
+  }
+  return { subscriptions, apiKeys };
+}
+
+/// Providers that exist on only ONE route page. Named in a footnote on the
+/// other page so a hidden provider never reads as a missing provider.
+function providersMissingFrom(kind: AccountRouteTab): string[] {
+  return PROVIDERS
+    .filter((provider) => !provider.routes.some((route) => route.kind === kind))
+    .map((provider) => provider.name);
+}
+
+// -----------------------------------------------------------------------
 // Page
 // -----------------------------------------------------------------------
 export default function AccountsPage() {
   // Flatten all routes into card state keyed by route.key
   const allRoutes = PROVIDERS.flatMap((p) => p.routes);
-  const [cards, setCards] = useState<Record<string, CardState>>(() =>
-    Object.fromEntries(allRoutes.map((r) => [r.key, { ...initialCardState }])),
-  );
+  const [cards, setCards] = useState<Record<string, CardState>>(() => {
+    const blank = Object.fromEntries(allRoutes.map((r) => [r.key, { ...initialCardState }]));
+    const cached = getCachedAccounts();
+    return cached ? reconcileCards(blank, cached) : blank;
+  });
   const [dialogFor, setDialogFor] = useState<{ route: RouteSpec; provider: ProviderSpec } | null>(null);
   const [onboardingProvider, setOnboardingProvider] = useState(() => {
     try {
@@ -1035,6 +1129,36 @@ export default function AccountsPage() {
     catch { return ""; }
   });
 
+  // Which route page is open. Inferred from how the user actually works until
+  // they click a tab themselves; that click is remembered across launches.
+  const storedRouteTab = (() => {
+    try { return localStorage.getItem(ACCOUNT_ROUTE_TAB_KEY); } catch { return null; }
+  })();
+  const routeTabPinned = useRef(isAccountRouteTab(storedRouteTab));
+  const routeTabSettled = useRef(false);
+  const [routeTab, setRouteTab] = useState<AccountRouteTab>(() => pickAccountRouteTab({
+    stored: storedRouteTab,
+    onboarding: onboardingProvider,
+    usage: countRouteUsage(cards),
+  }));
+
+  // Keep following the evidence until it EXISTS — a cold start whose first
+  // status probe lands a moment after mount must still open the right page.
+  // Once anything is connected the choice stops moving, so a later poll (or a
+  // disconnect the user is about to redo) can never yank the page away.
+  useEffect(() => {
+    if (routeTabPinned.current || routeTabSettled.current) return;
+    const usage = countRouteUsage(cards);
+    setRouteTab(pickAccountRouteTab({ onboarding: onboardingProvider, usage }));
+    if (usage.subscriptions + usage.apiKeys > 0) routeTabSettled.current = true;
+  }, [cards, onboardingProvider]);
+
+  const chooseRouteTab = (tab: AccountRouteTab) => {
+    routeTabPinned.current = true;
+    setRouteTab(tab);
+    try { localStorage.setItem(ACCOUNT_ROUTE_TAB_KEY, tab); } catch { /* locked-down WebView */ }
+  };
+
   useEffect(() => {
     if (!onboardingProvider || onboardingProvider === "api") return;
     const id = window.setTimeout(() => {
@@ -1042,7 +1166,9 @@ export default function AccountsPage() {
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 120);
     return () => window.clearTimeout(id);
-  }, [onboardingProvider]);
+    // routeTab: the highlighted card only exists on one page, so re-scroll
+    // after a tab switch instead of leaving the hint pointing off-screen.
+  }, [onboardingProvider, routeTab]);
 
   const dismissOnboardingHint = () => {
     try { sessionStorage.removeItem(ACCOUNT_ONBOARDING_KEY); } catch { /* ignore */ }
@@ -1111,48 +1237,8 @@ export default function AccountsPage() {
   };
 
   function reconcile(status: AccountsStatus) {
-    setCards((prev) => {
-      const next = { ...prev };
-      const flag = (key: string, connected: boolean, reauthRequired = false, installed = true) => {
-        const cur = next[key];
-        if (!cur) return;
-        if (cur.connected !== connected || cur.reauthRequired !== reauthRequired || cur.installed !== installed) {
-          next[key] = {
-            ...cur,
-            connected,
-            installed,
-            reauthRequired,
-            remediation: reauthRequired ? "reauth" : cur.remediation,
-            ...(reauthRequired
-              ? {
-                  testText: "✗  Kimi sign-in expired. Click Reconnect and complete login again.",
-                  testOk: false,
-                }
-              : connected
-                ? {}
-                : { testText: "", testOk: null }),
-          };
-        }
-      };
-      flag("anthropic_api",         status.anthropic_api_key);
-      flag("openai_api",            status.openai_api_key);
-      flag("moonshot_api",          status.moonshot_api_key);
-      flag("deepseek_api",          status.deepseek_api_key);
-      flag("xai_api",               status.xai_api_key);
-      flag("groq_api",              status.groq_api_key);
-      flag("perplexity_api",        status.perplexity_api_key);
-      flag("mistral_api",           status.mistral_api_key);
-      flag("together_api",          status.together_api_key);
-      flag("gemini_api",            status.gemini_api_key);
-      flag("claude_subscription",   status.claude_cli, false, status.claude_cli_installed);
-      flag("codex_subscription",    status.codex_cli, false, status.codex_cli_installed);
-      flag("kimi_subscription",     status.kimi_cli, status.kimi_cli_reauth_required, status.kimi_cli_installed);
-      flag("gemini_subscription",   status.gemini_cli, false, status.gemini_cli_installed);
-      flag("xai_subscription",      status.grok_cli, false, status.grok_cli_installed);
-      return next;
-    });
+    setCards((prev) => reconcileCards(prev, status));
   }
-
   // This page renders from the SHARED session cache (accountsStore), so
   // opening Accounts paints every card in its final connected/disconnected
   // state immediately instead of flashing through "nothing connected".
@@ -1614,6 +1700,11 @@ export default function AccountsPage() {
     }
   }
 
+  const routeUsage = countRouteUsage(cards);
+  const visibleProviders = PROVIDERS.filter((provider) =>
+    provider.routes.some((route) => route.kind === routeTab));
+  const elsewhereOnly = providersMissingFrom(routeTab);
+
   return (
     <div
       style={{
@@ -1629,9 +1720,10 @@ export default function AccountsPage() {
     >
       <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Accounts</div>
       <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-        Each provider gets one card with both ways to access it: subscription
-        (CLI login or web portal) and API key. Install / Connect output streams
-        live into the right-side log — no pop-out console.
+        Two ways to reach the same providers, one page each: subscription
+        (CLI login or web portal) and API key. The page you use opens first —
+        pick a tab to pin it. Install / Connect output streams live into the
+        right-side log — no pop-out console.
       </div>
       {onboardingProvider && (
         <div data-ui="AccountOnboardingHint" style={{
@@ -1648,9 +1740,14 @@ export default function AccountsPage() {
                 : `Connect your ${PROVIDERS.find((provider) => provider.key === onboardingProvider)?.name ?? "subscription"} account`}
             </div>
             <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginTop: 2, lineHeight: 1.4 }}>
-              {onboardingProvider === "api"
-                ? "Choose a provider below, then use its API row. API usage is billed separately by that provider."
-                : "Use the Subscription row in the highlighted card. Install its CLI if needed, then Connect and finish the provider’s browser login."}
+              {/* Describes the page the user is ACTUALLY on — they can switch
+                  tabs after arriving, and a hint pointing at the other page
+                  reads as a broken instruction. */}
+              {routeTab === "api"
+                ? "You are on the API key page — choose a provider below and set its key. API usage is billed separately by that provider."
+                : onboardingProvider === "api"
+                  ? "This is the Subscription page — switch to the API key tab to paste the key you already have."
+                  : "You are on the Subscription page — use the highlighted card. Install its CLI if needed, then Connect and finish the provider’s browser login."}
             </div>
           </div>
           <button onClick={dismissOnboardingHint} style={{
@@ -1661,6 +1758,23 @@ export default function AccountsPage() {
       )}
       <VoiceRuntimePanel />
 
+      {/* Route pages. Reuses the rail's TabButton so both tab bars in this
+          page look and behave the same. */}
+      <div data-ui="AccountRouteTabs" style={{
+        display: "flex", alignItems: "stretch",
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        <TabButton
+          label={`Subscription${routeUsage.subscriptions ? ` · ${routeUsage.subscriptions} connected` : ""}`}
+          active={routeTab === "subscription"}
+          onClick={() => chooseRouteTab("subscription")}
+        />
+        <TabButton
+          label={`API key${routeUsage.apiKeys ? ` · ${routeUsage.apiKeys} saved` : ""}`}
+          active={routeTab === "api"}
+          onClick={() => chooseRouteTab("api")}
+        />
+      </div>
 
       <div
         style={{
@@ -1697,10 +1811,11 @@ export default function AccountsPage() {
             paddingBottom: 4,
           }}
         >
-          {PROVIDERS.map((provider) => (
+          {visibleProviders.map((provider) => (
             <ProviderCard
               key={provider.key}
               provider={provider}
+              kind={routeTab}
               cards={cards}
               highlighted={onboardingProvider === provider.key}
               hostLabel={hostLabel}
@@ -1719,6 +1834,25 @@ export default function AccountsPage() {
               onTest={(r) => handleTest(r)}
             />
           ))}
+          {/* A provider hidden by the route filter must not read as a
+              provider the app dropped. */}
+          {elsewhereOnly.length > 0 && (
+            <div
+              data-ui="AccountRouteElsewhere"
+              style={{ gridColumn: "1 / -1", fontSize: 11, color: "var(--fg-dim)", paddingTop: 2 }}
+            >
+              {elsewhereOnly.join(", ")}{" "}
+              {elsewhereOnly.length === 1 ? "has" : "have"} no{" "}
+              {routeTab === "subscription" ? "subscription" : "API"} route —{" "}
+              <button
+                onClick={() => chooseRouteTab(routeTab === "subscription" ? "api" : "subscription")}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  color: "#7fb8ff", fontSize: 11, cursor: "pointer", textDecoration: "underline",
+                }}
+              >see the {routeTab === "subscription" ? "API key" : "Subscription"} tab</button>.
+            </div>
+          )}
         </div>
 
         {/* Right rail — tabbed: Log + Terminal. Stacks below the

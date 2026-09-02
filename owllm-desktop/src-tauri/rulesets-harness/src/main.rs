@@ -140,6 +140,7 @@ fn set(id: &str, project: &str, template: &str, priority: u32, rules: Vec<RuleSe
         id: format!("ruleset:{id}"),
         revision: 1,
         template_id: template.into(),
+        template_version: 1,
         name: id.into(),
         summary: format!("{id} summary"),
         priority,

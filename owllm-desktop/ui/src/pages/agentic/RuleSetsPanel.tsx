@@ -14,17 +14,25 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  RULE_SET_PROVENANCE_REVIEWED_AT,
   RULE_SET_TEMPLATE_LIST,
   RULE_SET_TOPICS,
   assignableRuleSets,
+  citationsFor,
   describeRuleSetStack,
   emptyRuleSet,
   emptyRuleSetRule,
   forkRuleSet,
+  migrateRuleSetDoc,
+  provenanceForRule,
   ruleSetForSave,
   ruleSetFromTemplate,
+  templateCitationsOf,
+  templateEditionOf,
+  templateProvenanceOf,
   validateRuleSetDraft,
   type RuleKind,
+  type RuleSetCitation,
   type RuleSetDoc,
   type RuleSetResolution,
   type RuleSetRule,
@@ -83,6 +91,110 @@ const STATUS_COLOR: Record<string, string> = {
   archived: "var(--fg-subtle)",
 };
 
+/// How much weight a citation may be read as carrying. Colour is the fast signal
+/// — a binding regulation must not look like a blog post at a glance — and the
+/// word is repeated in text so it survives colour-blindness and a screenshot.
+const KIND_COLOR: Record<RuleSetCitation["kind"], string> = {
+  regulation: "#ff9a8a",
+  standard: "#7fd4ff",
+  guideline: "#ffd97a",
+  "peer-reviewed": "#c6b3ff",
+  practice: "var(--fg-muted)",
+};
+
+function Citation({ source }: { source: RuleSetCitation }) {
+  return (
+    <div style={{ display: "grid", gap: 1, padding: "3px 0" }}>
+      <a
+        href={source.url}
+        target="_blank"
+        rel="noreferrer noopener"
+        style={{ color: "#7fd4ff", fontSize: 10.5, textDecoration: "none" }}
+      >{source.title}</a>
+      <span style={{ color: "var(--fg-muted)", fontSize: 9.5 }}>
+        {source.publisher} · {source.published} ·{" "}
+        <b style={{ color: KIND_COLOR[source.kind] }}>{source.kind}</b>
+        {" · reviewed "}{source.reviewedAt}
+      </span>
+      <span style={{ color: "var(--fg-subtle)", fontSize: 9.5 }}>{source.scope}</span>
+    </div>
+  );
+}
+
+/// The provenance of ONE rule. Renders three states, and the third is the point:
+/// a rule whose position no built-in takes says so, rather than borrowing the
+/// authority of whatever citation happened to be nearby.
+function RuleProvenanceBlock({ rule }: { rule: RuleSetRule }) {
+  const [open, setOpen] = useState(false);
+  const provenance = provenanceForRule(rule);
+  const sources = citationsFor(provenance);
+  if (!provenance) {
+    return (
+      <div data-ui="ruleProvenance" data-state="unlinked" style={{ color: "var(--fg-subtle)", fontSize: 10 }}>
+        No cited source — this rule takes a position no built-in template does, so it carries your
+        authority, not a reviewed one.
+      </div>
+    );
+  }
+  return (
+    <div data-ui="ruleProvenance" data-state={sources.length ? "cited" : "uncited"} style={{ display: "grid", gap: 4 }}>
+      <button
+        onClick={() => setOpen(value => !value)}
+        style={{ ...button, justifySelf: "start", padding: "3px 7px", fontSize: 10 }}
+      >
+        {open ? "▾" : "▸"} Why this rule · {sources.length
+          ? `${sources.length} source${sources.length === 1 ? "" : "s"}`
+          : "no external source"}
+      </button>
+      {open ? (
+        <div style={{ display: "grid", gap: 5, borderLeft: "2px solid var(--border)", paddingLeft: 8 }}>
+          <span style={{ fontSize: 10.5, lineHeight: 1.45 }}>{provenance.rationale}</span>
+          {sources.length ? (
+            <div style={{ display: "grid" }}>
+              {sources.map(source => <Citation key={source.id} source={source} />)}
+            </div>
+          ) : (
+            <span style={{ color: "#ffd97a", fontSize: 10 }}>
+              No external authority is claimed for this rule.
+            </span>
+          )}
+          <span style={{ color: "var(--fg-muted)", fontSize: 10, lineHeight: 1.45 }}>
+            <b style={{ color: "#ffd97a" }}>Limitation:</b> {provenance.limitation}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/// One line of attribution under a resolved rule. In the preview this matters
+/// most on the SUPERSEDED side: losing a `disclosure` rule that a binding EU
+/// regulation backs is a different decision from losing a house style preference,
+/// and the precedence order alone does not say which just happened.
+function ProvenanceTrail({ rule }: { rule: RuleSetRule }) {
+  const provenance = provenanceForRule(rule);
+  const sources = citationsFor(provenance);
+  if (!provenance) return null;
+  return (
+    <div data-ui="provenanceTrail" style={{ color: "var(--fg-subtle)", fontSize: 9.5, marginTop: 3 }}>
+      {sources.length ? (
+        <>Backed by {sources.map(source => (
+          <a
+            key={source.id}
+            href={source.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={`${source.title} — ${source.publisher} (${source.published}); ${source.scope}`}
+            style={{ color: KIND_COLOR[source.kind], textDecoration: "none", marginRight: 6 }}
+          >{source.publisher.split(",")[0]} ({source.kind})</a>
+        ))}</>
+      ) : (
+        <>No external source — OWLLM operating practice.</>
+      )}
+    </div>
+  );
+}
+
 function RuleEditor({ rule, onChange, onRemove }: {
   rule: RuleSetRule;
   onChange: (rule: RuleSetRule) => void;
@@ -130,6 +242,67 @@ function RuleEditor({ rule, onChange, onRemove }: {
           onChange={e => onChange({ ...rule, body: e.target.value })}
         />
       </label>
+      <RuleProvenanceBlock rule={rule} />
+    </div>
+  );
+}
+
+/// Everything the built-in template claims for itself, and everything it does
+/// not. The limitations are NOT collapsed behind a toggle: a user deciding
+/// whether to adopt "scientific research" needs to see that CONSORT covers
+/// randomised trials before they adopt it, not after.
+function TemplateProvenancePanel({ doc }: { doc: RuleSetDoc }) {
+  const provenance = templateProvenanceOf(doc.templateId);
+  const sources = templateCitationsOf(doc.templateId);
+  const edition = templateEditionOf(doc);
+  if (!provenance) {
+    return (
+      <div data-ui="templateProvenance" data-edition="none" style={{ ...panel, display: "grid", gap: 6 }}>
+        <span style={label}>Provenance</span>
+        <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>
+          {doc.templateVersion > 0
+            ? `Forked from a built-in template at edition v${doc.templateVersion}. Per-rule sources below still apply to every rule whose topic and stance you kept.`
+            : "Custom rule set — no built-in template backs it. Per-rule sources appear below for any rule that happens to take a built-in's position."}
+        </span>
+      </div>
+    );
+  }
+  const stale = provenance.reviewedAt !== RULE_SET_PROVENANCE_REVIEWED_AT;
+  return (
+    <div data-ui="templateProvenance" data-edition={String(edition)} style={{ ...panel, display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span style={{ ...label, marginBottom: 0 }}>Provenance</span>
+        <span style={{ color: "var(--fg-muted)", fontSize: 10.5 }}>
+          template v{provenance.templateVersion} · sources reviewed {provenance.reviewedAt}
+          {stale ? " · REVIEW DATE OUT OF STEP WITH THE CATALOGUE" : ""}
+        </span>
+      </div>
+      {edition === provenance.templateVersion ? (
+        <span style={{ color: "#9ee6b0", fontSize: 10.5 }}>
+          This set still takes every position of edition v{edition}, so the sources below back it as written.
+        </span>
+      ) : (
+        <span style={{ color: "#ffd97a", fontSize: 10.5 }}>
+          Customised — this set no longer matches any built-in edition
+          {doc.templateVersion > 0 ? ` (seeded from v${doc.templateVersion})` : ""}. The template's sources
+          are shown for reference; only rules that kept their topic and stance are still linked to one.
+        </span>
+      )}
+      <div style={{ display: "grid" }}>
+        {sources.map(source => <Citation key={source.id} source={source} />)}
+      </div>
+      <div style={{ display: "grid", gap: 3 }}>
+        <span style={{ ...label, marginBottom: 0 }}>What these sources do not establish</span>
+        {provenance.limitations.map(limitation => (
+          <span key={limitation} style={{ color: "var(--fg-muted)", fontSize: 10, lineHeight: 1.5 }}>
+            • {limitation}
+          </span>
+        ))}
+      </div>
+      <span style={{ color: "var(--fg-subtle)", fontSize: 9.5, lineHeight: 1.5 }}>
+        Provenance is documentation, not instruction: rationale, citations and limitations are shown here and are
+        never sent to the model. The agent is bound by the rule bodies above.
+      </span>
     </div>
   );
 }
@@ -173,8 +346,12 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
         invoke<RuleSetDoc[]>("personal_agent_list_rule_sets", { projectId: pid }),
         invoke<ProjectAgentConfigDoc | null>("personal_agent_get_project_config", { projectId: pid }),
       ]);
-      setSets(nextSets);
-      setPersistedIds(nextSets.map(set => set.id));
+      // Stored sets predate `templateVersion`; migrate on read so the panel never
+      // has to special-case an absent field, and so an old customised set reports
+      // edition 0 rather than silently claiming the current one.
+      const migrated = nextSets.map(migrateRuleSetDoc);
+      setSets(migrated);
+      setPersistedIds(migrated.map(set => set.id));
       setConfig(nextConfig ?? emptyProjectAgentConfig(pid));
       setConfigPersisted(!!nextConfig);
       setSelectedId(current => (nextSets.some(set => set.id === current) ? current : nextSets[0]?.id ?? ""));
@@ -337,6 +514,10 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
             >
               <span style={{ fontSize: 12 }}>{template.icon} {template.label}</span>
               <span style={{ color: "var(--fg-muted)", fontSize: 10, fontWeight: 500 }}>{template.hint}</span>
+              <span style={{ color: "var(--fg-subtle)", fontSize: 9.5, fontWeight: 500 }}>
+                v{template.templateVersion} · {templateCitationsOf(template.id).length} sources ·
+                reviewed {templateProvenanceOf(template.id)?.reviewedAt ?? "never"}
+              </span>
             </button>
           ))}
           <button
@@ -375,7 +556,7 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
 
         <div style={{ display: "grid", gap: 12, alignContent: "start" }}>
           {draft ? (
-            <div style={{ ...panel, display: "grid", gap: 10 }}>
+            <><div style={{ ...panel, display: "grid", gap: 10 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1.4fr .7fr .7fr", gap: 8 }}>
                 <label><span style={label}>Name</span>
                   <input style={input} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} />
@@ -457,6 +638,7 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
                 >Save {persisted ? `as revision ${draft.revision + 1}` : "new rule set"}</button>
               </div>
             </div>
+            <TemplateProvenancePanel doc={draft} /></>
           ) : (
             <div style={{ ...panel, color: "var(--fg-subtle)", fontSize: 11.5 }}>
               Choose a rule set, or start one from a template.
@@ -535,6 +717,7 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
                         {entry.setName} · {entry.layer}{entry.rule.topic ? ` · ${entry.rule.topic}=${entry.rule.stance}` : ""}
                       </span>
                       <div style={{ whiteSpace: "pre-wrap", fontSize: 10.5, marginTop: 2 }}>{entry.rule.body}</div>
+                      <ProvenanceTrail rule={entry.rule} />
                     </div>
                   ))}
                 </div>
@@ -546,6 +729,7 @@ export default function RuleSetsPanel({ projectId, onProjectIdChange, profiles }
                         <b style={{ fontSize: 10.5 }}>{entry.rule.title}</b>
                         <span style={{ color: "var(--fg-muted)", fontSize: 10, marginLeft: 6 }}>{entry.reason}</span>
                         <div style={{ color: "var(--fg-muted)", fontSize: 10.5, marginTop: 2 }}>{entry.explanation}</div>
+                        <ProvenanceTrail rule={entry.rule} />
                       </div>
                     ))}
                   </div>

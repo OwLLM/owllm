@@ -352,6 +352,24 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   cannot drift. Guard: `npm run test:rulesets` — catalogue + source contract +
   `src-tauri/rulesets-harness` executed against the real resolver + a mounted
   jsdom panel.
+- **Rule-set provenance** (`agentRuleSets.ts` → `RULE_SET_SOURCES`,
+  `RULE_SET_TEMPLATE_PROVENANCE`, `RULE_PROVENANCE`; write-up in
+  `docs/RULE_SET_PROVENANCE.md`): every built-in rule records why it exists, the
+  works that back it (publisher, edition date, **review date**, `kind` from
+  `regulation`…`practice`, and the jurisdiction/discipline it actually binds),
+  and **what its sources do not establish**. The panel shows per-rule "Why this
+  rule" blocks, template-level sources and limitations, and an attribution trail
+  on the resolved preview — so a superseded rule backed by binding law is
+  distinguishable from a superseded house-style preference. Six of the 21
+  built-in rules are deliberately **uncited** and labelled as OWLLM operating
+  practice rather than padded with weak citations. Provenance is keyed by
+  `topic::stance`, so editing a rule's position drops its citation instead of
+  carrying it onto a claim the source never made; it is documentation only and is
+  **never sent to a model**. Templates carry a `templateVersion` stamped onto
+  every seeded set; sets stored before that field existed migrate by re-deriving
+  their edition from the positions they still take, so a customised old set
+  reports "no longer matches any built-in edition" instead of claiming one.
+  Guard: `ruleSetProvenance.verify.run.mjs` (in `npm run test:rulesets`).
 - **Eval harness**: `routing.verify.run.mjs` control-flow judge + live-run
   scorecard + per-run Run Report (who ran · wrote files? · verdict · done?).
 

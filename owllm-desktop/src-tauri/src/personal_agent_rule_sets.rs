@@ -102,6 +102,13 @@ pub struct RuleSetDoc {
     pub revision: u64,
     /// One of `RULE_SET_TEMPLATE_IDS`, or `custom` for a set built from scratch.
     pub template_id: String,
+    /// Edition of the built-in template this set was seeded from. `0` means
+    /// unknown — a hand-built set, or one stored before provenance existed.
+    /// `#[serde(default)]` IS the migration: every set written before this field
+    /// existed loads as 0, and the UI re-derives the real edition from the
+    /// positions the set still takes rather than assuming one.
+    #[serde(default)]
+    pub template_version: u32,
     pub name: String,
     pub summary: String,
     /// Lower number wins inside a layer. Defaults come from the template so two
@@ -502,6 +509,7 @@ mod tests {
             id: format!("ruleset:{id}"),
             revision: 1,
             template_id: template.into(),
+            template_version: 1,
             name: id.into(),
             summary: "summary".into(),
             priority,

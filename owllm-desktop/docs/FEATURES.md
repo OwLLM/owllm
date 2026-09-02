@@ -240,12 +240,23 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   dock's Stop stays global. MCP-gateway tool results are capped at 60k chars
   with an explicit truncation notice, so OwLLM's own tools can't be what blows
   up an agent's context.
-- **Project Brainstorm** (`BrainstormPanel.tsx` + `brainstormModes.ts`): 🧠 on
+- **Project Brainstorm** (`BrainstormPanel.tsx` + `brainstormModes.ts` +
+  `brainstormOrientations.ts`): 🧠 on
   the Agents page. The user picks the KIND of brainstorm first — 🎯 Auto (the
   role's own STEP 0 decides), 🚀 New product, 🛠 Improve this app, 🔬 Research,
   💬 Open — and that choice selects the TRACK the brainstormer follows
   (`resources/agents/roles/brainstormer.yaml`, tracks A–D) instead of framing
-  every session as a product/market exercise. Only the tracks that call
+  every session as a product/market exercise. Alongside it, a separate
+  **orientation** checkbox group says what the idea is FOR — 💼 Business /
+  Product, 🧪 Scientific research, 🎉 Just for fun, 📣 Social media — any
+  combination, tuning the framing and wording without changing the track.
+  Ticking 💼 is the only thing that licenses sales/marketing language; every
+  other combination, including none, gets the plain-prose tone guard, and
+  ticking nothing means "balanced": no orientation is assumed and the
+  commercial angle gets no more room than any other. The set is checkpointed
+  with the conversation (schema v4) and remembered per project in
+  `owllm:brainstorm-orientations:<projectId>`, so it survives navigation,
+  🆕 Start fresh and a restart. Only the tracks that call
   `web_search` mention the Brave key. Co-founder chat → `BRIEF.md` → the
   project's Notebook (seeded whether the team already existed or was assembled
   here). The 📋 Board shows the Feature Priority table for a new-product brief
@@ -677,6 +688,36 @@ background work and, being unkillable OS processes, could never finish.
   each device publishes a `p2p_node_id`, pairable by node id from anywhere), then
   falls back to a **self-hostable relay** (store-and-forward, both peers dial out,
   ciphertext-only — run it via `device_relay_serve` on any always-on box).
+- **One machine = one row (`canonical.rs`)**: `device_id` is stable per *keypair*,
+  so re-pairing a PC mints a new one and the registry grew one dead identity per
+  re-pair — measured live at **36 rows for 9 real devices**, 17 of them a single
+  Windows PC, in both the Devices list and the World Map fleet orbit. Each record
+  publishes a `machine_key` (`identity::machine_key` = domain-separated hash of
+  `hardware::machine_uid` — Windows `MachineGuid`, Linux `/etc/machine-id`, macOS
+  `IOPlatformUUID`; the raw OS id never leaves the process), and records sharing
+  one collapse to the freshest. Records published *before* `machine_key` existed
+  can never gain one, so they collapse by `name|os|arch` instead — that heuristic
+  only ever eats keyless rows, so it self-heals the moment either machine
+  publishes a key. `registry::list` returns this canonical collection and
+  compacts the file when it shrinks; **both** the Devices list and the World Map
+  fleet read it, so a device is never in one view and not the other.
+- **Deleting a device sticks (tombstones)**: ✕ used to retain-out one row of a
+  local file while the vault kept `state/devices/<id>.json` for every dead
+  identity forever — the next beat re-ingested it. `device_forget` now writes a
+  `Tombstone` (with the machine key and a `deleted_at`), removes the device's
+  vault record file, and publishes the tombstone to `state/devices/tombstones/`
+  so the user's other PCs apply the same deletion. `vault_sync_devices` reads
+  tombstones **before** any record, and `registry::upsert` refuses a record the
+  canonical rules would discard — so a client that never synced cannot resurrect
+  it by republishing its stale copy. `deleted_at` is what separates stale from
+  live: a machine that heartbeats *after* the deletion is allowed back and
+  retires the tombstone, and a pairing handshake clears it outright. This machine
+  is never deletable, from either view. Gate:
+  `ui/src/pages/advanced/deviceIdentity.verify.run.mjs` — source contract plus
+  `src-tauri/devices-harness` (`cargo run` + `cargo test`), which drives the real
+  `canonical.rs` through legacy cleanup, repeated logins, deletion from either
+  view, restart, two-PC sync and stale-client reconciliation, with a control
+  scenario that reproduces the pre-fix duplication + resurrection.
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each
   device's public record + all endpoints and pulls peers into the registry; or
   **pair by IP** directly with no vault. Self-maintaining: the listener starts at

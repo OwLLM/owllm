@@ -385,6 +385,12 @@ function runHarnesses() {
     // merely because periodic sync channels met another live Git writer's
     // fresh lock, so this protection must run on every release host.
     "vaultFreshLockBreaker.verify.run.mjs",
+    // Source assertions over remote_devices/vault.rs plus `cargo run` of the
+    // standalone devices-harness. It is the ONLY executable coverage of the
+    // rules that stop one machine appearing as dozens of undeletable rows in
+    // the Devices list and the World Map fleet, so it must not be parked behind
+    // the TypeScript-dependent SKIP.
+    "deviceIdentity.verify.run.mjs",
   ]);
   const files = found.sort();
   const runHarness = (p) => {

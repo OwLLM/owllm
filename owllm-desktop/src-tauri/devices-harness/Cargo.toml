@@ -1,0 +1,24 @@
+# Standalone regression harness for the canonical device collection.
+# NOT a workspace member of the app: Rust *test* binaries fail to launch in this
+# dev environment (STATUS_ENTRYPOINT_NOT_FOUND), so the proof runs as a normal
+# `cargo run` binary that includes src/remote_devices/{protocol,canonical}.rs
+# via #[path]. Same arrangement as ../sync-harness.
+# Run it with: node owllm-desktop/ui/src/pages/advanced/deviceIdentity.verify.run.mjs --live
+[package]
+name = "devices-harness"
+version = "0.1.0"
+authors = ["Far island Corporation Ltd."]
+publish = false
+license-file = "../../../LICENSE"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[[bin]]
+name = "devices-harness"
+path = "src/main.rs"

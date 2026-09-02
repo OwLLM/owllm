@@ -1,0 +1,23 @@
+# Standalone regression harness for project-scoped rule-set profiles.
+# NOT a workspace member of the app: Rust *test* binaries fail to launch in this
+# dev environment (STATUS_ENTRYPOINT_NOT_FOUND), so the proof runs as a normal
+# `cargo run` binary that includes src/personal_agent_rule_sets.rs via #[path].
+# Same arrangement as ../devices-harness and ../sync-harness.
+# Run it with: node owllm-desktop/ui/src/pages/agentic/agentRuleSets.verify.run.mjs
+[package]
+name = "rulesets-harness"
+version = "0.1.0"
+authors = ["Far island Corporation Ltd."]
+publish = false
+license-file = "../../../LICENSE"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "rulesets-harness"
+path = "src/main.rs"

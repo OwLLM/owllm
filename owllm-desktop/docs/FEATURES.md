@@ -333,6 +333,25 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   preview shows deterministic precedence + provenance; runtime resolution
   applies fail-closed tool/delegation intersections, project-isolated memory,
   and the resolved skills/rules on every supported model path.
+- **Rule-set profiles** (`agentRuleSets.ts`, `RuleSetsPanel.tsx`,
+  `personal_agent_rule_sets.rs`): the Studio **Rule sets** tab bundles rules into
+  named, versioned, **project-scoped** sets, seeded from three evidence-informed
+  templates — software development, scientific research, social-media /
+  influencer management — or built from scratch. Sets are previewed, customised,
+  forked and saved append-only by revision. Assignment has two layers, both on
+  the project config: project-wide (`ruleSetRefs`) and per agent
+  (`profileOverrides[id].ruleSetRefs`), so a project's rules never travel with a
+  global profile. **Precedence is total and deterministic**: agent layer, then
+  priority, then catalogue order, then set id — never the load order. Each rule
+  declares a conflict `topic` and a `stance`; a topic is decided exactly once and
+  every loser is reported as `conflict` or `duplicate` with the rule that beat
+  it, never silently dropped. Winning rules join the existing `attachedRules`
+  path, so they reach every model path unchanged. Sets are only ever read from
+  the resolving project's own encrypted scope, and the preview panel calls the
+  same resolver the agent runs on (`personal_agent_preview_rule_sets`) so it
+  cannot drift. Guard: `npm run test:rulesets` — catalogue + source contract +
+  `src-tauri/rulesets-harness` executed against the real resolver + a mounted
+  jsdom panel.
 - **Eval harness**: `routing.verify.run.mjs` control-flow judge + live-run
   scorecard + per-run Run Report (who ran · wrote files? · verdict · done?).
 

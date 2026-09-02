@@ -15,6 +15,7 @@
     "preview": "vite preview --config ui/vite.config.ts",
     "test:launchpad": "node ui/src/pages/agentic/creationLaunchpad.verify.run.mjs",
     "test:brainstorm": "node ui/src/pages/agentic/brainstormModes.verify.run.mjs && node ui/src/pages/agentic/brainstormOrientations.verify.run.mjs && node ui/src/pages/agentic/brainstormGraph.verify.run.mjs",
+    "test:rulesets": "node ui/src/pages/agentic/agentRuleSets.verify.run.mjs",
     "test:teammodel": "node ui/src/pages/agentic/teamModelSelection.verify.run.mjs",
     "test:watchers": "node ui/src/runtime/listenerBus.verify.run.mjs",
     "test:psychedelic": "node ui/src/pages/agentic/psychedelicMode.verify.run.mjs",

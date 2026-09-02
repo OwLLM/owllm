@@ -86,11 +86,12 @@ const mountGuard = mountStart >= 0 && mountEnd > mountStart ? page.slice(mountSt
 check(mountGuard.includes("left its branch untouched") &&
       !mountGuard.includes("void openWorkspace(projectRoot)"),
   "an unreadable/missing worktree is reported without deleting and recreating its branch");
-check((page.match(/await ensureWorktreeCurrent\(workspace\)/g) ?? []).length === 3,
+check((page.match(/await ensurePrimaryWorktreesCurrent\(\)/g) ?? []).length === 3
+      && page.includes("return ensureWorktreeCurrent(workspace)"),
   "Send, Plan, and Resume each fail closed on the primary worktree preflight");
 check(page.includes("const secondaryRunCwd = await ensureSecondaryWorktree()") &&
-      page.includes("await ensureWorktreeCurrent(secondaryRunCwd)"),
-  "the second pane preflights the worktree it will actually give its selected model");
+      page.includes("await ensureWorktreeCurrent(secondaryRunCwd, true, cur.workspace)"),
+  "the second pane preflights its actual worktree against the first pane, not canonical main");
 check(page.includes('data-ui="CodeWorktreeStaleGuard"') &&
       page.includes("so no model was allowed to run"),
   "a blocked stale page stays visibly explained instead of silently dropping the task");

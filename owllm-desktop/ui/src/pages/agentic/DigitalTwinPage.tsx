@@ -11,20 +11,30 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 // @ts-ignore: bundled Three.js example module
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { loadCadModel } from "./digitalTwinCad";
 import {
   actionableImportFailure,
+  applySourceUnit,
   aggregateImportError,
+  defaultModelUnit,
   formatImportBytes as formatBytes,
+  formatModelDimensions,
+  metresPerModelUnit,
+  modelSizeWarning,
   parseGltfScene,
   resolveLinkedAssetUrl,
   yieldToMainThread,
+  type ModelUnit,
 } from "./digitalTwinImport";
 
-const ACCEPTED_EXTENSIONS = new Set(["glb", "gltf", "obj", "stl"]);
-const IMPORT_ACCEPT = ".glb,.gltf,.obj,.stl,.bin,.png,.jpg,.jpeg,.webp";
+const ACCEPTED_EXTENSIONS = new Set(["step", "stp", "iges", "igs", "glb", "gltf", "obj", "stl"]);
+const MODEL_ACCEPT = ".step,.stp,.iges,.igs,.glb,.gltf,.obj,.stl";
+const GLTF_ASSET_ACCEPT = ".bin,.png,.jpg,.jpeg,.webp";
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
 
 type Vector3Tuple = [number, number, number];
+type ProjectionMode = "perspective" | "orthographic";
+type ImportUnit = "auto" | ModelUnit;
 
 type ImportedPart = {
   id: string;
@@ -34,6 +44,9 @@ type ImportedPart = {
   bytes: number;
   object: any;
   basePosition: Vector3Tuple;
+  dimensionsMetres: Vector3Tuple;
+  unit: ModelUnit;
+  sizeWarning: string | null;
   visible: boolean;
 };
 
@@ -50,8 +63,17 @@ type AssemblyConstraint = {
 type ViewerApi = {
   fit: () => void;
   render: () => void;
+  setProjection: (projection: ProjectionMode) => void;
   setView: (view: "front" | "top" | "right" | "iso") => void;
 };
+
+const UNIT_OPTIONS: { value: ModelUnit; label: string }[] = [
+  { value: "mm", label: "Millimetres (mm)" },
+  { value: "cm", label: "Centimetres (cm)" },
+  { value: "m", label: "Metres (m)" },
+  { value: "in", label: "Inches (in)" },
+  { value: "ft", label: "Feet (ft)" },
+];
 
 function extensionOf(name: string): string {
   return name.split(".").pop()?.toLowerCase() ?? "";
@@ -91,8 +113,18 @@ function prepareObject(root: any, fallbackName: string) {
   });
 }
 
-function loadModel(file: File, companions: File[]): Promise<any> {
+function measureObject(root: any): Vector3Tuple {
+  const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+  return [size.x, size.y, size.z];
+}
+
+function loadModel(file: File, companions: File[], unit: ModelUnit, signal?: AbortSignal): Promise<any> {
   const extension = extensionOf(file.name);
+  if (["step", "stp", "iges", "igs"].includes(extension)) {
+    return loadCadModel(file, extension, unit, signal).catch((error) => {
+      throw actionableImportFailure(file.name, error);
+    });
+  }
   return new Promise((resolve, reject) => {
     const fail = (reason: unknown) => reject(actionableImportFailure(file.name, reason));
 
@@ -157,6 +189,8 @@ function DigitalTwinViewer({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const assemblyRef = useRef<any>(null);
   const constraintLayerRef = useRef<any>(null);
+  const gridRef = useRef<any>(null);
+  const axesRef = useRef<any>(null);
   const renderRef = useRef<() => void>(() => {});
   const partsRef = useRef(parts);
 
@@ -168,8 +202,13 @@ function DigitalTwinViewer({
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x11161d);
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 100000);
-    camera.position.set(7, 5, 8);
+    const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 1e-9, 1e12);
+    const orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1e-9, 1e12);
+    perspectiveCamera.position.set(7, 5, 8);
+    orthographicCamera.position.copy(perspectiveCamera.position);
+    let camera: any = perspectiveCamera;
+    let projection: ProjectionMode = "perspective";
+    let orthographicHalfHeight = 5;
 
     let renderer: any;
     try {
@@ -189,8 +228,10 @@ function DigitalTwinViewer({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = false;
     controls.screenSpacePanning = true;
-    controls.minDistance = 0.05;
-    controls.maxDistance = 100000;
+    controls.minDistance = 1e-9;
+    controls.maxDistance = 1e12;
+    controls.minZoom = 1e-9;
+    controls.maxZoom = 1e9;
     controls.listenToKeyEvents?.(renderer.domElement);
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x2d3748, 2.1));
@@ -200,8 +241,11 @@ function DigitalTwinViewer({
     scene.add(keyLight);
 
     const grid = new THREE.GridHelper(20, 20, 0x566678, 0x2c3744);
+    gridRef.current = grid;
     scene.add(grid);
-    scene.add(new THREE.AxesHelper(2.5));
+    const axes = new THREE.AxesHelper(2.5);
+    axesRef.current = axes;
+    scene.add(axes);
 
     const assembly = new THREE.Group();
     const constraintLayer = new THREE.Group();
@@ -216,8 +260,14 @@ function DigitalTwinViewer({
     const resize = () => {
       const width = Math.max(host.clientWidth, 1);
       const height = Math.max(host.clientHeight, 1);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      const aspect = width / height;
+      perspectiveCamera.aspect = aspect;
+      perspectiveCamera.updateProjectionMatrix();
+      orthographicCamera.left = -orthographicHalfHeight * aspect;
+      orthographicCamera.right = orthographicHalfHeight * aspect;
+      orthographicCamera.top = orthographicHalfHeight;
+      orthographicCamera.bottom = -orthographicHalfHeight;
+      orthographicCamera.updateProjectionMatrix();
       renderer.setSize(width, height, false);
       render();
     };
@@ -231,16 +281,44 @@ function DigitalTwinViewer({
         camera.position.set(7, 5, 8);
       } else {
         const sphere = box.getBoundingSphere(new THREE.Sphere());
-        const radius = Math.max(sphere.radius, 0.25);
-        const distance = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.25;
+        const radius = Math.max(sphere.radius, 1e-9);
+        const currentDirection = camera.position.clone().sub(controls.target);
+        const direction = currentDirection.lengthSq() > 0
+          ? currentDirection.normalize()
+          : new THREE.Vector3(1, 0.72, 1).normalize();
+        const distance = projection === "perspective"
+          ? radius / Math.sin(THREE.MathUtils.degToRad(perspectiveCamera.fov / 2)) * 1.25
+          : radius * 4;
         controls.target.copy(sphere.center);
-        camera.position.copy(sphere.center).add(new THREE.Vector3(1, 0.72, 1).normalize().multiplyScalar(distance));
-        camera.near = Math.max(distance / 1000, 0.001);
-        camera.far = Math.max(distance * 100, 1000);
+        camera.position.copy(sphere.center).add(direction.multiplyScalar(distance));
+        camera.near = Math.max(distance / 1000, 1e-9);
+        camera.far = Math.max(distance * 100, 1);
+        if (projection === "orthographic") {
+          const aspect = Math.max(host.clientWidth, 1) / Math.max(host.clientHeight, 1);
+          orthographicHalfHeight = radius * 1.25 / Math.min(aspect, 1);
+          orthographicCamera.zoom = 1;
+          orthographicCamera.left = -orthographicHalfHeight * aspect;
+          orthographicCamera.right = orthographicHalfHeight * aspect;
+          orthographicCamera.top = orthographicHalfHeight;
+          orthographicCamera.bottom = -orthographicHalfHeight;
+        }
         camera.updateProjectionMatrix();
       }
       controls.update();
       render();
+    };
+
+    const setProjection = (nextProjection: ProjectionMode) => {
+      if (projection === nextProjection) return;
+      const previousCamera = camera;
+      const offset = previousCamera.position.clone().sub(controls.target);
+      const direction = offset.lengthSq() > 0 ? offset.normalize() : new THREE.Vector3(1, 0.72, 1).normalize();
+      projection = nextProjection;
+      camera = nextProjection === "orthographic" ? orthographicCamera : perspectiveCamera;
+      camera.up.copy(previousCamera.up);
+      camera.position.copy(controls.target).add(direction.multiplyScalar(Math.max(previousCamera.position.distanceTo(controls.target), 1)));
+      controls.object = camera;
+      fit();
     };
 
     const setView = (view: "front" | "top" | "right" | "iso") => {
@@ -250,12 +328,13 @@ function DigitalTwinViewer({
         : view === "right" ? new THREE.Vector3(1, 0, 0)
         : new THREE.Vector3(1, 0.72, 1).normalize();
       camera.position.copy(controls.target).add(direction.multiplyScalar(distance));
-      camera.up.set(0, 1, 0);
+      if (view === "top") camera.up.set(0, 0, -1);
+      else camera.up.set(0, 1, 0);
       camera.lookAt(controls.target);
       controls.update();
       render();
     };
-    onReady({ fit, render, setView });
+    onReady({ fit, render, setProjection, setView });
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -302,6 +381,8 @@ function DigitalTwinViewer({
       renderer.domElement.remove();
       assemblyRef.current = null;
       constraintLayerRef.current = null;
+      gridRef.current = null;
+      axesRef.current = null;
     };
   }, [onError, onReady, onSelect]);
 
@@ -310,6 +391,17 @@ function DigitalTwinViewer({
     if (!assembly) return;
     assembly.clear();
     for (const part of parts) assembly.add(part.object);
+    const box = new THREE.Box3().setFromObject(assembly);
+    if (!box.isEmpty()) {
+      const size = box.getSize(new THREE.Vector3());
+      const largest = Math.max(size.x, size.y, size.z, 1e-9);
+      const magnitude = 10 ** Math.floor(Math.log10(largest));
+      const normalized = largest / magnitude;
+      const niceLargest = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+      const gridSpan = niceLargest * magnitude * 2;
+      gridRef.current?.scale.setScalar(gridSpan / 20);
+      axesRef.current?.scale.setScalar(gridSpan / 10);
+    }
     renderRef.current();
   }, [parts]);
 
@@ -405,8 +497,10 @@ const fieldStyle: CSSProperties = {
 
 export default function DigitalTwinPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const gltfAssetInputRef = useRef<HTMLInputElement | null>(null);
   const partsRef = useRef<ImportedPart[]>([]);
   const importRunRef = useRef(0);
+  const importAbortRef = useRef<AbortController | null>(null);
   const importingRef = useRef(false);
   const [parts, setParts] = useState<ImportedPart[]>([]);
   const [constraints, setConstraints] = useState<AssemblyConstraint[]>([]);
@@ -416,6 +510,8 @@ export default function DigitalTwinPage() {
   const [constraintKind, setConstraintKind] = useState<ConstraintKind>("mate");
   const [offset, setOffset] = useState(0);
   const [explode, setExplode] = useState(0);
+  const [importUnit, setImportUnit] = useState<ImportUnit>("auto");
+  const [projection, setProjection] = useState<ProjectionMode>("perspective");
   const [loading, setLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -425,6 +521,7 @@ export default function DigitalTwinPage() {
   useEffect(() => { partsRef.current = parts; }, [parts]);
   useEffect(() => () => {
     importRunRef.current += 1;
+    importAbortRef.current?.abort();
     importingRef.current = false;
     for (const part of partsRef.current) disposeObject(part.object);
   }, []);
@@ -437,11 +534,8 @@ export default function DigitalTwinPage() {
     if (importingRef.current || !incoming.length) return;
     const files = Array.from(incoming);
     const modelFiles = files.filter((file) => ACCEPTED_EXTENSIONS.has(extensionOf(file.name)));
-    const unsupportedCad = files.filter((file) => ["step", "stp", "iges", "igs"].includes(extensionOf(file.name)));
     if (!modelFiles.length) {
-      setError(unsupportedCad.length
-        ? "STEP/IGES needs a CAD tessellation engine, which is not installed in this frontend module. Export GLB, GLTF, OBJ, or STL and import that file here."
-        : "No supported 3D model found. Choose GLB, GLTF, OBJ, or STL; include linked .bin and texture files with GLTF.");
+      setError("No supported 3D model found. Choose STEP, IGES, GLB, GLTF, OBJ, or STL. Linked GLTF assets can be added after choosing the model.");
       return;
     }
     const oversized = modelFiles.find((file) => file.size > MAX_IMPORT_BYTES);
@@ -456,6 +550,9 @@ export default function DigitalTwinPage() {
     }
 
     const importRun = ++importRunRef.current;
+    const importAbort = new AbortController();
+    importAbortRef.current?.abort();
+    importAbortRef.current = importAbort;
     importingRef.current = true;
     setLoading(true);
     setError(null);
@@ -472,7 +569,8 @@ export default function DigitalTwinPage() {
         // uninterrupted main-thread task. Timers still run when the window is
         // occluded, unlike requestAnimationFrame, and cancellation is checked next.
         await yieldToMainThread();
-        const object = await loadModel(file, files);
+        const unit = importUnit === "auto" ? defaultModelUnit(extensionOf(file.name)) : importUnit;
+        const object = await loadModel(file, files, unit, importAbort.signal);
         if (importRun !== importRunRef.current) {
           disposeObject(object);
           for (const part of imported) disposeObject(part.object);
@@ -480,7 +578,9 @@ export default function DigitalTwinPage() {
         }
         if (!object) throw new Error("The file contained no renderable scene");
         prepareObject(object, file.name);
+        applySourceUnit(object, unit);
         const p = object.position ?? new THREE.Vector3();
+        const dimensionsMetres = measureObject(object);
         imported.push({
           id: uniqueId("part"),
           name: file.name.replace(/\.[^.]+$/, ""),
@@ -489,6 +589,9 @@ export default function DigitalTwinPage() {
           bytes: file.size,
           object,
           basePosition: [p.x, p.y, p.z],
+          dimensionsMetres,
+          unit,
+          sizeWarning: modelSizeWarning(dimensionsMetres),
           visible: true,
         });
       } catch (reason) {
@@ -500,6 +603,7 @@ export default function DigitalTwinPage() {
       return;
     }
     importingRef.current = false;
+    if (importAbortRef.current === importAbort) importAbortRef.current = null;
     setLoading(false);
     if (imported.length) {
       setParts((current) => [...current, ...imported]);
@@ -517,6 +621,16 @@ export default function DigitalTwinPage() {
     void importFiles(files);
   };
 
+  const handleGltfAssets = (event: ChangeEvent<HTMLInputElement>) => {
+    const companions = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!lastFiles.some((file) => extensionOf(file.name) === "gltf")) {
+      setError("Choose the GLTF model first, then add its linked .bin and texture files here.");
+      return;
+    }
+    void importFiles([...lastFiles, ...companions]);
+  };
+
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
@@ -531,6 +645,19 @@ export default function DigitalTwinPage() {
     setParts((current) => current.map((part) => part.id === id ? { ...part, ...patch } : part));
   };
 
+  const updatePartUnit = (id: string, unit: ModelUnit) => {
+    setParts((current) => current.map((part) => {
+      if (part.id !== id || part.unit === unit) return part;
+      const ratio = metresPerModelUnit(unit) / metresPerModelUnit(part.unit);
+      part.object.scale.multiplyScalar(ratio);
+      const basePosition = part.basePosition.map((value) => value * ratio) as Vector3Tuple;
+      part.object.position.set(...basePosition);
+      const dimensionsMetres = part.dimensionsMetres.map((value) => value * ratio) as Vector3Tuple;
+      return { ...part, basePosition, dimensionsMetres, unit, sizeWarning: modelSizeWarning(dimensionsMetres) };
+    }));
+    window.setTimeout(() => viewerApi?.fit(), 0);
+  };
+
   const removePart = (id: string) => {
     const part = parts.find((candidate) => candidate.id === id);
     if (part) disposeObject(part.object);
@@ -543,6 +670,8 @@ export default function DigitalTwinPage() {
 
   const clearAssembly = () => {
     importRunRef.current += 1;
+    importAbortRef.current?.abort();
+    importAbortRef.current = null;
     importingRef.current = false;
     setLoading(false);
     for (const part of parts) disposeObject(part.object);
@@ -574,7 +703,8 @@ export default function DigitalTwinPage() {
 
   return (
     <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-      <input ref={fileInputRef} type="file" accept={IMPORT_ACCEPT} multiple onChange={handleFiles} style={{ display: "none" }} />
+      <input ref={fileInputRef} type="file" accept={MODEL_ACCEPT} multiple onChange={handleFiles} style={{ display: "none" }} />
+      <input ref={gltfAssetInputRef} type="file" accept={GLTF_ASSET_ACCEPT} multiple onChange={handleGltfAssets} style={{ display: "none" }} />
 
       <header style={{ minHeight: 58, padding: "10px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-card)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div style={{ marginRight: 8 }}>
@@ -584,7 +714,19 @@ export default function DigitalTwinPage() {
         <button type="button" style={{ ...buttonStyle, background: "var(--accent)", color: "var(--accent-fg)", borderColor: "var(--accent)" }} onClick={() => fileInputRef.current?.click()} disabled={loading}>
           {loading ? "Importing…" : "Import 3D"}
         </button>
+        <label htmlFor="digital-twin-import-unit" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11 }}>
+          Source unit
+          <select id="digital-twin-import-unit" value={importUnit} onChange={(event) => setImportUnit(event.target.value as ImportUnit)} disabled={loading} style={{ ...fieldStyle, width: "auto", minHeight: 32, padding: "5px 8px" }}>
+            <option value="auto">Auto · GLTF m, CAD/OBJ/STL mm</option>
+            {UNIT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
         <button type="button" style={buttonStyle} onClick={() => viewerApi?.fit()} disabled={!parts.length}>Fit assembly</button>
+        {(["perspective", "orthographic"] as const).map((mode) => (
+          <button key={mode} type="button" aria-pressed={projection === mode} style={{ ...buttonStyle, borderColor: projection === mode ? "var(--accent)" : "var(--border-strong)", background: projection === mode ? "rgba(var(--accent-rgb), 0.16)" : "var(--bg-panel)" }} onClick={() => { setProjection(mode); viewerApi?.setProjection(mode); }}>
+            {mode === "orthographic" ? "Orthographic" : "Perspective"}
+          </button>
+        ))}
         {(["front", "top", "right", "iso"] as const).map((view) => (
           <button key={view} type="button" style={buttonStyle} onClick={() => viewerApi?.setView(view)} disabled={!parts.length}>
             {view === "iso" ? "Isometric" : view[0].toUpperCase() + view.slice(1)}
@@ -623,7 +765,7 @@ export default function DigitalTwinPage() {
               <div key={part.id} style={{ marginBottom: 7, padding: 8, borderRadius: 7, border: part.id === selectedId ? "1px solid var(--accent)" : "1px solid var(--border)", background: part.id === selectedId ? "rgba(var(--accent-rgb), 0.10)" : "var(--bg-panel)" }}>
                 <button type="button" onClick={() => setSelectedId(part.id)} style={{ width: "100%", padding: 0, border: 0, background: "transparent", color: "inherit", textAlign: "left", cursor: "pointer" }}>
                   <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>{part.name}</span>
-                  <span style={{ display: "block", marginTop: 2, color: "var(--fg-muted)", fontSize: 10 }}>{part.format} · {formatBytes(part.bytes)}</span>
+                  <span style={{ display: "block", marginTop: 2, color: "var(--fg-muted)", fontSize: 10 }}>{part.format} · {formatModelDimensions(part.dimensionsMetres, part.unit)}</span>
                 </button>
                 <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
                   <button type="button" style={{ ...buttonStyle, minHeight: 26, padding: "3px 7px", fontSize: 11 }} onClick={() => updatePart(part.id, { visible: !part.visible })}>{part.visible ? "Hide" : "Show"}</button>
@@ -649,9 +791,9 @@ export default function DigitalTwinPage() {
             <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 24, pointerEvents: "none" }}>
               <div style={{ width: "min(520px, 90%)", padding: "28px 30px", border: "1px solid var(--border-strong)", borderRadius: 12, background: "color-mix(in srgb, var(--bg-card) 94%, transparent)", textAlign: "center", pointerEvents: "auto" }}>
                 <div style={{ color: "var(--fg-strong)", fontSize: 21, fontWeight: 850 }}>Build a digital twin from your 3D parts</div>
-                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.55 }}>Import GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
+                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.55 }}>Import STEP, IGES, GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
                 <button type="button" style={{ ...buttonStyle, background: "var(--accent)", color: "var(--accent-fg)", borderColor: "var(--accent)" }} onClick={() => fileInputRef.current?.click()}>Choose 3D files</button>
-                <div style={{ marginTop: 10, color: "var(--fg-subtle)", fontSize: 10 }}>For GLTF, select the .gltf, .bin, and texture files together.</div>
+                <div style={{ marginTop: 10, color: "var(--fg-subtle)", fontSize: 10 }}>STEP and IGES are tessellated locally. For linked GLTF assets, choose the model first; the error action will request only its companion files.</div>
               </div>
             </div>
           )}
@@ -671,6 +813,7 @@ export default function DigitalTwinPage() {
               <input id="digital-twin-explode" type="range" min="0" max="1" step="0.01" value={explode} onChange={(event) => setExplode(Number(event.target.value))} style={{ width: "100%", accentColor: "var(--accent)" }} />
             </div>
           )}
+          {parts.length > 0 && <div style={{ position: "absolute", right: 12, bottom: 12, padding: "6px 8px", borderRadius: 7, background: "color-mix(in srgb, var(--bg-card) 88%, transparent)", border: "1px solid var(--border-strong)", color: "var(--fg-muted)", fontSize: 10 }}>Scene normalized to metres · adaptive grid</div>}
         </main>
 
         <aside aria-label="Digital twin inspector" style={{ ...panelStyle, minHeight: 0, overflow: "auto", padding: 12 }}>
@@ -681,8 +824,14 @@ export default function DigitalTwinPage() {
                 <label style={{ display: "block", marginBottom: 5, color: "var(--fg-muted)", fontSize: 11 }} htmlFor="digital-twin-part-name">Part name</label>
                 <input id="digital-twin-part-name" value={selectedPart.name} onChange={(event) => updatePart(selectedPart.id, { name: event.target.value })} style={fieldStyle} />
                 <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.55, color: "var(--fg-muted)" }}>
-                  Source: {selectedPart.sourceName}<br />Format: {selectedPart.format}<br />Size: {formatBytes(selectedPart.bytes)}
+                  Source: {selectedPart.sourceName}<br />Format: {selectedPart.format}<br />File size: {formatBytes(selectedPart.bytes)}<br />Dimensions: {formatModelDimensions(selectedPart.dimensionsMetres, selectedPart.unit)}
                 </div>
+                <label style={{ display: "block", margin: "9px 0 4px", color: "var(--fg-muted)", fontSize: 11 }} htmlFor="digital-twin-part-unit">Source unit</label>
+                <select id="digital-twin-part-unit" value={selectedPart.unit} onChange={(event) => updatePartUnit(selectedPart.id, event.target.value as ModelUnit)} style={fieldStyle}>
+                  {UNIT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <div style={{ marginTop: 5, color: "var(--fg-subtle)", fontSize: 10, lineHeight: 1.45 }}>STEP/IGES units are converted during tessellation. OBJ and STL do not store units; correct those if the displayed dimensions do not match the source.</div>
+                {selectedPart.sizeWarning && <div role="status" style={{ marginTop: 8, padding: "7px 8px", border: "1px solid rgba(255, 190, 90, 0.45)", borderRadius: 6, color: "var(--fg-strong)", background: "rgba(255, 190, 90, 0.08)", fontSize: 10, lineHeight: 1.45 }}>{selectedPart.sizeWarning}</div>}
               </>
             ) : <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5 }}>Select a part in the list or viewport to inspect it.</div>}
           </section>
@@ -711,7 +860,7 @@ export default function DigitalTwinPage() {
             </select>
             {constraintKind === "offset" && (
               <>
-                <label htmlFor="digital-twin-offset" style={{ display: "block", margin: "9px 0 4px", color: "var(--fg-muted)", fontSize: 11 }}>Offset (model units)</label>
+                <label htmlFor="digital-twin-offset" style={{ display: "block", margin: "9px 0 4px", color: "var(--fg-muted)", fontSize: 11 }}>Offset (metres)</label>
                 <input id="digital-twin-offset" type="number" value={offset} onChange={(event) => setOffset(Number(event.target.value))} style={fieldStyle} />
               </>
             )}
@@ -728,7 +877,7 @@ export default function DigitalTwinPage() {
                   <span style={{ flex: 1 }} />
                   <button type="button" aria-label={`Remove ${constraint.kind} constraint`} onClick={() => setConstraints((current) => current.filter((item) => item.id !== constraint.id))} style={{ border: 0, background: "transparent", color: "#ff9e9e", cursor: "pointer", fontWeight: 700 }}>Remove</button>
                 </div>
-                <div style={{ marginTop: 4, color: "var(--fg-muted)", overflowWrap: "anywhere" }}>{partName(constraint.sourceId)} → {partName(constraint.targetId)}{constraint.kind === "offset" ? ` · ${constraint.offset}` : ""}</div>
+                <div style={{ marginTop: 4, color: "var(--fg-muted)", overflowWrap: "anywhere" }}>{partName(constraint.sourceId)} → {partName(constraint.targetId)}{constraint.kind === "offset" ? ` · ${constraint.offset} m` : ""}</div>
               </div>
             ))}
           </div>
@@ -738,6 +887,7 @@ export default function DigitalTwinPage() {
       {error && (
         <div role="alert" style={{ margin: "0 10px 10px", padding: "9px 11px", borderRadius: 8, border: "1px solid rgba(255, 120, 120, 0.45)", background: "rgba(255, 90, 90, 0.10)", color: "#ffb1b1", display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
           <span style={{ flex: 1 }}>{error}</span>
+          {lastFiles.some((file) => extensionOf(file.name) === "gltf") && error.includes("Missing linked asset") && <button type="button" style={buttonStyle} onClick={() => gltfAssetInputRef.current?.click()} disabled={loading}>Add linked GLTF files</button>}
           {lastFiles.length > 0 && <button type="button" style={buttonStyle} onClick={() => void importFiles(lastFiles)} disabled={loading}>Retry import</button>}
           <button type="button" style={buttonStyle} onClick={() => setError(null)}>Dismiss</button>
         </div>

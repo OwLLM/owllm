@@ -1230,6 +1230,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     cwd: string,
     announceRefresh = true,
     referenceCwd = projectRoot,
+    reportBlocked = true,
   ): Promise<boolean> => {
     if (!isolated || !referenceCwd || !cwd) return true;
     let outcome: WtRefresh;
@@ -1279,9 +1280,37 @@ function CodeWorkspace({ pageId, onTitle }: {
       : `This page is not current with the project, so no model was allowed to run. ${reason}`;
     setWorktreeStaleSyncAdvice(outcome.status === "stale" && !secondary);
     setWorktreeStaleNotice(message);
-    notify(message, "error");
+    if (reportBlocked) notify(message, "error");
     return false;
   };
+
+  // A stale guard describes live Git state, not a permanent error. Publisher
+  // Sync, a parallel-agent merge, or another process can reconcile the page
+  // after the guard was rendered. Recheck only while the warning is present,
+  // and do it quietly so a still-valid block never spams notifications. The
+  // native transaction remains the authority: the banner clears only after it
+  // confirms Current/Refreshed.
+  useEffect(() => {
+    if (!worktreeStaleNotice || !isolated || !workspace || !projectRoot || preparing || busy || secondaryBusy) return;
+    let checking = false;
+    const recheckStaleWorktree = () => {
+      if (checking || document.visibilityState === "hidden") return;
+      checking = true;
+      void ensureWorktreeCurrent(workspace, false, projectRoot, false)
+        .finally(() => { checking = false; });
+    };
+    window.addEventListener("focus", recheckStaleWorktree);
+    window.addEventListener("owllm:projects:refresh", recheckStaleWorktree);
+    const interval = window.setInterval(recheckStaleWorktree, 5_000);
+    return () => {
+      window.removeEventListener("focus", recheckStaleWorktree);
+      window.removeEventListener("owllm:projects:refresh", recheckStaleWorktree);
+      window.clearInterval(interval);
+    };
+    // ensureWorktreeCurrent deliberately reads the current render's page
+    // identity; listing it would recreate the timer on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worktreeStaleNotice, isolated, workspace, projectRoot, preparing, busy, secondaryBusy]);
 
   // Stale-worktree self-heal: a restored session can point at a worktree that
   // was deleted or gutted underneath it (sweep, crash, manual cleanup). The

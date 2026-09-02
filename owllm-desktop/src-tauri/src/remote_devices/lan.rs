@@ -246,7 +246,7 @@ pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
         };
     }
     // Record the requester in the registry (so it shows up) + the trust queue.
-    let _ = super::registry::upsert(pr.from.clone(), false);
+    let _ = super::registry::upsert_paired(pr.from.clone());
     match super::trust::record_pairing_request(
         &pr.from.device_id,
         &pr.from.name,

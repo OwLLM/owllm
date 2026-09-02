@@ -70,6 +70,7 @@ const effective: EffectiveAgentConfig = {
     updatedAt: now,
   }],
   attachedSkills: [],
+  ruleSets: { sets: [], applied: [], superseded: [], errors: [] },
   validationErrors: [],
 };
 

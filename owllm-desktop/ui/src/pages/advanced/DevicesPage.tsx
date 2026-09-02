@@ -371,7 +371,7 @@ export default function DevicesPage() {
         remoteModelErrors={remoteModelErrors}
         onUseModels={useRemoteModels}
           onPair={(id) => guard(async () => { await rd.requestPairing(id); await reload(); })}
-          onForget={(id) => guard(async () => { await rd.forgetDevice(id); await reload(); })}
+          onForget={(id) => guard(async () => { await rd.forgetDeviceEverywhere(id); await reload(); })}
           trusted={trusted}
           manualAddr={manualAddr}
           setManualAddr={setManualAddr}

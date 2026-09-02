@@ -27,6 +27,16 @@ import {
   type BrainstormModeId,
 } from "./brainstormModes";
 import {
+  BRAINSTORM_ORIENTATIONS,
+  normalizeOrientations,
+  orientationDirective,
+  orientationSummary,
+  readOrientationPref,
+  toggleOrientation,
+  writeOrientationPref,
+  type BrainstormOrientationId,
+} from "./brainstormOrientations";
+import {
   type RoleData,
   type ModelInfo,
   streamChatCompletion,
@@ -92,8 +102,11 @@ const BRAINSTORM_STATE_PATH = ".owllm/brainstorm.json";
 /// growing JSON blob on nearly every keystroke.
 const DISK_CHECKPOINT_INTERVAL_MS = 5_000;
 type BrainstormState = {
-  v: 3;
+  v: 4;
   modeId: BrainstormModeId;
+  /// What the idea is FOR (any combination, possibly none). Orthogonal to
+  /// modeId, which picks the track.
+  orientations: BrainstormOrientationId[];
   idea: string;
   selectedModelId: string;
   convHistory: ConversationTurn[];
@@ -117,7 +130,7 @@ function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
   if (!raw) return null;
   try {
     const value = JSON.parse(raw) as Partial<Omit<BrainstormState, "v">> & { v?: number };
-    if (!value || (value.v !== 1 && value.v !== 2 && value.v !== 3)) return null;
+    if (!value || ![1, 2, 3, 4].includes(value.v as number)) return null;
     const convHistory = Array.isArray(value.convHistory)
       ? value.convHistory.filter((turn): turn is ConversationTurn =>
           !!turn && (turn.role === "user" || turn.role === "assistant") && typeof turn.content === "string")
@@ -131,10 +144,13 @@ function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
           !!agent && typeof agent.name === "string" && typeof agent.base === "string")
       : null;
     return {
-      v: 3,
+      v: 4,
       // v1/v2 checkpoints predate explicit modes — they ran the role's own
       // STEP 0 inference, which is exactly what "auto" does.
       modeId: isBrainstormModeId(value.modeId) ? value.modeId : "auto",
+      // v1..v3 checkpoints predate orientations; "nothing checked" is the
+      // balanced fallback, which is what those conversations effectively had.
+      orientations: normalizeOrientations(value.orientations),
       idea: typeof value.idea === "string" ? value.idea : "",
       selectedModelId: typeof value.selectedModelId === "string" ? value.selectedModelId : "",
       convHistory,
@@ -193,6 +209,7 @@ export default function BrainstormPanel(props: Props) {
     initialIdea, onBriefSaved, projectId, availableRoles, onTeamApplied, hasTeam = false, onOpenNotebook } = props;
 
   const [modeId, setModeId] = useState<BrainstormModeId>("auto");
+  const [orientations, setOrientations] = useState<BrainstormOrientationId[]>([]);
   const [idea, setIdea] = useState("");
   const [selectedModelId, setSelectedModelId] = useState(modelId);
   const [running, setRunning] = useState(false);
@@ -234,8 +251,9 @@ export default function BrainstormPanel(props: Props) {
   const logSticky = useStickyScroll(lines.length, open);
 
   const liveState: BrainstormState = {
-    v: 3,
+    v: 4,
     modeId,
+    orientations,
     idea,
     selectedModelId,
     convHistory,
@@ -344,6 +362,10 @@ export default function BrainstormPanel(props: Props) {
     let savedModel = "";
     try { if (modelKey) savedModel = localStorage.getItem(modelKey) ?? ""; } catch { /* ignore */ }
     setSelectedModelId(savedModel || modelId);
+    // The saved preference is the starting point for a conversation that has no
+    // checkpoint of its own (first brainstorm here, or after 🆕 Start fresh).
+    const savedOrientations = readOrientationPref(localStorage, projectId);
+    setOrientations(savedOrientations);
     setIdea(initialIdea ?? "");
     let cancelled = false;
     (async () => {
@@ -388,6 +410,10 @@ export default function BrainstormPanel(props: Props) {
       }
       if (cancelled) return;
       setModeId(st?.modeId ?? "auto");
+      // A resumed conversation keeps the orientations it actually ran with —
+      // including "none", which a pre-v4 checkpoint always reports. Only a
+      // conversation with no checkpoint at all starts from the saved preference.
+      setOrientations(st ? st.orientations : savedOrientations);
       setIdea(st?.idea ?? initialIdea ?? "");
       setSelectedModelId(st?.selectedModelId || savedModel || modelId);
       setConvHistory(restoredHistory);
@@ -424,7 +450,7 @@ export default function BrainstormPanel(props: Props) {
         persistTimerRef.current = null;
       }
     };
-  }, [open, hydrated, targetKey, modeId, idea, selectedModelId, convHistory, chatInput, lines, done,
+  }, [open, hydrated, targetKey, modeId, orientations, idea, selectedModelId, convHistory, chatInput, lines, done,
     proposedTeam, teamApplied, briefText, boardView, error, running, proposing, applying]);
 
   useEffect(() => () => {
@@ -447,6 +473,16 @@ export default function BrainstormPanel(props: Props) {
   const activeModelId = selectedModelId.trim();
   const activeMode = brainstormMode(modeId);
   const modeLocked = running || convHistory.length > 0;   // the mode framed the conversation; changing it mid-way would contradict it
+  const activeOrientations = normalizeOrientations(orientations);
+  // Orientation only tunes framing and wording, so — unlike the mode — it stays
+  // editable mid-conversation and takes effect on the next turn. It is frozen
+  // only while a turn is streaming, so the reply can't contradict the boxes.
+  const toggleBrainstormOrientation = (id: BrainstormOrientationId) => {
+    if (running) return;
+    const next = toggleOrientation(activeOrientations, id);
+    setOrientations(next);
+    writeOrientationPref(localStorage, projectId, next);
+  };
   const selectBrainstormModel = (next: string) => {
     setSelectedModelId(next);
     if (!projectId) return;
@@ -481,8 +517,11 @@ export default function BrainstormPanel(props: Props) {
     setBriefText("");
     setBoardView(false);
     const fresh: BrainstormState = {
-      v: 3,
+      v: 4,
       modeId,
+      // The orientation is a preference, not part of the transcript — a fresh
+      // start keeps it, the same way it keeps the mode and the model.
+      orientations: activeOrientations,
       idea: "",
       selectedModelId,
       convHistory: [],
@@ -516,6 +555,10 @@ export default function BrainstormPanel(props: Props) {
         // improvement or a plain question.
         activeMode.directive
           || "Before doing anything, decide the MODE per STEP 0 of your role below (NEW PROJECT, IMPROVEMENT, RESEARCH, or OPEN) and follow that track. Competitor web research belongs to a brand-new product only; an improvement is planned from this project's code, and a question is answered from sources.",
+        // What the idea is FOR — orthogonal to the track. Always present: with
+        // nothing checked this is the balanced fallback, which is what stops a
+        // hobby idea or a research question from being written as a pitch.
+        orientationDirective(activeOrientations),
         "Do NOT start any tools yet — wait until you've clarified enough, OR the user tells you to (e.g. 'go', 'run', 'proceed', 'looks good'). THEN follow the matching track in your role below and WRITE the ordered PLAN to BRIEF.md.",
         "After BRIEF.md exists, the user may keep talking to refine it — re-write BRIEF.md to reflect their changes.",
         "",
@@ -613,6 +656,8 @@ export default function BrainstormPanel(props: Props) {
     await runTurn([
       `Project location (BRIEF.md goes here; for a brand-new app, brainstorm/<png> screenshots too): ${projectCwd}`,
       ...(activeMode.directive ? ["", activeMode.directive] : []),
+      "",
+      orientationDirective(activeOrientations),
       "",
       `My idea: ${trimmed}`,
       "",
@@ -815,6 +860,49 @@ export default function BrainstormPanel(props: Props) {
             </div>
             <div style={{ marginTop: 5, color: "var(--fg-muted)", fontSize: 11 }}>
               {activeMode.hint}{modeLocked ? " · locked for this conversation — 🆕 Start fresh to change it" : ""}
+            </div>
+          </div>
+
+          {/* Orientation checkboxes — what the idea is FOR. Independent of the
+              mode above (which picks the track); any combination is valid, and
+              none is a real choice: it keeps the brief free of sales language. */}
+          <div data-ui="BrainstormOrientationPicker">
+            <label style={{ color: "var(--fg)", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+              What is it for? (optional — tick any that apply)
+            </label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {BRAINSTORM_ORIENTATIONS.map((o) => {
+                const checked = activeOrientations.includes(o.id);
+                return (
+                  <label
+                    key={o.id}
+                    data-ui={`BrainstormOrientation-${o.id}`}
+                    title={running ? "Wait for this turn to finish" : o.hint}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "6px 12px", fontSize: 12, fontWeight: checked ? 700 : 600,
+                      background: checked ? "rgba(107,127,255,0.28)" : "transparent",
+                      color: checked ? "var(--fg-strong)" : "var(--fg)",
+                      border: `1px solid ${checked ? "rgba(140,160,255,0.65)" : "rgba(255,255,255,0.15)"}`,
+                      borderRadius: 6,
+                      cursor: running ? "not-allowed" : "pointer",
+                      opacity: running && !checked ? 0.45 : 1,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={running}
+                      onChange={() => toggleBrainstormOrientation(o.id)}
+                      style={{ margin: 0, cursor: running ? "not-allowed" : "pointer" }}
+                    />
+                    {o.icon} {o.label}
+                  </label>
+                );
+              })}
+            </div>
+            <div data-ui="BrainstormOrientationSummary" style={{ marginTop: 5, color: "var(--fg-muted)", fontSize: 11 }}>
+              {orientationSummary(activeOrientations)} Saved for this project.
             </div>
           </div>
 

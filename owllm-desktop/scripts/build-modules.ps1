@@ -77,7 +77,17 @@ function Get-Upstream {
     # stack in PowerShell 5.1 hangs on the 302 redirect GitHub Releases
     # issues to release-assets.githubusercontent.com for some files
     # (notably cudart-*.zip). curl handles redirects + retries reliably.
-    & curl.exe --fail --location --retry 3 --retry-delay 2 --silent --show-error --output $tmp $url
+    $curlArgs = @('--fail', '--location', '--retry', '3', '--retry-delay', '2', '--silent', '--show-error', '--output', $tmp, $url)
+    & curl.exe @curlArgs
+    # Windows Schannel returns 35 when its revocation endpoint is temporarily
+    # unreachable, even though the server certificate and HTTPS connection are
+    # otherwise valid. Retry only that transport failure in best-effort mode;
+    # certificate validation remains enabled and every other curl error stays
+    # fatal.
+    if ($LASTEXITCODE -eq 35) {
+        Write-Sub "certificate revocation endpoint unavailable; retrying securely"
+        & curl.exe --ssl-revoke-best-effort @curlArgs
+    }
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path $tmp) { Remove-Item -Force $tmp }
         throw "curl failed (exit $LASTEXITCODE) for $url"

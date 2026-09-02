@@ -21,6 +21,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+pub use crate::personal_agent_rule_sets::{
+    resolve_rule_set_stack, rule_set_validation_errors, visible_rule_sets, RuleSetDoc,
+    RuleSetLayer, RuleSetResolution,
+};
+
 const SCHEMA_VERSION: u32 = 1;
 const STORE_SCHEMA_VERSION: u32 = 2;
 const EXPORT_SCHEMA_VERSION: u32 = 2;
@@ -179,6 +184,11 @@ pub struct AgentProfileOverride {
     pub personal_skill_refs: Option<Vec<RevisionRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_card_refs: Option<Vec<RevisionRef>>,
+    /// Per-agent rule-set assignment — the HIGH-precedence layer. It lives on
+    /// the project config (not on the global profile) so a project's rule sets
+    /// never travel with the profile into another project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_set_refs: Option<Vec<RevisionRef>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +201,9 @@ pub struct ProjectAgentConfigDoc {
     pub profile_refs: Vec<RevisionRef>,
     #[serde(default)]
     pub rule_card_refs: Vec<RevisionRef>,
+    /// Project-wide rule-set assignment — the LOW-precedence layer.
+    #[serde(default)]
+    pub rule_set_refs: Vec<RevisionRef>,
     #[serde(default)]
     pub profile_overrides: BTreeMap<String, AgentProfileOverride>,
     pub created_at: String,
@@ -214,6 +227,12 @@ pub struct EffectiveAgentConfig {
     pub attached_rules: Vec<RuleCardDoc>,
     #[serde(default)]
     pub attached_skills: Vec<PersonalSkillDoc>,
+    /// The resolved rule-set stack: which sets applied, in what order, and every
+    /// rule that lost a topic to a higher-precedence set. `attached_rules`
+    /// already contains the winners, so the runtime prompt needs nothing extra;
+    /// this is what the editor shows so a superseded rule is never invisible.
+    #[serde(default)]
+    pub rule_sets: RuleSetResolution,
     pub validation_errors: Vec<String>,
 }
 
@@ -238,6 +257,10 @@ struct ScopeStore {
     profiles: Vec<AgentProfileDoc>,
     #[serde(default)]
     rule_cards: Vec<RuleCardDoc>,
+    /// Project-scoped only. Additive with `default`, so a store written before
+    /// rule sets existed loads unchanged and needs no schema bump.
+    #[serde(default)]
+    rule_sets: Vec<RuleSetDoc>,
     #[serde(default)]
     skills: Vec<PersonalSkillDoc>,
     #[serde(default)]
@@ -597,6 +620,9 @@ fn migrate_scope(mut value: ScopeStore) -> Result<ScopeStore, String> {
             for r in &mut value.rule_cards {
                 r.schema_version = SCHEMA_VERSION;
             }
+            for s in &mut value.rule_sets {
+                s.schema_version = SCHEMA_VERSION;
+            }
             for p in &mut value.project_configs {
                 p.schema_version = SCHEMA_VERSION;
             }
@@ -898,6 +924,22 @@ fn validate_rule_shape(doc: &RuleCardDoc) -> Result<(), String> {
     validate_time("updatedAt", &doc.updated_at)
 }
 
+/// Storage-level shape check. The ordering/conflict rules live in
+/// `personal_agent_rule_sets.rs`; this adds only what storage owns — the uuid id
+/// shape and the fact that a rule set is project-scoped, never global.
+fn validate_rule_set_shape(doc: &RuleSetDoc) -> Result<(), String> {
+    let errors = rule_set_validation_errors(doc);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    validate_id(&doc.id, "ruleset:")?;
+    for rule in &doc.rules {
+        validate_id(&rule.id, "rule:")?;
+    }
+    validate_time("createdAt", &doc.created_at)?;
+    validate_time("updatedAt", &doc.updated_at)
+}
+
 fn validate_project_shape(doc: &ProjectAgentConfigDoc) -> Result<(), String> {
     if doc.schema_version != SCHEMA_VERSION || doc.revision == 0 {
         return Err("project config schemaVersion must be 1 and revision positive".into());
@@ -905,6 +947,7 @@ fn validate_project_shape(doc: &ProjectAgentConfigDoc) -> Result<(), String> {
     validate_text("projectId", &doc.project_id)?;
     unique_refs("profileRefs", &doc.profile_refs)?;
     unique_refs("ruleCardRefs", &doc.rule_card_refs)?;
+    unique_refs("ruleSetRefs", &doc.rule_set_refs)?;
     for (id, override_doc) in &doc.profile_overrides {
         validate_id(id, "agent:")?;
         if let Some(scope) = &override_doc.memory_scope {
@@ -921,6 +964,9 @@ fn validate_project_shape(doc: &ProjectAgentConfigDoc) -> Result<(), String> {
         }
         if let Some(v) = &override_doc.rule_card_refs {
             unique_refs("override.ruleCardRefs", v)?;
+        }
+        if let Some(v) = &override_doc.rule_set_refs {
+            unique_refs("override.ruleSetRefs", v)?;
         }
     }
     validate_time("createdAt", &doc.created_at)?;
@@ -1001,6 +1047,62 @@ fn pinned_profile<'a>(docs: &'a [AgentProfileDoc], r: &RevisionRef) -> Option<&'
 fn pinned_rule<'a>(docs: &'a [RuleCardDoc], r: &RevisionRef) -> Option<&'a RuleCardDoc> {
     docs.iter()
         .find(|d| d.id == r.id && d.revision == r.revision)
+}
+
+fn pinned_rule_set<'a>(docs: &'a [RuleSetDoc], r: &RevisionRef) -> Option<&'a RuleSetDoc> {
+    docs.iter()
+        .find(|d| d.id == r.id && d.revision == r.revision)
+}
+
+/// Collect the assigned sets for one profile. The ordering and the dangling-ref
+/// reporting live in `collect_assignments`; this only maps `RevisionRef` onto
+/// it and picks the agent layer out of the project config's overrides.
+fn rule_set_assignments(
+    project_rule_sets: &[RuleSetDoc],
+    config: &ProjectAgentConfigDoc,
+    profile_id: &str,
+    errors: &mut Vec<String>,
+) -> Vec<(RuleSetLayer, RuleSetDoc)> {
+    let pairs = |refs: &[RevisionRef]| -> Vec<(String, u64)> {
+        refs.iter()
+            .map(|r| (r.id.clone(), r.revision))
+            .collect()
+    };
+    let agent_refs = config
+        .profile_overrides
+        .get(profile_id)
+        .and_then(|o| o.rule_set_refs.clone())
+        .unwrap_or_default();
+    crate::personal_agent_rule_sets::collect_assignments(
+        project_rule_sets,
+        &pairs(&agent_refs),
+        &pairs(&config.rule_set_refs),
+        errors,
+    )
+}
+
+/// Turn a winning rule-set rule into the same `RuleCardDoc` shape the prompt
+/// renderer already consumes, so assigned sets reach the agent through the
+/// existing `attachedRules` path instead of a second, parallel channel.
+fn rule_set_rule_as_card(
+    applied: &crate::personal_agent_rule_sets::AppliedRuleSetRule,
+    project_id: &str,
+    set: &RuleSetDoc,
+) -> RuleCardDoc {
+    RuleCardDoc {
+        schema_version: SCHEMA_VERSION,
+        id: applied.rule.id.clone(),
+        revision: applied.set_revision,
+        kind: applied.rule.kind.clone(),
+        title: applied.rule.title.clone(),
+        body: applied.rule.body.clone(),
+        condition: None,
+        scope: "project".into(),
+        project_id: Some(project_id.to_string()),
+        private: true,
+        created_at: set.created_at.clone(),
+        updated_at: set.updated_at.clone(),
+    }
 }
 
 fn pinned_skill<'a>(docs: &'a [PersonalSkillDoc], r: &RevisionRef) -> Option<&'a PersonalSkillDoc> {
@@ -1154,6 +1256,7 @@ fn validate_project_refs(
     config: &ProjectAgentConfigDoc,
     profiles: &[AgentProfileDoc],
     rules: &[RuleCardDoc],
+    rule_sets: &[RuleSetDoc],
     skills: &[PersonalSkillDoc],
     installed: &BTreeSet<String>,
 ) -> Result<(), String> {
@@ -1170,6 +1273,14 @@ fn validate_project_refs(
             return Err(format!(
                 "missing pinned rule {}@{}",
                 rule_ref.id, rule_ref.revision
+            ));
+        }
+    }
+    for set_ref in &config.rule_set_refs {
+        if pinned_rule_set(rule_sets, set_ref).is_none() {
+            return Err(format!(
+                "missing pinned rule set {}@{}",
+                set_ref.id, set_ref.revision
             ));
         }
     }
@@ -1190,6 +1301,16 @@ fn validate_project_refs(
                     return Err(format!(
                         "profile override {profile_id} has dangling rule {}@{}",
                         rule_ref.id, rule_ref.revision
+                    ));
+                }
+            }
+        }
+        if let Some(set_refs) = &override_doc.rule_set_refs {
+            for set_ref in set_refs {
+                if pinned_rule_set(rule_sets, set_ref).is_none() {
+                    return Err(format!(
+                        "profile override {profile_id} has dangling rule set {}@{}",
+                        set_ref.id, set_ref.revision
                     ));
                 }
             }
@@ -1476,6 +1597,33 @@ fn resolve_with(
             None => errors.push(format!("missing pinned rule {}@{}", r.id, r.revision)),
         }
     }
+    // Rule sets resolve AFTER individual rule cards and append to the same
+    // attachment list, so the runtime prompt path needs no new channel. Only
+    // this project's own sets are ever candidates.
+    let project_rule_sets = visible_rule_sets(&project.rule_sets, project_id);
+    let assignments = rule_set_assignments(&project_rule_sets, config, profile_id, &mut errors);
+    let rule_set_resolution = resolve_rule_set_stack(project_id, &assignments);
+    errors.extend(rule_set_resolution.errors.iter().cloned());
+    let sets_by_id: BTreeMap<&str, &RuleSetDoc> = assignments
+        .iter()
+        .map(|(_, doc)| (doc.id.as_str(), doc))
+        .collect();
+    let already_attached: BTreeSet<String> = attached.iter().map(|card| card.id.clone()).collect();
+    for applied in &rule_set_resolution.applied {
+        // A rule card pinned directly to the project or the profile is the more
+        // explicit choice and keeps the id; the set's copy stands down.
+        if already_attached.contains(&applied.rule.id) {
+            continue;
+        }
+        let Some(set) = sets_by_id.get(applied.set_id.as_str()) else {
+            continue;
+        };
+        attached.push(rule_set_rule_as_card(applied, project_id, set));
+        prov.insert(
+            format!("ruleSets.{}@{}", applied.set_id, applied.set_revision),
+            provenance("rule-set", &applied.set_id, applied.set_revision),
+        );
+    }
     if let Err(error) = validate_skill_refs(resolved.skill_ids.iter(), &installed_skill_ids()) {
         errors.push(error);
     }
@@ -1530,6 +1678,7 @@ fn resolve_with(
         provenance: prov,
         attached_rules: attached,
         attached_skills,
+        rule_sets: rule_set_resolution,
         validation_errors: errors,
     })
 }
@@ -1678,6 +1827,7 @@ fn save_project_with(
         &doc,
         &latest_profiles(&global.profiles),
         &rules,
+        &store.rule_sets,
         &skills,
         &installed_skill_ids(),
     )?;
@@ -1901,6 +2051,119 @@ pub fn personal_agent_save_project_config(
     expected_revision: Option<u64>,
 ) -> Result<ProjectAgentConfigDoc, String> {
     save_project_with(&Repository::production()?, doc, expected_revision)
+}
+
+/// Rule sets are project-scoped with no global tier, so this reads exactly one
+/// project's store. An empty project id returns nothing rather than everything.
+#[tauri::command]
+pub fn personal_agent_list_rule_sets(project_id: String) -> Result<Vec<RuleSetDoc>, String> {
+    if project_id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let repo = Repository::production()?;
+    let project = repo.load_scope(&repo.project_path(&project_id))?;
+    let mut sets = crate::personal_agent_rule_sets::latest_rule_sets(&project.rule_sets, &project_id);
+    sets.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(sets)
+}
+
+#[tauri::command]
+pub fn personal_agent_get_rule_set(
+    project_id: String,
+    id: String,
+    revision: Option<u64>,
+) -> Result<RuleSetDoc, String> {
+    let repo = Repository::production()?;
+    let project = repo.load_scope(&repo.project_path(&project_id))?;
+    project
+        .rule_sets
+        .iter()
+        .filter(|doc| {
+            doc.id == id
+                && doc.project_id == project_id
+                && revision.is_none_or(|wanted| wanted == doc.revision)
+        })
+        .max_by_key(|doc| doc.revision)
+        .cloned()
+        .ok_or_else(|| format!("rule set not found in this project: {id}"))
+}
+
+#[tauri::command]
+pub fn personal_agent_save_rule_set(
+    doc: RuleSetDoc,
+    expected_revision: Option<u64>,
+) -> Result<RuleSetDoc, String> {
+    save_rule_set_with(&Repository::production()?, doc, expected_revision)
+}
+
+/// Append-only by revision, exactly like profiles and rule cards, so an older
+/// pinned revision keeps resolving after the set is edited.
+fn save_rule_set_with(
+    repo: &Repository,
+    mut doc: RuleSetDoc,
+    expected_revision: Option<u64>,
+) -> Result<RuleSetDoc, String> {
+    validate_rule_set_shape(&doc)?;
+    let _guard = repo.lock()?;
+    let path = repo.project_path(&doc.project_id);
+    let mut store = repo.load_scope(&path)?;
+    let previous = store
+        .rule_sets
+        .iter()
+        .filter(|existing| existing.id == doc.id)
+        .max_by_key(|existing| existing.revision)
+        .cloned();
+    match previous {
+        None if expected_revision.is_none() && doc.revision == 1 => {}
+        None => return Err("new rule set must use revision 1 and no expectedRevision".into()),
+        Some(previous) => {
+            if previous.project_id != doc.project_id {
+                return Err("rule set projectId is immutable across revisions".into());
+            }
+            if expected_revision != Some(previous.revision) {
+                return Err(format!("rule set revision conflict at {}", previous.revision));
+            }
+            doc.revision = previous.revision + 1;
+            doc.created_at = previous.created_at;
+        }
+    }
+    store.rule_sets.push(doc.clone());
+    repo.save_scope(&path, &store)?;
+    Ok(doc)
+}
+
+/// Preview an assignment WITHOUT saving it, through the same resolver the agent
+/// runs on — so what the editor shows and what the agent gets can never differ.
+/// Drafts are accepted here (that is the point of a preview) but every other
+/// rule, including the cross-project guard, still applies.
+#[tauri::command]
+pub fn personal_agent_preview_rule_sets(
+    project_id: String,
+    agent_rule_sets: Vec<RuleSetDoc>,
+    project_rule_sets: Vec<RuleSetDoc>,
+) -> Result<RuleSetResolution, String> {
+    let assignments: Vec<(RuleSetLayer, RuleSetDoc)> = agent_rule_sets
+        .into_iter()
+        .map(|doc| (RuleSetLayer::Agent, doc))
+        .chain(
+            project_rule_sets
+                .into_iter()
+                .map(|doc| (RuleSetLayer::Project, doc)),
+        )
+        .map(|(layer, mut doc)| {
+            // A draft previews as if it were active; nothing else is relaxed.
+            if doc.status == "draft" {
+                doc.status = "active".into();
+            }
+            (layer, doc)
+        })
+        .collect();
+    Ok(resolve_rule_set_stack(&project_id, &assignments))
 }
 
 #[tauri::command]
@@ -2228,6 +2491,7 @@ fn import_with(
                 &config,
                 &latest_profiles(&global.profiles),
                 &all_rules,
+                &store.rule_sets,
                 &all_skills,
                 &installed,
             )?;
@@ -2285,11 +2549,13 @@ pub(crate) fn snapshot_material(project_id: &str) -> Result<PersonalAgentSnapsho
     );
     let skills = latest_skills(&all_skills);
     let installed = installed_skill_ids();
+    let project_rule_sets = visible_rule_sets(&project.rule_sets, project_id);
     validate_profile_refs(&profiles, &all_rules, &global.skills, &installed)?;
     validate_project_refs(
         &project_config,
         &profiles,
         &all_rules,
+        &project_rule_sets,
         &all_skills,
         &installed,
     )?;
@@ -2417,6 +2683,7 @@ mod tests {
                 revision: p.revision,
             }],
             rule_card_refs: Vec::new(),
+            rule_set_refs: Vec::new(),
             profile_overrides: BTreeMap::new(),
             created_at: ts(),
             updated_at: ts(),

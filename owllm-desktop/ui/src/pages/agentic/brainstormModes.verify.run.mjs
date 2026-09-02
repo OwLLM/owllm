@@ -173,9 +173,12 @@ check("the chosen mode is injected into the co-founder system prompt",
 check("the first turn states the mode and uses its opening question",
   panel.includes("...(activeMode.directive ? [\"\", activeMode.directive] : [])")
   && panel.includes("activeMode.opening"));
-check("the mode is persisted with the checkpoint (v3, older versions accepted)",
+// The schema version moved to v4 when orientations were added; the invariant
+// under test is unchanged — every older checkpoint still loads instead of being
+// discarded, and an unknown modeId still falls back to "auto".
+check("the mode is persisted with the checkpoint (current version, older versions accepted)",
   panel.includes("modeId: isBrainstormModeId(value.modeId) ? value.modeId : \"auto\"")
-  && panel.includes("value.v !== 1 && value.v !== 2 && value.v !== 3"));
+  && /!\[1, 2, 3, 4\]\.includes\(value\.v as number\)/.test(panel));
 check("the Brave-key line is conditional, not unconditional",
   panel.includes("webResearchNotice(activeMode)")
   && !panel.includes("<span>🔑 Brave Search key required (set in Accounts page)</span>"));

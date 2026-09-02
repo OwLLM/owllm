@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use crate::remote_devices::canonical;
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -2014,9 +2016,33 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
         reset_to_origin(&dir, &branch)?;
         let dev_dir = dir.join("state").join("devices");
         std::fs::create_dir_all(&dev_dir).map_err(|e| format!("mkdir devices: {e}"))?;
+        let tomb_dir = dev_dir.join("tombstones");
+        std::fs::create_dir_all(&tomb_dir).map_err(|e| format!("mkdir device tombstones: {e}"))?;
 
-        // 1) remote → local registry (public metadata only).
-        let mut changed = false;
+        // 0) deletions made on the user's OTHER PCs, BEFORE any record is read.
+        // A device's record file outlives the device (a dead re-pair identity
+        // never rewrites it), so without this the next read would faithfully
+        // resurrect every row the user deleted somewhere else.
+        let mut remote_tombstones: Vec<canonical::Tombstone> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&tomb_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Some(t) = std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|txt| serde_json::from_str::<canonical::Tombstone>(&txt).ok())
+                {
+                    remote_tombstones.push(t);
+                }
+            }
+        }
+        let mut changed = crate::remote_devices::apply_device_tombstones(remote_tombstones)?;
+
+        // 1) remote → local registry (public metadata only). Records the
+        // canonical rules reject — tombstoned, or a dead identity of a machine
+        // already listed — are not stored and do not count as a change.
         if let Ok(rd) = std::fs::read_dir(&dev_dir) {
             for e in rd.flatten() {
                 let p = e.path();
@@ -2032,16 +2058,83 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
             }
         }
 
-        // 2) publish OUR record.
+        // 2) publish OUR record + the deletions made here. A tombstone also
+        // removes the deleted device's record file: leaving it in place is what
+        // made "forget" a no-op that the next beat undid.
         atomic_write(
             &dev_dir.join(format!("{}.json", safe_id(&self_id))),
             self_json.as_bytes(),
         )
         .map_err(|e| format!("write device record: {e}"))?;
+        for t in crate::remote_devices::device_tombstones() {
+            let id = safe_id(&t.device_id);
+            let _ = std::fs::remove_file(dev_dir.join(format!("{id}.json")));
+            let json = serde_json::to_string_pretty(&t).map_err(|e| e.to_string())?;
+            atomic_write(&tomb_dir.join(format!("{id}.json")), json.as_bytes())
+                .map_err(|e| format!("write device tombstone: {e}"))?;
+        }
+        // A device that heartbeat after its deletion cleared the tombstone
+        // locally (registry::upsert); retire the vault copy too so it stops
+        // travelling to the other PCs and killing a device that is back.
+        let live: std::collections::HashSet<String> = crate::remote_devices::device_tombstones()
+            .iter()
+            .map(|t| safe_id(&t.device_id))
+            .collect();
+        if let Ok(rd) = std::fs::read_dir(&tomb_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                if !live.contains(stem) {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
 
         // 3) commit + push.
         commit_push(&dir, &branch)?;
         Ok(changed)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Push a device deletion to the account vault straight away: remove the
+/// device's record file and publish the tombstone.
+///
+/// The authoritative copy of "which devices exist" is the vault, not any one
+/// PC's registry. Deleting only locally left `state/devices/<id>.json` in place,
+/// so the next beat re-ingested the row and the device came back — in the
+/// Devices list and in the World Map fleet orbit alike. Doing it here rather
+/// than waiting for the next periodic sync means the row does not reappear in
+/// the seconds after the user clicks ✕.
+///
+/// A vault that is not set up is not an error: the local deletion + tombstone
+/// already stand, and the next `vault_sync_devices` republishes them.
+pub async fn vault_publish_device_tombstone(
+    tombstone: &canonical::Tombstone,
+) -> Result<(), String> {
+    let dir = connected_vault_dir()?;
+    if !is_cloned(&dir) {
+        return Ok(());
+    }
+    let t = tombstone.clone();
+    let _gate = vault_admit().await;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _txn = vault_txn();
+        let branch = current_branch(&dir);
+        reset_to_origin(&dir, &branch)?;
+        let dev_dir = dir.join("state").join("devices");
+        let tomb_dir = dev_dir.join("tombstones");
+        std::fs::create_dir_all(&tomb_dir).map_err(|e| format!("mkdir device tombstones: {e}"))?;
+        let id = safe_id(&t.device_id);
+        let _ = std::fs::remove_file(dev_dir.join(format!("{id}.json")));
+        let json = serde_json::to_string_pretty(&t).map_err(|e| e.to_string())?;
+        atomic_write(&tomb_dir.join(format!("{id}.json")), json.as_bytes())
+            .map_err(|e| format!("write device tombstone: {e}"))?;
+        commit_push(&dir, &branch)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

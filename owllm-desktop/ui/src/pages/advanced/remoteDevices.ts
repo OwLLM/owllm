@@ -64,6 +64,10 @@ export type DeviceRecord = {
   /// Embedded P2P (iroh) endpoint id — dialable from anywhere when set.
   p2p_node_id?: string | null;
   published_at?: string | null;
+  /// Stable per-MACHINE id. `device_id` changes every time a machine re-pairs;
+  /// this does not, so records sharing it are collapsed to one row. Absent on
+  /// records published before it existed. See src-tauri/src/remote_devices/canonical.rs.
+  machine_key?: string | null;
   last_seen: string | null;
   is_self: boolean;
 };
@@ -160,8 +164,29 @@ export const getEnabled = () => invoke<boolean>("device_remote_enabled_get");
 export const setEnabled = (enabled: boolean) => invoke<void>("device_remote_enabled_set", { enabled });
 
 // ---- Registry ----
+/// The canonical device collection — one row per machine, deduplicated and with
+/// deleted devices filtered out in Rust. Every view reads THIS, so a device can
+/// never be listed in one place and missing in another.
 export const listDevices = () => invoke<DeviceRecord[]>("devices_list");
+
+/// Delete a device everywhere: local registry, a synced tombstone, and the
+/// device's record file in the account vault. Deleting only locally never stuck
+/// — the next vault beat re-ingested the record file and the row came back.
+///
+/// Use `forgetDeviceEverywhere` from a view so the OTHER views refresh too.
 export const forgetDevice = (deviceId: string) => invoke<void>("device_forget", { deviceId });
+
+/// `forgetDevice` + the refresh broadcast. The Devices list and the World Map
+/// fleet render the same collection from two independently-mounted pages, so a
+/// deletion issued in one has to tell the other to re-read.
+export async function forgetDeviceEverywhere(deviceId: string): Promise<void> {
+  await forgetDevice(deviceId);
+  try {
+    window.dispatchEvent(new CustomEvent("owllm:devices:refresh"));
+  } catch {
+    /* non-browser host */
+  }
+}
 
 // ---- Listener / discovery / WAN ----
 export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null; endpoints: string[] }>("device_listener_status");

@@ -38,15 +38,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem npm install on first run only — if node_modules missing.
-if not exist "%cd%\node_modules" (
-  echo [owllm-desktop] node_modules missing — running npm install...
-  call npm install
-  if errorlevel 1 (
-    echo [owllm-desktop] npm install failed.
-    pause
-    exit /b 1
-  )
+rem Validate real entry points, not just the node_modules directory. npm can
+rem leave that directory half-populated after a cancelled or blocked install.
+call npm run deps:ensure
+if errorlevel 1 (
+  echo [owllm-desktop] Frontend dependency repair failed.
+  pause
+  exit /b 1
 )
 
 rem Warn if Vite port already taken — `npm run tauri dev` will spin its own

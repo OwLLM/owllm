@@ -73,6 +73,7 @@ mod models;
 mod modules;
 mod overlay_frame;
 mod paths;
+mod personal_agent_rule_sets;
 mod personal_agent_teams;
 mod personal_agents;
 mod projects;
@@ -860,6 +861,10 @@ pub fn run() {
             personal_agents::personal_agent_list_rule_cards,
             personal_agents::personal_agent_get_rule_card,
             personal_agents::personal_agent_save_rule_card,
+            personal_agents::personal_agent_list_rule_sets,
+            personal_agents::personal_agent_get_rule_set,
+            personal_agents::personal_agent_save_rule_set,
+            personal_agents::personal_agent_preview_rule_sets,
             personal_agents::personal_agent_get_project_config,
             personal_agents::personal_agent_save_project_config,
             personal_agents::personal_agent_resolve,

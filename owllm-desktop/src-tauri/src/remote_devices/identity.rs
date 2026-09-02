@@ -81,6 +81,25 @@ pub fn presence_id(device_id: &str) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Domain separator for the per-machine grouping key.
+const MACHINE_KEY_DOMAIN: &str = "owllm-device-machine-v1\0";
+
+/// Stable per-MACHINE id: `hex(SHA-256(domain || machine_uid))`, or None when
+/// the OS exposes no installation uid.
+///
+/// Hashed rather than published raw for the same reason `presence_id` is: the
+/// record travels into the account vault, and the OS machine GUID is a global
+/// identifier this app has no business copying around. The hash is stable
+/// across re-pairing, which is all the deduplication in `canonical.rs` needs.
+pub fn machine_key() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let uid = crate::hardware::machine_uid()?;
+    let mut hasher = Sha256::new();
+    hasher.update(MACHINE_KEY_DOMAIN.as_bytes());
+    hasher.update(uid.as_bytes());
+    Some(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod presence_id_tests {
     /// Pinned to the value the webview's `presenceNodeIdForDevice` produces for
@@ -220,5 +239,7 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         // Embedded P2P dial-by-id (iroh) — created on first use, vault-synced.
         p2p_node_id: super::p2p::node_id(),
         published_at: None,
+        // Groups THIS machine's records however often it re-pairs.
+        machine_key: machine_key(),
     })
 }

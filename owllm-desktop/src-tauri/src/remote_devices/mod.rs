@@ -21,6 +21,7 @@
 pub mod protocol;
 
 mod audit;
+pub mod canonical;
 mod crypto;
 mod executor;
 mod identity;
@@ -746,8 +747,21 @@ pub fn ingest_peer_record(json: &str) -> Result<bool, String> {
     {
         return Err("device record id does not match its ed25519 key".into());
     }
-    registry::upsert(peer, false)?;
-    Ok(true)
+    // False when the canonical rules reject it — a tombstoned device, or a dead
+    // identity of a machine we already list. Nothing changed locally.
+    registry::upsert(peer, false)
+}
+
+/// Deletions the user made on their OTHER PCs, pulled from the vault. Returns
+/// true when anything changed here.
+pub fn apply_device_tombstones(remote: Vec<canonical::Tombstone>) -> Result<bool, String> {
+    registry::apply_tombstones(remote)
+}
+
+/// Every deletion this machine knows about — published to the vault so the rest
+/// of the fleet applies it too.
+pub fn device_tombstones() -> Vec<canonical::Tombstone> {
+    registry::tombstones()
 }
 
 // ------------------------------------------------------------------
@@ -874,7 +888,7 @@ async fn pair_with_endpoint(endpoint: &str) -> Result<DevicePublic, String> {
         lan::send_pair(endpoint, pr).await?
     };
     // Learn the peer's keys/id so we can later seal commands to it.
-    registry::upsert(peer.clone(), false)?;
+    registry::upsert_paired(peer.clone())?;
     Ok(peer)
 }
 
@@ -1126,17 +1140,35 @@ pub fn device_listener_status() -> Value {
 pub async fn devices_list() -> Result<Vec<DeviceRecord>, String> {
     tokio::task::spawn_blocking(|| {
         let me = identity::public_record(github_login())?;
-        registry::upsert(me.clone(), true)?;
+        let _ = registry::upsert(me.clone(), true)?;
         Ok(registry::list(&me))
     })
     .await
     .map_err(|e| format!("device registry task failed: {e}"))?
 }
 
-/// Remove a device from the local registry.
+/// Delete a device everywhere: drop it from the local registry, record a
+/// tombstone, and push both the tombstone and the removal of the device's
+/// record file to the account vault.
+///
+/// Deleting locally alone never stuck — the vault keeps a `state/devices/
+/// <id>.json` per identity forever, so the next beat re-ingested it and the row
+/// came back in the Devices list and the World Map orbit alike. The tombstone
+/// is what makes the deletion reach the user's other PCs too.
 #[tauri::command]
-pub fn device_forget(device_id: String) -> Result<(), String> {
-    registry::forget(&device_id)
+pub async fn device_forget(device_id: String) -> Result<(), String> {
+    let tombstone = tokio::task::spawn_blocking({
+        let id = device_id.clone();
+        move || registry::forget(&id)
+    })
+    .await
+    .map_err(|e| format!("device forget task failed: {e}"))??;
+    // The registry is already correct; a vault that is not set up (or offline)
+    // must not turn a successful deletion into a failure.
+    if let Err(e) = crate::vault::vault_publish_device_tombstone(&tombstone).await {
+        eprintln!("device_forget: tombstone not published to the vault yet: {e}");
+    }
+    Ok(())
 }
 
 /// Controllers this device knows about (pending / trusted / revoked).

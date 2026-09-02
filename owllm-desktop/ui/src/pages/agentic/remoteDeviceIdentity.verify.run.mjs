@@ -28,32 +28,42 @@ function check(condition, message) {
 
 const T = "../../../../src-tauri/src"; // ui/src/pages/agentic → owllm-desktop
 const registry = read(`${T}/remote_devices/registry.rs`);
+// The freshness ordering moved into the pure canonical.rs when device records
+// gained deduplication + tombstones, so devices-harness could execute it. Same
+// invariants, new home — the assertions below follow it rather than being
+// relaxed. Deduplication itself is gated by advanced/deviceIdentity.verify.run.mjs.
+const canonical = read(`${T}/remote_devices/canonical.rs`);
 const mod = read(`${T}/remote_devices/mod.rs`);
 const localTools = read("./localTools.ts");
 
 // ── 1. Registry list is freshness-ordered ─────────────────────────────────
 check(
-  /fn freshness_epoch\(rec: &DeviceRecord\) -> i64/.test(registry),
-  "registry: freshness_epoch() ranks a record by its newest timestamp",
+  /pub fn freshness_epoch\(rec: &DeviceRecord\) -> i64/.test(canonical),
+  "canonical: freshness_epoch() ranks a record by its newest timestamp",
 );
 check(
-  registry.includes("rec.public.published_at.as_deref()") &&
-    registry.includes("rec.last_seen.as_deref()"),
-  "registry: freshness considers BOTH the publish heartbeat and last_seen",
+  canonical.includes("rec.public.published_at.as_deref()") &&
+    canonical.includes("rec.last_seen.as_deref()"),
+  "canonical: freshness considers BOTH the publish heartbeat and last_seen",
 );
 check(
-  /fn order_for_resolution\(devices: &mut \[DeviceRecord\]\)[\s\S]*?sort_by_key\(\|d\| \(!d\.is_self, std::cmp::Reverse\(freshness_epoch\(d\)\)\)\)/.test(registry),
-  "registry: order_for_resolution sorts self-first, then freshest-first",
+  /pub fn order_for_resolution\(devices: &mut \[DeviceRecord\]\)[\s\S]*?a\.is_self\s*\n?\s*\.cmp\(&b\.is_self\)\s*\n?\s*\.reverse\(\)[\s\S]*?freshness_epoch\(a\)\.cmp\(&freshness_epoch\(b\)\)\.reverse\(\)/.test(canonical),
+  "canonical: order_for_resolution sorts self-first, then freshest-first",
 );
 check(
-  /pub fn list\(self_public: &DevicePublic\) -> Vec<DeviceRecord> \{[\s\S]*?order_for_resolution\(&mut f\.devices\);\s*\n\s*f\.devices\s*\n\}/.test(registry),
-  "registry: list() actually applies the resolution ordering before returning",
+  /\.then_with\(\|\| a\.public\.device_id\.cmp\(&b\.public\.device_id\)\)/.test(canonical),
+  "canonical: the ordering is total, so the resolution winner is reproducible",
 );
 check(
-  /fn duplicate_name_resolves_to_freshest_identity/.test(registry) &&
-    /fn last_seen_counts_as_freshness/.test(registry) &&
-    /fn self_record_stays_first_and_dateless_records_sink/.test(registry),
-  "registry: executable unit tests cover the duplicate-name/freshness contract",
+  /pub fn canonicalize\([\s\S]*?order_for_resolution\(&mut ordered\);/.test(canonical) &&
+    /canonical::canonicalize\(f\.devices, &tombstones\(\)\)/.test(registry),
+  "registry: list() applies the resolution ordering (via canonicalize) before returning",
+);
+check(
+  /fn duplicate_name_resolves_to_freshest_identity/.test(canonical) &&
+    /fn last_seen_counts_as_freshness/.test(canonical) &&
+    /fn self_record_stays_first_and_dateless_records_sink/.test(canonical),
+  "canonical: executable unit tests cover the duplicate-name/freshness contract",
 );
 
 // ── 2. Name resolution rides that ordering ────────────────────────────────

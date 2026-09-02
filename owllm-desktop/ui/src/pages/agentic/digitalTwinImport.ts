@@ -37,9 +37,9 @@ export function formatImportBytes(bytes: number): string {
 }
 
 export function defaultModelUnit(extension: string): ModelUnit {
-  // glTF defines metres as its linear unit. OBJ and STL do not carry unit
-  // metadata, so use the conventional mechanical-CAD default and keep the
-  // choice visible/correctable in the inspector.
+  // glTF defines metres as its linear unit. STEP/IGES are converted by OCCT
+  // to millimetres in auto mode. OBJ and STL do not carry unit metadata, so
+  // use the conventional mechanical-CAD default and keep it correctable.
   return extension.toLowerCase() === "glb" || extension.toLowerCase() === "gltf" ? "m" : "mm";
 }
 
@@ -108,7 +108,7 @@ export function actionableImportFailure(fileName: string, reason: unknown): Erro
   const detail = typeof reason === "string"
     ? reason
     : (reason as { message?: string })?.message ?? "the file could not be parsed";
-  return new Error(`Could not import ${fileName}: ${detail}. Verify that the file is valid, re-export it as GLB/GLTF, OBJ, or STL if needed, then retry.`);
+  return new Error(`Could not import ${fileName}: ${detail}. Verify that the file is a valid STEP, IGES, GLB/GLTF, OBJ, or STL model, then retry.`);
 }
 
 export function parseGltfScene(

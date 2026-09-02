@@ -11,6 +11,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 // @ts-ignore: bundled Three.js example module
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { loadCadModel } from "./digitalTwinCad";
 import {
   actionableImportFailure,
   applySourceUnit,
@@ -26,8 +27,9 @@ import {
   type ModelUnit,
 } from "./digitalTwinImport";
 
-const ACCEPTED_EXTENSIONS = new Set(["glb", "gltf", "obj", "stl"]);
-const IMPORT_ACCEPT = ".glb,.gltf,.obj,.stl,.bin,.png,.jpg,.jpeg,.webp";
+const ACCEPTED_EXTENSIONS = new Set(["step", "stp", "iges", "igs", "glb", "gltf", "obj", "stl"]);
+const MODEL_ACCEPT = ".step,.stp,.iges,.igs,.glb,.gltf,.obj,.stl";
+const GLTF_ASSET_ACCEPT = ".bin,.png,.jpg,.jpeg,.webp";
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
 
 type Vector3Tuple = [number, number, number];
@@ -116,8 +118,13 @@ function measureObject(root: any): Vector3Tuple {
   return [size.x, size.y, size.z];
 }
 
-function loadModel(file: File, companions: File[]): Promise<any> {
+function loadModel(file: File, companions: File[], unit: ModelUnit, signal?: AbortSignal): Promise<any> {
   const extension = extensionOf(file.name);
+  if (["step", "stp", "iges", "igs"].includes(extension)) {
+    return loadCadModel(file, extension, unit, signal).catch((error) => {
+      throw actionableImportFailure(file.name, error);
+    });
+  }
   return new Promise((resolve, reject) => {
     const fail = (reason: unknown) => reject(actionableImportFailure(file.name, reason));
 
@@ -490,8 +497,10 @@ const fieldStyle: CSSProperties = {
 
 export default function DigitalTwinPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const gltfAssetInputRef = useRef<HTMLInputElement | null>(null);
   const partsRef = useRef<ImportedPart[]>([]);
   const importRunRef = useRef(0);
+  const importAbortRef = useRef<AbortController | null>(null);
   const importingRef = useRef(false);
   const [parts, setParts] = useState<ImportedPart[]>([]);
   const [constraints, setConstraints] = useState<AssemblyConstraint[]>([]);
@@ -512,6 +521,7 @@ export default function DigitalTwinPage() {
   useEffect(() => { partsRef.current = parts; }, [parts]);
   useEffect(() => () => {
     importRunRef.current += 1;
+    importAbortRef.current?.abort();
     importingRef.current = false;
     for (const part of partsRef.current) disposeObject(part.object);
   }, []);
@@ -524,11 +534,8 @@ export default function DigitalTwinPage() {
     if (importingRef.current || !incoming.length) return;
     const files = Array.from(incoming);
     const modelFiles = files.filter((file) => ACCEPTED_EXTENSIONS.has(extensionOf(file.name)));
-    const unsupportedCad = files.filter((file) => ["step", "stp", "iges", "igs"].includes(extensionOf(file.name)));
     if (!modelFiles.length) {
-      setError(unsupportedCad.length
-        ? "STEP/IGES needs a CAD tessellation engine, which is not installed in this frontend module. Export GLB, GLTF, OBJ, or STL and import that file here."
-        : "No supported 3D model found. Choose GLB, GLTF, OBJ, or STL; include linked .bin and texture files with GLTF.");
+      setError("No supported 3D model found. Choose STEP, IGES, GLB, GLTF, OBJ, or STL. Linked GLTF assets can be added after choosing the model.");
       return;
     }
     const oversized = modelFiles.find((file) => file.size > MAX_IMPORT_BYTES);
@@ -543,6 +550,9 @@ export default function DigitalTwinPage() {
     }
 
     const importRun = ++importRunRef.current;
+    const importAbort = new AbortController();
+    importAbortRef.current?.abort();
+    importAbortRef.current = importAbort;
     importingRef.current = true;
     setLoading(true);
     setError(null);
@@ -559,7 +569,8 @@ export default function DigitalTwinPage() {
         // uninterrupted main-thread task. Timers still run when the window is
         // occluded, unlike requestAnimationFrame, and cancellation is checked next.
         await yieldToMainThread();
-        const object = await loadModel(file, files);
+        const unit = importUnit === "auto" ? defaultModelUnit(extensionOf(file.name)) : importUnit;
+        const object = await loadModel(file, files, unit, importAbort.signal);
         if (importRun !== importRunRef.current) {
           disposeObject(object);
           for (const part of imported) disposeObject(part.object);
@@ -567,7 +578,6 @@ export default function DigitalTwinPage() {
         }
         if (!object) throw new Error("The file contained no renderable scene");
         prepareObject(object, file.name);
-        const unit = importUnit === "auto" ? defaultModelUnit(extensionOf(file.name)) : importUnit;
         applySourceUnit(object, unit);
         const p = object.position ?? new THREE.Vector3();
         const dimensionsMetres = measureObject(object);
@@ -593,6 +603,7 @@ export default function DigitalTwinPage() {
       return;
     }
     importingRef.current = false;
+    if (importAbortRef.current === importAbort) importAbortRef.current = null;
     setLoading(false);
     if (imported.length) {
       setParts((current) => [...current, ...imported]);
@@ -608,6 +619,16 @@ export default function DigitalTwinPage() {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     void importFiles(files);
+  };
+
+  const handleGltfAssets = (event: ChangeEvent<HTMLInputElement>) => {
+    const companions = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!lastFiles.some((file) => extensionOf(file.name) === "gltf")) {
+      setError("Choose the GLTF model first, then add its linked .bin and texture files here.");
+      return;
+    }
+    void importFiles([...lastFiles, ...companions]);
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -649,6 +670,8 @@ export default function DigitalTwinPage() {
 
   const clearAssembly = () => {
     importRunRef.current += 1;
+    importAbortRef.current?.abort();
+    importAbortRef.current = null;
     importingRef.current = false;
     setLoading(false);
     for (const part of parts) disposeObject(part.object);
@@ -680,7 +703,8 @@ export default function DigitalTwinPage() {
 
   return (
     <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-      <input ref={fileInputRef} type="file" accept={IMPORT_ACCEPT} multiple onChange={handleFiles} style={{ display: "none" }} />
+      <input ref={fileInputRef} type="file" accept={MODEL_ACCEPT} multiple onChange={handleFiles} style={{ display: "none" }} />
+      <input ref={gltfAssetInputRef} type="file" accept={GLTF_ASSET_ACCEPT} multiple onChange={handleGltfAssets} style={{ display: "none" }} />
 
       <header style={{ minHeight: 58, padding: "10px 16px", borderBottom: "1px solid var(--border)", background: "var(--bg-card)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div style={{ marginRight: 8 }}>
@@ -693,7 +717,7 @@ export default function DigitalTwinPage() {
         <label htmlFor="digital-twin-import-unit" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11 }}>
           Source unit
           <select id="digital-twin-import-unit" value={importUnit} onChange={(event) => setImportUnit(event.target.value as ImportUnit)} disabled={loading} style={{ ...fieldStyle, width: "auto", minHeight: 32, padding: "5px 8px" }}>
-            <option value="auto">Auto · GLTF m, OBJ/STL mm</option>
+            <option value="auto">Auto · GLTF m, CAD/OBJ/STL mm</option>
             {UNIT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
@@ -767,9 +791,9 @@ export default function DigitalTwinPage() {
             <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 24, pointerEvents: "none" }}>
               <div style={{ width: "min(520px, 90%)", padding: "28px 30px", border: "1px solid var(--border-strong)", borderRadius: 12, background: "color-mix(in srgb, var(--bg-card) 94%, transparent)", textAlign: "center", pointerEvents: "auto" }}>
                 <div style={{ color: "var(--fg-strong)", fontSize: 21, fontWeight: 850 }}>Build a digital twin from your 3D parts</div>
-                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.55 }}>Import GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
+                <div style={{ margin: "9px auto 17px", maxWidth: 430, color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.55 }}>Import STEP, IGES, GLB, GLTF, OBJ, or STL locally. Select parts, inspect the assembly, and record mate, axis, plane, or offset intent without changing Studio or agent runs.</div>
                 <button type="button" style={{ ...buttonStyle, background: "var(--accent)", color: "var(--accent-fg)", borderColor: "var(--accent)" }} onClick={() => fileInputRef.current?.click()}>Choose 3D files</button>
-                <div style={{ marginTop: 10, color: "var(--fg-subtle)", fontSize: 10 }}>For GLTF, select the .gltf, .bin, and texture files together.</div>
+                <div style={{ marginTop: 10, color: "var(--fg-subtle)", fontSize: 10 }}>STEP and IGES are tessellated locally. For linked GLTF assets, choose the model first; the error action will request only its companion files.</div>
               </div>
             </div>
           )}
@@ -806,7 +830,7 @@ export default function DigitalTwinPage() {
                 <select id="digital-twin-part-unit" value={selectedPart.unit} onChange={(event) => updatePartUnit(selectedPart.id, event.target.value as ModelUnit)} style={fieldStyle}>
                   {UNIT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
-                <div style={{ marginTop: 5, color: "var(--fg-subtle)", fontSize: 10, lineHeight: 1.45 }}>OBJ and STL do not store units. Correct this value if the displayed dimensions do not match the CAD source.</div>
+                <div style={{ marginTop: 5, color: "var(--fg-subtle)", fontSize: 10, lineHeight: 1.45 }}>STEP/IGES units are converted during tessellation. OBJ and STL do not store units; correct those if the displayed dimensions do not match the source.</div>
                 {selectedPart.sizeWarning && <div role="status" style={{ marginTop: 8, padding: "7px 8px", border: "1px solid rgba(255, 190, 90, 0.45)", borderRadius: 6, color: "var(--fg-strong)", background: "rgba(255, 190, 90, 0.08)", fontSize: 10, lineHeight: 1.45 }}>{selectedPart.sizeWarning}</div>}
               </>
             ) : <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5 }}>Select a part in the list or viewport to inspect it.</div>}
@@ -863,6 +887,7 @@ export default function DigitalTwinPage() {
       {error && (
         <div role="alert" style={{ margin: "0 10px 10px", padding: "9px 11px", borderRadius: 8, border: "1px solid rgba(255, 120, 120, 0.45)", background: "rgba(255, 90, 90, 0.10)", color: "#ffb1b1", display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
           <span style={{ flex: 1 }}>{error}</span>
+          {lastFiles.some((file) => extensionOf(file.name) === "gltf") && error.includes("Missing linked asset") && <button type="button" style={buttonStyle} onClick={() => gltfAssetInputRef.current?.click()} disabled={loading}>Add linked GLTF files</button>}
           {lastFiles.length > 0 && <button type="button" style={buttonStyle} onClick={() => void importFiles(lastFiles)} disabled={loading}>Retry import</button>}
           <button type="button" style={buttonStyle} onClick={() => setError(null)}>Dismiss</button>
         </div>

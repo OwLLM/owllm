@@ -19,6 +19,8 @@ const pagePath = process.env.DIGITAL_TWIN_PAGE_PATH
   ? path.resolve(process.env.DIGITAL_TWIN_PAGE_PATH)
   : path.join(here, "DigitalTwinPage.tsx");
 const page = fs.readFileSync(pagePath, "utf8");
+const cad = fs.readFileSync(path.join(here, "digitalTwinCad.ts"), "utf8");
+const cadWorker = fs.readFileSync(path.join(here, "digitalTwinCad.worker.ts"), "utf8");
 const route = fs.readFileSync(path.join(here, "DigitalTwinRoute.tsx"), "utf8");
 const registry = fs.readFileSync(path.resolve(here, "../../core/modules.ts"), "utf8");
 const repo = path.resolve(here, "../../../..");
@@ -27,6 +29,11 @@ const helperOut = path.join(fs.mkdtempSync(path.join(process.env.TMPDIR || proce
 fs.writeFileSync(helperOut, ts.transpileModule(fs.readFileSync(path.join(here, "digitalTwinImport.ts"), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 }).outputText);
+const cadOut = path.join(path.dirname(helperOut), "digitalTwinCad.mjs");
+const threeModuleUrl = pathToFileURL(path.join(repo, "node_modules/three/build/three.module.js")).href;
+fs.writeFileSync(cadOut, ts.transpileModule(cad, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
+}).outputText.replace('from "three"', `from "${threeModuleUrl}"`));
 const {
   BLOCKED_ASSET_URL,
   MAX_TOTAL_IMPORT_BYTES,
@@ -41,16 +48,20 @@ const {
   resolveLinkedAssetUrl,
   yieldToMainThread,
 } = await import(pathToFileURL(helperOut).href);
+const { cadResponseToObject } = await import(pathToFileURL(cadOut).href);
 
 const checks = [
   [registry.includes('key: "studio"') && registry.indexOf('key: "digital-twin"') > registry.indexOf('key: "studio"'), "Digital Twin/3D is registered immediately after Studio"],
   [registry.includes('label: "Digital Twin/3D"') && registry.includes("component: DigitalTwinRoute"), "the new page has the requested visible label and isolated route"],
   [route.includes('lazy(() => import("./DigitalTwinPage"))'), "Three.js and its loaders are lazy-loaded away from existing pages"],
   [page.includes('new GLTFLoader') && page.includes('new OBJLoader') && page.includes('new STLLoader'), "GLB/GLTF, OBJ, and STL loaders are wired"],
+  [page.includes('new Set(["step", "stp", "iges", "igs"') && page.includes("return loadCadModel(file, extension, unit, signal)"), "STEP/STP and IGES/IGS route to the CAD loader"],
+  [cadWorker.includes('from "occt-import-js"') && cadWorker.includes("ReadStepFile") && cadWorker.includes("ReadIgesFile") && cadWorker.includes("occt-import-js.wasm?url"), "OpenCascade STEP/IGES tessellation and its WASM binary are bundled locally"],
+  [cad.includes('new Worker(new URL("./digitalTwinCad.worker.ts"') && cad.includes("worker.terminate()") && cadWorker.includes("self.onmessage"), "CAD tessellation runs in a cancellable worker instead of taking the UI thread hostage"],
   [page.includes("URL.createObjectURL") && page.includes("URL.revokeObjectURL"), "linked GLTF assets use revocable local object URLs"],
   [page.includes('role="alert"') && page.includes("Retry import") && page.includes("Preparing geometry on this device"), "loading and actionable error states are present"],
   [page.includes("Choose 3D files") && page.includes("No constraints yet") && page.includes("constraints.map"), "empty and populated assembly states are present"],
-  [page.includes("STEP/IGES needs a CAD tessellation engine"), "unsupported CAD formats fail honestly instead of pretending to import"],
+  [page.includes('const MODEL_ACCEPT = ".step,.stp,.iges,.igs,.glb,.gltf,.obj,.stl"') && !page.includes('const MODEL_ACCEPT = ".png') && page.includes("GLTF_ASSET_ACCEPT"), "the model picker shows only 3D formats while optional GLTF image assets use a separate action"],
   [page.includes("100 MB interactive import limit") && page.includes("so the UI remains responsive"), "oversized imports are refused before they can monopolize the UI thread"],
   [page.includes("if (importingRef.current)") && page.includes("then drop these files again"), "dropping files during an active import produces actionable feedback"],
   [page.includes('aria-label="Assembly parts"') && page.includes('aria-label="Digital twin inspector"'), "the workspace regions expose accessible labels"],
@@ -108,6 +119,24 @@ const dimensionsOf = (object) => new THREE.Box3().setFromObject(object).getSize(
 const closeTo = (actual, expected) => actual.length === expected.length
   && actual.every((value, index) => Math.abs(value - expected[index]) < 1e-6);
 
+const cadObject = cadResponseToObject({
+  name: "STEP cube",
+  meshes: [{
+    name: "Body",
+    color: [1, 0.6, 0],
+    positions: new Float32Array([0, 0, 0, 2, 0, 0, 0, 3, 4]),
+    normals: new Float32Array(),
+    indices: new Uint32Array([0, 1, 2]),
+  }],
+});
+const cadDimensions = dimensionsOf(cadObject);
+const cadMeshIsRenderable = cadObject.name === "STEP cube"
+  && cadObject.children[0]?.name === "Body"
+  && closeTo(cadDimensions, [2, 3, 4])
+  && cadObject.children[0]?.geometry.getAttribute("normal")?.count === 3;
+console.log(`${cadMeshIsRenderable ? "✓" : "✗"} tessellated CAD arrays become measurable, shaded Three.js geometry`);
+if (cadMeshIsRenderable) passed += 1;
+
 const gltfScene = await parseGltfScene(new GLTFLoader(), exactArrayBuffer(gltfBuffer), () => {}, () => null, () => {});
 const stlGeometry = new STLLoader().parse(exactArrayBuffer(stlBuffer));
 const stlMesh = new THREE.Mesh(stlGeometry);
@@ -164,6 +193,6 @@ const malformedSettled = releaseCount === 1
 console.log(`${malformedSettled ? "✓" : "✗"} synchronous GLTF parse failure settles, releases URLs, clears loading, and reports an actionable error`);
 if (malformedSettled) passed += 1;
 
-const totalChecks = checks.length + 8;
+const totalChecks = checks.length + 9;
 console.log(`\n${passed}/${totalChecks} checks passed`);
 if (passed !== totalChecks) process.exit(1);

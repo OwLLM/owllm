@@ -9,6 +9,7 @@ const APP = path.resolve(HERE, "..");
 const REQUIRED_FILES = [
   "node_modules/vite/package.json",
   "node_modules/three/package.json",
+  "node_modules/occt-import-js/dist/occt-import-js.wasm",
   "node_modules/typescript/package.json",
   "node_modules/@tauri-apps/cli/tauri.js",
 ];

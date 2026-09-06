@@ -233,8 +233,8 @@ Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 | Mode | Status | Use case |
 |---|:---:|---|
 | **Desktop (Windows)** | ✅ shipped | Daily-driver AI workstation on your laptop |
-| **Desktop (Linux x86_64)** | ✅ shipped | AppImage + Debian/Ubuntu `.deb` |
-| **Desktop (macOS)** | 🔜 next | Apple Silicon + Intel via cross-platform CI |
+| **Desktop (Linux x86-64 + ARM64)** | ✅ shipped | AppImage + Debian/Ubuntu `.deb` + Fedora/RHEL `.rpm`, on both architectures |
+| **Desktop (macOS)** | ✅ shipped | Signed **universal** `.dmg` — Apple Silicon + Intel |
 | **Fleet — your other machines** | ✅ shipped | Pair your PCs; agents run commands, open a remote shell, and drive them over an encrypted LAN / WAN / P2P channel. |
 | **Headless on VPS (24/7)** | 🔜 Q4 2026 | Run your custom teams on a $5/mo box. Reach them via Telegram, web, API. Always-on agentic services. |
 | **Containerised / VM** | 🔜 Q4 2026 | Drop OwLLM into your existing infra. |
@@ -305,7 +305,24 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.9.42** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.43** releases.
+
+### 🧩 Digital Twin — a real CAD assembly workspace inside your agent app (1.0.36 → 1.0.43)
+Import STEP / STL / GLTF parts and build a working machine in guided steps: **Import & place → Merge → Mate & actuate → Simulate**. It ships **face-level mates** (Ctrl+click a face and mate it like a CAD tool), **merged bodies that behave as one real part everywhere** — click, box-select, transform, mate, simulate — and **linear/rotational actuator mates** with an **overview infographic** mapping every actuator to its fixed and moving parts, axis, travel limits or gear ratio, and validation state. Set the **assembly origin** on any part and remap axes (`X→Y, Y→−X, Z→Z`) across the whole assembly without disturbing geometry, mates or merges. Assemblies save to a **versioned `.owdt` project asset** — source geometry, transforms, coordinate frame, merges, mates, actuators and metadata in one reusable file, with Save / Save As / Open, **autosave + recovery**, and migration. Saved assemblies can then be **imported or linked into another assembly** as named, movable containers, so you can build hierarchical structures. *No other local-agent app ships a mechanical assembly workspace.*
+
+### ↩️ Global multi-step undo/redo (1.0.38)
+One shared Undo/Redo toolbar control, wired across every supported surface — including the whole Digital Twin workflow.
+
+### 🗣️ Voice, done properly (1.0.43)
+Agent speech now prefers **natural / neural voices**, falls back to enhanced offline voices and then plain system speech, and retries locally if an online voice fails mid-sentence. Voice and speaking rate are **per agent and persisted**; a visible, accessible **Stop** control cancels active *and queued* speech from any page, and playback stops on navigation, new playback, run cancellation and teardown. **Dictation** now inserts each recognised phrase **at your cursor** instead of overwriting what you already typed.
+
+### 🩹 The reliability run (1.0.34 → 1.0.43)
+- **The Code page stopped saving at 4 MB** — hot blobs now get a SQLite-sized ceiling, so a long session no longer loses its most recent work.
+- **Every push was rejected** — a 115 MB publisher backup was being committed; dropped, with a size guard.
+- **Our own squash integration manufactured a dead-end conflict** — fixed; and a blocked run now **auto-Syncs** and hands the conflict *to* the agent instead of stopping.
+- **The git storm** — a project's origin is probed **once per session**, bounded.
+- **macOS** — agentic history rendering is bounded in WebKit.
+- The second agent's chat sticks to the bottom like the first · world chat: replying to a request actually accepts it, with a real messenger UI.
 
 ### 🛰️ Fleet Control — your agents reach your other machines (0.8.35 → 0.8.56)
 Pair your computers and your agent teams can **run commands on them, open an interactive SSH-like shell, and drive them** — no SSH setup, no port-forwarding. Devices talk over an **end-to-end-encrypted channel** (Ed25519 + X25519 sealed envelope), reachable on your **LAN**, across the **WAN** (overlay / public / relay), or through a **zero-setup embedded P2P transport** (iroh) that punches through NAT for you. Same-account machines **auto-enable and self-heal pairing**; the first injection into a new host still asks for your per-host approval. Even **subscription-CLI agents** (Claude Code / Codex) can drive a paired device. *This is the software half of "run your workforce anywhere" — and no other local-LLM app ships it.*
@@ -440,10 +457,18 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.9.42)</b></summary>
+<summary><b>Full changelog (0.6.37 → 1.0.43)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **1.0.43** | **Digital Twin project assets (`.owdt`) + hierarchical assembly import/link** · merged parts select as one atomic unit · canvas ↔ parts-list selection sync · actuator overview infographic · natural TTS voices + a global Stop · dictation inserts at the caret · macOS WebKit history bounded |
+| **1.0.38** | Code page saves past **4 MB** (hot-blob ceiling) · pushes unblocked (115 MB publisher backup dropped + guard) · squash integration stops manufacturing dead-end conflicts · **global undo/redo** · Digital Twin actuators + a real Step 3 run |
+| **1.0.37** | A blocked run **auto-Syncs** — the conflict is handed to the agent, never a dead end · Digital Twin **Merge view**: parts cement into one unit |
+| **1.0.36** | Digital Twin **Mate view** — face-level mating + actuator mates for automation/robotics |
+| **1.0.35** | **Kill the git storm** — one bounded origin probe per session · world chat: replying to a request accepts it, real messenger UI · refreshed provider catalogues |
+| **1.0.33** | Project-scoped rule-set profiles · every provider split into **Subscription** and **API** pages · one device row per machine (deleting one sticks) |
+| **1.0.31** | Page worktrees protected across Windows and WSL · the janitor's quarantine no longer blocks page runs |
+| **1.0.0 → 1.0.30** | The 1.0 line: **global disk janitor** (every producer has a registered cleaner, host memory bounded too) · **background work survives the turn** — orphan watch + auto-resume on every CLI and OS · Windows PTY login fixed · a dead renderer no longer blacks out an agent-browser tab · skills picker v2 · a promoted release is noticed in minutes |
 | **0.9.42** | Agent runs require isolated worktrees (no silent shared-folder fallback) · honor inherited agent model settings |
 | **0.9.40** | Account-ownership guard quarantines transplanted `.owllm` credentials · `/dl` resolves per-OS to the newest build · World Map Solar-System explorer |
 | **0.9.39** | macOS auto-updates fixed — signed app bundle preserved after launch |

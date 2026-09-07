@@ -6,23 +6,41 @@
 
 **Your AI agent workforce on your own hardware — one file, no admin required.**
 
+<!-- owllm:downloads -->
+<!-- Generated from owllm-desktop/scripts/download-targets.mjs by
+     owllm-desktop/scripts/sync-readme-downloads.mjs. Edit that table, not this block. -->
+
 <div align="center">
   <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=2" width="260" alt="Download OwLLM for Windows" />
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=4" width="260" alt="Download OwLLM for Windows" />
   </a>
   &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg" width="260" alt="Download OwLLM for Linux" />
+  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage">
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg?v=4" width="260" alt="Download OwLLM for Linux" />
   </a>
   &nbsp;&nbsp;
   <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg" width="260" alt="Download OwLLM for macOS" />
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg?v=4" width="260" alt="Download OwLLM for macOS" />
   </a>
 </div>
 
-<sub>**Not sure which file?** → **[DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md)** — one permanent link per machine, always the newest release.</sub>
+<div align="center">
+<sub>
 
-<sub>**Linux (x86-64 or ARM64):** [choose by distro and architecture, then follow the install steps](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md) — Ubuntu/Debian, Fedora/RHEL, or AppImage. The **AppImage** is the only Linux package that updates itself.</sub>
+**Linux on ARM64 — Jetson, Raspberry Pi, ARM servers:** [OwLLM.Desktop.aarch64.AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.AppImage)
+
+**Other packages** — portable Windows, `.deb`, `.rpm`, both architectures: **[DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md)** · [Linux install guide](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md)
+
+**Every platform:** [release notes and checksums](https://github.com/OwLLM/owllm/releases/latest)
+
+Every link above is permanent: it resolves to the newest release at the moment you click it,
+so it never needs updating when a release ships. The **AppImage** is the only Linux package
+the in-app updater can replace by itself — `.deb` and `.rpm` installs must be re-downloaded.
+
+</sub>
+</div>
+
+<!-- /owllm:downloads -->
 
 ---
 

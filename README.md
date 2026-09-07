@@ -346,11 +346,16 @@ A palm-sized KVM device (HDMI in, USB-HID out) that gives an agent team **eyes a
 
 ## Install
 
+Not sure which file is yours? Every download is listed by machine at the top of this
+page, and on [DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md).
+
 **Windows**
-1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)** (~30 MB — one file, that's it)
+1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)** — one file, no admin required.
 2. Run it. The installer **and** the app binary are **EV code-signed** (Certum EV certificate). If SmartScreen still shows a prompt while the certificate's reputation builds, click "More info" → "Run anyway" — the publisher name confirms the signature.
 
-**Linux (x86-64 or ARM64)** — [choose the package for your distro and follow the install steps](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md), or grab the permanent link from [DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md). Then:
+**macOS (Apple Silicon or Intel)** — [download `OwLLM.Desktop.Setup.dmg`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg), open it and drag OwLLM to Applications. Then:
+
+**Linux (x86-64 or ARM64)** — [choose the package for your distro and follow the install steps](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md), or grab the permanent link from [DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md). The **AppImage** is the one that updates itself. Then:
 3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
    - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models
    - **Audio / Speech-to-Text** (~148 MB) — for voice messages, mic input

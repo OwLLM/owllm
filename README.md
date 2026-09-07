@@ -15,23 +15,17 @@
 <td align="center">
 <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=5" width="200" alt="Download OwLLM for Windows" /></a>
 <br />
-<code>OwLLM.Desktop.Setup.exe</code>
-<br />
-<sub>Installer (.exe) · Intel / AMD 64-bit · updates itself</sub>
+<sub><b><code>OwLLM.Desktop.Setup.exe</code></b><br />Installer (.exe) · Intel / AMD 64-bit · updates itself</sub>
 </td>
 <td align="center">
 <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg?v=5" width="200" alt="Download OwLLM for Linux" /></a>
 <br />
-<code>OwLLM.Desktop.AppImage</code>
-<br />
-<sub>AppImage · Intel / AMD 64-bit · updates itself</sub>
+<sub><b><code>OwLLM.Desktop.AppImage</code></b><br />AppImage · Intel / AMD 64-bit · updates itself</sub>
 </td>
 <td align="center">
 <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg?v=5" width="200" alt="Download OwLLM for macOS" /></a>
 <br />
-<code>OwLLM.Desktop.Setup.dmg</code>
-<br />
-<sub>Disk image (.dmg) · Apple Silicon + Intel · updates itself</sub>
+<sub><b><code>OwLLM.Desktop.Setup.dmg</code></b><br />Disk image (.dmg) · Apple Silicon + Intel · updates itself</sub>
 </td>
 </tr>
 </table>

@@ -10,29 +10,81 @@
 <!-- Generated from owllm-desktop/scripts/download-targets.mjs by
      owllm-desktop/scripts/sync-readme-downloads.mjs. Edit that table, not this block. -->
 
+<table align="center">
+<tr>
+<td align="center" width="300">
+<a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=5" width="260" alt="Download OwLLM for Windows" /></a>
+<br />
+<code>OwLLM.Desktop.Setup.exe</code>
+<br />
+<sub>Installer (.exe) · Intel / AMD 64-bit · updates itself</sub>
+</td>
+<td align="center" width="300">
+<a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg?v=5" width="260" alt="Download OwLLM for Linux" /></a>
+<br />
+<code>OwLLM.Desktop.AppImage</code>
+<br />
+<sub>AppImage · Intel / AMD 64-bit · updates itself</sub>
+</td>
+<td align="center" width="300">
+<a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg"><img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg?v=5" width="260" alt="Download OwLLM for macOS" /></a>
+<br />
+<code>OwLLM.Desktop.Setup.dmg</code>
+<br />
+<sub>Disk image (.dmg) · Apple Silicon + Intel · updates itself</sub>
+</td>
+</tr>
+</table>
+
 <div align="center">
-  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=4" width="260" alt="Download OwLLM for Windows" />
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg?v=4" width="260" alt="Download OwLLM for Linux" />
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg">
-    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg?v=4" width="260" alt="Download OwLLM for macOS" />
-  </a>
+
+**Linux on ARM64** — NVIDIA Jetson / Thor, Raspberry Pi, ARM servers: [OwLLM.Desktop.aarch64.AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.AppImage)
+
 </div>
 
+<details>
+<summary><b>⬇️ All 9 downloads</b> — every OS, both architectures, <code>.deb</code> / <code>.rpm</code> / portable Windows (6 more than the cards above)</summary>
+
+**Windows**
+
+| Your machine | File | Download | Auto-updates |
+| --- | --- | --- | --- |
+| Windows 10 / 11 — Intel or AMD 64-bit ⭐ | Installer (.exe) | [OwLLM.Desktop.Setup.exe](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe) | yes |
+| Windows — portable, no installation | Portable (.exe) | [OwLLM-Desktop-portable-x86_64-pc-windows-msvc.exe](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM-Desktop-portable-x86_64-pc-windows-msvc.exe) | no — reinstall to update |
+
+**macOS**
+
+| Your machine | File | Download | Auto-updates |
+| --- | --- | --- | --- |
+| macOS — Apple Silicon and Intel ⭐ | Disk image (.dmg) | [OwLLM.Desktop.Setup.dmg](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg) | yes |
+
+**Linux — Intel / AMD 64-bit**
+
+| Your machine | File | Download | Auto-updates |
+| --- | --- | --- | --- |
+| Any Linux — Intel or AMD 64-bit ⭐ | AppImage | [OwLLM.Desktop.AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage) | yes |
+| Ubuntu / Debian — Intel or AMD 64-bit | Package (.deb) | [OwLLM.Desktop.deb](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb) | no — reinstall to update |
+| Fedora / RHEL / openSUSE — Intel or AMD 64-bit | Package (.rpm) | [OwLLM.Desktop.x86_64.rpm](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.x86_64.rpm) | no — reinstall to update |
+
+**Linux — ARM64**
+
+| Your machine | File | Download | Auto-updates |
+| --- | --- | --- | --- |
+| Any Linux on ARM64 — NVIDIA Jetson / Thor, Raspberry Pi, ARM servers ⭐ | AppImage | [OwLLM.Desktop.aarch64.AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.AppImage) | yes |
+| Ubuntu / Debian on ARM64 | Package (.deb) | [OwLLM.Desktop.arm64.deb](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.arm64.deb) | no — reinstall to update |
+| Fedora / RHEL on ARM64 | Package (.rpm) | [OwLLM.Desktop.aarch64.rpm](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.rpm) | no — reinstall to update |
+
+⭐ = pick this one if you are unsure. On Linux the **AppImage** is starred because it is the only
+Linux package the in-app updater can replace by itself; `.deb` and `.rpm` installs have to be
+re-downloaded to update.
+
+</details>
+
 <div align="center">
 
-**Linux on ARM64 — Jetson, Raspberry Pi, ARM servers:** [OwLLM.Desktop.aarch64.AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.aarch64.AppImage)
+**Same list as a page:** [DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md) · [Linux install guide](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md) · [release notes and checksums](https://github.com/OwLLM/owllm/releases/latest)
 
-**Other packages** — portable Windows, `.deb`, `.rpm`, both architectures: **[DOWNLOAD.md](https://github.com/OwLLM/owllm/blob/main/DOWNLOAD.md)** · [Linux install guide](https://github.com/OwLLM/owllm/blob/main/INSTALL_LINUX.md)
-
-**Every platform:** [release notes and checksums](https://github.com/OwLLM/owllm/releases/latest)
-
-Every link above is permanent — it resolves to the newest release at the moment you click it, so it never needs updating when a release ships. The **AppImage** is the only Linux package the in-app updater can replace by itself; `.deb` and `.rpm` installs must be re-downloaded.
+Every link above is permanent — it resolves to the newest release at the moment you click it, so it never needs updating when a release ships.
 
 </div>
 

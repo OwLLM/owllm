@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.08.25",
-  "publishedAt": "2026-08-25T04:20:00Z",
+  "registryVersion": "2026.09.14",
+  "publishedAt": "2026-09-14T07:00:00Z",
   "channels": [
     "stable",
     "beta",
@@ -560,6 +560,59 @@
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/tools-python-base-0.1.0.zip",
               "sha256": "48550f73bad4b9ff1de0dc64e7f6092a477a70f5bf779c0dd32d20d5b04a1bdb",
               "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "git-runtime",
+      "displayName": "Git runtime",
+      "description": "Git itself (the official MinGit build from git-for-windows, hash-pinned). OwLLM installs this automatically on a Windows PC that has no Git: GitHub import, project sync, the Coding/Agents worktrees and the chat/settings vault all run git. On macOS and Linux Git comes from Xcode Command Line Tools or the package manager instead.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": [
+        "code-page",
+        "github-import",
+        "vault-sync"
+      ],
+      "dependsOn": [],
+      "variants": [
+        {
+          "id": "git-runtime-win",
+          "displayName": "MinGit (Windows x64)",
+          "platform": "windows-x86_64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 38989688,
+          "channels": {
+            "stable": {
+              "version": "2.55.0.5",
+              "releasedAt": "2026-08-20T16:21:31Z",
+              "downloadUrl": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip",
+              "sha256": "56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e",
+              "minShellVersion": "1.0.59",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "git-runtime-win-arm64",
+          "displayName": "MinGit (Windows ARM64)",
+          "platform": "windows-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 37650057,
+          "channels": {
+            "stable": {
+              "version": "2.55.0.5",
+              "releasedAt": "2026-08-20T16:21:31Z",
+              "downloadUrl": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-arm64.zip",
+              "sha256": "05843f9d6e60306c3ab886799e2c67200caab921571f10512df3493049179ddb",
+              "minShellVersion": "1.0.59",
               "signature": null
             }
           }

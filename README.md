@@ -372,7 +372,16 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.43** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.62** releases.
+
+### ⚡ Solo agents as fast as a chat turn (1.0.62)
+An Agents-page solo run now costs about what a Code-page turn costs. Each page **keeps one workspace and fast-forwards it** instead of cutting a fresh copy of the repo every run, the resumed coder session is **capped at half the model's context window** so it never drags a bloated transcript into every tool call, and a **quick run never runs the project's full verify matrix** — a run that changed nothing skips the gate entirely. Every skipped step is said out loud in the chat and the run report, never hidden.
+
+### 🆕 Newest models, and CLIs that keep up by themselves (1.0.62)
+**Claude Opus 5.5**, **GPT-6 Sol / Luna** and **Grok 4.7** are in every CLI family's picker. When the model catalogue gains a new id, OwLLM **updates every installed subscription CLI in the background** — no more "version X or newer is required" on a model you just picked. The Accounts page gets an **⬆ Update all CLIs** button with the last round's outcome, and a run that still hits a too-old CLI upgrades it and retries the turn by itself.
+
+### 📓 Agentic teams finish the job (1.0.61 → 1.0.62)
+A **completion loop** with coverage-based done, **team publish**, and a Project-Card mode. The Notebook's delivery judge is read correctly even when it narrates before its verdict, so a delivered card no longer re-runs in a fresh worktree. Two Agents pages on the same project now run **independently**, the run timer reads in **blue in the header's corner**, and the idle app stops booting WSL on every heartbeat.
 
 ### 🧩 Digital Twin — a real CAD assembly workspace inside your agent app (1.0.36 → 1.0.43)
 Import STEP / STL / GLTF parts and build a working machine in guided steps: **Import & place → Merge → Mate & actuate → Simulate**. It ships **face-level mates** (Ctrl+click a face and mate it like a CAD tool), **merged bodies that behave as one real part everywhere** — click, box-select, transform, mate, simulate — and **linear/rotational actuator mates** with an **overview infographic** mapping every actuator to its fixed and moving parts, axis, travel limits or gear ratio, and validation state. Set the **assembly origin** on any part and remap axes (`X→Y, Y→−X, Z→Z`) across the whole assembly without disturbing geometry, mates or merges. Assemblies save to a **versioned `.owdt` project asset** — source geometry, transforms, coordinate frame, merges, mates, actuators and metadata in one reusable file, with Save / Save As / Open, **autosave + recovery**, and migration. Saved assemblies can then be **imported or linked into another assembly** as named, movable containers, so you can build hierarchical structures. *No other local-agent app ships a mechanical assembly workspace.*
@@ -524,10 +533,12 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 1.0.43)</b></summary>
+<summary><b>Full changelog (0.6.37 → 1.0.62)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **1.0.62** | **Solo agents as fast as the Code page** — reused workspace per page, capped resumed session, quick runs skip the full verify · **CLIs update themselves when new models arrive** + ⬆ Update all CLIs · **Claude Opus 5.5, GPT-6 Sol/Luna, Grok 4.7** · Notebook judge reads narrated verdicts · two Agents pages on one project run independently |
+| **1.0.61** | Agentic teams finish the job — completion loop, coverage-based done, team publish, Project-Card mode · Stop targets the run · idle app no longer boots WSL every heartbeat |
 | **1.0.43** | **Digital Twin project assets (`.owdt`) + hierarchical assembly import/link** · merged parts select as one atomic unit · canvas ↔ parts-list selection sync · actuator overview infographic · natural TTS voices + a global Stop · dictation inserts at the caret · macOS WebKit history bounded |
 | **1.0.38** | Code page saves past **4 MB** (hot-blob ceiling) · pushes unblocked (115 MB publisher backup dropped + guard) · squash integration stops manufacturing dead-end conflicts · **global undo/redo** · Digital Twin actuators + a real Step 3 run |
 | **1.0.37** | A blocked run **auto-Syncs** — the conflict is handed to the agent, never a dead end · Digital Twin **Merge view**: parts cement into one unit |

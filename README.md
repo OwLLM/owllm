@@ -2,9 +2,13 @@
 
 <img src="assets/OWLLM_Hero.png" alt="OwLLM" width="600">
 
-# ⬇ Download OwLLM
+# OwLLM — give your AI a world to work in
 
-**Your AI agent workforce on your own hardware — one file, no admin required.**
+**OWLLM means Orchestrated Workflow for Large Language Models.**
+
+Meet your companion. Build your team. Choose your models. Turn ideas into checked results.
+
+### ⬇ Download OwLLM
 
 <!-- owllm:downloads -->
 <!-- Generated from owllm-desktop/scripts/download-targets.mjs by
@@ -86,9 +90,9 @@ Every link above is permanent — it resolves to the newest release at the momen
 
 ---
 
-### Your team of AI agents. Build them. Own them. Run them anywhere.
+### Your companion. Your team. Your workflow.
 
-**OwLLM is an open platform to build, deploy, and run custom AI agent teams — on your hardware, your VPS, or in a VM, 24/7. Bring your own models: local, cloud, or both. Fine-tune. Quantize. Abliterate. Red-team. Automate.**
+**OwLLM brings companion chat, agent workflows, local and cloud models, model training, browser tools and remote devices into one desktop application. Run it on Windows, macOS or Linux. Headless/VPS operation remains on the roadmap.**
 
 <p align="center">
   <a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/github/v/release/OwLLM/owllm?label=version&style=for-the-badge&color=3ec5d8" alt="Latest version" /></a>
@@ -106,44 +110,61 @@ Every link above is permanent — it resolves to the newest release at the momen
 
 ## What makes OwLLM different
 
-Most AI tools give you a chatbox. **OwLLM gives you a workforce.**
+**The standout is the combination: your companion, your models, your agents and
+your machines working together in one desktop app.**
 
-You compose teams of specialised agents — an orchestrator that plans, a coder that writes, a critic that reviews, a researcher that fact-checks — and they collaborate on real tasks in parallel. Each team is a graph of roles + prompts you define. The 18 teams shipped in this repo are **starter samples**, not the menu.
-
-```mermaid
-flowchart LR
-    G(["🎯 Your goal<br/>typed · Telegram · WhatsApp<br/>Slack · Discord · email"])
-    G --> O["🧠 Orchestrator<br/>plans + right-sizes the round"]
-    O -->|"@coder"| A1["👷 Coder<br/>edits in its own worktree"]
-    O -->|"@researcher"| A2["🔎 Researcher<br/>web + citations"]
-    O -->|"@critic"| A3["🧐 Critic<br/>reviews what a build can't catch"]
-    A1 --> V{"✅ Verification Gate<br/>a REAL command's exit code<br/>never the model's say-so"}
-    V -->|"fail — captured error"| A1
-    V -->|"pass"| P["🚀 Publisher<br/>version → commit → tag →<br/>build → sign → release"]
-    A2 --> O
-    A3 --> O
-    N["📓 Run Notebook<br/>your ideas while they work"] -.->|"⚡ steers mid-run"| O
-
-    classDef goal fill:#0a2230,stroke:#3ec5d8,stroke-width:2px,color:#dff6ff;
-    classDef agent fill:#1a1430,stroke:#8a7ad8,stroke-width:1.5px,color:#e8dfff;
-    classDef gate fill:#2a2208,stroke:#ffcf5a,stroke-width:2px,color:#fff3d0;
-    classDef ship fill:#0e2a1e,stroke:#3ec58a,stroke-width:2px,color:#d6ffe9;
-    class G goal; class O,A1,A2,A3,N agent; class V gate; class P ship;
-```
-
-*And you're never locked out while it runs: messages you type mid-run are injected into the working agents (on local models, between tool calls), and the **Run Notebook** lets you brainstorm next steps that auto-feed the team as each run finishes.*
-
-| | What OwLLM gives you that others don't |
+| Start with an idea… | …carry it through with OwLLM |
 |---|---|
-| 🧩 **Build your own teams** | Compose agents from 8 base roles + custom prompts. Visual graph builder. Hot-updates through this repo — push a team JSON, it lands on every installed app. |
-| ☁️ **Cloud OR local — same teams** | No 4090? Plug in Claude / GPT / Gemini / Kimi keys, teams work identically. Have a GPU? Run open-weight models locally and stop paying per token. Mix both in the same conversation. |
-| 🎓 **Fine-tune any model** | Full LoRA + Unsloth + TRL pipeline. Drop a JSONL, watch loss curves, save adapters. Works on consumer GPUs (8 GB+). |
-| 🔬 **Abliterate for safety research** | Orthogonalise weights against refusal directions. Generate adversarial datasets. Train better safety classifiers. The honest tools the field actually needs. |
-| 🛠 **GGUF + quantization built-in** | Convert HF safetensors → GGUF, quantize Q4/Q5/Q6/Q8/F16. Ship custom models anyone with llama.cpp can run. |
-| 🛡 **Red-team capable** | Compose adversarial agent teams whose *job* is to find vulnerabilities — in models, code, apps. Pair with fine-tuning to train defenders. |
-| 🔒 **Sealed to ONE folder (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox** (WSL2 on Windows, Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*). Agents are **sealed to ONLY the project folder**: they work on your **real Windows folder — no copy** — but **cannot see the rest of your C: drive, other projects, or your home / SSH keys**. A model that runs `rm -rf` simply has nothing else to reach. Isolated **by default**; the seal and toolchain **auto-install**; provider logins (CLIs **and** API keys) **auto-sync** in so cloud agents just work. **Connect GitHub** to clone/push private repos from inside. See the **🔒 Sealed to one folder** section below for the diagram. |
-| 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
-| 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
+| 🦉 **Talk to your companion** | Voice and text, project actions on supported provider paths, and connected messaging bridges. |
+| 🧠 **Choose the brain for each job** | Local GGUFs, cloud APIs and supported subscription CLIs in the same workspace; capabilities depend on the model and provider. |
+| 🧩 **Build the team** | Configure roles, prompts, models and tools; use a solo workflow or coordinated agents with isolated coding worktrees. |
+| 📚 **Keep useful context** | Durable Team Memory plus a native code map for finding definitions, file APIs and call relationships without an external map server. |
+| ✅ **Check the result** | Real verification commands report their exit status; project rules, run history and the Notebook keep the work inspectable. |
+| 🌐 **Give agents a workspace** | Files, shell, a shared native browser, MCP tools and approved remote devices connect reasoning to action. |
+| 🛠 **Make the model yours** | Prepare datasets, fine-tune supported models, export GGUFs, quantize and serve locally, subject to hardware and format support. |
+| 🎮 **Make room for play** | Animated agent activity, quests, XP and a World Map alongside the practical tools. |
+
+<a id="meet-your-companion"></a>
+
+## 🦉 Meet your companion — your front door to OwLLM
+
+**Pick a face. Choose a voice. Put your AI to work.**
+
+Your companion brings conversation and action together: type a request, dictate it
+with the microphone, hear a reply, and stay close to the project you are working on.
+Choose a bundled character, model and voice, adjust sound and motion, and keep the
+resizable companion beside your work.
+
+With a supported model/provider path, the companion can navigate the app, create
+and update projects, and start an agent run. It can explain the workspace and
+summarize project replies aloud. Attach documents, audio or images; image
+understanding depends on the selected model.
+
+Connect **Telegram, WhatsApp, Discord, Slack, Email or LINE** and let your chosen
+companion answer through the bridges you enable. One familiar character, across
+your desktop and connected conversations.
+
+### 🎨 Build your own companion — planned
+
+**Your character. Your personality. Your way of working.**
+
+Today you can choose from the bundled companions and customize their model,
+voice and behaviour settings. The next step is a creator workflow for making
+your own companion and sharing it through the marketplace. **Custom character
+creation and companion publishing are planned; they are not available in the
+current character picker.**
+
+## 🎮 Play — give your work a world
+
+Watch agent activity come alive in an animated workspace: agents move, speak
+and react to the same events that drive real runs. Completed runs populate a
+quest board and earn XP. Explore themed rooms, or try the labelled demo to
+see the world in motion.
+
+The **World Map** adds fleet presence, community conversation and a Solar-System
+explorer. These playful surfaces are experimental; the standalone character
+editor and model arena remain planned. The working projects, models and agents
+are the same ones you use elsewhere in OwLLM.
 
 ## Built to work beside your editor — not imitate it
 
@@ -163,31 +184,6 @@ Keep VS Code, JetBrains, Neovim, or whatever editor you already love. OwLLM does
 | A workstation install | **OwLLM Go** — portable mode redirects app state, models, configuration, and webview data to a USB drive |
 
 > **VS Code writes code. OwLLM runs the workforce that verifies it, ships it, and can operate the machines it runs on.**
-
-## ⚔️ OwLLM vs the field
-
-Every tool below is good at its one thing. OwLLM's pitch is that **the whole pipeline lives in one app** — and the pieces compound: the team you built fine-tunes the model it runs on, inside a sandbox, reachable from your phone.
-
-| Capability | **OwLLM** | LM Studio | Ollama | Jan | AnythingLLM | Cursor |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Local GGUF serving + model browser | ✅ | ✅ | ✅ | ✅ | ⚠️ via others | ❌ |
-| **Agent teams** (orchestrator + parallel specialists) | ✅ | ❌ | ❌ | ❌ | ⚠️ basic | ❌ |
-| Verified "done" (real exit-code gate, not model claims) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
-| **Fine-tuning** (LoRA/QLoRA) built in | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| GGUF conversion + quantization built in | ✅ | ❌ | ⚠️ import | ❌ | ❌ | ❌ |
-| Abliteration / safety-research tooling | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **6 messaging bridges** (Telegram · WhatsApp · Discord · Slack · Email · LINE) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Folder-sealed Linux sandbox for agent tools **and cloud CLIs** | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
-| Mid-run steering + Run Notebook (plan while they work) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
-| Team memory: durable facts + RAG, synced across your PCs | ✅ | ❌ | ❌ | ❌ | ⚠️ | ❌ |
-| Subscription CLIs as agents (Claude Code · Codex · Gemini · Kimi) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Rule-based release pipeline (agents that actually SHIP versions) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| In-app support agent that sees your screen (the Watcher) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Fleet control** — agents that drive your *other* machines (encrypted, LAN/WAN/P2P) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **Cross-PC repo sync** — real three-way merge coordinator, never a FF dead-end | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Price | **Free** | Free | Free | Free | Free | $20+/mo |
-
-*Fair notes: LM Studio is a superb model runner; Cursor is a superb code editor. OwLLM doesn't replace your editor — it replaces the **five separate apps** between "I have a GPU" and "my own trained, sandboxed, always-reachable agent workforce".*
 
 ## 🔒 Sealed to one folder — nothing else
 
@@ -261,9 +257,9 @@ OwLLM ships starter teams in nine categories. **All of them are forkable and rem
 5. Save → team appears in your picker
 6. **Publish to the community** via PR against [`data/teams/`](data/teams/) — your team becomes one-click installable for every other user
 
-## Power tools nobody else ships
+## Your model workshop
 
-### Fine-tune any open-weight model
+### Fine-tune supported open-weight models
 LoRA pipeline with Unsloth, TRL, PEFT, bitsandbytes. Llama / Qwen / Mistral / Gemma — anything on HuggingFace. Live loss curves, graceful Stop preserves checkpoints, resume-from-checkpoint and resume-adapter both supported. Runs on a 12 GB GPU.
 
 ### Abliterate (refusal removal for safety research)
@@ -371,6 +367,12 @@ That's why the data/ tree is open and community-driven even though the app binar
 > 📐 **[How OwLLM's agents are built — design & the science behind it](docs/AGENTIC_DESIGN.md)** — evidence-based architecture (single-agent verify-loops for code, parallel teams for research), with diagrams and cited research.
 
 ## ✨ Recent highlights
+
+- **Companion conversation and control:** selectable characters, voice, dictation, attachments, project actions on supported paths, and six messaging bridges.
+- **Memory + native code map:** retrieve durable project knowledge and inspect code structure from the agent workspace.
+- **PDFs agents can inspect:** original files, rendered page images, and Korean/English OCR when extracted text is unusable, with bounded page processing.
+- **Play alongside work:** animated agent activity, quests, XP, and the World Map.
+
 
 OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.62** releases.
 
@@ -701,14 +703,15 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [ ] **Visual team builder** — Q3 2026
 - [x] **Linux desktop** — AppImage + `.deb` (x86_64)
 - [x] **Linux aarch64 / Jetson** — AppImage + `.deb` + `.rpm`, CUDA engine, built on-device
-- [ ] **macOS desktop** — Apple Silicon + Intel *(signing + runtime-module groundwork shipped)*
+- [x] **macOS desktop** — universal Apple Silicon + Intel builds
 - [ ] **24/7 headless / VPS mode** — Q4 2026
 - [ ] **Container / VM deployment** — Q4 2026
 - [x] **Local vision models** — image-capable GGUFs work out of the box (projectors auto-fetched)
 - [~] **Gamification** — the **World Map** (live fleet presence, orbits, Solar-System explorer) shipped; agent-vs-agent arena + achievements next
 - [ ] **🔑 OwLLM Go** — the workforce-on-a-USB-key hardware edition *(in design)*
 - [~] **🖥️ OwLLM Node** — KVM device: teams with eyes + hands on remote physical machines *(prototyping — the `kvm_node` agent tool is live)*
-- [ ] **Voice output (TTS)** — Q1 2027
+- [x] **Voice output (TTS)** — neural speech, companion narration and playback controls
+- [ ] **Build your own companion** — custom character creation and companion marketplace publishing
 - [~] **Public team marketplace** — creator self-service + an in-Settings marketplace surface shipped; full public marketplace Q1 2027
 
 Track active work in [Discussions → Roadmap](https://github.com/OwLLM/owllm/discussions).

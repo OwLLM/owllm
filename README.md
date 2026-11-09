@@ -374,7 +374,13 @@ That's why the data/ tree is open and community-driven even though the app binar
 - **Play alongside work:** animated agent activity, quests, XP, and the World Map.
 
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.79** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.80** releases.
+
+### 🛡️ Strict sandbox works on every Windows PC (1.0.80)
+Agent runs in a sandboxed project no longer stop with **"The directory name is invalid"**, and nothing needs changing in your settings. Sync, the Git panel, commit, push and the code map all use the same fixed route now, and a release check blocks any code that goes around it.
+
+### 💬 World Chat history that only grows (1.0.80)
+Conversations now **merge message by message across your PCs**, so a PC with a shorter list can no longer erase chats on your other machines.
 
 ### 🦉 A companion that keeps your schedule (1.0.79)
 Give the companion a task for a date, a time zone, or a repeating schedule, and it goes out through your linked messaging app **at most once per occurrence**, even if the connection flaps. Runs that can't go out are reported as waiting, failed or missed, with a full run history. Bridges now **reconnect by themselves after a restart**, show their live state, and keep one connection per bot across OwLLM instances.

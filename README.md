@@ -374,7 +374,16 @@ That's why the data/ tree is open and community-driven even though the app binar
 - **Play alongside work:** animated agent activity, quests, XP, and the World Map.
 
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.62** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 1.0.79** releases.
+
+### 🦉 A companion that keeps your schedule (1.0.79)
+Give the companion a task for a date, a time zone, or a repeating schedule, and it goes out through your linked messaging app **at most once per occurrence**, even if the connection flaps. Runs that can't go out are reported as waiting, failed or missed, with a full run history. Bridges now **reconnect by themselves after a restart**, show their live state, and keep one connection per bot across OwLLM instances.
+
+### 🖐️ You keep control while agents work (1.0.79)
+Every project now carries a rule that the app and browser stay responsive and under your control, and it reaches team runs, Code-page turns, Brainstormer, bridges and calendar drafts. Agent actions in the browser **leave your caret alone while you type**, and one agent click now fires exactly once.
+
+### 📅 Redesigned Schedule page (1.0.79)
+Today's date and time zone up front, Day, Week, Month and a new Agenda view, full keyboard navigation, and layouts down to phone width. A damaged schedule file is reported and never overwritten.
 
 ### ⚡ Solo agents as fast as a chat turn (1.0.62)
 An Agents-page solo run now costs about what a Code-page turn costs. Each page **keeps one workspace and fast-forwards it** instead of cutting a fresh copy of the repo every run, the resumed coder session is **capped at half the model's context window** so it never drags a bloated transcript into every tool call, and a **quick run never runs the project's full verify matrix** — a run that changed nothing skips the gate entirely. Every skipped step is said out loud in the chat and the run report, never hidden.

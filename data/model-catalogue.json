@@ -1,0 +1,113 @@
+{
+  "_README": "Remote model catalogue for OwLLM Desktop — the ONE file to edit when a model ships. Every installed app fetches it at startup, every 6 hours and on focus after a long gap, merges it OVER the bundled defaults, and applies it to open pickers immediately; the last good copy is cached for offline use. Edit here, then run: node owllm-desktop/scripts/publish-model-catalogue.mjs --publish (validates with the app's own schema, then publishes to OwLLM/owllm data/model-catalogue.json — the URL the app reads). Fields per entry: id (exact API/CLI model id), display (label), sub (show subscription row), api (show API row), effort (reasoning tiers; Anthropic/OpenAI only). Same id => replaces the bundled entry; new id => added to the top of that provider's list. Keep schema at 1 unless the app's reader changed. A NEW PROVIDER or a new wire protocol still needs an app release — see owllm-desktop/docs/MODEL-CATALOGUE.md.",
+  "schema": 1,
+  "anthropic": [
+    { "id": "claude-fable-5-1",  "display": "Claude Fable 5.1",  "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-fable-5",    "display": "Claude Fable 5",    "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-opus-5-5",   "display": "Claude Opus 5.5",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-opus-5",     "display": "Claude Opus 5",     "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-opus-4-8",   "display": "Claude Opus 4.8",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-opus-4-7",   "display": "Claude Opus 4.7",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-sonnet-5-5", "display": "Claude Sonnet 5.5", "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-sonnet-5",   "display": "Claude Sonnet 5",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-sonnet-4-6", "display": "Claude Sonnet 4.6", "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-haiku-5-5",  "display": "Claude Haiku 5.5",  "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5" }
+  ],
+  "openai": [
+    { "id": "gpt-6-astra",   "display": "GPT-6 Astra",   "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
+    {"id": "gpt-6.1-sol", "display": "GPT-6.1 Sol", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"]},
+    {"id": "gpt-6.1-terra", "display": "GPT-6.1 Terra", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"]},
+    { "id": "gpt-6-sol",     "display": "GPT-6 Sol",     "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
+    { "id": "gpt-6-luna",    "display": "GPT-6 Luna",    "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
+    { "id": "gpt-5.6-sol",   "display": "GPT-5.6 Sol",   "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "gpt-5.6-terra", "display": "GPT-5.6 Terra", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "gpt-5.6-luna",  "display": "GPT-5.6 Luna",  "sub": true, "api": true },
+    { "id": "gpt-5.5",       "display": "GPT-5.5",       "api": true, "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "gpt-5.5-codex", "display": "GPT-5.5 Codex", "sub": true, "effort": ["low", "medium", "high", "extra_high"] }
+  ],
+  "xai": [
+    { "id": "grok-4.7",       "display": "Grok 4.7",       "sub": true, "api": true },
+    { "id": "grok-4.6",       "display": "Grok 4.6",       "sub": true, "api": true },
+    { "id": "grok-build-0.1", "display": "Grok Build 0.1", "sub": true, "api": true },
+    { "id": "grok-4.5",  "display": "Grok 4.5",  "sub": true, "api": true },
+    { "id": "grok-4.3",  "display": "Grok 4.3",  "sub": true, "api": true },
+    { "id": "grok-4.20", "display": "Grok 4.20", "sub": true, "api": true }
+  ],
+  "kimi": [
+    {"id": "k3", "display": "Kimi Code K3", "sub": true},
+    {"id": "k3-256k", "display": "Kimi Code K3 · 256K", "sub": true},
+    {"id": "kimi-for-coding", "display": "Kimi Code K2.8 Preview", "sub": true},
+    {"id": "kimi-for-coding-highspeed", "display": "Kimi Code K2.7 HighSpeed", "sub": true},
+    { "id": "kimi-k3.1-pro", "display": "Kimi K3.1 Pro", "sub": true, "api": true },
+    { "id": "kimi-k3.1-pro-highspeed", "display": "Kimi K3.1 Pro HighSpeed", "sub": true, "api": true },
+    { "id": "kimi-k3", "display": "Kimi K3", "sub": true, "api": true },
+    { "id": "kimi-k2.7", "display": "Kimi K2.7", "sub": true, "api": true }
+  ],
+  "deepseek": [
+    {"id": "deepseek-flash", "display": "DeepSeek V4.1 Flash", "api": true},
+    { "id": "deepseek-v4-pro",              "display": "DeepSeek V4 Pro",              "api": true },
+    { "id": "deepseek-v4-flash",            "display": "DeepSeek V4 Flash",            "api": true },
+    { "id": "deepseek-v4-flash-vision-exp", "display": "DeepSeek V4 Flash Vision Exp", "api": true }
+  ],
+  "groq": [
+    {"id": "minimaxai/minimax-m2.7", "display": "MiniMax M2.7 (Enterprise preview)", "api": true},
+    { "id": "groq/compound",             "display": "Groq Compound",  "api": true },
+    { "id": "groq/compound-mini",        "display": "Groq Compound Mini", "api": true },
+    { "id": "openai/gpt-oss-120b",       "display": "GPT-OSS 120B",   "api": true },
+    { "id": "openai/gpt-oss-20b",        "display": "GPT-OSS 20B",    "api": true },
+    { "id": "qwen/qwen3.8-27b",          "display": "Qwen 3.8 27B",   "api": true },
+    { "id": "qwen/qwen3.6-27b",          "display": "Qwen 3.6 27B",   "api": true },
+    { "id": "llama-3.3-70b-versatile",   "display": "Llama 3.3 70B",  "api": true }
+  ],
+  "perplexity": [
+    { "id": "sonar-pro",           "display": "Sonar Pro",           "api": true },
+    { "id": "sonar",               "display": "Sonar",               "api": true },
+    { "id": "sonar-reasoning-pro", "display": "Sonar Reasoning Pro", "api": true },
+    { "id": "sonar-deep-research", "display": "Sonar Deep Research", "api": true }
+  ],
+  "mistral": [
+    {"id": "zai-glm-5-3", "display": "GLM 5.3 (Mistral)", "api": true},
+    {"id": "mistral-medium-3-5", "display": "Mistral Medium 3.5", "api": true},
+    { "id": "mistral-large-latest",    "display": "Mistral Large",    "api": true },
+    { "id": "mistral-medium-latest",   "display": "Mistral Medium",   "api": true },
+    { "id": "magistral-medium-latest", "display": "Magistral Medium", "api": true },
+    { "id": "devstral-small-latest",   "display": "Devstral Small",   "api": true },
+    { "id": "codestral-latest",        "display": "Codestral",        "api": true },
+    { "id": "mistral-small-latest",    "display": "Mistral Small",    "api": true }
+  ],
+  "together": [
+    {"id": "MiniMaxAI/MiniMax-M3.1-Flash", "display": "MiniMax M3.1 Flash", "api": true},
+    {"id": "MiniMaxAI/MiniMax-M3", "display": "MiniMax M3", "api": true},
+    {"id": "thinkingmachines/Inkling", "display": "Inkling", "api": true},
+    {"id": "zai-org/GLM-5.3", "display": "GLM 5.3", "api": true},
+    {"id": "zai-org/GLM-5.3-Flash", "display": "GLM 5.3 Flash", "api": true},
+    {"id": "Qwen/Qwen3.8-2.4T-A95B", "display": "Qwen 3.8 2.4T A95B", "api": true},
+    {"id": "Qwen/Qwen3.8-Flash", "display": "Qwen 3.8 Flash", "api": true},
+    {"id": "moonshotai/Kimi-K3", "display": "Kimi K3", "api": true},
+    {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "display": "DeepSeek V4.1 Flash 1017", "api": true},
+    {"id": "deepseek-ai/DeepSeek-V4.1-Flash", "display": "DeepSeek V4.1 Flash", "api": true},
+    {"id": "deepseek-ai/DeepSeek-V4-Pro-0813", "display": "DeepSeek V4 Pro 0813", "api": true},
+    {"id": "meta-models/Muse-Glimmer-30B", "display": "Muse Glimmer 30B", "api": true},
+    { "id": "MiniMaxAI/MiniMax-M2.7",             "display": "MiniMax M2.7",        "api": true },
+    { "id": "Qwen/Qwen3.7-Max",                   "display": "Qwen 3.7 Max",        "api": true },
+    { "id": "Qwen/Qwen3.5-397B-A17B",            "display": "Qwen 3.5 397B A17B", "api": true },
+    { "id": "deepseek-ai/DeepSeek-V4-Pro",        "display": "DeepSeek V4 Pro",     "api": true },
+    { "id": "moonshotai/Kimi-K2.6",               "display": "Kimi K2.6",           "api": true },
+    { "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "display": "Llama 3.3 70B Turbo", "api": true }
+  ],
+  "gemini": [
+    { "id": "gemini-4-argon",         "display": "Gemini 4 Argon",         "sub": true, "api": true },
+    { "id": "gemini-3.8-flash",       "display": "Gemini 3.8 Flash",       "sub": true, "api": true },
+    { "id": "gemini-3.7-flash",       "display": "Gemini 3.7 Flash",       "sub": true, "api": true },
+    { "id": "gemini-3.6-flash",       "display": "Gemini 3.6 Flash",       "sub": true, "api": true },
+    { "id": "gemini-3.5-flash",       "display": "Gemini 3.5 Flash",       "sub": true, "api": true },
+    { "id": "gemini-3.5-flash-lite",  "display": "Gemini 3.5 Flash-Lite",  "sub": true, "api": true },
+    { "id": "gemini-3.1-flash-lite",  "display": "Gemini 3.1 Flash-Lite",  "sub": true, "api": true },
+    { "id": "gemini-3.1-pro-preview", "display": "Gemini 3.1 Pro Preview", "sub": true, "api": true },
+    { "id": "gemini-3-flash-preview", "display": "Gemini 3 Flash Preview", "sub": true, "api": true },
+    { "id": "gemini-2.5-pro",         "display": "Gemini 2.5 Pro",         "sub": true, "api": true },
+    { "id": "gemini-2.5-flash",       "display": "Gemini 2.5 Flash",       "sub": true, "api": true },
+    { "id": "gemini-2.5-flash-lite",  "display": "Gemini 2.5 Flash-Lite",  "api": true }
+  ]
+}

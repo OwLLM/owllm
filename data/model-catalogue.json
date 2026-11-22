@@ -2,6 +2,7 @@
   "_README": "Remote model catalogue for OwLLM Desktop — the ONE file to edit when a model ships. Every installed app fetches it at startup, every 6 hours and on focus after a long gap, merges it OVER the bundled defaults, and applies it to open pickers immediately; the last good copy is cached for offline use. Edit here, then run: node owllm-desktop/scripts/publish-model-catalogue.mjs --publish (validates with the app's own schema, then publishes to OwLLM/owllm data/model-catalogue.json — the URL the app reads). Fields per entry: id (exact API/CLI model id), display (label), sub (show subscription row), api (show API row), effort (reasoning tiers; Anthropic/OpenAI only). Same id => replaces the bundled entry; new id => added to the top of that provider's list. Keep schema at 1 unless the app's reader changed. A NEW PROVIDER or a new wire protocol still needs an app release — see owllm-desktop/docs/MODEL-CATALOGUE.md.",
   "schema": 1,
   "anthropic": [
+    { "id": "claude-fable-5-2",  "display": "Claude Fable 5.2",  "effort": ["low", "medium", "high", "extra_high"] },
     { "id": "claude-fable-5-1",  "display": "Claude Fable 5.1",  "effort": ["low", "medium", "high", "extra_high"] },
     { "id": "claude-fable-5",    "display": "Claude Fable 5",    "effort": ["low", "medium", "high", "extra_high"] },
     { "id": "claude-opus-5-5",   "display": "Claude Opus 5.5",   "effort": ["low", "medium", "high", "extra_high"] },
@@ -15,6 +16,8 @@
     { "id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5" }
   ],
   "openai": [
+    { "id": "gpt-6.2-astra", "display": "GPT-6.2 Astra", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
+    { "id": "gpt-6.2-sol", "display": "GPT-6.2 Sol", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
     { "id": "gpt-6-astra",   "display": "GPT-6 Astra",   "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"] },
     {"id": "gpt-6.1-sol", "display": "GPT-6.1 Sol", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"]},
     {"id": "gpt-6.1-terra", "display": "GPT-6.1 Terra", "sub": true, "api": true, "effort": ["low", "medium", "high", "extra_high", "max"]},

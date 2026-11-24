@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "registryVersion": "2026.11.25",
-  "publishedAt": "2026-11-24T23:10:00Z",
+  "publishedAt": "2026-11-24T23:26:57Z",
   "channels": [
     "stable",
     "beta",
@@ -30,13 +30,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 653361802,
+          "sizeBytes": 653792885,
           "channels": {
             "stable": {
-              "version": "b10358-cuda12.4",
-              "releasedAt": "2026-08-11T09:51:12Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-cuda-b10358-cuda12.4.zip",
-              "sha256": "5e54c79ffaedaf09e7e802d2396167aa24e79c62ba82c1316439b88e53025426",
+              "version": "b10358-cuda12.4-owllm1",
+              "releasedAt": "2026-11-24T23:26:57Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/local-inference-cuda-b10358-cuda12.4-owllm1.zip",
+              "sha256": "2c6992cd5054293498c2228758632142bd3c9b708d0d5a7fbb14cf56f7c40635",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -50,13 +50,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 34660001,
+          "sizeBytes": 34900122,
           "channels": {
             "stable": {
-              "version": "b10358-vulkan",
-              "releasedAt": "2026-08-11T09:51:12Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-vulkan-b10358-vulkan.zip",
-              "sha256": "e47de3fbbb3636ef039ae9ddd32cdf19736eaf5c20f8644553b6bf790c8ec244",
+              "version": "b10358-vulkan-owllm1",
+              "releasedAt": "2026-11-24T23:26:57Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/local-inference-vulkan-b10358-vulkan-owllm1.zip",
+              "sha256": "a1b3de78981a66692bca195228cc92b76e13049dc532c26eefbee4184cdbfeee",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -69,13 +69,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 18469624,
+          "sizeBytes": 18701679,
           "channels": {
             "stable": {
-              "version": "b10358-cpu",
-              "releasedAt": "2026-08-11T09:51:12Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.11/local-inference-cpu-b10358-cpu.zip",
-              "sha256": "0f5734e1cdc34c90d7f25e91f3e19307552acc0f9189853368a2f6675334c056",
+              "version": "b10358-cpu-owllm1",
+              "releasedAt": "2026-11-24T23:26:57Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/local-inference-cpu-b10358-cpu-owllm1.zip",
+              "sha256": "57ff26789ff2976713235b8981fcfdb361406dec2fcc126943f9e24798a988be",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -202,13 +202,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 137386050,
+          "sizeBytes": 137553767,
           "channels": {
             "stable": {
-              "version": "v1.8.4-base",
-              "releasedAt": "2026-08-25T04:20:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/audio-stt-whisper-base-v1.8.4-base.zip",
-              "sha256": "8d951979bbce0c5fb358a51704db0926242475a4c57790cc9957d240a84d5292",
+              "version": "v1.8.4-base-owllm1",
+              "releasedAt": "2026-11-24T23:26:57Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/audio-stt-whisper-base-v1.8.4-base-owllm1.zip",
+              "sha256": "5cb180d1aa83e5f56e875b02deba9051a16c8310416187a5407430c473306199",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -480,13 +480,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 46588132,
+          "sizeBytes": 46604187,
           "channels": {
             "stable": {
-              "version": "node20.18.0-uv0.5.4",
-              "releasedAt": "2026-08-25T04:20:00Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.08.25/mcp-toolchain-node-uv-node20.18.0-uv0.5.4.zip",
-              "sha256": "9326aad94f6deef745a43c529d86ee6de69eb7dcde3804d4aa8d64dbb1386d19",
+              "version": "node20.18.0-uv0.5.4-owllm1",
+              "releasedAt": "2026-11-24T23:26:57Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/mcp-toolchain-node-uv-node20.18.0-uv0.5.4-owllm1.zip",
+              "sha256": "ecdacc43c0fe13f75430d19ae0995a644a267e6fd7b5c885abb8a10dc92eb844",
               "minShellVersion": "0.1.0",
               "signature": null
             }

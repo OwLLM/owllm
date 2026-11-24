@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.09.14",
-  "publishedAt": "2026-09-14T07:00:00Z",
+  "registryVersion": "2026.11.25",
+  "publishedAt": "2026-11-24T23:10:00Z",
   "channels": [
     "stable",
     "beta",
@@ -586,13 +586,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 38989688,
+          "sizeBytes": 41763548,
           "channels": {
             "stable": {
-              "version": "2.55.0.5",
-              "releasedAt": "2026-08-20T16:21:31Z",
-              "downloadUrl": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-64-bit.zip",
-              "sha256": "56d7b226b7693196cfc71fef26568f536c4a021ab6c37ff2db4287bed908e96e",
+              "version": "2.55.0.5-owllm1",
+              "releasedAt": "2026-11-24T23:04:39Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/git-runtime-win-2.55.0.5-owllm1.zip",
+              "sha256": "348c51669beb4daf79e9e59c3e2324e0fb83b0ca5c03a3461f55d9a346a3ae23",
               "minShellVersion": "1.0.59",
               "signature": null
             }
@@ -605,13 +605,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 37650057,
+          "sizeBytes": 40352621,
           "channels": {
             "stable": {
-              "version": "2.55.0.5",
-              "releasedAt": "2026-08-20T16:21:31Z",
-              "downloadUrl": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/MinGit-2.55.0.5-arm64.zip",
-              "sha256": "05843f9d6e60306c3ab886799e2c67200caab921571f10512df3493049179ddb",
+              "version": "2.55.0.5-owllm1",
+              "releasedAt": "2026-11-24T23:04:39Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.11.25/git-runtime-win-arm64-2.55.0.5-owllm1.zip",
+              "sha256": "dbce9989e3ae69986cad4a585d2e81d699f77614efe6e1798ddaa74aa9e8a637",
               "minShellVersion": "1.0.59",
               "signature": null
             }
